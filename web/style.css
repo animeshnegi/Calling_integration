@@ -1,0 +1,15 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, system-ui, sans-serif; background: #0b1020; color: #edf2f7; }
+.shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.card { width: min(560px, 100%); background: #111827; border: 1px solid #263244; border-radius: 18px; padding: 28px; box-shadow: 0 20px 70px rgba(0,0,0,.35); }
+h1 { margin-top: 0; }
+label { display: grid; gap: 8px; margin: 16px 0; font-weight: 600; }
+input { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid #39475d; background: #0f172a; color: inherit; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+button { border: 0; border-radius: 10px; padding: 11px 16px; font-weight: 700; cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .5; }
+#register, #call { background: #38bdf8; color: #062033; }
+#hangup { background: #f87171; color: #350808; }
+.status { margin-top: 18px; padding: 12px; border-radius: 10px; background: #0b1220; border: 1px solid #263244; min-height: 44px; }
+.muted { color: #9aa7b8; }
+.small { font-size: 13px; margin-bottom: 0; }
