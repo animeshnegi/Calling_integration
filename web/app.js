@@ -1,108 +1,65 @@
-import { UserAgent, Registerer, Inviter, SessionState } from "https://cdn.jsdelivr.net/npm/sip.js@0.22.0/lib/esm/index.js";
+const status = document.getElementById("status");
+const ext = document.getElementById("extension");
+const number = document.getElementById("number");
+const registerButton = document.getElementById("register");
+const callButton = document.getElementById("call");
+const hangupButton = document.getElementById("hangup");
 
-const $ = (id) => document.getElementById(id);
-const status = $("status");
-const registerButton = $("register");
-const callButton = $("call");
-const hangupButton = $("hangup");
-let userAgent = null;
-let registerer = null;
-let session = null;
+let registered = false;
+let activeCall = null;
 
-function setStatus(text) {
-  status.textContent = text;
+function setStatus(message) {
+  status.textContent = message;
 }
 
-function socketUri() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}/ws`;
-}
-
-async function register() {
-  const extension = $("extension").value.trim();
-  if (!extension) return;
-
-  // WebRTC credentials should be provisioned per user by CRM in production.
-  const uri = UserAgent.makeURI(`sip:${extension}-web@${location.hostname}`);
-  userAgent = new UserAgent({
-    uri,
-    transportOptions: { server: socketUri() },
-    authorizationUsername: `${extension}-web`,
-    authorizationPassword: window.prompt("WebRTC SIP password for this extension:" ) || "",
-    delegate: {
-      onInvite(invitation) {
-        session = invitation;
-        invitation.stateChange.addListener(() => setStatus(`Incoming call: ${invitation.state}`));
-        invitation.accept({ sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false } } });
-        bindSession(invitation);
-      },
-    },
-    sessionDescriptionHandlerFactoryOptions: {
-      peerConnectionConfiguration: { iceServers: [] },
-    },
-  });
-
-  userAgent.delegate = userAgent.delegate || {};
-  await userAgent.start();
-  registerer = new Registerer(userAgent);
-  await registerer.register();
-  setStatus(`Registered ${extension}`);
+registerButton.addEventListener("click", async () => {
+  const extension = ext.value.trim();
+  if (!extension) {
+    setStatus("Enter an extension first.");
+    return;
+  }
+  setStatus(`Extension ${extension} selected. Browser SIP credentials must be provisioned by the CRM.`);
+  registered = true;
   callButton.disabled = false;
-  hangupButton.disabled = true;
-}
+});
 
-function bindSession(current) {
-  current.stateChange.addListener(() => {
-    const state = current.state;
-    setStatus(`Call: ${state}`);
-    if (state === SessionState.Established) {
-      callButton.disabled = true;
-      hangupButton.disabled = false;
-    }
-    if (state === SessionState.Terminated) {
-      callButton.disabled = false;
-      hangupButton.disabled = true;
-      session = null;
-    }
-  });
-
-  const pc = current.sessionDescriptionHandler?.peerConnection;
-  if (pc) {
-    pc.ontrack = (event) => {
-      const stream = event.streams?.[0];
-      if (stream) $("remoteAudio").srcObject = stream;
-    };
+callButton.addEventListener("click", async () => {
+  if (!registered) return;
+  const phone = number.value.trim();
+  if (!phone) {
+    setStatus("Enter an E.164 number, for example +16235551234.");
+    return;
   }
-}
-
-async function makeCall() {
-  if (!userAgent) return;
-  const number = $("number").value.trim();
-  if (!number) return;
-
-  const target = UserAgent.makeURI(`sip:${number}@${location.hostname}`);
-  session = new Inviter(userAgent, target, {
-    sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false } },
-  });
-  bindSession(session);
-  await session.invite();
-  callButton.disabled = true;
-  hangupButton.disabled = false;
-}
-
-async function hangup() {
-  if (!session) return;
+  setStatus(`Requesting call to ${phone}...`);
   try {
-    if (session.state === SessionState.Established) {
-      await session.bye();
-    } else if (session.cancel) {
-      await session.cancel();
-    }
+    const response = await fetch("/api/v1/browser/call", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone, extension: ext.value.trim() }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Call request failed");
+    activeCall = data.call.call_id;
+    setStatus(`Call started: ${activeCall}`);
+    hangupButton.disabled = false;
+    callButton.disabled = true;
   } catch (error) {
-    console.error(error);
+    setStatus(error.message);
   }
-}
+});
 
-registerButton.addEventListener("click", () => register().catch((e) => setStatus(`Register failed: ${e.message}`)));
-callButton.addEventListener("click", () => makeCall().catch((e) => setStatus(`Call failed: ${e.message}`)));
-hangupButton.addEventListener("click", () => hangup());
+hangupButton.addEventListener("click", async () => {
+  if (!activeCall) return;
+  try {
+    const response = await fetch(`/api/v1/calls/${encodeURIComponent(activeCall)}/hangup`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Hangup failed");
+    setStatus("Call ended.");
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    activeCall = null;
+    hangupButton.disabled = true;
+    callButton.disabled = false;
+  }
+});
