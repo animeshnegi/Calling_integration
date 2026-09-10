@@ -36,22 +36,19 @@ class AsteriskClient:
             return None
         return response.json()
 
-    def create_outbound_call(
-        self,
-        extension: str,
-        phone: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> str:
+    def create_outbound_call(self, extension: str, phone: str, metadata: dict[str, Any] | None = None) -> str:
         call_id = str(uuid.uuid4())
         variables = {"EIP_CALL_ID": call_id}
         if metadata:
             variables["EIP_CONTACT_ID"] = str(metadata.get("contact_id", ""))
             variables["EIP_MEMBER_ID"] = str(metadata.get("member_id", ""))
+        # Dialplan/Local channel is the portable hand-off point; the application
+        # records the UUID so provider channel IDs can later be correlated.
         self._request(
             "POST",
             "/channels",
             params={
-                "endpoint": f"Local/{phone}@outbound/n",
+                "endpoint": f"Local/{phone}@web-outbound/n",
                 "app": self.app,
                 "appArgs": f"{extension},{phone}",
                 "channelId": call_id,
@@ -75,19 +72,20 @@ def ari_event_loop(on_event, config: type[Config] = Config) -> threading.Thread:
     client = AsteriskClient(config)
 
     def run() -> None:
+        backoff = 2
         while True:
             ws = None
             try:
                 ws = websocket.create_connection(client.event_url(), timeout=30)
+                backoff = 2
                 while True:
                     raw = ws.recv()
                     if not raw:
                         break
                     on_event(json.loads(raw))
             except Exception:
-                # The production supervisor should restart/reconnect this listener.
-                # Avoid a busy loop if Asterisk is temporarily unavailable.
-                threading.Event().wait(2)
+                threading.Event().wait(backoff)
+                backoff = min(backoff * 2, 30)
             finally:
                 if ws:
                     try:
