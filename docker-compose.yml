@@ -1,0 +1,51 @@
+services:
+  telephony-api:
+    build: .
+    container_name: engineerip-telephony-api
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      asterisk:
+        condition: service_started
+    networks:
+      - crm-network
+      - telephony-internal
+    ports:
+      - "5000:5000"
+
+  asterisk:
+    build: ./asterisk
+    container_name: engineerip-asterisk
+    restart: unless-stopped
+    environment:
+      ARI_USER: ${ASTERISK_ARI_USER:-engineerip}
+      ARI_PASSWORD: ${ASTERISK_ARI_PASSWORD:-change-me}
+    volumes:
+      - asterisk_etc:/etc/asterisk
+      - asterisk_lib:/var/lib/asterisk
+      - asterisk_spool:/var/spool/asterisk
+      - asterisk_keys:/etc/asterisk/keys
+    networks:
+      - telephony-internal
+    ports:
+      # SIP devices/provider
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      # WebRTC WSS/HTTPS. ARI 8088 is intentionally NOT published.
+      - "8089:8089/tcp"
+      # RTP media
+      - "10000-10100:10000-10100/udp"
+
+networks:
+  crm-network:
+    external: true
+    name: crm-network
+  telephony-internal:
+    driver: bridge
+    name: engineerip-telephony-internal
+
+volumes:
+  asterisk_etc:
+  asterisk_lib:
+  asterisk_spool:
+  asterisk_keys:
