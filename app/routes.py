@@ -3,11 +3,9 @@ from __future__ import annotations
 from functools import wraps
 from typing import Any, Callable
 
-from flask import Blueprint, jsonify, request, send_from_directory
+from flask import jsonify, request, send_from_directory
 
 from .config import Config
-
-bp = Blueprint("telephony", __name__)
 
 
 def require_token(fn: Callable):
@@ -23,6 +21,24 @@ def require_token(fn: Callable):
 
 
 def register_routes(app, service):
+    def build_call(data):
+        phone = str(data.get("phone", "")).strip()
+        extension = str(data.get("extension") or Config.DEFAULT_EXTENSION).strip()
+        if not phone:
+            return None, (jsonify({"error": "phone is required"}), 400)
+        if not extension.isdigit():
+            return None, (jsonify({"error": "extension must be numeric"}), 400)
+        try:
+            call = service.start_outbound(
+                phone=phone,
+                extension=extension,
+                contact_id=data.get("contact_id"),
+                member_id=data.get("member_id"),
+            )
+        except Exception as exc:
+            return None, (jsonify({"error": str(exc)}), 502)
+        return call, None
+
     @app.get("/health")
     def health():
         try:
@@ -39,19 +55,17 @@ def register_routes(app, service):
     @app.post("/api/v1/calls")
     @require_token
     def create_call():
-        data = request.get_json(silent=True) or {}
-        phone = str(data.get("phone", "")).strip()
-        extension = str(data.get("extension") or Config.DEFAULT_EXTENSION).strip()
-        if not phone:
-            return jsonify({"error": "phone is required"}), 400
-        if not extension.isdigit():
-            return jsonify({"error": "extension must be numeric"}), 400
-        call = service.start_outbound(
-            phone=phone,
-            extension=extension,
-            contact_id=data.get("contact_id"),
-            member_id=data.get("member_id"),
-        )
+        call, error = build_call(request.get_json(silent=True) or {})
+        if error:
+            return error
+        return jsonify({"call": call.to_dict()}), 201
+
+    @app.post("/api/v1/browser/call")
+    @require_token
+    def browser_call():
+        call, error = build_call(request.get_json(silent=True) or {})
+        if error:
+            return error
         return jsonify({"call": call.to_dict()}), 201
 
     @app.get("/api/v1/calls/<call_id>")
