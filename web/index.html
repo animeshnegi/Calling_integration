@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>EngineerIP Telephony</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main class="shell">
+  <section class="card">
+    <h1>EngineerIP Telephony</h1>
+    <p class="muted">Browser WebRTC softphone and telephony diagnostics.</p>
+
+    <label>Extension
+      <input id="extension" value="101" autocomplete="username">
+    </label>
+    <label>Dial number
+      <input id="number" placeholder="+16235551234" autocomplete="tel">
+    </label>
+
+    <div class="row">
+      <button id="register">Register</button>
+      <button id="call" disabled>Call</button>
+      <button id="hangup" disabled>Hang up</button>
+    </div>
+
+    <div id="status" class="status">Not registered</div>
+    <audio id="remoteAudio" autoplay></audio>
+    <p class="muted small">The production CRM should launch the WebRTC client with the employee's assigned endpoint rather than exposing Asterisk credentials.</p>
+  </section>
+</main>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
