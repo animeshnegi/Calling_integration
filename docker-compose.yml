@@ -34,8 +34,8 @@ services:
       - "5060:5060/tcp"
       # WebRTC WSS/HTTPS. ARI 8088 is intentionally NOT published.
       - "8089:8089/tcp"
-      # RTP media; keep in sync with ASTERISK_RTP_START/END and VPS firewall.
-      - "10000-10100:10000-10100/udp"
+      # RTP media; values must match .env and the VPS firewall.
+      - "${ASTERISK_RTP_START:-10000}-${ASTERISK_RTP_END:-10100}:${ASTERISK_RTP_START:-10000}-${ASTERISK_RTP_END:-10100}/udp"
     healthcheck:
       test: ["CMD-SHELL", "asterisk -rx 'core show version' >/dev/null 2>&1 && asterisk -rx 'pjsip show endpoint ipcomms' >/dev/null 2>&1"]
       interval: 15s
