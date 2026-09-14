@@ -8,50 +8,103 @@ If EngineerIP already creates a Docker network named `crm-network`, use it. Othe
 docker network create crm-network
 ```
 
-The telephony API joins that network, allowing the CRM container to reach it by its Docker service/container DNS name.
+The telephony API joins that network, allowing the CRM container to reach it by its Docker DNS name.
 
-## 2. Configure secrets
+## 2. Configure secrets and IPComms
 
 ```bash
 cp .env.example .env
+nano .env
 ```
 
-Set strong random values for `SECRET_KEY`, `TELEPHONY_TOKEN`, `CRM_WEBHOOK_TOKEN`, and the Asterisk ARI password. Set your SIP provider values only in `.env` or a secret manager.
+Set strong random values for `SECRET_KEY`, `TELEPHONY_TOKEN`, `CRM_WEBHOOK_TOKEN`, and `ASTERISK_ARI_PASSWORD`.
 
-Never commit `.env`.
+Set these IPComms values from the IPComms portal:
 
-## 3. TLS certificate for WebRTC
+```text
+IPCOMMS_SIP_SERVER=<your-tenant>.s1.ipcomms.net
+IPCOMMS_SIP_PORT=5060
+IPCOMMS_SIP_USERNAME=<trunk username>
+IPCOMMS_SIP_PASSWORD=<trunk password>
+IPCOMMS_DID=+13022661626
+IPCOMMS_ALLOWED_IPS=<provider IP 1>,<provider IP 2>
+```
 
-A trusted certificate is required for normal browser WebRTC operation. Mount a certificate/key into `/etc/asterisk/keys/asterisk.pem`, or terminate TLS at the reverse proxy and configure the Asterisk/browser topology consistently.
+Set `ASTERISK_EXTERNAL_ADDRESS` to the VPS public IP or the public telephony hostname that resolves to the VPS.
 
-The certificate hostname should match the WSS hostname used by the browser.
+Set a strong `EXTENSION_101_PASSWORD` for Zoiper/SIP phones. `WEBRTC_EXTENSION_PASSWORD` may be separate.
+
+**Never commit `.env` or provider credentials.** `.gitignore` already excludes `.env` and Asterisk keys.
+
+## 3. RTP and firewall
+
+The default RTP range is UDP `10000-10100`. Keep all three values aligned:
+
+- `ASTERISK_RTP_START=10000`
+- `ASTERISK_RTP_END=10100`
+- Docker's published `10000-10100/udp` range
+- VPS firewall UDP `10000:10100`
+
+If IPComms gives a different RTP range, change the environment and Docker publish range together before deployment.
 
 ## 4. Build/start
 
 ```bash
 docker compose up -d --build
 docker compose ps
-docker compose logs --tail=100 asterisk
-docker compose logs --tail=100 telephony-api
+docker compose logs --tail=150 asterisk
 ```
 
-## 5. Verify Asterisk from inside the network
+The Asterisk container generates `pjsip.conf` at startup from the `.env` values. Real SIP credentials therefore never enter GitHub.
+
+## 5. Verify Asterisk
 
 ```bash
 docker compose exec asterisk asterisk -rx 'core show version'
 docker compose exec asterisk asterisk -rx 'pjsip show endpoints'
+docker compose exec asterisk asterisk -rx 'pjsip show registrations'
 docker compose exec asterisk asterisk -rx 'http show status'
 ```
 
-## 6. Verify Flask
+The first carrier milestone is:
+
+```text
+IPComms registration: Registered
+```
+
+If registration is rejected, check the SIP server, username, password, UDP 5060 access, and IPComms account status before testing a phone.
+
+## 6. Test Zoiper through Asterisk
+
+Do **not** put the IPComms trunk credentials into Zoiper for this test. Zoiper should register to Asterisk extension `101`:
+
+```text
+Username: 101
+Password: EXTENSION_101_PASSWORD
+Server: <VPS public IP or telephony hostname>
+Port: 5060
+Transport: UDP
+```
+
+Then verify:
+
+```bash
+docker compose exec asterisk asterisk -rx 'pjsip show contacts'
+```
+
+The extension should appear as reachable/available.
+
+From Zoiper, dial a full E.164 number such as `+1...`. The dialplan sends the call through the `ipcomms` endpoint.
+
+## 7. Verify Flask
 
 ```bash
 curl http://127.0.0.1:5000/health
 ```
 
-It will return 503 until ARI is actually reachable and authenticated.
+It will return 503 until ARI is reachable and authenticated.
 
-## 7. Connect EngineerIP CRM
+## 8. Connect EngineerIP CRM
 
 Attach EngineerIP's CRM container to `crm-network` if it is not already attached:
 
@@ -59,42 +112,45 @@ Attach EngineerIP's CRM container to `crm-network` if it is not already attached
 docker network connect crm-network engineerip-crm
 ```
 
-Then set the CRM integration base URL to the telephony API container name, e.g.:
+Then set the CRM integration base URL to:
 
 ```text
 http://engineerip-telephony-api:5000
 ```
 
-Use the `POST /api/v1/calls` endpoint from server-side CRM code. The master `TELEPHONY_TOKEN` must remain server-side.
+Use `POST /api/v1/calls` from server-side CRM code. Keep `TELEPHONY_TOKEN` server-side.
 
-## 8. Reverse proxy / WebRTC
+## 9. WebRTC / TLS
 
-Publish only the browser-facing HTTPS/WSS endpoint through your normal reverse proxy. Do not publish Asterisk ARI 8088. If using a separate hostname such as `telephony.example.com`, proxy WebSocket upgrades to Asterisk's HTTPS/WSS listener and keep ARI on the private network.
+Asterisk's HTTPS/WSS listener is on TCP 8089. The startup script creates a temporary self-signed certificate if none exists, which is useful for container bring-up but **is not a production browser certificate**.
 
-## 9. VPS firewall
+Before browser WebRTC production use, mount a trusted certificate whose hostname matches the browser WSS hostname, or terminate TLS at the reverse proxy and configure the topology consistently.
 
-Allow only the ports you actually need. Typical public telephony ports are:
+Do **not** publish Asterisk ARI TCP 8088 to the Internet.
 
-- UDP/TCP 5060 for SIP where the provider requires it.
-- UDP 10000-10100 for RTP.
-- TCP 8089 only when exposing Asterisk's WebRTC HTTPS/WSS directly through your reverse proxy design.
+## 10. VPS firewall
 
-Do **not** open TCP 8088 for ARI to the Internet.
+For the current IPComms UDP test, allow only what is required:
 
-Providers may use different SIP transports/ports. Follow the provider's firewall requirements.
+- UDP 5060 for SIP
+- UDP 10000-10100 for RTP
+- TCP 8089 only when using Asterisk WSS directly or as required by the reverse-proxy design
+- TCP 5000 should normally remain private and not be publicly exposed
 
-## 10. Production hardening
+Do not open TCP 8088 for ARI to the Internet.
+
+## 11. Production hardening
 
 - Use strong unique SIP credentials per employee.
-- Disable or restrict anonymous SIP.
-- Apply outbound dialing permissions and destination controls.
-- Set call duration limits to reduce toll fraud risk.
-- Use TLS/SRTP/VPN appropriate to your environment.
-- Back up Asterisk config and any call/recording storage.
-- Monitor disk usage if recordings are enabled later.
+- Disable anonymous SIP.
+- Restrict inbound provider identification to IPComms source addresses.
+- Apply outbound destination permissions and call-duration limits.
+- Use TLS/SRTP for browser/device traffic where appropriate.
+- Back up Asterisk configuration and call/recording storage.
+- Monitor disk usage if recordings are enabled.
 - Rate-limit public API endpoints at the reverse proxy.
-- Keep `.env` and certificates outside the Git repository.
+- Keep `.env` and certificates outside Git.
 
-## Important testing boundary
+## Testing boundary
 
-This repository can be syntax-tested and container-configuration-tested in CI, but actual carrier calls, inbound DID delivery, remote WebRTC, NAT traversal and audio quality require a real SIP trunk/provider, real endpoint credentials, TLS certificates, and a reachable deployed VPS. Those environmental dependencies cannot truthfully be marked as validated from GitHub alone.
+The GitHub repository can be reviewed and syntax-tested, but real carrier registration, inbound DID delivery, NAT/audio, Zoiper registration, WebRTC and call quality require the deployed VPS and live IPComms account. Those are verified only after the corresponding VPS tests succeed.
