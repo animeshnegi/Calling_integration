@@ -17,6 +17,7 @@ services:
     build: ./asterisk
     container_name: engineerip-asterisk
     restart: unless-stopped
+    env_file: .env
     environment:
       ARI_USER: ${ASTERISK_ARI_USER:-engineerip}
       ARI_PASSWORD: ${ASTERISK_ARI_PASSWORD:-change-me}
@@ -28,12 +29,12 @@ services:
     networks:
       - telephony-internal
     ports:
-      # SIP devices/provider
+      # SIP devices and IPComms provider registration
       - "5060:5060/udp"
       - "5060:5060/tcp"
       # WebRTC WSS/HTTPS. ARI 8088 is intentionally NOT published.
       - "8089:8089/tcp"
-      # RTP media
+      # RTP media; keep in sync with ASTERISK_RTP_START/END and VPS firewall.
       - "10000-10100:10000-10100/udp"
 
 networks:
