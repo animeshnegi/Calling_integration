@@ -8,17 +8,20 @@ set -eu
 : "${IPCOMMS_DID:?IPCOMMS_DID must be set}"
 : "${EXTENSION_101_PASSWORD:?EXTENSION_101_PASSWORD must be set}"
 
-ASTERISK_EXTERNAL_ADDRESS="${ASTERISK_EXTERNAL_ADDRESS}" \
-IPCOMMS_SIP_SERVER="${IPCOMMS_SIP_SERVER}" \
-IPCOMMS_SIP_USERNAME="${IPCOMMS_SIP_USERNAME}" \
-IPCOMMS_SIP_PASSWORD="${IPCOMMS_SIP_PASSWORD}" \
-IPCOMMS_DID="${IPCOMMS_DID}" \
-EXTENSION_101_PASSWORD="${EXTENSION_101_PASSWORD}" \
-ASTERISK_RTP_START="${ASTERISK_RTP_START:-10000}" \
-ASTERISK_RTP_END="${ASTERISK_RTP_END:-10100}" \
-IPCOMMS_ALLOWED_IPS="${IPCOMMS_ALLOWED_IPS:-}" \
-ASTERISK_EXTERNAL_ADDRESS="${ASTERISK_EXTERNAL_ADDRESS}" \
-sh -c 'cat > /etc/asterisk/pjsip.conf <<EOF
+WEBRTC_EXTENSION_PASSWORD="${WEBRTC_EXTENSION_PASSWORD:-${EXTENSION_101_PASSWORD}}"
+ASTERISK_RTP_START="${ASTERISK_RTP_START:-10000}"
+ASTERISK_RTP_END="${ASTERISK_RTP_END:-10100}"
+
+mkdir -p /etc/asterisk/keys
+if [ ! -s /etc/asterisk/keys/asterisk.pem ]; then
+  openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+    -keyout /etc/asterisk/keys/asterisk.pem \
+    -out /etc/asterisk/keys/asterisk.pem \
+    -subj "/CN=${ASTERISK_EXTERNAL_ADDRESS}" >/dev/null 2>&1
+  chmod 600 /etc/asterisk/keys/asterisk.pem
+fi
+
+cat > /etc/asterisk/pjsip.conf <<EOF
 [global]
 user_agent=EngineerIP-Telephony
 
@@ -30,7 +33,12 @@ external_signaling_address=${ASTERISK_EXTERNAL_ADDRESS}
 external_signaling_port=5060
 local_net=172.16.0.0/12
 
-; Extension 101 for Zoiper, SIP phones and the first WebRTC test.
+[transport-wss]
+type=transport
+protocol=wss
+bind=0.0.0.0
+
+; Extension 101 for Zoiper and SIP phones.
 [101]
 type=aor
 max_contacts=5
@@ -55,7 +63,7 @@ rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
 
-; IPComms registered trunk.
+; IPComms registered SIP trunk.
 [ipcomms]
 type=endpoint
 transport=transport-udp
@@ -93,33 +101,8 @@ retry_interval=30
 forbidden_retry_interval=300
 expiration=300
 
-; Identify inbound IPComms traffic. If the portal supplies source IPs,
-; put them in IPCOMMS_ALLOWED_IPS as a comma-separated list.
-EOF
-
-if [ -n "${IPCOMMS_ALLOWED_IPS:-}" ]; then
-  i=1
-  oldifs="$IFS"
-  IFS=",
-"
-  for ip in $IPCOMMS_ALLOWED_IPS; do
-    ip=$(echo "$ip" | tr -d "[:space:]")
-    [ -n "$ip" ] || continue
-    cat >> /etc/asterisk/pjsip.conf <<EOF
-
-[ipcomms-identify-$i]
-type=identify
-endpoint=ipcomms
-match=$ip
-EOF
-    i=$((i + 1))
-  done
-  IFS="$oldifs"
-fi
-
-cat >> /etc/asterisk/pjsip.conf <<EOF
-
-; WebRTC endpoint. TLS/WSS media is enabled once a trusted certificate is mounted.
+; Browser WebRTC extension. A trusted certificate should replace the temporary
+; startup certificate before production browser use.
 [101-web]
 type=aor
 max_contacts=2
@@ -129,7 +112,7 @@ remove_existing=yes
 type=auth
 auth_type=userpass
 username=101-web
-password=${EXTENSION_101_PASSWORD}
+password=${WEBRTC_EXTENSION_PASSWORD}
 
 [101-web]
 type=endpoint
@@ -144,17 +127,34 @@ rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
 webrtc=yes
-
 EOF
+
+if [ -n "${IPCOMMS_ALLOWED_IPS:-}" ]; then
+  i=1
+  oldifs="$IFS"
+  IFS=','
+  for ip in $IPCOMMS_ALLOWED_IPS; do
+    ip=$(echo "$ip" | tr -d '[:space:]')
+    [ -n "$ip" ] || continue
+    cat >> /etc/asterisk/pjsip.conf <<EOF
+
+[ipcomms-identify-$i]
+type=identify
+endpoint=ipcomms
+match=$ip
+EOF
+    i=$((i + 1))
+  done
+  IFS="$oldifs"
+fi
 
 cat > /etc/asterisk/rtp.conf <<EOF
 [general]
-rtpstart=${ASTERISK_RTP_START:-10000}
-rtpend=${ASTERISK_RTP_END:-10100}
+rtpstart=${ASTERISK_RTP_START}
+rtpend=${ASTERISK_RTP_END}
 icesupport=yes
 EOF
 
-# Generate ARI credentials at runtime; never commit them.
 if [ -n "${ARI_USER:-}" ] && [ -n "${ARI_PASSWORD:-}" ]; then
   cat > /etc/asterisk/ari.conf <<EOF
 [general]
@@ -169,8 +169,6 @@ password = ${ARI_PASSWORD}
 EOF
 fi
 
-# Asterisk must own its runtime directories.
 chown -R asterisk:asterisk /etc/asterisk /var/lib/asterisk /var/spool/asterisk 2>/dev/null || true
 
 exec asterisk -f -U asterisk -G asterisk -vvv
-' 
