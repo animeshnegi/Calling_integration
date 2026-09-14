@@ -6,7 +6,7 @@ services:
     env_file: .env
     depends_on:
       asterisk:
-        condition: service_started
+        condition: service_healthy
     networks:
       - crm-network
       - telephony-internal
@@ -36,6 +36,12 @@ services:
       - "8089:8089/tcp"
       # RTP media; keep in sync with ASTERISK_RTP_START/END and VPS firewall.
       - "10000-10100:10000-10100/udp"
+    healthcheck:
+      test: ["CMD-SHELL", "asterisk -rx 'core show version' >/dev/null 2>&1 && asterisk -rx 'pjsip show endpoint ipcomms' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 networks:
   crm-network:
