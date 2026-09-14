@@ -1,25 +1,76 @@
 #!/bin/sh
 set -eu
 
-: "${ASTERISK_EXTERNAL_ADDRESS:?ASTERISK_EXTERNAL_ADDRESS must be set to the VPS public IP or telephony hostname}"
-: "${IPCOMMS_SIP_SERVER:?IPCOMMS_SIP_SERVER must be set}"
-: "${IPCOMMS_SIP_USERNAME:?IPCOMMS_SIP_USERNAME must be set}"
-: "${IPCOMMS_SIP_PASSWORD:?IPCOMMS_SIP_PASSWORD must be set}"
-: "${IPCOMMS_DID:?IPCOMMS_DID must be set}"
-: "${EXTENSION_101_PASSWORD:?EXTENSION_101_PASSWORD must be set}"
+fail() {
+  echo "[ERROR] $*" >&2
+  exit 1
+}
+
+require_env() {
+  name="$1"
+  eval "value=\${$name:-}"
+  [ -n "$value" ] || fail "$name must be set"
+}
+
+require_env ASTERISK_EXTERNAL_ADDRESS
+require_env IPCOMMS_SIP_SERVER
+require_env IPCOMMS_SIP_PORT
+require_env IPCOMMS_SIP_USERNAME
+require_env IPCOMMS_SIP_PASSWORD
+require_env IPCOMMS_DID
+require_env IPCOMMS_ALLOWED_IPS
+require_env EXTENSION_101_PASSWORD
+require_env ARI_USER
+require_env ARI_PASSWORD
 
 WEBRTC_EXTENSION_PASSWORD="${WEBRTC_EXTENSION_PASSWORD:-${EXTENSION_101_PASSWORD}}"
 ASTERISK_RTP_START="${ASTERISK_RTP_START:-10000}"
 ASTERISK_RTP_END="${ASTERISK_RTP_END:-10100}"
+
+case "$IPCOMMS_SIP_PORT" in
+  *[!0-9]*) fail "IPCOMMS_SIP_PORT must be numeric" ;;
+  esac
+case "$ASTERISK_RTP_START" in
+  *[!0-9]*) fail "ASTERISK_RTP_START must be numeric" ;;
+  esac
+case "$ASTERISK_RTP_END" in
+  *[!0-9]*) fail "ASTERISK_RTP_END must be numeric" ;;
+  esac
+
+[ "$ASTERISK_RTP_START" -lt "$ASTERISK_RTP_END" ] || fail "ASTERISK_RTP_START must be less than ASTERISK_RTP_END"
+[ "$IPCOMMS_SIP_PORT" -ge 1 ] && [ "$IPCOMMS_SIP_PORT" -le 65535 ] || fail "IPCOMMS_SIP_PORT must be between 1 and 65535"
+[ "$ASTERISK_RTP_START" -ge 1024 ] && [ "$ASTERISK_RTP_END" -le 65535 ] || fail "RTP range must be between 1024 and 65535"
+
+# IPComms provider IPs are deliberately required so inbound SIP is matched by
+# source address instead of trusting arbitrary SIP usernames.
+validate_ip_list() {
+  oldifs="$IFS"
+  IFS=','
+  count=0
+  for raw_ip in $IPCOMMS_ALLOWED_IPS; do
+    ip=$(echo "$raw_ip" | tr -d '[:space:]')
+    [ -n "$ip" ] || continue
+    case "$ip" in
+      *[!0-9./:]*) fail "Invalid IP/CIDR in IPCOMMS_ALLOWED_IPS: $ip" ;;
+    esac
+    count=$((count + 1))
+  done
+  IFS="$oldifs"
+  [ "$count" -gt 0 ] || fail "IPCOMMS_ALLOWED_IPS must contain at least one provider IP/CIDR"
+}
+validate_ip_list
 
 mkdir -p /etc/asterisk/keys
 if [ ! -s /etc/asterisk/keys/asterisk.pem ]; then
   openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
     -keyout /etc/asterisk/keys/asterisk.pem \
     -out /etc/asterisk/keys/asterisk.pem \
-    -subj "/CN=${ASTERISK_EXTERNAL_ADDRESS}" >/dev/null 2>&1
+    -subj "/CN=${ASTERISK_EXTERNAL_ADDRESS}" >/dev/null 2>&1 || fail "Could not generate temporary TLS certificate"
   chmod 600 /etc/asterisk/keys/asterisk.pem
 fi
+
+DID_USER=$(echo "$IPCOMMS_DID" | tr -d '+ -()')
+[ -n "$DID_USER" ] || fail "IPCOMMS_DID must contain a valid telephone number"
 
 cat > /etc/asterisk/pjsip.conf <<EOF
 [global]
@@ -31,6 +82,7 @@ protocol=udp
 bind=0.0.0.0:5060
 external_signaling_address=${ASTERISK_EXTERNAL_ADDRESS}
 external_signaling_port=5060
+external_media_address=${ASTERISK_EXTERNAL_ADDRESS}
 local_net=172.16.0.0/12
 
 [transport-wss]
@@ -87,22 +139,22 @@ password=${IPCOMMS_SIP_PASSWORD}
 
 [ipcomms]
 type=aor
-contact=sip:${IPCOMMS_SIP_SERVER}:5060
+contact=sip:${IPCOMMS_SIP_SERVER}:${IPCOMMS_SIP_PORT}
 qualify_frequency=60
 
 [ipcomms-reg]
 type=registration
 transport=transport-udp
 outbound_auth=ipcomms-auth
-server_uri=sip:${IPCOMMS_SIP_SERVER}:5060
+server_uri=sip:${IPCOMMS_SIP_SERVER}:${IPCOMMS_SIP_PORT}
 client_uri=sip:${IPCOMMS_SIP_USERNAME}@${IPCOMMS_SIP_SERVER}
-contact_user=${IPCOMMS_DID}
+contact_user=${DID_USER}
 retry_interval=30
 forbidden_retry_interval=300
 expiration=300
 
-; Browser WebRTC extension. A trusted certificate should replace the temporary
-; startup certificate before production browser use.
+; Browser WebRTC extension. Replace the temporary certificate with a trusted
+; certificate before production browser use.
 [101-web]
 type=aor
 max_contacts=2
@@ -129,24 +181,22 @@ rewrite_contact=yes
 webrtc=yes
 EOF
 
-if [ -n "${IPCOMMS_ALLOWED_IPS:-}" ]; then
-  i=1
-  oldifs="$IFS"
-  IFS=','
-  for ip in $IPCOMMS_ALLOWED_IPS; do
-    ip=$(echo "$ip" | tr -d '[:space:]')
-    [ -n "$ip" ] || continue
-    cat >> /etc/asterisk/pjsip.conf <<EOF
+i=1
+oldifs="$IFS"
+IFS=','
+for raw_ip in $IPCOMMS_ALLOWED_IPS; do
+  ip=$(echo "$raw_ip" | tr -d '[:space:]')
+  [ -n "$ip" ] || continue
+  cat >> /etc/asterisk/pjsip.conf <<EOF
 
 [ipcomms-identify-$i]
 type=identify
 endpoint=ipcomms
 match=$ip
 EOF
-    i=$((i + 1))
-  done
-  IFS="$oldifs"
-fi
+  i=$((i + 1))
+done
+IFS="$oldifs"
 
 cat > /etc/asterisk/rtp.conf <<EOF
 [general]
@@ -155,20 +205,44 @@ rtpend=${ASTERISK_RTP_END}
 icesupport=yes
 EOF
 
-if [ -n "${ARI_USER:-}" ] && [ -n "${ARI_PASSWORD:-}" ]; then
-  cat > /etc/asterisk/ari.conf <<EOF
+cat > /etc/asterisk/ari.conf <<EOF
 [general]
 enabled = yes
 pretty = yes
-allowed_origins = *
+; ARI is only reachable on the private Docker network; 8088 is not published.
+allowed_origins = https://127.0.0.1
 
 [${ARI_USER}]
 type = user
 read_only = no
 password = ${ARI_PASSWORD}
 EOF
-fi
 
 chown -R asterisk:asterisk /etc/asterisk /var/lib/asterisk /var/spool/asterisk 2>/dev/null || true
 
+# Asterisk has no separate universal "lint" command for all module configs.
+# Perform a controlled foreground startup as the configuration gate. If any
+# core/PJSIP/HTTP/dialplan configuration is rejected, this exits non-zero and
+# Docker restarts the container instead of leaving a broken PBX running.
+VALIDATION_LOG=/tmp/asterisk-config-validation.log
+rm -f "$VALIDATION_LOG"
+set +e
+(timeout 8s asterisk -f -U asterisk -G asterisk -vvv >"$VALIDATION_LOG" 2>&1)
+validation_status=$?
+set -e
+
+if [ "$validation_status" -ne 124 ] && [ "$validation_status" -ne 0 ]; then
+  echo "[ERROR] Asterisk configuration validation failed:" >&2
+  cat "$VALIDATION_LOG" >&2
+  exit "$validation_status"
+fi
+
+if grep -Eiq '(ERROR|Unable to load|failed to load|Parsing.*failed|config.*error)' "$VALIDATION_LOG"; then
+  echo "[ERROR] Asterisk reported configuration errors during validation:" >&2
+  cat "$VALIDATION_LOG" >&2
+  exit 1
+fi
+
+# The validation process is intentionally time-limited. Start the real daemon
+# only after the configuration gate succeeds.
 exec asterisk -f -U asterisk -G asterisk -vvv
