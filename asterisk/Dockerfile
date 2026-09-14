@@ -1,15 +1,43 @@
 FROM debian:bookworm-slim
 
+ARG ASTERISK_VERSION=22.11.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       asterisk \
-       asterisk-core-sounds-en-ulaw \
+       build-essential \
        ca-certificates \
-       openssl \
+       curl \
+       libedit-dev \
+       libjansson-dev \
+       libncurses5-dev \
+       libnewt-dev \
+       libogg-dev \
+       libopus-dev \
+       libsamplerate0-dev \
+       libsndfile1-dev \
+       libspeex-dev \
+       libspeexdsp-dev \
+       libsqlite3-dev \
+       libssl-dev \
+       libtool \
+       libvorbis-dev \
+       libxml2-dev \
+       pkg-config \
        procps \
-    && rm -rf /var/lib/apt/lists/*
+       uuid-dev \
+       xmlstarlet \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${ASTERISK_VERSION}.tar.gz" -o /tmp/asterisk.tar.gz \
+    && tar -xzf /tmp/asterisk.tar.gz -C /tmp \
+    && cd "/tmp/asterisk-${ASTERISK_VERSION}" \
+    && ./configure --with-jansson-bundled --with-pjproject-bundled \
+    && make -j2 \
+    && make install \
+    && make samples \
+    && ldconfig \
+    && cd / \
+    && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" /tmp/asterisk.tar.gz
 
 COPY config/ /etc/asterisk/
 COPY entrypoint.sh /entrypoint.sh
