@@ -4,12 +4,16 @@ services:
     container_name: engineerip-telephony-api
     restart: unless-stopped
     env_file: .env
+    environment:
+      SETTINGS_DB_PATH: /app/instance/settings.db
     depends_on:
       asterisk:
         condition: service_healthy
     networks:
       - crm-network
       - telephony-internal
+    volumes:
+      - telephony_data:/app/instance
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -34,9 +38,7 @@ services:
     networks:
       - telephony-internal
     ports:
-      # SIP devices and IPComms provider registration. UDP is sufficient for the current POC.
       - "5060:5060/udp"
-      # RTP media; values must match .env and the VPS firewall.
       - "${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}:${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}/udp"
     security_opt:
       - no-new-privileges:true
@@ -56,6 +58,7 @@ networks:
     name: engineerip-telephony-internal
 
 volumes:
+  telephony_data:
   asterisk_etc:
   asterisk_lib:
   asterisk_spool:
