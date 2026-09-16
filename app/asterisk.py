@@ -45,13 +45,7 @@ class AsteriskClient:
                     variables[f"EIP_{key.upper()}"] = str(metadata[key])
         return variables
 
-    def create_outbound_call(
-        self,
-        extension: str,
-        phone: str,
-        provider_endpoint: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> str:
+    def create_outbound_call(self, extension: str, phone: str, provider_endpoint: str, metadata: dict[str, Any] | None = None) -> str:
         """Ring the employee first. The customer leg is created only after the employee answers."""
         call_id = str(uuid.uuid4())
         employee_channel = f"{call_id}-employee"
@@ -69,13 +63,7 @@ class AsteriskClient:
         )
         return call_id
 
-    def create_customer_leg(
-        self,
-        call_id: str,
-        phone: str,
-        provider_endpoint: str,
-        employee_channel_id: str,
-    ) -> str:
+    def create_customer_leg(self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str) -> str:
         customer_channel = f"{call_id}-customer"
         self._request(
             "POST",
@@ -115,9 +103,8 @@ class AsteriskClient:
 
     def stop_recording(self, name: str) -> None:
         try:
-            self._request("DELETE", f"/recordings/live/{name}")
+            self._request("POST", f"/recordings/live/{name}/stop")
         except AsteriskError:
-            # A recording may already have been finalized by Asterisk.
             pass
 
     def destroy_bridge(self, bridge_id: str) -> None:
@@ -127,6 +114,8 @@ class AsteriskClient:
             pass
 
     def hangup(self, channel_id: str) -> None:
+        if not channel_id:
+            return
         try:
             self._request("DELETE", f"/channels/{channel_id}")
         except AsteriskError:
@@ -157,11 +146,7 @@ def ari_event_loop(on_event, config: type[Config] = Config) -> threading.Thread:
         while True:
             ws = None
             try:
-                ws = websocket.create_connection(
-                    client.event_url(),
-                    timeout=30,
-                    header=client.event_headers(),
-                )
+                ws = websocket.create_connection(client.event_url(), timeout=30, header=client.event_headers())
                 backoff = 2
                 while True:
                     raw = ws.recv()
