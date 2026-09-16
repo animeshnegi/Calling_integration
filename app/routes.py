@@ -49,6 +49,15 @@ def require_token(fn: Callable):
     return wrapped
 
 
+def _configured_default_extension(service) -> str:
+    if service.settings_store:
+        configured = str(service.settings_store.get_settings().get("default_extension", "")).strip()
+        if configured.isdigit() and 100 <= int(configured) <= 999:
+            if any(row["extension"] == configured and row["active"] for row in service.settings_store.list_extensions()):
+                return configured
+    return Config.DEFAULT_EXTENSION
+
+
 def register_routes(app, service):
     def build_call(data):
         if not isinstance(data, dict):
@@ -56,7 +65,7 @@ def register_routes(app, service):
         if not service.ari_ready():
             return None, (jsonify({"error": "telephony event service is not ready"}), 503)
         phone = str(data.get("phone", "")).strip()
-        extension = str(data.get("extension") or Config.DEFAULT_EXTENSION).strip()
+        extension = str(data.get("extension") or _configured_default_extension(service)).strip()
         provider = str(data.get("provider") or "").strip() or None
         if not phone:
             return None, (jsonify({"error": "phone is required"}), 400)
@@ -84,7 +93,8 @@ def register_routes(app, service):
     def health():
         try:
             service.asterisk.health()
-            return jsonify({"ok": True, "asterisk": "reachable", "ari_ready": service.ari_ready()})
+            ready = service.ari_ready()
+            return jsonify({"ok": ready, "asterisk": "reachable", "ari_ready": ready}), (200 if ready else 503)
         except Exception:
             app.logger.exception("Asterisk health check failed")
             return jsonify({"ok": False, "error": "telephony service unavailable", "ari_ready": service.ari_ready()}), 503
@@ -94,7 +104,7 @@ def register_routes(app, service):
     def list_extensions():
         if service.settings_store:
             rows = service.settings_store.list_extensions()
-            return jsonify({"extensions": [row["extension"] for row in rows if row["active"]], "default_extension": Config.DEFAULT_EXTENSION})
+            return jsonify({"extensions": [row["extension"] for row in rows if row["active"]], "default_extension": _configured_default_extension(service)})
         return jsonify({"extensions": list(Config.ASTERISK_EXTENSIONS), "default_extension": Config.DEFAULT_EXTENSION})
 
     @app.get("/api/v1/providers")
