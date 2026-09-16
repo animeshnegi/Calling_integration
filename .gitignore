@@ -1,8 +1,13 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 .pytest_cache/
 *.pyc
 .venv/
 venv/
+*.log
+*.tar
+*.tar.gz
 asterisk/keys/*
 !asterisk/keys/.gitkeep
