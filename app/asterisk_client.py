@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -24,7 +26,13 @@ class AsteriskClient:
         self.app = config.ASTERISK_ARI_APP
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        response = requests.request(method, f"{self.base_url}/{path.lstrip('/')}", auth=(self.user, self.password), timeout=10, **kwargs)
+        response = requests.request(
+            method,
+            f"{self.base_url}/{path.lstrip('/')}",
+            auth=(self.user, self.password),
+            timeout=10,
+            **kwargs,
+        )
         if not response.ok:
             raise AsteriskError(f"Asterisk API {response.status_code}")
         if not response.content:
@@ -40,22 +48,44 @@ class AsteriskClient:
                     variables[f"EIP_{key.upper()}"] = str(metadata[key])
         return variables
 
-    def create_outbound_call(self, call_id: str, extension: str, phone: str, provider_endpoint: str, metadata: dict[str, Any] | None = None) -> str:
+    def create_outbound_call(
+        self,
+        call_id: str,
+        extension: str,
+        phone: str,
+        provider_endpoint: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Ring the employee first; the customer leg is created after answer."""
         employee_channel = f"{call_id}-employee"
-        self._request("POST", "/channels", params={
-            "endpoint": f"PJSIP/{extension}", "app": self.app,
-            "appArgs": f"employee,{call_id},{provider_endpoint},{phone}",
-            "channelId": employee_channel, "timeout": 30,
-        }, json={"variables": self._variables(call_id, metadata)})
+        self._request(
+            "POST",
+            "/channels",
+            params={
+                "endpoint": f"PJSIP/{extension}",
+                "app": self.app,
+                "appArgs": f"employee,{call_id},{provider_endpoint},{phone}",
+                "channelId": employee_channel,
+                "timeout": 30,
+            },
+            json={"variables": self._variables(call_id, metadata)},
+        )
         return call_id
 
     def create_customer_leg(self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str) -> str:
         customer_channel = f"{call_id}-customer"
-        self._request("POST", "/channels", params={
-            "endpoint": f"PJSIP/{phone}@{provider_endpoint}", "app": self.app,
-            "appArgs": f"customer,{call_id}", "channelId": customer_channel,
-            "originator": employee_channel_id, "timeout": 60,
-        })
+        self._request(
+            "POST",
+            "/channels",
+            params={
+                "endpoint": f"PJSIP/{phone}@{provider_endpoint}",
+                "app": self.app,
+                "appArgs": f"customer,{call_id}",
+                "channelId": customer_channel,
+                "originator": employee_channel_id,
+                "timeout": 60,
+            },
+        )
         return customer_channel
 
     def list_channels(self) -> list[dict[str, Any]]:
@@ -64,17 +94,29 @@ class AsteriskClient:
 
     def create_bridge(self, call_id: str) -> str:
         bridge_id = f"bridge-{call_id}"
-        self._request("POST", "/bridges", params={"type": "mixing", "bridgeId": bridge_id, "name": f"EngineerIP {call_id}"})
+        self._request(
+            "POST",
+            "/bridges",
+            params={"type": "mixing", "bridgeId": bridge_id, "name": f"EngineerIP {call_id}"},
+        )
         return bridge_id
 
     def add_channel_to_bridge(self, bridge_id: str, channel_id: str) -> None:
         self._request("POST", f"/bridges/{bridge_id}/addChannel", params={"channel": channel_id})
 
     def start_bridge_recording(self, bridge_id: str, name: str, fmt: str, beep: bool, max_duration: int = 0) -> dict[str, Any]:
-        return self._request("POST", f"/bridges/{bridge_id}/record", params={
-            "name": name, "format": fmt, "ifExists": "fail", "beep": "true" if beep else "false",
-            "maxDurationSeconds": max_duration, "terminateOn": "none",
-        })
+        return self._request(
+            "POST",
+            f"/bridges/{bridge_id}/record",
+            params={
+                "name": name,
+                "format": fmt,
+                "ifExists": "fail",
+                "beep": "true" if beep else "false",
+                "maxDurationSeconds": max_duration,
+                "terminateOn": "none",
+            },
+        )
 
     def play_bridge_media(self, bridge_id: str, media: str) -> dict[str, Any]:
         if not media or len(media) > 256 or "\r" in media or "\n" in media:
@@ -89,11 +131,22 @@ class AsteriskClient:
         except AsteriskError:
             pass
 
+    def get_stored_recording(self, name: str) -> dict[str, Any] | None:
+        if not name or len(name) > 128 or any(char in name for char in "/\\\r\n"):
+            return None
+        try:
+            result = self._request("GET", f"/recordings/stored/{name}")
+            return result if isinstance(result, dict) else None
+        except AsteriskError:
+            return None
+
     def list_stored_recordings(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/recordings/stored")
         return result if isinstance(result, list) else []
 
     def delete_stored_recording(self, name: str) -> None:
+        if not name or len(name) > 128 or any(char in name for char in "/\\\r\n"):
+            return
         try:
             self._request("DELETE", f"/recordings/stored/{name}")
         except AsteriskError:
@@ -149,22 +202,44 @@ class AsteriskClient:
         return [f"Authorization: Basic {token}"]
 
 
+def _set_ready(path: str) -> None:
+    ready = Path(path)
+    ready.parent.mkdir(parents=True, exist_ok=True)
+    ready.touch()
+
+
+def _clear_ready(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 def ari_event_loop(on_event, config: type[Config] = Config) -> None:
     client = AsteriskClient(config)
+    ready_path = config.ARI_READY_PATH
+    _clear_ready(ready_path)
 
     def run() -> None:
         backoff = 2
         while True:
             ws = None
             try:
-                ws = websocket.create_connection(client.event_url(), timeout=30, header=client.event_headers())
+                ws = websocket.create_connection(client.event_url(), timeout=5, header=client.event_headers())
                 backoff = 2
+                _set_ready(ready_path)
                 while True:
-                    raw = ws.recv()
+                    try:
+                        raw = ws.recv()
+                    except websocket.WebSocketTimeoutException:
+                        _set_ready(ready_path)
+                        continue
                     if not raw:
                         break
+                    _set_ready(ready_path)
                     on_event(json.loads(raw))
             except Exception:
+                _clear_ready(ready_path)
                 threading.Event().wait(backoff)
                 backoff = min(backoff * 2, 30)
             finally:
@@ -173,6 +248,7 @@ def ari_event_loop(on_event, config: type[Config] = Config) -> None:
                         ws.close()
                     except Exception:
                         pass
+                _clear_ready(ready_path)
 
     thread = threading.Thread(target=run, name="asterisk-ari-events", daemon=True)
     thread.start()
