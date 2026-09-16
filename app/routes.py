@@ -19,8 +19,8 @@ MAX_OUTBOUND_CALLS_PER_WINDOW = 30
 
 
 def _client_key(scope: str = "api") -> str:
-    address = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",", 1)[0].strip()
-    return f"{scope}:{address}"
+    # Do not trust a caller-supplied X-Forwarded-For header for security controls.
+    return f"{scope}:{request.remote_addr or 'unknown'}"
 
 
 def _rate_limited(scope: str = "api", limit: int = MAX_REQUESTS_PER_WINDOW) -> bool:
@@ -53,6 +53,8 @@ def register_routes(app, service):
     def build_call(data):
         if not isinstance(data, dict):
             return None, (jsonify({"error": "JSON object required"}), 400)
+        if not service.ari_ready():
+            return None, (jsonify({"error": "telephony event service is not ready"}), 503)
         phone = str(data.get("phone", "")).strip()
         extension = str(data.get("extension") or Config.DEFAULT_EXTENSION).strip()
         provider = str(data.get("provider") or "").strip() or None
@@ -82,10 +84,10 @@ def register_routes(app, service):
     def health():
         try:
             service.asterisk.health()
-            return jsonify({"ok": True, "asterisk": "reachable"})
+            return jsonify({"ok": True, "asterisk": "reachable", "ari_ready": service.ari_ready()})
         except Exception:
             app.logger.exception("Asterisk health check failed")
-            return jsonify({"ok": False, "error": "telephony service unavailable"}), 503
+            return jsonify({"ok": False, "error": "telephony service unavailable", "ari_ready": service.ari_ready()}), 503
 
     @app.get("/api/v1/extensions")
     @require_token
