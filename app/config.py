@@ -22,6 +22,11 @@ class Config:
     ENABLE_DIAGNOSTIC_UI = os.getenv("ENABLE_DIAGNOSTIC_UI", "false").lower() == "true"
     MAX_CONTENT_LENGTH = 64 * 1024
 
+    # Admin bootstrap credentials are read only when the settings database is first created.
+    ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+    SETTINGS_DB_PATH = os.getenv("SETTINGS_DB_PATH", "/app/instance/settings.db")
+
     @classmethod
     def is_extension_configured(cls, extension: str) -> bool:
         return extension in cls.ASTERISK_EXTENSIONS
@@ -37,6 +42,8 @@ class Config:
             "TELEPHONY_TOKEN": cls.TELEPHONY_TOKEN,
             "ASTERISK_ARI_USER": cls.ASTERISK_ARI_USER,
             "ASTERISK_ARI_PASSWORD": cls.ASTERISK_ARI_PASSWORD,
+            "ADMIN_USERNAME": cls.ADMIN_USERNAME,
+            "ADMIN_PASSWORD": cls.ADMIN_PASSWORD,
         }
         if cls.CRM_WEBHOOK_URL and not cls.CRM_WEBHOOK_TOKEN:
             raise RuntimeError("CRM_WEBHOOK_TOKEN must be set when CRM_WEBHOOK_URL is configured")
@@ -49,6 +56,8 @@ class Config:
             raise RuntimeError("TELEPHONY_TOKEN must be at least 32 characters in production")
         if len(cls.ASTERISK_ARI_PASSWORD) < 20:
             raise RuntimeError("ASTERISK_ARI_PASSWORD must be at least 20 characters in production")
+        if len(cls.ADMIN_PASSWORD) < 14:
+            raise RuntimeError("ADMIN_PASSWORD must be at least 14 characters in production")
         if not cls.ASTERISK_EXTENSIONS:
             raise RuntimeError("ASTERISK_EXTENSIONS must contain at least one extension")
         if cls.DEFAULT_EXTENSION not in cls.ASTERISK_EXTENSIONS:
