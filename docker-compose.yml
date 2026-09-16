@@ -36,8 +36,6 @@ services:
     ports:
       # SIP devices and IPComms provider registration. UDP is sufficient for the current POC.
       - "5060:5060/udp"
-      # WebRTC secure WebSocket. Use a trusted production certificate before browser deployment.
-      - "8089:8089/tcp"
       # RTP media; values must match .env and the VPS firewall.
       - "${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}:${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}/udp"
     security_opt:
