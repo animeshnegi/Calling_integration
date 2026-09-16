@@ -34,6 +34,7 @@ Asterisk is the telephony engine. The Flask service provides the CRM-facing API.
 - Employee and customer legs are placed into a mixing bridge after customer answer.
 - Optional bridge recording with retention managed through private ARI.
 - Persistent call state in SQLite so worker restarts do not erase call metadata.
+- Deterministic channel IDs are persisted before each originate so fast ARI events can be correlated even before the originate request returns.
 - Call lifecycle events, answer status and answered-call duration tracking.
 - Optional CRM webhook integration.
 - SIP-trunk-ready configuration with provider IP/CIDR allowlists for inbound SIP.
@@ -110,15 +111,15 @@ The intended outbound lifecycle is:
 
 1. CRM calls `POST /api/v1/calls`.
 2. API validates the E.164 destination and active employee extension.
-3. A call record is persisted **before** ARI originate to avoid losing an immediate `StasisStart` event.
+3. A call record and deterministic employee channel ID are persisted **before** ARI originate to avoid losing an immediate event.
 4. Asterisk rings the employee extension.
-5. After the employee answers, ARI originates the customer leg through the selected SIP provider.
+5. After the employee answers, ARI persists the deterministic customer channel ID before originating the customer leg.
 6. After the customer answers, ARI creates a mixing bridge and joins both channels.
 7. If recording is enabled globally and for the employee extension, bridge recording starts.
 8. Recording-finished and channel lifecycle events update the persistent call record and CRM webhooks.
 9. On hangup, the bridge is destroyed and the final call status/duration is persisted.
 
-A mixing bridge is used because Asterisk's bridge recording captures the mixed audio from the bridge participants. urlAsterisk bridge recording documentationhttps://docs.asterisk.org/Latest_API/API_Documentation/Asterisk_REST_Interface/Bridges_REST_API/
+Asterisk's ARI channel originate API creates the channel immediately and supports caller-selected channel IDs and channel variables in the request body. urlAsterisk Channels REST APIhttps://docs.asterisk.org/Latest_API/API_Documentation/Asterisk_REST_Interface/Channels_REST_API/
 
 ## API endpoints
 
@@ -147,11 +148,11 @@ The API rejects outbound calls while the dedicated ARI event worker is not conne
 
 The production/POSIX deployment uses IPComms as the SIP provider. Credentials are supplied through `.env` for first-run bootstrap and then stored encrypted in the telephony settings database. They are never committed to Git.
 
-Provider inbound traffic is matched using explicit IP/CIDR allowlists rendered as PJSIP `identify` objects. Asterisk documents IP-based endpoint identification as the mechanism for associating inbound provider traffic with a configured endpoint. urlAsterisk PJSIP endpoint identification documentationhttps://docs.asterisk.org/Configuration/Channel-Drivers/SIP/Configuring-res_pjsip/Asterisk-PJSIP-Troubleshooting-Guide/
+Provider inbound traffic is matched using explicit IP/CIDR allowlists rendered as PJSIP `identify` objects. Asterisk documents IP-based endpoint identification as the mechanism for associating inbound provider traffic with a configured endpoint.
 
 ## Recording
 
-Recordings are stored by Asterisk in the persistent recording volume. The Flask/API containers do not mount the recording volume. Retention is enforced by the ARI worker through the private Asterisk recordings API, which supports listing and deleting completed stored recordings. urlAsterisk recordings API documentationhttps://docs.asterisk.org/Certified-Asterisk_20.7_Documentation/API_Documentation/Asterisk_REST_Interface/Recordings_REST_API/
+Recordings are stored by Asterisk in the persistent recording volume. The Flask/API containers do not mount the recording volume. Retention is enforced by the ARI worker through the private Asterisk recordings API.
 
 Recording settings include:
 
