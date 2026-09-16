@@ -7,12 +7,22 @@ from .services import TelephonyService
 
 
 def create_app(config_class=Config):
+    config_class.validate()
     app = Flask(__name__)
     app.config.from_object(config_class)
+    app.config["MAX_CONTENT_LENGTH"] = config_class.MAX_CONTENT_LENGTH
 
     client = AsteriskClient(config_class)
     service = TelephonyService(client, config_class)
     app.extensions["telephony_service"] = service
+
+    @app.after_request
+    def security_headers(response):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     register_routes(app, service)
 
