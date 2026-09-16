@@ -19,11 +19,13 @@ require_env IPCOMMS_SIP_USERNAME
 require_env IPCOMMS_SIP_PASSWORD
 require_env IPCOMMS_DID
 require_env IPCOMMS_ALLOWED_IPS
-require_env EXTENSION_101_PASSWORD
+require_env ASTERISK_EXTENSIONS
 require_env ARI_USER
 require_env ARI_PASSWORD
 
-WEBRTC_EXTENSION_PASSWORD="${WEBRTC_EXTENSION_PASSWORD:-${EXTENSION_101_PASSWORD}}"
+ASTERISK_EXTENSIONS="$(echo "$ASTERISK_EXTENSIONS" | tr -d '[:space:]')"
+WEBRTC_EXTENSIONS="$(echo "${WEBRTC_EXTENSIONS:-101}" | tr -d '[:space:]')"
+WEBRTC_EXTENSION_PASSWORD="${WEBRTC_EXTENSION_PASSWORD:-}"
 ASTERISK_RTP_START="${ASTERISK_RTP_START:-10000}"
 ASTERISK_RTP_END="${ASTERISK_RTP_END:-10100}"
 
@@ -40,6 +42,51 @@ esac
 [ "$ASTERISK_RTP_START" -lt "$ASTERISK_RTP_END" ] || fail "ASTERISK_RTP_START must be less than ASTERISK_RTP_END"
 [ "$IPCOMMS_SIP_PORT" -ge 1 ] && [ "$IPCOMMS_SIP_PORT" -le 65535 ] || fail "IPCOMMS_SIP_PORT must be between 1 and 65535"
 [ "$ASTERISK_RTP_START" -ge 1024 ] && [ "$ASTERISK_RTP_END" -le 65535 ] || fail "RTP range must be between 1024 and 65535"
+
+# Validate and load the configured local SIP extensions.
+validate_extensions() {
+  oldifs="$IFS"
+  IFS=','
+  count=0
+  for raw_ext in $ASTERISK_EXTENSIONS; do
+    ext=$(echo "$raw_ext" | tr -d '[:space:]')
+    [ -n "$ext" ] || continue
+    case "$ext" in
+      *[!0-9]*) fail "Invalid extension in ASTERISK_EXTENSIONS: $ext" ;;
+    esac
+    [ "$ext" -ge 100 ] && [ "$ext" -le 999 ] || fail "Extension must be between 100 and 999: $ext"
+    password_var="EXTENSION_${ext}_PASSWORD"
+    eval "password=\${$password_var:-}"
+    [ -n "$password" ] || fail "$password_var must be set for extension $ext"
+    count=$((count + 1))
+  done
+  IFS="$oldifs"
+  [ "$count" -gt 0 ] || fail "ASTERISK_EXTENSIONS must contain at least one extension"
+}
+validate_extensions
+
+# WebRTC extensions are optional. Their password can be configured as
+# WEBRTC_EXTENSION_<number>_PASSWORD; for 101, WEBRTC_EXTENSION_PASSWORD is
+# retained as a backwards-compatible fallback.
+validate_webrtc_extensions() {
+  oldifs="$IFS"
+  IFS=','
+  for raw_ext in $WEBRTC_EXTENSIONS; do
+    ext=$(echo "$raw_ext" | tr -d '[:space:]')
+    [ -n "$ext" ] || continue
+    case "$ext" in
+      *[!0-9]*) fail "Invalid extension in WEBRTC_EXTENSIONS: $ext" ;;
+    esac
+    password_var="WEBRTC_EXTENSION_${ext}_PASSWORD"
+    eval "password=\${$password_var:-}"
+    if [ -z "$password" ] && [ "$ext" = "101" ]; then
+      password="$WEBRTC_EXTENSION_PASSWORD"
+    fi
+    [ -n "$password" ] || fail "$password_var must be set for WebRTC extension $ext"
+  done
+  IFS="$oldifs"
+}
+validate_webrtc_extensions
 
 # IPComms provider IPs are deliberately required so inbound SIP is matched by
 # source address instead of trusting arbitrary SIP usernames.
@@ -90,22 +137,34 @@ type=transport
 protocol=wss
 bind=0.0.0.0
 
-; Extension 101 for Zoiper and SIP phones.
-[101]
+EOF
+
+# Generate every configured local SIP endpoint.
+i=1
+oldifs="$IFS"
+IFS=','
+for raw_ext in $ASTERISK_EXTENSIONS; do
+  ext=$(echo "$raw_ext" | tr -d '[:space:]')
+  [ -n "$ext" ] || continue
+  password_var="EXTENSION_${ext}_PASSWORD"
+  eval "password=\${$password_var:-}"
+  cat >> /etc/asterisk/pjsip.conf <<EOF
+; Local SIP extension ${ext} for Zoiper / IP phones.
+[${ext}]
 type=aor
 max_contacts=5
 remove_existing=yes
 
-[101]
+[${ext}]
 type=auth
 auth_type=userpass
-username=101
-password=${EXTENSION_101_PASSWORD}
+username=${ext}
+password=${password}
 
-[101]
+[${ext}]
 type=endpoint
-aors=101
-auth=101
+aors=${ext}
+auth=${ext}
 context=from-internal
 disallow=all
 allow=ulaw,alaw
@@ -115,6 +174,12 @@ rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
 
+EOF
+  i=$((i + 1))
+done
+IFS="$oldifs"
+
+cat >> /etc/asterisk/pjsip.conf <<EOF
 ; IPComms registered SIP trunk.
 [ipcomms]
 type=endpoint
@@ -153,23 +218,37 @@ retry_interval=30
 forbidden_retry_interval=300
 expiration=300
 
-; Browser WebRTC extension. Replace the temporary certificate with a trusted
+EOF
+
+# Generate optional browser/WebRTC endpoints.
+oldifs="$IFS"
+IFS=','
+for raw_ext in $WEBRTC_EXTENSIONS; do
+  ext=$(echo "$raw_ext" | tr -d '[:space:]')
+  [ -n "$ext" ] || continue
+  password_var="WEBRTC_EXTENSION_${ext}_PASSWORD"
+  eval "password=\${$password_var:-}"
+  if [ -z "$password" ] && [ "$ext" = "101" ]; then
+    password="$WEBRTC_EXTENSION_PASSWORD"
+  fi
+  cat >> /etc/asterisk/pjsip.conf <<EOF
+; Browser WebRTC extension ${ext}-web. Replace the temporary certificate with a trusted
 ; certificate before production browser use.
-[101-web]
+[${ext}-web]
 type=aor
 max_contacts=2
 remove_existing=yes
 
-[101-web]
+[${ext}-web]
 type=auth
 auth_type=userpass
-username=101-web
-password=${WEBRTC_EXTENSION_PASSWORD}
+username=${ext}-web
+password=${password}
 
-[101-web]
+[${ext}-web]
 type=endpoint
-aors=101-web
-auth=101-web
+aors=${ext}-web
+auth=${ext}-web
 context=from-internal
 disallow=all
 allow=opus,ulaw,alaw
@@ -179,8 +258,12 @@ rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
 webrtc=yes
-EOF
 
+EOF
+done
+IFS="$oldifs"
+
+# Provider identify rules.
 i=1
 oldifs="$IFS"
 IFS=','
@@ -188,7 +271,6 @@ for raw_ip in $IPCOMMS_ALLOWED_IPS; do
   ip=$(echo "$raw_ip" | tr -d '[:space:]')
   [ -n "$ip" ] || continue
   cat >> /etc/asterisk/pjsip.conf <<EOF
-
 [ipcomms-identify-$i]
 type=identify
 endpoint=ipcomms
@@ -226,12 +308,12 @@ exten => _+X.,1,NoOp(WebRTC outbound \${EXTEN})
 [from-provider]
 ; IPComms may deliver the DID as the called extension instead of 's'.
 exten => ${DID_USER},1,NoOp(Inbound IPComms DID ${DID_USER} \${CALLERID(all)})
- same => n,Dial(PJSIP/101,30)
+ same => n,Dial(PJSIP/${DEFAULT_EXTENSION:-101},30)
  same => n,Hangup()
 
 ; Fallback for providers that deliver the called number as 's'.
 exten => s,1,NoOp(Inbound IPComms call \${CALLERID(all)})
- same => n,Dial(PJSIP/101,30)
+ same => n,Dial(PJSIP/${DEFAULT_EXTENSION:-101},30)
  same => n,Hangup()
 EOF
 
@@ -257,10 +339,6 @@ EOF
 
 chown -R asterisk:asterisk /etc/asterisk /var/lib/asterisk /var/spool/asterisk 2>/dev/null || true
 
-# Asterisk has no separate universal "lint" command for all module configs.
-# Perform a controlled foreground startup as the configuration gate. If any
-# core/PJSIP/HTTP/dialplan configuration is rejected, this exits non-zero and
-# Docker restarts the container instead of leaving a broken PBX running.
 VALIDATION_LOG=/tmp/asterisk-config-validation.log
 rm -f "$VALIDATION_LOG"
 set +e
@@ -280,6 +358,4 @@ if grep -Eiq '(ERROR|Unable to load|failed to load|Parsing.*failed|config.*error
   exit 1
 fi
 
-# The validation process is intentionally time-limited. Start the real daemon
-# only after the configuration gate succeeds.
 exec asterisk -f -U asterisk -G asterisk -vvv
