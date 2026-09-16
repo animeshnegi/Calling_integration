@@ -4,6 +4,7 @@ import hashlib
 import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -32,6 +33,13 @@ class TelephonyService:
         self._finalizing: set[str] = set()
         self._finalize_lock = threading.Lock()
 
+    def ari_ready(self) -> bool:
+        try:
+            ready = Path(self.config.ARI_READY_PATH)
+            return ready.exists() and (datetime.now(timezone.utc).timestamp() - ready.stat().st_mtime) <= 15
+        except OSError:
+            return False
+
     def _provider_endpoint(self, provider_name: str | None) -> tuple[str, str]:
         if not self.settings_store:
             return "ipcomms", "IPComms"
@@ -51,7 +59,7 @@ class TelephonyService:
         except (TypeError, ValueError):
             max_duration = 0
         try:
-            retention = max(0, int(settings.get("recording_retention_days", "90")))
+            retention = max(1, int(settings.get("recording_retention_days", "90")))
         except (TypeError, ValueError):
             retention = 90
         extension_enabled = True
@@ -83,16 +91,30 @@ class TelephonyService:
             pass
 
     def start_outbound(self, *, phone: str, extension: str, contact_id=None, member_id=None, provider=None) -> Call:
+        if not self.ari_ready():
+            raise RuntimeError("ARI event worker is not ready")
         provider_endpoint, provider_name = self._provider_endpoint(provider)
         call_id = str(uuid.uuid4())
         call = Call(
-            call_id=call_id, contact_id=str(contact_id) if contact_id is not None else None,
-            member_id=str(member_id) if member_id is not None else None, extension=str(extension), phone=phone,
-            provider=provider_name, employee_channel_id=f"{call_id}-employee", status="initiated",
+            call_id=call_id,
+            contact_id=str(contact_id) if contact_id is not None else None,
+            member_id=str(member_id) if member_id is not None else None,
+            extension=str(extension),
+            phone=phone,
+            provider=provider_name,
+            employee_channel_id=f"{call_id}-employee",
+            status="initiated",
         )
+        # Persist the state before originating. ARI can emit StasisStart immediately.
         self.store.create(call)
         try:
-            self.asterisk.create_outbound_call(call_id, extension, phone, provider_endpoint, {"contact_id": contact_id, "member_id": member_id})
+            self.asterisk.create_outbound_call(
+                call_id,
+                extension,
+                phone,
+                provider_endpoint,
+                {"contact_id": contact_id, "member_id": member_id},
+            )
         except Exception:
             updated = self.store.update(call_id, status="failed", ended_at=iso_now())
             self.notify_crm("call.failed", updated, {"reason": "asterisk_originate_failed"})
@@ -115,7 +137,9 @@ class TelephonyService:
             return
         endpoint, _ = self._provider_endpoint(call.provider)
         try:
-            customer_channel = self.asterisk.create_customer_leg(call.call_id, call.phone, endpoint, call.employee_channel_id or "")
+            customer_channel = self.asterisk.create_customer_leg(
+                call.call_id, call.phone, endpoint, call.employee_channel_id or ""
+            )
             updated = self.store.update(call.call_id, customer_channel_id=customer_channel, status="dialing_customer")
             self.notify_crm("call.customer_dialing", updated)
         except Exception:
@@ -138,8 +162,19 @@ class TelephonyService:
             if not recording["enabled"]:
                 return
             name = f"call-{updated.call_id}"
-            self.asterisk.start_bridge_recording(bridge_id, name, recording["format"], recording["beep"], recording["max_duration"])
-            updated = self.store.update(updated.call_id, recording_name=name, recording_format=recording["format"], recording_status="recording")
+            self.asterisk.start_bridge_recording(
+                bridge_id,
+                name,
+                recording["format"],
+                recording["beep"],
+                recording["max_duration"],
+            )
+            updated = self.store.update(
+                updated.call_id,
+                recording_name=name,
+                recording_format=recording["format"],
+                recording_status="recording",
+            )
             self.notify_crm("call.recording_started", updated)
             if recording["announcement"] and recording["announcement_media"]:
                 try:
@@ -151,7 +186,13 @@ class TelephonyService:
                 self.asterisk.destroy_bridge(bridge_id)
             self.asterisk.hangup(current.employee_channel_id or "")
             self.asterisk.hangup(current.customer_channel_id or "")
-            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed")
+            updated = self.store.update(
+                current.call_id,
+                status="failed",
+                ended_at=iso_now(),
+                bridge_id=None,
+                recording_status="failed",
+            )
             self.notify_crm("call.failed", updated, {"reason": "bridge_setup_failed"})
 
     def _finalize(self, call_id: str, reason: str) -> None:
@@ -164,41 +205,59 @@ class TelephonyService:
             if not call or call.status == "completed":
                 return
             ended = iso_now()
+            duration_start = call.answered_at or call.started_at
             try:
-                started = datetime.fromisoformat(call.started_at)
+                started = datetime.fromisoformat(duration_start)
                 duration = max(0, int((datetime.fromisoformat(ended) - started).total_seconds()))
             except (ValueError, TypeError):
                 duration = 0
-            if call.recording_name:
+            recording_status = call.recording_status
+            if call.recording_name and recording_status == "recording":
                 self.asterisk.stop_recording(call.recording_name)
-                recording_status = call.recording_status or "finalizing"
-            else:
-                recording_status = call.recording_status
+                recording_status = "finalizing"
             if call.bridge_id:
                 self.asterisk.destroy_bridge(call.bridge_id)
             terminal_status = "failed" if call.status == "failed" else ("completed" if call.answered else "failed")
-            updated = self.store.update(call_id, status=terminal_status, ended_at=ended, duration_seconds=duration, recording_status=recording_status)
+            updated = self.store.update(
+                call_id,
+                status=terminal_status,
+                ended_at=ended,
+                duration_seconds=duration,
+                recording_status=recording_status,
+            )
             if terminal_status == "completed":
                 self.notify_crm("call.completed", updated, {"reason": reason})
             else:
-                self.notify_crm("call.failed", updated, {"reason": "call_ended_before_answer" if reason == "channel_destroyed" else reason})
+                self.notify_crm(
+                    "call.failed",
+                    updated,
+                    {"reason": "call_ended_before_answer" if reason == "channel_destroyed" else reason},
+                )
         finally:
             with self._finalize_lock:
                 self._finalizing.discard(call_id)
 
     def cleanup_recordings(self) -> None:
         days = self._recording_settings()["retention_days"]
-        if days > 0:
-            self.asterisk.cleanup_old_recordings(days)
+        self.asterisk.cleanup_old_recordings(days)
 
     def handle_ari_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+
         if event_type == "RecordingFinished":
             recording = event.get("recording") or {}
             name = str(recording.get("name") or "")
             call = self.store.find_by_recording(name) if name else None
             if call:
-                updated = self.store.update(call.call_id, recording_status="finalized")
+                stored = self.asterisk.get_stored_recording(name) if name else None
+                changes: dict[str, Any] = {"recording_status": "finalized"}
+                if stored:
+                    filename = stored.get("filename")
+                    if filename:
+                        changes["recording_path"] = str(filename)
+                    if stored.get("format") and not call.recording_format:
+                        changes["recording_format"] = str(stored["format"])
+                updated = self.store.update(call.call_id, **changes)
                 self.notify_crm("call.recording_finished", updated)
             return
 
@@ -230,7 +289,12 @@ class TelephonyService:
                 self._start_bridge(current)
                 updated = self.store.get(current.call_id)
                 if updated and updated.status != "failed" and not updated.answered:
-                    updated = self.store.update(updated.call_id, status="answered", answered=True, answered_at=iso_now())
+                    updated = self.store.update(
+                        updated.call_id,
+                        status="answered",
+                        answered=True,
+                        answered_at=iso_now(),
+                    )
                     self.notify_crm("call.answered", updated)
             return
 
@@ -241,7 +305,7 @@ class TelephonyService:
             self._finalize(call.call_id, "channel_destroyed")
 
     def recover_incomplete_calls(self) -> None:
-        """Keep calls whose channels are still live; fail only calls with no live channel."""
+        """Fail orphaned records only when Asterisk no longer has either channel."""
         try:
             live_ids = {str(channel.get("id")) for channel in self.asterisk.list_channels() if channel.get("id")}
         except Exception:
