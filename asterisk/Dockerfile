@@ -53,9 +53,12 @@ COPY config/ /etc/asterisk/
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod 750 /entrypoint.sh \
     && groupadd --system asterisk \
-    && useradd --system --gid asterisk --home-dir /var/lib/asterisk --no-create-home asterisk \
-    && mkdir -p /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys \
-    && chown -R asterisk:asterisk /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys
+    && groupadd --gid 2000 telephony \
+    && useradd --system --gid asterisk --groups telephony --home-dir /var/lib/asterisk --no-create-home asterisk \
+    && mkdir -p /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys /etc/asterisk/dynamic \
+    && chown -R asterisk:asterisk /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys \
+    && chown asterisk:telephony /etc/asterisk/dynamic \
+    && chmod 0770 /etc/asterisk/dynamic
 
 # ARI 8088 is intentionally not exposed/published. WebRTC WSS is kept internal
 # until a trusted certificate/reverse-proxy path is explicitly deployed.
