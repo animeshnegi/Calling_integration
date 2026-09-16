@@ -62,9 +62,6 @@ class SettingsStore:
                            (username, generate_password_hash(password, method="scrypt")))
 
     def bootstrap_telephony(self, config):
-        """Import the existing .env POC extension/DID into the database once.
-        Secrets are encrypted immediately and are never returned by admin APIs.
-        """
         with self._connect() as db:
             if db.execute("SELECT 1 FROM settings WHERE key='bootstrap_complete'").fetchone():
                 return
@@ -80,6 +77,14 @@ class SettingsStore:
                 db.execute("""INSERT OR IGNORE INTO phone_numbers
                     (number,provider,description,inbound_extension,active) VALUES(?,?,?,?,1)""",
                            (did, "IPComms", "Primary DID", config.DEFAULT_EXTENSION))
+            if os.getenv("IPCOMMS_SIP_SERVER") and os.getenv("IPCOMMS_SIP_USERNAME"):
+                existing = db.execute("SELECT id FROM sip_providers WHERE name='IPComms'").fetchone()
+                if existing is None:
+                    db.execute("""INSERT INTO sip_providers(name,server,port,username,password_enc,transport,codecs,active)
+                        VALUES(?,?,?,?,?,?,?,1)""", (
+                        "IPComms", os.getenv("IPCOMMS_SIP_SERVER", ""), int(os.getenv("IPCOMMS_SIP_PORT", "5060")),
+                        os.getenv("IPCOMMS_SIP_USERNAME", ""), self.encrypt(os.getenv("IPCOMMS_SIP_PASSWORD", "")),
+                        "udp", "ulaw,alaw"))
             db.execute("INSERT INTO settings(key,value) VALUES('bootstrap_complete','true')")
 
     def authenticate(self, username, password):
@@ -98,6 +103,11 @@ class SettingsStore:
         with self._connect() as db:
             rows = db.execute("SELECT extension,display_name,sip_username,webrtc_enabled,recording_enabled,active FROM extensions ORDER BY extension").fetchall()
         return [dict(r) for r in rows]
+
+    def get_extension_password(self, extension):
+        with self._connect() as db:
+            row = db.execute("SELECT sip_password_enc FROM extensions WHERE extension=?", (str(extension),)).fetchone()
+        return self.decrypt(row["sip_password_enc"]) if row else ""
 
     def save_extension(self, data):
         extension = str(data.get("extension", "")).strip()
@@ -142,6 +152,8 @@ class SettingsStore:
         with self._connect() as db:
             if inbound and not db.execute("SELECT 1 FROM extensions WHERE extension=? AND active=1", (inbound,)).fetchone():
                 raise ValueError("Inbound extension must be an active configured extension")
+            if data.get("provider") and not db.execute("SELECT 1 FROM sip_providers WHERE name=? AND active=1", (str(data.get("provider")).strip(),)).fetchone():
+                raise ValueError("Provider must be an active configured SIP provider")
             db.execute("""INSERT INTO phone_numbers(number,provider,description,inbound_extension,active) VALUES(?,?,?,?,?)
                 ON CONFLICT(number) DO UPDATE SET provider=excluded.provider,description=excluded.description,
                 inbound_extension=excluded.inbound_extension,active=excluded.active,updated_at=CURRENT_TIMESTAMP""",
@@ -160,19 +172,54 @@ class SettingsStore:
             rows = db.execute("SELECT id,name,server,port,username,transport,codecs,active FROM sip_providers ORDER BY name").fetchall()
         return [dict(r) for r in rows]
 
+    def list_provider_details(self):
+        with self._connect() as db:
+            rows = db.execute("SELECT id,name,server,port,username,password_enc,transport,codecs,active FROM sip_providers ORDER BY name").fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["password"] = self.decrypt(item.pop("password_enc"))
+            result.append(item)
+        return result
+
+    def get_provider(self, name: str | None = None):
+        with self._connect() as db:
+            if name:
+                row = db.execute("SELECT id,name,server,port,username,password_enc,transport,codecs,active FROM sip_providers WHERE name=? AND active=1", (name,)).fetchone()
+            else:
+                row = db.execute("SELECT id,name,server,port,username,password_enc,transport,codecs,active FROM sip_providers WHERE active=1 ORDER BY id LIMIT 1").fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["password"] = self.decrypt(item.pop("password_enc"))
+        return item
+
+    def first_active_number_for_provider(self, provider: str) -> str | None:
+        with self._connect() as db:
+            row = db.execute("SELECT number FROM phone_numbers WHERE provider=? AND active=1 ORDER BY id LIMIT 1", (provider,)).fetchone()
+        return row["number"] if row else None
+
     def save_provider(self, data):
         name, server = str(data.get("name", "")).strip()[:80], str(data.get("server", "")).strip()[:255]
         if not name or not server:
             raise ValueError("Provider name and server are required")
         password = str(data.get("password") or "")
+        transport = str(data.get("transport", "udp")).lower().strip()
+        if transport not in {"udp", "tcp"}:
+            raise ValueError("Provider transport must be udp or tcp")
+        port = int(data.get("port", 5060))
+        if not 1 <= port <= 65535:
+            raise ValueError("Provider port is invalid")
+        codecs = str(data.get("codecs", "ulaw,alaw")).strip()[:120]
         with self._connect() as db:
             existing = db.execute("SELECT password_enc FROM sip_providers WHERE name=?", (name,)).fetchone()
             encrypted = self.encrypt(password) if password else (existing["password_enc"] if existing else "")
+            if not encrypted:
+                raise ValueError("SIP provider password is required for a new provider")
             db.execute("""INSERT INTO sip_providers(name,server,port,username,password_enc,transport,codecs,active) VALUES(?,?,?,?,?,?,?,?)
                 ON CONFLICT(name) DO UPDATE SET server=excluded.server,port=excluded.port,username=excluded.username,password_enc=excluded.password_enc,
                 transport=excluded.transport,codecs=excluded.codecs,active=excluded.active,updated_at=CURRENT_TIMESTAMP""",
-                (name, server, int(data.get("port", 5060)), str(data.get("username", "")).strip()[:120], encrypted,
-                 str(data.get("transport", "udp")).lower(), str(data.get("codecs", "ulaw,alaw")).strip()[:120], int(bool(data.get("active", True)))))
+                (name, server, port, str(data.get("username", "")).strip()[:120], encrypted, transport, codecs, int(bool(data.get("active", True)))))
         return name
 
     def get_settings(self):
@@ -188,18 +235,30 @@ class SettingsStore:
                 db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
                            (str(key), str(value)))
 
+    def decrypt(self, ciphertext):
+        from cryptography.fernet import Fernet
+        key = base64.urlsafe_b64encode(hashlib.sha256(self.secret_key).digest())
+        return Fernet(key).decrypt(ciphertext.encode()).decode()
+
     def encrypt(self, plaintext):
         from cryptography.fernet import Fernet
         key = base64.urlsafe_b64encode(hashlib.sha256(self.secret_key).digest())
         return Fernet(key).encrypt(plaintext.encode()).decode()
 
 
-def register_admin(app, config):
+def register_admin(app, config, on_telephony_change=None):
     store = SettingsStore(config.SETTINGS_DB_PATH, config.SECRET_KEY)
     store.ensure_bootstrap_admin(config.ADMIN_USERNAME, config.ADMIN_PASSWORD)
     store.bootstrap_telephony(config)
     app.extensions["settings_store"] = store
     web_dir = str(Path(app.root_path).parent / "web")
+
+    def apply_change():
+        if on_telephony_change:
+            try:
+                on_telephony_change()
+            except Exception:
+                app.logger.exception("Failed to apply telephony configuration change")
 
     def login_required(fn):
         @wraps(fn)
@@ -240,33 +299,42 @@ def register_admin(app, config):
     @app.post("/admin/api/extensions")
     @login_required
     def admin_extension():
-        try: return jsonify({"ok": True, "extension": store.save_extension(request.get_json(silent=True) or {})})
+        try:
+            result = store.save_extension(request.get_json(silent=True) or {})
+            apply_change()
+            return jsonify({"ok": True, "extension": result})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
     @app.delete("/admin/api/extensions/<extension>")
     @login_required
     def admin_delete_extension(extension):
         try:
-            store.delete_extension(extension); return jsonify({"ok": True})
+            store.delete_extension(extension); apply_change(); return jsonify({"ok": True})
         except ValueError as exc: return jsonify({"error": str(exc)}), 400
 
     @app.post("/admin/api/numbers")
     @login_required
     def admin_number():
-        try: return jsonify({"ok": True, "number": store.save_number(request.get_json(silent=True) or {})})
+        try:
+            result = store.save_number(request.get_json(silent=True) or {})
+            apply_change()
+            return jsonify({"ok": True, "number": result})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
     @app.delete("/admin/api/numbers/<path:number>")
     @login_required
     def admin_delete_number(number):
         try:
-            store.delete_number(number); return jsonify({"ok": True})
+            store.delete_number(number); apply_change(); return jsonify({"ok": True})
         except ValueError as exc: return jsonify({"error": str(exc)}), 400
 
     @app.post("/admin/api/providers")
     @login_required
     def admin_provider():
-        try: return jsonify({"ok": True, "provider": store.save_provider(request.get_json(silent=True) or {})})
+        try:
+            result = store.save_provider(request.get_json(silent=True) or {})
+            apply_change()
+            return jsonify({"ok": True, "provider": result})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
     @app.post("/admin/api/settings")
@@ -276,8 +344,9 @@ def register_admin(app, config):
             data = request.get_json(silent=True) or {}
             if not isinstance(data, dict): raise ValueError("JSON object required")
             allowed = {"recording_enabled", "recording_format", "recording_retention_days", "recording_announcement", "recording_beep",
-                       "default_extension", "inbound_fallback_extension", "webrtc_enabled"}
+                       "recording_max_duration_seconds", "default_extension", "inbound_fallback_extension", "webrtc_enabled"}
             store.set_settings({k: data[k] for k in data if k in allowed})
+            apply_change()
             return jsonify({"ok": True})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
