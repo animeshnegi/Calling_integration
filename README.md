@@ -27,10 +27,10 @@ Asterisk is the telephony engine. The Flask service provides the CRM-facing API 
 - Asterisk in its own Docker container.
 - Flask integration/API service in its own container.
 - Private CRM ↔ telephony API ↔ Asterisk ARI communication.
-- SIP hard/soft phones using PJSIP.
+- Multiple SIP hard/soft-phone extensions.
 - Browser calling foundation with WebRTC/WSS.
 - Outbound click-to-call initiated by CRM.
-- Inbound call delivery to the configured extension.
+- Inbound call delivery to the configured default extension.
 - Call lifecycle events, answer status and duration tracking.
 - Optional CRM webhook integration.
 - SIP-trunk-ready configuration.
@@ -72,11 +72,42 @@ Calling_integration/
 ├── requirements.txt
 └── docs/
     ├── API.md
+    ├── API_TESTING.md
     ├── WEBHOOKS.md
     ├── ASTERISK.md
     ├── WEBRTC.md
     └── DEPLOYMENT.md
 ```
+
+## Multiple extensions
+
+Local SIP extensions are now configuration-driven. The Asterisk container reads a comma-separated list from `ASTERISK_EXTENSIONS` and generates one PJSIP AOR/auth/endpoint for every entry.
+
+Example:
+
+```env
+ASTERISK_EXTENSIONS=101,102,103,104
+DEFAULT_EXTENSION=101
+
+EXTENSION_101_PASSWORD=strong-password-for-101
+EXTENSION_102_PASSWORD=strong-password-for-102
+EXTENSION_103_PASSWORD=strong-password-for-103
+EXTENSION_104_PASSWORD=strong-password-for-104
+```
+
+Each employee can then use their extension number as the SIP username. For example, employee 102 uses username `102` and the password configured in `EXTENSION_102_PASSWORD`.
+
+The API only accepts an extension that appears in `ASTERISK_EXTENSIONS`. This prevents a CRM request from attempting to originate through an undefined endpoint.
+
+The authenticated extension list is available from:
+
+```text
+GET /api/v1/extensions
+```
+
+For browser/WebRTC endpoints, use `WEBRTC_EXTENSIONS` and configure the corresponding `WEBRTC_EXTENSION_<number>_PASSWORD` values. The existing `WEBRTC_EXTENSION_PASSWORD` remains a fallback for extension 101.
+
+The inbound DID currently rings `DEFAULT_EXTENSION`. Later, the CRM can choose an employee/extension dynamically after contact lookup without changing the SIP endpoint configuration.
 
 ## API endpoints
 
@@ -84,6 +115,7 @@ The Flask service provides these CRM-facing endpoints:
 
 ```text
 GET  /health
+GET  /api/v1/extensions
 GET  /api/v1/calls
 POST /api/v1/calls
 POST /api/v1/browser/call
@@ -111,20 +143,22 @@ Content-Type: application/json
 {
   "contact_id": "582",
   "phone": "+16235551234",
-  "extension": "101",
+  "extension": "102",
   "member_id": "37"
 }
 ```
 
+The extension must be configured in `ASTERISK_EXTENSIONS`. If omitted, `DEFAULT_EXTENSION` is used.
+
 The service creates a call identifier, requests Asterisk to originate the call, stores the call state, and sends a `call.started` CRM webhook when configured.
 
-See [`docs/API.md`](docs/API.md) for the complete contract and examples.
+See `docs/API.md` for the complete contract and examples.
 
 ## IPComms / Asterisk operation
 
 The production/POSIX deployment uses IPComms as the SIP provider. Credentials are supplied only through `.env`; they are never stored in Git.
 
-Extension `101` is the current Zoiper/SIP-phone test endpoint. The endpoint uses `ulaw,alaw` for the carrier-compatible SIP leg. The browser WebRTC endpoint can use Opus/ulaw/alaw separately.
+All configured local extensions use `ulaw,alaw` for the carrier-compatible SIP leg. Browser WebRTC endpoints can use Opus/ulaw/alaw separately.
 
 The configured IPComms DID is used by the generated Asterisk dialplan for inbound calls. The provider source IP allow-list is required so inbound SIP is identified by provider source address.
 
@@ -167,8 +201,8 @@ Use strong unique values for:
 - `TELEPHONY_TOKEN`
 - `CRM_WEBHOOK_TOKEN`
 - `ASTERISK_ARI_PASSWORD`
-- `EXTENSION_101_PASSWORD`
-- `WEBRTC_EXTENSION_PASSWORD`
+- `EXTENSION_<number>_PASSWORD` for every configured SIP extension
+- `WEBRTC_EXTENSION_<number>_PASSWORD` for every configured browser extension
 - `IPCOMMS_SIP_PASSWORD`
 
 ## Validation
@@ -186,7 +220,7 @@ Validate the Compose file with:
 docker compose config
 ```
 
-For real telephony validation, verify IPComms registration, Zoiper registration, outbound calling, inbound DID delivery, RTP/audio, and then CRM API → Asterisk call control on the deployed VPS.
+For real telephony validation, verify IPComms registration, each Zoiper/SIP extension registration, outbound calling from each configured extension, inbound DID delivery to the default extension, RTP/audio, and then CRM API → Asterisk call control on the deployed VPS.
 
 ## Security boundary
 
