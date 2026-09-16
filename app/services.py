@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +108,8 @@ class TelephonyService:
             employee_channel_id=f"{call_id}-employee",
             status="initiated",
         )
+        # Persist the state before originate so an immediate StasisStart/StateChange
+        # event can always be correlated by the ARI worker.
         self.store.create(call)
         self.notify_crm("call.started", call)
         try:
@@ -214,25 +216,55 @@ class TelephonyService:
                 self._finalizing.discard(call_id)
 
     def cleanup_recordings(self) -> None:
-        self.asterisk.cleanup_old_recordings(self._recording_settings()["retention_days"])
+        """Delete managed recordings using the persisted call end time.
+
+        ARI's StoredRecording model exposes name and format, but no creation/completion
+        timestamp, so retention cannot safely be calculated from the ARI listing alone.
+        Calls are persisted in SQLite, making ended_at the authoritative retention clock.
+        """
+        retention_days = self._recording_settings()["retention_days"]
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        for call in self.store.all():
+            if not call.recording_name or not call.ended_at or call.recording_status == "deleted":
+                continue
+            try:
+                ended = datetime.fromisoformat(call.ended_at)
+                if ended.tzinfo is None:
+                    ended = ended.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            if ended >= cutoff:
+                continue
+            if self.asterisk.delete_stored_recording(call.recording_name):
+                updated = self.store.update(
+                    call.call_id,
+                    recording_status="deleted",
+                    recording_path=None,
+                )
+                self.notify_crm("call.recording_deleted", updated, {"reason": "retention_policy"})
 
     def handle_ari_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
-        if event_type == "RecordingFinished":
+        if event_type in {"RecordingFinished", "RecordingFailed"}:
             recording = event.get("recording") or {}
             name = str(recording.get("name") or "")
             call = self.store.find_by_recording(name) if name else None
             if call:
-                stored = self.asterisk.get_stored_recording(name) if name else None
-                changes: dict[str, Any] = {"recording_status": "finalized"}
-                if stored:
-                    filename = stored.get("filename")
-                    if filename:
-                        changes["recording_path"] = str(filename)
-                    if stored.get("format") and not call.recording_format:
-                        changes["recording_format"] = str(stored["format"])
+                changes: dict[str, Any] = {
+                    "recording_status": "finalized" if event_type == "RecordingFinished" else "failed"
+                }
+                if recording.get("format") and not call.recording_format:
+                    changes["recording_format"] = str(recording["format"])
+                if event_type == "RecordingFinished":
+                    stored = self.asterisk.get_stored_recording(name) if name else None
+                    if stored:
+                        filename = stored.get("filename")
+                        if filename:
+                            changes["recording_path"] = str(filename)
+                        if stored.get("format") and not call.recording_format:
+                            changes["recording_format"] = str(stored["format"])
                 updated = self.store.update(call.call_id, **changes)
-                self.notify_crm("call.recording_finished", updated)
+                self.notify_crm(f"call.recording_{'finished' if event_type == 'RecordingFinished' else 'failed'}", updated)
             return
 
         channel = event.get("channel") or {}
@@ -276,14 +308,28 @@ class TelephonyService:
             self._finalize(call.call_id, "channel_destroyed")
 
     def recover_incomplete_calls(self) -> None:
+        """Reconcile persisted calls with channels that survived an ARI worker restart."""
         try:
-            live_ids = {str(channel.get("id")) for channel in self.asterisk.list_channels() if channel.get("id")}
+            live = {str(channel.get("id")): channel for channel in self.asterisk.list_channels() if channel.get("id")}
         except Exception:
             return
         for call in self.store.all():
             if call.status in {"completed", "failed"} or call.ended_at is not None:
                 continue
-            if call.employee_channel_id in live_ids or call.customer_channel_id in live_ids:
+            employee = live.get(call.employee_channel_id or "")
+            customer = live.get(call.customer_channel_id or "") if call.customer_channel_id else None
+            if not employee and not customer:
+                updated = self.store.update(call.call_id, status="failed", ended_at=iso_now())
+                self.notify_crm("call.failed", updated, {"reason": "worker_restart_no_live_channel"})
                 continue
-            updated = self.store.update(call.call_id, status="failed", ended_at=iso_now())
-            self.notify_crm("call.failed", updated, {"reason": "worker_restart_no_live_channel"})
+            if employee and not customer and str(employee.get("state", "")).lower() == "up" and not call.customer_channel_id:
+                self._start_customer(call)
+                continue
+            if customer and employee and str(customer.get("state", "")).lower() == "up":
+                current = self.store.get(call.call_id)
+                if current and not current.bridge_id:
+                    self._start_bridge(current)
+                current = self.store.get(call.call_id)
+                if current and current.status != "failed" and not current.answered:
+                    updated = self.store.update(current.call_id, status="answered", answered=True, answered_at=iso_now())
+                    self.notify_crm("call.answered", updated)
