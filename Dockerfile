@@ -16,4 +16,4 @@ COPY --chown=appuser:appuser web ./web
 USER appuser
 
 EXPOSE 5000
-CMD ["python", "-m", "app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "60", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
