@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,10 +63,7 @@ class TelephonyService:
         }
 
     def notify_crm(self, event: str, call: Call | None, extra: dict[str, Any] | None = None) -> None:
-        if call is None:
-            return
-        url = self.config.CRM_WEBHOOK_URL
-        if not url:
+        if call is None or not self.config.CRM_WEBHOOK_URL:
             return
         payload = {"event": event, "call": call.to_dict()}
         if extra:
@@ -76,7 +72,7 @@ class TelephonyService:
         if self.config.CRM_WEBHOOK_TOKEN:
             headers["Authorization"] = f"Bearer {self.config.CRM_WEBHOOK_TOKEN}"
         try:
-            requests.post(url, json=payload, headers=headers, timeout=5)
+            requests.post(self.config.CRM_WEBHOOK_URL, json=payload, headers=headers, timeout=5)
         except requests.RequestException:
             pass
 
@@ -197,8 +193,7 @@ class TelephonyService:
                 self._finalizing.discard(call_id)
 
     def cleanup_recordings(self) -> None:
-        settings = self._recording_settings()
-        days = settings["retention_days"]
+        days = self._recording_settings()["retention_days"]
         if days <= 0:
             return
         root = Path(self.config.RECORDING_VOLUME_PATH)
@@ -233,12 +228,12 @@ class TelephonyService:
             if state != "up":
                 return
             if channel_id == call.employee_channel_id and not call.customer_channel_id:
-                updated = self.store.update(call.call_id, status="employee_answered", answered_at=iso_now())
+                updated = self.store.update(call.call_id, status="employee_answered")
                 self.notify_crm("call.employee_answered", updated)
                 self._start_customer(updated)
             elif channel_id == call.customer_channel_id:
                 self._start_bridge(call)
-                updated = self.store.update(call.call_id, status="answered", answered=True, answered_at=call.answered_at or iso_now())
+                updated = self.store.update(call.call_id, status="answered", answered=True, answered_at=iso_now())
                 self.notify_crm("call.answered", updated)
             return
 
@@ -250,7 +245,6 @@ class TelephonyService:
             return
 
         if event_type == "ChannelDestroyed":
-            # The customer leg controls the conversation. Any leg disappearing ends the call.
             other = call.customer_channel_id if channel_id == call.employee_channel_id else call.employee_channel_id
             if other:
                 self.asterisk.hangup(other)
