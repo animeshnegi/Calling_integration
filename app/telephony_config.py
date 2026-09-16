@@ -64,7 +64,7 @@ class TelephonyConfigSync:
                 f"[{extension}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
                 f"[auth-{extension}]", "type=auth", "auth_type=userpass",
                 f"username={username}", f"password={password}", "supported_algorithms_uas=SHA-256,MD5", "",
-                f"[endpoint-{extension}]", "type=endpoint", f"aors={extension}", f"auth=auth-{extension}",
+                f"[{extension}]", "type=endpoint", f"aors={extension}", f"auth=auth-{extension}",
                 "context=from-internal", "disallow=all", "allow=ulaw,alaw", "transport=transport-udp",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
                 "allow_subscribe=no", "",
