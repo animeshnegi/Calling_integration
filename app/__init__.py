@@ -1,15 +1,15 @@
 from flask import Flask
 
+from .admin import register_admin
 from .ami import AsteriskAMI
-from .asterisk import AsteriskClient, ari_event_loop
+from .asterisk_client import AsteriskClient
 from .config import Config
 from .routes import register_routes
 from .services import TelephonyService
-from .admin import register_admin
 from .telephony_config import TelephonyConfigSync
 
 
-def create_app(config_class=Config):
+def create_app(config_class=Config, *, start_ari: bool = False):
     config_class.validate()
     app = Flask(__name__)
     app.config.from_object(config_class)
@@ -56,13 +56,15 @@ def create_app(config_class=Config):
 
     register_routes(app, service)
 
-    def on_event(event):
-        try:
-            service.handle_ari_event(event)
-        except Exception:
-            app.logger.exception("Failed to process Asterisk ARI event")
+    if start_ari:
+        from .asterisk_client import ari_event_loop
 
-    if config_class.ASTERISK_ARI_URL:
+        def on_event(event):
+            try:
+                service.handle_ari_event(event)
+            except Exception:
+                app.logger.exception("Failed to process Asterisk ARI event")
+
         ari_event_loop(on_event, config_class)
 
     return app
