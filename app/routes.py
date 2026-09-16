@@ -39,7 +39,12 @@ def require_token(fn: Callable):
     def wrapped(*args: Any, **kwargs: Any):
         if _rate_limited():
             return jsonify({"error": "rate limit exceeded"}), 429
-        expected = Config.TELEPHONY_TOKEN
+        # Use the config object injected into the application/service. This is
+        # essential for tests and for deployments that subclass Config.
+        from flask import current_app
+        service = current_app.extensions.get("telephony_service")
+        config = getattr(service, "config", Config)
+        expected = config.TELEPHONY_TOKEN
         supplied = request.headers.get("Authorization", "")
         prefix = "Bearer "
         token = supplied[len(prefix):] if supplied.startswith(prefix) else ""
@@ -55,7 +60,7 @@ def _configured_default_extension(service) -> str:
         if configured.isdigit() and 100 <= int(configured) <= 999:
             if any(row["extension"] == configured and row["active"] for row in service.settings_store.list_extensions()):
                 return configured
-    return Config.DEFAULT_EXTENSION
+    return service.config.DEFAULT_EXTENSION
 
 
 def register_routes(app, service):
@@ -105,7 +110,7 @@ def register_routes(app, service):
         if service.settings_store:
             rows = service.settings_store.list_extensions()
             return jsonify({"extensions": [row["extension"] for row in rows if row["active"]], "default_extension": _configured_default_extension(service)})
-        return jsonify({"extensions": list(Config.ASTERISK_EXTENSIONS), "default_extension": Config.DEFAULT_EXTENSION})
+        return jsonify({"extensions": list(service.config.ASTERISK_EXTENSIONS), "default_extension": service.config.DEFAULT_EXTENSION})
 
     @app.get("/api/v1/providers")
     @require_token
@@ -131,7 +136,7 @@ def register_routes(app, service):
     @app.post("/api/v1/browser/call")
     @require_token
     def browser_call():
-        if not Config.ENABLE_BROWSER_API:
+        if not service.config.ENABLE_BROWSER_API:
             return jsonify({"error": "browser call API is disabled"}), 404
         if _rate_limited("outbound", MAX_OUTBOUND_CALLS_PER_WINDOW):
             return jsonify({"error": "outbound call rate limit exceeded"}), 429
@@ -189,6 +194,6 @@ def register_routes(app, service):
 
     @app.get("/")
     def index():
-        if not Config.ENABLE_DIAGNOSTIC_UI:
+        if not service.config.ENABLE_DIAGNOSTIC_UI:
             return jsonify({"error": "not found"}), 404
         return send_from_directory(str(Path(app.root_path).parent / "web"), "index.html")
