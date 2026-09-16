@@ -19,6 +19,9 @@ class FakeAsterisk:
 
 
 def app_client(tmp_path: Path):
+    ready = tmp_path / "ari.ready"
+    ready.touch()
+
     class TestingConfig(Config):
         FLASK_ENV = "testing"
         SECRET_KEY = "test-secret-key-which-is-long-enough"
@@ -31,6 +34,7 @@ def app_client(tmp_path: Path):
         DEFAULT_EXTENSION = "101"
         SETTINGS_DB_PATH = str(tmp_path / "settings.db")
         CALLS_DB_PATH = str(tmp_path / "calls.db")
+        ARI_READY_PATH = str(ready)
         ASTERISK_DYNAMIC_CONFIG_PATH = str(tmp_path / "pjsip.dynamic.conf")
         ADMIN_USERNAME = "admin"
         ADMIN_PASSWORD = "test-admin-password-1234"
