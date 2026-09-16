@@ -10,6 +10,13 @@ services:
     networks:
       - crm-network
       - telephony-internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
 
   asterisk:
     build: ./asterisk
@@ -17,8 +24,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      ARI_USER: ${ASTERISK_ARI_USER:-engineerip}
-      ARI_PASSWORD: ${ASTERISK_ARI_PASSWORD:-change-me}
+      ARI_USER: ${ASTERISK_ARI_USER:?ASTERISK_ARI_USER must be set in .env}
+      ARI_PASSWORD: ${ASTERISK_ARI_PASSWORD:?ASTERISK_ARI_PASSWORD must be set in .env}
     volumes:
       - asterisk_etc:/etc/asterisk
       - asterisk_lib:/var/lib/asterisk
@@ -27,13 +34,14 @@ services:
     networks:
       - telephony-internal
     ports:
-      # SIP devices and IPComms provider registration
+      # SIP devices and IPComms provider registration. UDP is sufficient for the current POC.
       - "5060:5060/udp"
-      - "5060:5060/tcp"
-      # WebRTC WSS/HTTPS. ARI 8088 is intentionally NOT published.
+      # WebRTC secure WebSocket. Use a trusted production certificate before browser deployment.
       - "8089:8089/tcp"
       # RTP media; values must match .env and the VPS firewall.
-      - "${ASTERISK_RTP_START:-10000}-${ASTERISK_RTP_END:-10100}:${ASTERISK_RTP_START:-10000}-${ASTERISK_RTP_END:-10100}/udp"
+      - "${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}:${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}/udp"
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "asterisk -rx 'core show version' >/dev/null 2>&1 && asterisk -rx 'pjsip show endpoint ipcomms' >/dev/null 2>&1"]
       interval: 15s
