@@ -28,6 +28,15 @@ def register_routes(app, service):
             return None, (jsonify({"error": "phone is required"}), 400)
         if not extension.isdigit():
             return None, (jsonify({"error": "extension must be numeric"}), 400)
+        if not Config.is_extension_configured(extension):
+            return None, (
+                jsonify({
+                    "error": "extension is not configured",
+                    "extension": extension,
+                    "configured_extensions": list(Config.ASTERISK_EXTENSIONS),
+                }),
+                400,
+            )
         try:
             call = service.start_outbound(
                 phone=phone,
@@ -43,9 +52,22 @@ def register_routes(app, service):
     def health():
         try:
             info = service.asterisk.health()
-            return jsonify({"ok": True, "asterisk": info.get("system", "reachable")})
+            return jsonify({
+                "ok": True,
+                "asterisk": info.get("system", "reachable"),
+                "extensions": list(Config.ASTERISK_EXTENSIONS),
+                "default_extension": Config.DEFAULT_EXTENSION,
+            })
         except Exception as exc:
             return jsonify({"ok": False, "error": str(exc)}), 503
+
+    @app.get("/api/v1/extensions")
+    @require_token
+    def list_extensions():
+        return jsonify({
+            "extensions": list(Config.ASTERISK_EXTENSIONS),
+            "default_extension": Config.DEFAULT_EXTENSION,
+        })
 
     @app.get("/api/v1/calls")
     @require_token
