@@ -13,26 +13,23 @@ from .config import Config
 
 E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 CALL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-
-# Lightweight per-process abuse protection. The telephony API is intentionally
-# private to the CRM Docker network; this adds another layer against accidental
-# loops and compromised internal clients. A shared gateway should enforce the
-# same limits across multiple replicas.
 _request_times: dict[str, deque[float]] = defaultdict(deque)
 WINDOW_SECONDS = 60
 MAX_REQUESTS_PER_WINDOW = 120
+MAX_OUTBOUND_CALLS_PER_WINDOW = 30
 
 
-def _client_key() -> str:
-    return request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",", 1)[0].strip()
+def _client_key(scope: str = "api") -> str:
+    address = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",", 1)[0].strip()
+    return f"{scope}:{address}"
 
 
-def _rate_limited() -> bool:
+def _rate_limited(scope: str = "api", limit: int = MAX_REQUESTS_PER_WINDOW) -> bool:
     now = time.monotonic()
-    bucket = _request_times[_client_key()]
+    bucket = _request_times[_client_key(scope)]
     while bucket and now - bucket[0] >= WINDOW_SECONDS:
         bucket.popleft()
-    if len(bucket) >= MAX_REQUESTS_PER_WINDOW:
+    if len(bucket) >= limit:
         return True
     bucket.append(now)
     return False
@@ -92,10 +89,7 @@ def register_routes(app, service):
     @app.get("/api/v1/extensions")
     @require_token
     def list_extensions():
-        return jsonify({
-            "extensions": list(Config.ASTERISK_EXTENSIONS),
-            "default_extension": Config.DEFAULT_EXTENSION,
-        })
+        return jsonify({"extensions": list(Config.ASTERISK_EXTENSIONS), "default_extension": Config.DEFAULT_EXTENSION})
 
     @app.get("/api/v1/calls")
     @require_token
@@ -105,6 +99,8 @@ def register_routes(app, service):
     @app.post("/api/v1/calls")
     @require_token
     def create_call():
+        if _rate_limited("outbound", MAX_OUTBOUND_CALLS_PER_WINDOW):
+            return jsonify({"error": "outbound call rate limit exceeded"}), 429
         call, error = build_call(request.get_json(silent=True))
         if error:
             return error
@@ -115,6 +111,8 @@ def register_routes(app, service):
     def browser_call():
         if not Config.ENABLE_BROWSER_API:
             return jsonify({"error": "browser call API is disabled"}), 404
+        if _rate_limited("outbound", MAX_OUTBOUND_CALLS_PER_WINDOW):
+            return jsonify({"error": "outbound call rate limit exceeded"}), 429
         call, error = build_call(request.get_json(silent=True))
         if error:
             return error
@@ -152,11 +150,7 @@ def register_routes(app, service):
         notes = str(data.get("notes", "")).strip()
         if len(disposition) > 100 or len(notes) > 2000:
             return jsonify({"error": "disposition or notes too long"}), 400
-        call = service.store.update(
-            call_id,
-            disposition=disposition or None,
-            notes=notes or None,
-        )
+        call = service.store.update(call_id, disposition=disposition or None, notes=notes or None)
         if not call:
             return jsonify({"error": "call not found"}), 404
         service.notify_crm("call.disposition", call)
