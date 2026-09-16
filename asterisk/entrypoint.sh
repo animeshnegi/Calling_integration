@@ -215,41 +215,12 @@ exten => s,1,NoOp(Inbound provider call \${CALLERID(all)})
  same => n,Hangup()
 EOF
 
-cat > /etc/asterisk/ari.conf <<EOF
-[general]
-enabled = yes
-pretty = yes
-allowed_origins =
-
-[${ARI_USER}]
-type = user
-read_only = no
-password = ${ARI_PASSWORD}
-EOF
-
-cat > /etc/asterisk/manager.conf <<EOF
-[general]
-enabled = yes
-port = 5038
-bindaddr = 0.0.0.0
-webenabled = no
-
-[${AMI_USER}]
-secret = ${AMI_PASSWORD}
-displayconnects = no
-read = system,call,command,reporting
-write = system,call,command
-EOF
-
-cat > /etc/asterisk/rtp.conf <<EOF
-[general]
-rtpstart=${ASTERISK_RTP_START}
-rtpend=${ASTERISK_RTP_END}
-icesupport=yes
-EOF
-
 chmod 600 "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf"
 chown -R asterisk:asterisk /etc/asterisk /var/lib/asterisk /var/spool/asterisk 2>/dev/null || true
+# The dynamic configuration volume is shared with the unprivileged API via GID 2000.
+chown asterisk:telephony "$DYNAMIC_DIR" 2>/dev/null || true
+chmod 0770 "$DYNAMIC_DIR"
+chmod 0660 "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf"
 
 VALIDATION_LOG=/tmp/asterisk-config-validation.log
 rm -f "$VALIDATION_LOG"
