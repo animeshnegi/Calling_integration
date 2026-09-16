@@ -103,16 +103,6 @@ bind=0.0.0.0
 #include /etc/asterisk/dynamic/pjsip.dynamic.conf
 EOF
 
-# Seed the shared dynamic file from .env so Asterisk is healthy before the API starts.
-cat > "$DYNAMIC_DIR/pjsip.dynamic.conf" <<EOF
-; Bootstrap configuration. The telephony API replaces this file from the settings DB.
-[101]
-type=aor
-max_contacts=5
-remove_existing=yes
-
-EOF
-# Replace the bootstrap AOR/endpoint sections with all configured extensions.
 : > "$DYNAMIC_DIR/pjsip.dynamic.conf"
 oldifs="$IFS"; IFS=','
 for raw_ext in $ASTERISK_EXTENSIONS; do
@@ -131,7 +121,7 @@ username=${ext}
 password=${password}
 supported_algorithms_uas=SHA-256,MD5
 
-[endpoint-${ext}]
+[${ext}]
 type=endpoint
 aors=${ext}
 auth=auth-${ext}
