@@ -38,6 +38,8 @@ class Config:
             "ASTERISK_ARI_USER": cls.ASTERISK_ARI_USER,
             "ASTERISK_ARI_PASSWORD": cls.ASTERISK_ARI_PASSWORD,
         }
+        if cls.CRM_WEBHOOK_URL and not cls.CRM_WEBHOOK_TOKEN:
+            raise RuntimeError("CRM_WEBHOOK_TOKEN must be set when CRM_WEBHOOK_URL is configured")
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise RuntimeError(f"Missing required production security settings: {', '.join(missing)}")
