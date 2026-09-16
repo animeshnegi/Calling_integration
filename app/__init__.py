@@ -9,7 +9,7 @@ from .services import TelephonyService
 from .telephony_config import TelephonyConfigSync
 
 
-def create_app(config_class=Config, *, start_ari: bool = False):
+def create_app(config_class=Config, *, start_ari: bool = False, sync_config: bool = False):
     config_class.validate()
     app = Flask(__name__)
     app.config.from_object(config_class)
@@ -19,32 +19,24 @@ def create_app(config_class=Config, *, start_ari: bool = False):
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
     asterisk = AsteriskClient(config_class)
-    ami = AsteriskAMI(
-        config_class.ASTERISK_AMI_HOST,
-        config_class.ASTERISK_AMI_PORT,
-        config_class.ASTERISK_AMI_USER,
-        config_class.ASTERISK_AMI_PASSWORD,
-    )
+    ami = AsteriskAMI(config_class.ASTERISK_AMI_HOST, config_class.ASTERISK_AMI_PORT, config_class.ASTERISK_AMI_USER, config_class.ASTERISK_AMI_PASSWORD)
 
     def apply_telephony_config():
         store = app.extensions.get("settings_store")
-        if not store:
-            return
-        TelephonyConfigSync(store, ami, config_class.ASTERISK_DYNAMIC_CONFIG_PATH).apply()
+        if store:
+            TelephonyConfigSync(store, ami, config_class.ASTERISK_DYNAMIC_CONFIG_PATH).apply()
 
     register_admin(app, config_class, on_telephony_change=apply_telephony_config)
     settings_store = app.extensions["settings_store"]
-    app.extensions["telephony_config_sync"] = TelephonyConfigSync(
-        settings_store, ami, config_class.ASTERISK_DYNAMIC_CONFIG_PATH
-    )
-
+    app.extensions["telephony_config_sync"] = TelephonyConfigSync(settings_store, ami, config_class.ASTERISK_DYNAMIC_CONFIG_PATH)
     service = TelephonyService(asterisk, config_class, settings_store=settings_store)
     app.extensions["telephony_service"] = service
 
-    try:
-        app.extensions["telephony_config_sync"].apply()
-    except Exception:
-        app.logger.exception("Initial Asterisk database configuration sync failed")
+    if sync_config:
+        try:
+            app.extensions["telephony_config_sync"].apply()
+        except Exception:
+            app.logger.exception("Initial Asterisk database configuration sync failed")
 
     @app.after_request
     def security_headers(response):
