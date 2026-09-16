@@ -4,7 +4,6 @@ import base64
 import json
 import os
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ class AsteriskClient:
         self.user = config.ASTERISK_ARI_USER
         self.password = config.ASTERISK_ARI_PASSWORD
         self.app = config.ASTERISK_ARI_APP
+        self.recording_path = getattr(config, "ASTERISK_RECORDING_PATH", "/var/spool/asterisk/recording")
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         response = requests.request(
@@ -136,7 +136,14 @@ class AsteriskClient:
             return None
         try:
             result = self._request("GET", f"/recordings/stored/{name}")
-            return result if isinstance(result, dict) else None
+            if not isinstance(result, dict):
+                return None
+            # StoredRecording exposes name/format, not a filesystem filename.
+            # Keep the canonical Asterisk-side path as derived metadata for CRM/admin use.
+            fmt = str(result.get("format") or "").strip()
+            if fmt and name:
+                result.setdefault("filename", str(Path(self.recording_path) / f"{name}.{fmt}"))
+            return result
         except AsteriskError:
             return None
 
@@ -144,32 +151,22 @@ class AsteriskClient:
         result = self._request("GET", "/recordings/stored")
         return result if isinstance(result, list) else []
 
-    def delete_stored_recording(self, name: str) -> None:
+    def delete_stored_recording(self, name: str) -> bool:
         if not name or len(name) > 128 or any(char in name for char in "/\\\r\n"):
-            return
+            return False
         try:
             self._request("DELETE", f"/recordings/stored/{name}")
+            return True
         except AsteriskError:
-            pass
+            return False
 
     def cleanup_old_recordings(self, retention_days: int) -> int:
-        if retention_days <= 0:
-            return 0
-        cutoff = datetime.now(timezone.utc).timestamp() - retention_days * 86400
-        deleted = 0
-        for recording in self.list_stored_recordings():
-            name = str(recording.get("name") or "")
-            completed = recording.get("completed")
-            if not name.startswith("call-") or not completed:
-                continue
-            try:
-                stamp = datetime.fromisoformat(str(completed).replace("Z", "+00:00")).timestamp()
-            except (ValueError, TypeError, OverflowError):
-                continue
-            if stamp < cutoff:
-                self.delete_stored_recording(name)
-                deleted += 1
-        return deleted
+        """Deprecated compatibility helper.
+
+        ARI StoredRecording does not expose creation/completion timestamps, so age-based
+        retention is enforced by TelephonyService from persisted call ended_at timestamps.
+        """
+        return 0
 
     def destroy_bridge(self, bridge_id: str) -> None:
         try:
