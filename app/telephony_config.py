@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import tempfile
@@ -46,6 +47,19 @@ class TelephonyConfigSync:
         if value not in {"udp", "tcp"}:
             raise ValueError("Provider transport must be udp or tcp")
         return value
+
+    @staticmethod
+    def _allowed_ips(value: str) -> list[str]:
+        result = []
+        for item in str(value or "").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                result.append(str(ipaddress.ip_network(item, strict=False)))
+            except ValueError as exc:
+                raise ValueError(f"Invalid provider IP/CIDR: {item}") from exc
+        return list(dict.fromkeys(result))
 
     def render_pjsip(self) -> str:
         lines = [
@@ -99,6 +113,13 @@ class TelephonyConfigSync:
                 *([f"contact_user={did_user}"] if did_user else []), "retry_interval=30",
                 "forbidden_retry_interval=300", "expiration=300", "",
             ])
+            allowed_ips = self._allowed_ips(provider.get("allowed_ips", ""))
+            if not allowed_ips:
+                raise ValueError(f"Provider {name} has no inbound IP/CIDR allowlist")
+            for index, match in enumerate(allowed_ips, 1):
+                lines.extend([
+                    f"[{endpoint}-identify-{index}]", "type=identify", f"endpoint={endpoint}", f"match={match}", "",
+                ])
         return "\n".join(lines) + "\n"
 
     def render_dialplan(self) -> str:
@@ -143,8 +164,6 @@ class TelephonyConfigSync:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
-            # The Asterisk container runs under a different UID, so it must be able to read this file.
-            # The file is never exposed through a host port; it lives only in the internal Docker volume.
             os.chmod(tmp_name, 0o644)
             os.replace(tmp_name, path)
         finally:
