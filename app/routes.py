@@ -5,6 +5,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from functools import wraps
+from pathlib import Path
 from typing import Any, Callable
 
 from flask import jsonify, request, send_from_directory
@@ -66,12 +67,7 @@ def register_routes(app, service):
         if not Config.is_extension_configured(extension):
             return None, (jsonify({"error": "extension is not configured"}), 400)
         try:
-            call = service.start_outbound(
-                phone=phone,
-                extension=extension,
-                contact_id=data.get("contact_id"),
-                member_id=data.get("member_id"),
-            )
+            call = service.start_outbound(phone=phone, extension=extension, contact_id=data.get("contact_id"), member_id=data.get("member_id"))
         except Exception:
             app.logger.exception("Asterisk failed to start outbound call")
             return None, (jsonify({"error": "telephony service unavailable"}), 502)
@@ -169,4 +165,4 @@ def register_routes(app, service):
     def index():
         if not Config.ENABLE_DIAGNOSTIC_UI:
             return jsonify({"error": "not found"}), 404
-        return send_from_directory("../web", "index.html")
+        return send_from_directory(str(Path(app.root_path).parent / "web"), "index.html")
