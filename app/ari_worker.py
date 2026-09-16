@@ -7,7 +7,7 @@ from .config import Config
 
 
 def main() -> None:
-    app = create_app(Config, start_ari=False)
+    app = create_app(Config, start_ari=False, sync_config=True)
     service = app.extensions["telephony_service"]
     service.recover_incomplete_calls()
 
