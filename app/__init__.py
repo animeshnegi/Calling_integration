@@ -4,6 +4,7 @@ from .asterisk import AsteriskClient, ari_event_loop
 from .config import Config
 from .routes import register_routes
 from .services import TelephonyService
+from .admin import register_admin
 
 
 def create_app(config_class=Config):
@@ -11,10 +12,14 @@ def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
     app.config["MAX_CONTENT_LENGTH"] = config_class.MAX_CONTENT_LENGTH
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SECURE"] = config_class.FLASK_ENV == "production"
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
     client = AsteriskClient(config_class)
     service = TelephonyService(client, config_class)
     app.extensions["telephony_service"] = service
+    register_admin(app, config_class)
 
     @app.after_request
     def security_headers(response):
