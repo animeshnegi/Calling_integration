@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import uuid
@@ -31,7 +32,7 @@ class AsteriskClient:
             **kwargs,
         )
         if not response.ok:
-            raise AsteriskError(f"Asterisk API {response.status_code}: {response.text[:500]}")
+            raise AsteriskError(f"Asterisk API {response.status_code}")
         if not response.content:
             return None
         return response.json()
@@ -42,8 +43,6 @@ class AsteriskClient:
         if metadata:
             variables["EIP_CONTACT_ID"] = str(metadata.get("contact_id", ""))
             variables["EIP_MEMBER_ID"] = str(metadata.get("member_id", ""))
-        # Dialplan/Local channel is the portable hand-off point; the application
-        # records the UUID so provider channel IDs can later be correlated.
         self._request(
             "POST",
             "/channels",
@@ -65,7 +64,11 @@ class AsteriskClient:
 
     def event_url(self) -> str:
         scheme = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
-        return f"{scheme}/events?api_key={self.user}:{self.password}&app={self.app}"
+        return f"{scheme}/events?app={self.app}"
+
+    def event_headers(self) -> list[str]:
+        token = base64.b64encode(f"{self.user}:{self.password}".encode()).decode()
+        return [f"Authorization: Basic {token}"]
 
 
 def ari_event_loop(on_event, config: type[Config] = Config) -> threading.Thread:
@@ -76,7 +79,11 @@ def ari_event_loop(on_event, config: type[Config] = Config) -> threading.Thread:
         while True:
             ws = None
             try:
-                ws = websocket.create_connection(client.event_url(), timeout=30)
+                ws = websocket.create_connection(
+                    client.event_url(),
+                    timeout=30,
+                    header=client.event_headers(),
+                )
                 backoff = 2
                 while True:
                     raw = ws.recv()
