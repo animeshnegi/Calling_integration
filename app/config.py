@@ -26,6 +26,7 @@ class Config:
     ENABLE_BROWSER_API = os.getenv("ENABLE_BROWSER_API", "false").lower() == "true"
     ENABLE_DIAGNOSTIC_UI = os.getenv("ENABLE_DIAGNOSTIC_UI", "false").lower() == "true"
     RECORDING_VOLUME_PATH = os.getenv("RECORDING_VOLUME_PATH", "/recordings")
+    CALLS_DB_PATH = os.getenv("CALLS_DB_PATH", "/app/instance/calls.db")
     MAX_CONTENT_LENGTH = 64 * 1024
 
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
