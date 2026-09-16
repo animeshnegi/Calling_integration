@@ -72,6 +72,11 @@ class AsteriskClient:
             "maxDurationSeconds": max_duration, "terminateOn": "none",
         })
 
+    def play_bridge_media(self, bridge_id: str, media: str) -> dict[str, Any]:
+        if not media or len(media) > 512 or "\r" in media or "\n" in media:
+            raise ValueError("Invalid announcement media")
+        return self._request("POST", f"/bridges/{bridge_id}/play", params={"media": media})
+
     def stop_recording(self, name: str) -> None:
         try:
             self._request("POST", f"/recordings/live/{name}/stop")
