@@ -29,13 +29,13 @@ ASTERISK_RTP_END="${ASTERISK_RTP_END:-10100}"
 
 case "$IPCOMMS_SIP_PORT" in
   *[!0-9]*) fail "IPCOMMS_SIP_PORT must be numeric" ;;
-  esac
+esac
 case "$ASTERISK_RTP_START" in
   *[!0-9]*) fail "ASTERISK_RTP_START must be numeric" ;;
-  esac
+esac
 case "$ASTERISK_RTP_END" in
   *[!0-9]*) fail "ASTERISK_RTP_END must be numeric" ;;
-  esac
+esac
 
 [ "$ASTERISK_RTP_START" -lt "$ASTERISK_RTP_END" ] || fail "ASTERISK_RTP_START must be less than ASTERISK_RTP_END"
 [ "$IPCOMMS_SIP_PORT" -ge 1 ] && [ "$IPCOMMS_SIP_PORT" -le 65535 ] || fail "IPCOMMS_SIP_PORT must be between 1 and 65535"
@@ -108,7 +108,7 @@ aors=101
 auth=101
 context=from-internal
 disallow=all
-allow=opus,ulaw,alaw
+allow=ulaw,alaw
 transport=transport-udp
 direct_media=no
 rtp_symmetric=yes
@@ -197,6 +197,43 @@ EOF
   i=$((i + 1))
 done
 IFS="$oldifs"
+
+# Generate the dialplan at runtime so the configured IPComms DID route is
+# always present, even when /etc/asterisk is backed by a persistent volume.
+cat > /etc/asterisk/extensions.conf <<EOF
+[general]
+static=yes
+autofallthrough=yes
+
+[globals]
+
+[from-internal]
+; Dial another local SIP extension.
+exten => _1XX,1,NoOp(EngineerIP extension \${EXTEN})
+ same => n,Dial(PJSIP/\${EXTEN},30)
+ same => n,Hangup()
+
+; Outbound E.164 calls through the IPComms trunk.
+exten => _+X.,1,NoOp(Outbound E.164 \${EXTEN})
+ same => n,Dial(PJSIP/\${EXTEN}@ipcomms,60)
+ same => n,Hangup()
+
+[web-outbound]
+exten => _+X.,1,NoOp(WebRTC outbound \${EXTEN})
+ same => n,Dial(PJSIP/\${EXTEN}@ipcomms,60)
+ same => n,Hangup()
+
+[from-provider]
+; IPComms may deliver the DID as the called extension instead of 's'.
+exten => ${DID_USER},1,NoOp(Inbound IPComms DID ${DID_USER} \${CALLERID(all)})
+ same => n,Dial(PJSIP/101,30)
+ same => n,Hangup()
+
+; Fallback for providers that deliver the called number as 's'.
+exten => s,1,NoOp(Inbound IPComms call \${CALLERID(all)})
+ same => n,Dial(PJSIP/101,30)
+ same => n,Hangup()
+EOF
 
 cat > /etc/asterisk/rtp.conf <<EOF
 [general]
