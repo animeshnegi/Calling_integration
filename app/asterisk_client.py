@@ -58,6 +58,10 @@ class AsteriskClient:
         })
         return customer_channel
 
+    def list_channels(self) -> list[dict[str, Any]]:
+        result = self._request("GET", "/channels")
+        return result if isinstance(result, list) else []
+
     def create_bridge(self, call_id: str) -> str:
         bridge_id = f"bridge-{call_id}"
         self._request("POST", "/bridges", params={"type": "mixing", "bridgeId": bridge_id, "name": f"EngineerIP {call_id}"})
