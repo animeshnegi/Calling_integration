@@ -1,24 +1,18 @@
 # EngineerIP Telephony API
 
-The Flask telephony service is intended to be reachable from EngineerIP over the private Docker network. It listens on port `5000` inside the container; the production Compose configuration does not publish port 5000 to the public Internet.
-
-## Base URL
-
-From the EngineerIP CRM container:
-
-```text
-http://engineerip-telephony-api:5000
-```
+The Flask telephony service is reachable from EngineerIP over the private Docker network. Port `5000` is not published publicly.
 
 ## Authentication
 
-All `/api/v1/*` endpoints use the server-side token:
+All `/api/v1/*` endpoints require:
 
 ```http
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
-Never put the master `TELEPHONY_TOKEN`, ARI password, or IPComms credentials in browser JavaScript.
+Production requires a random `TELEPHONY_TOKEN` of at least 32 characters. Authentication uses constant-time token comparison. Never put the master token, ARI password, SIP passwords, or provider credentials in browser JavaScript.
+
+The API has a lightweight per-client request limit and a separate outbound-call limit to reduce abuse and toll-fraud risk. A production reverse proxy/API gateway should enforce equivalent limits across multiple replicas.
 
 ## Health
 
@@ -26,24 +20,16 @@ Never put the master `TELEPHONY_TOKEN`, ARI password, or IPComms credentials in 
 GET /health
 ```
 
-No authentication is required.
+No authentication is required. It returns only whether Asterisk is reachable; it does not expose the Asterisk version or configured extension list.
 
-Example:
-
-```bash
-curl http://engineerip-telephony-api:5000/health
-```
-
-Returns HTTP `200` when the Flask service can reach Asterisk ARI. Returns HTTP `503` when ARI is unavailable or authentication fails.
-
-## List calls
+## Extensions
 
 ```http
-GET /api/v1/calls
+GET /api/v1/extensions
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
-Returns the calls currently held by the service's in-memory call store.
+Returns the configured extension numbers and default extension. SIP passwords are never returned.
 
 ## Start outbound call
 
@@ -55,81 +41,28 @@ Authorization: Bearer <TELEPHONY_TOKEN>
 {
   "contact_id": "582",
   "member_id": "37",
-  "extension": "101",
+  "extension": "102",
   "phone": "+16235551234"
 }
 ```
 
-`phone` should use E.164 format such as `+16235551234`. `extension` defaults to the configured `DEFAULT_EXTENSION` and must contain only digits.
+`phone` must be E.164 format. `extension` must be a configured three-digit extension. If omitted, `DEFAULT_EXTENSION` is used.
 
-Example response:
-
-```json
-{
-  "call": {
-    "call_id": "uuid",
-    "contact_id": "582",
-    "member_id": "37",
-    "extension": "101",
-    "phone": "+16235551234",
-    "direction": "outbound",
-    "status": "initiated",
-    "answered": false
-  }
-}
-```
-
-The API requests Asterisk to originate a `Local/<phone>@web-outbound` channel and records the returned UUID as the application call ID.
+The current call-originator implementation is still a POC and should not be treated as the final employee-first click-to-call flow until the ARI bridge logic is completed and tested.
 
 ## Browser call launcher
 
-```http
-POST /api/v1/browser/call
-Content-Type: application/json
-Authorization: Bearer <TELEPHONY_TOKEN>
+`POST /api/v1/browser/call` is **disabled by default**. Enable it only after implementing short-lived, narrowly scoped browser credentials. The master `TELEPHONY_TOKEN` must not be exposed to browser JavaScript.
 
-{
-  "phone": "+16235551234",
-  "extension": "101"
-}
-```
-
-This endpoint uses the same server-side Bearer authentication in the current reference implementation. The included browser page is diagnostic/reference UI only; it does not embed the master token. Production EngineerIP should issue a short-lived, narrowly scoped capability or SIP credential after normal CRM authentication.
-
-## Get call
+## Get / hang up / disposition
 
 ```http
-GET /api/v1/calls/<call_id>
-Authorization: Bearer <TELEPHONY_TOKEN>
-```
-
-Returns HTTP `404` when the call ID is not in the current service store.
-
-## Hang up
-
-```http
+GET  /api/v1/calls/<call_id>
 POST /api/v1/calls/<call_id>/hangup
-Authorization: Bearer <TELEPHONY_TOKEN>
-```
-
-The API requests Asterisk to hang up the application channel and updates the local call state.
-
-## Set disposition
-
-```http
 POST /api/v1/calls/<call_id>/disposition
-Authorization: Bearer <TELEPHONY_TOKEN>
-Content-Type: application/json
-
-{
-  "disposition": "follow_up",
-  "notes": "Asked us to call next Tuesday."
-}
 ```
 
-The disposition and notes are stored with the call and a `call.disposition` webhook is sent to the CRM when configured.
-
-Suggested CRM disposition values are implementation-specific; examples include `reached`, `voicemail`, `gatekeeper`, `not_interested`, `follow_up`, `wrong_number`, and `remove_me`.
+All require the Bearer token. Call IDs are syntactically validated before lookup. Disposition and notes have length limits.
 
 ## Asterisk event intake
 
@@ -139,21 +72,37 @@ Authorization: Bearer <TELEPHONY_TOKEN>
 Content-Type: application/json
 ```
 
-This is a controlled integration/test endpoint. The built-in ARI WebSocket listener already consumes Asterisk events, so Asterisk should not be wired to this HTTP endpoint and the listener simultaneously unless both paths are intentionally required.
+This endpoint is for controlled integration/testing. The built-in ARI WebSocket listener already consumes Asterisk events.
+
+## Security limits
+
+- Maximum request body: 64 KiB.
+- General authenticated API rate limit: 120 requests/minute per client address.
+- Outbound call creation limit: 30 requests/minute per client address.
+- Phone numbers are restricted to E.164 syntax before reaching Asterisk.
+- Exceptions from Asterisk are logged server-side and are not returned to clients.
+- Security response headers are added to Flask responses.
+- Diagnostic UI is disabled by default.
+- Browser call API is disabled by default.
+- Asterisk ARI TCP 8088 is private and is not published.
+- Asterisk WebRTC WSS port 8089 is not published by the current Compose configuration until trusted TLS/reverse-proxy access is ready.
 
 ## Errors
 
 Typical responses:
 
-- `400` — invalid/missing phone or invalid extension.
+- `400` — invalid JSON, phone, extension, or disposition data.
 - `401` — missing or invalid Bearer token.
-- `404` — requested call ID does not exist in the current call store.
-- `502` — Asterisk API request failed while starting a call.
-- `503` — `/health` cannot reach Asterisk ARI.
+- `404` — call not found or disabled endpoint.
+- `429` — API or outbound-call rate limit exceeded.
+- `502` — Asterisk unavailable while starting a call.
+- `503` — Asterisk unavailable for `/health`.
 
 ## CRM webhook events
 
-When `CRM_WEBHOOK_URL` is configured, the service can emit:
+When `CRM_WEBHOOK_URL` is configured in production, `CRM_WEBHOOK_TOKEN` is required and is sent as a Bearer token to the CRM.
+
+Possible events:
 
 ```text
 call.started
@@ -164,5 +113,3 @@ call.completed
 call.hangup_requested
 call.disposition
 ```
-
-See `docs/WEBHOOKS.md` for the payload contract.
