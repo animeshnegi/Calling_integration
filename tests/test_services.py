@@ -31,6 +31,9 @@ class DummyAsterisk:
     def stop_recording(self, name):
         self.recording_stopped.append(name)
 
+    def get_stored_recording(self, name):
+        return {"name": name, "filename": f"/var/spool/asterisk/recording/{name}.wav", "format": "wav"}
+
     def destroy_bridge(self, *args):
         return None
 
@@ -47,19 +50,31 @@ class DummyAsterisk:
         return []
 
 
-def test_call_is_stored_before_asterisk_originate(tmp_path: Path):
+def make_service(tmp_path: Path):
+    ready = tmp_path / "ari.ready"
+    ready.touch()
+
+    class Config:
+        ARI_READY_PATH = str(ready)
+        CALLS_DB_PATH = str(tmp_path / "calls.db")
+        CRM_WEBHOOK_URL = ""
+        CRM_WEBHOOK_TOKEN = ""
+        DEFAULT_EXTENSION = "101"
+
     asterisk = DummyAsterisk()
     store = CallStore(str(tmp_path / "calls.db"))
-    service = TelephonyService(asterisk, store=store)
+    return TelephonyService(asterisk, config=Config, store=store), asterisk, store
+
+
+def test_call_is_stored_before_asterisk_originate(tmp_path: Path):
+    service, asterisk, store = make_service(tmp_path)
     call = service.start_outbound(phone="+13025551234", extension="101")
     assert call.call_id == asterisk.created_call
     assert store.get(call.call_id).status == "ringing"
 
 
 def test_recording_finished_event_is_correlated_without_channel(tmp_path: Path):
-    asterisk = DummyAsterisk()
-    store = CallStore(str(tmp_path / "calls.db"))
-    service = TelephonyService(asterisk, store=store)
+    service, _, store = make_service(tmp_path)
     call = service.start_outbound(phone="+13025551234", extension="101")
     store.update(call.call_id, recording_name=f"call-{call.call_id}", recording_status="recording")
 
