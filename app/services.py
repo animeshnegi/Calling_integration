@@ -127,16 +127,17 @@ class TelephonyService:
         current = self.store.get(call.call_id)
         if not current or current.bridge_id or not current.employee_channel_id or not current.customer_channel_id:
             return
-        bridge_id = self.asterisk.create_bridge(current.call_id)
-        self.asterisk.add_channel_to_bridge(bridge_id, current.employee_channel_id)
-        self.asterisk.add_channel_to_bridge(bridge_id, current.customer_channel_id)
-        updated = self.store.update(current.call_id, bridge_id=bridge_id, status="bridged")
-        self.notify_crm("call.bridged", updated)
-        recording = self._recording_settings(updated.extension)
-        if not recording["enabled"]:
-            return
-        name = f"call-{updated.call_id}"
+        bridge_id = None
         try:
+            bridge_id = self.asterisk.create_bridge(current.call_id)
+            self.asterisk.add_channel_to_bridge(bridge_id, current.employee_channel_id)
+            self.asterisk.add_channel_to_bridge(bridge_id, current.customer_channel_id)
+            updated = self.store.update(current.call_id, bridge_id=bridge_id, status="bridged")
+            self.notify_crm("call.bridged", updated)
+            recording = self._recording_settings(updated.extension)
+            if not recording["enabled"]:
+                return
+            name = f"call-{updated.call_id}"
             self.asterisk.start_bridge_recording(bridge_id, name, recording["format"], recording["beep"], recording["max_duration"])
             updated = self.store.update(updated.call_id, recording_name=name, recording_format=recording["format"], recording_status="recording")
             self.notify_crm("call.recording_started", updated)
@@ -146,8 +147,12 @@ class TelephonyService:
                 except Exception:
                     self.notify_crm("call.recording_announcement_failed", updated)
         except Exception:
-            updated = self.store.update(updated.call_id, recording_status="failed")
-            self.notify_crm("call.recording_failed", updated)
+            if bridge_id:
+                self.asterisk.destroy_bridge(bridge_id)
+            self.asterisk.hangup(current.employee_channel_id or "")
+            self.asterisk.hangup(current.customer_channel_id or "")
+            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed")
+            self.notify_crm("call.failed", updated, {"reason": "bridge_setup_failed"})
 
     def _finalize(self, call_id: str, reason: str) -> None:
         with self._finalize_lock:
@@ -171,8 +176,12 @@ class TelephonyService:
                 recording_status = call.recording_status
             if call.bridge_id:
                 self.asterisk.destroy_bridge(call.bridge_id)
-            updated = self.store.update(call_id, status="completed", ended_at=ended, duration_seconds=duration, recording_status=recording_status)
-            self.notify_crm("call.completed", updated, {"reason": reason})
+            terminal_status = "failed" if call.status == "failed" else ("completed" if call.answered else "failed")
+            updated = self.store.update(call_id, status=terminal_status, ended_at=ended, duration_seconds=duration, recording_status=recording_status)
+            if terminal_status == "completed":
+                self.notify_crm("call.completed", updated, {"reason": reason})
+            else:
+                self.notify_crm("call.failed", updated, {"reason": "call_ended_before_answer" if reason == "channel_destroyed" else reason})
         finally:
             with self._finalize_lock:
                 self._finalizing.discard(call_id)
@@ -220,7 +229,7 @@ class TelephonyService:
             elif channel_id == current.customer_channel_id:
                 self._start_bridge(current)
                 updated = self.store.get(current.call_id)
-                if updated and not updated.answered:
+                if updated and updated.status != "failed" and not updated.answered:
                     updated = self.store.update(updated.call_id, status="answered", answered=True, answered_at=iso_now())
                     self.notify_crm("call.answered", updated)
             return
