@@ -77,8 +77,10 @@ class AsteriskClient:
         })
 
     def play_bridge_media(self, bridge_id: str, media: str) -> dict[str, Any]:
-        if not media or len(media) > 512 or "\r" in media or "\n" in media:
+        if not media or len(media) > 256 or "\r" in media or "\n" in media:
             raise ValueError("Invalid announcement media")
+        if not media.startswith(("sound:", "recording:")):
+            raise ValueError("Announcement media must use sound: or recording:")
         return self._request("POST", f"/bridges/{bridge_id}/play", params={"media": media})
 
     def stop_recording(self, name: str) -> None:
