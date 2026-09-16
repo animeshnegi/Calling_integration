@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import sqlite3
 from functools import wraps
 from pathlib import Path
@@ -60,6 +61,27 @@ class SettingsStore:
                 db.execute("INSERT INTO admin_users(username,password_hash) VALUES(?,?)",
                            (username, generate_password_hash(password, method="scrypt")))
 
+    def bootstrap_telephony(self, config):
+        """Import the existing .env POC extension/DID into the database once.
+        Secrets are encrypted immediately and are never returned by admin APIs.
+        """
+        with self._connect() as db:
+            if db.execute("SELECT 1 FROM settings WHERE key='bootstrap_complete'").fetchone():
+                return
+            for ext in config.ASTERISK_EXTENSIONS:
+                password = os.getenv(f"EXTENSION_{ext}_PASSWORD", "")
+                if password:
+                    encrypted = self.encrypt(password)
+                    db.execute("""INSERT OR IGNORE INTO extensions
+                        (extension,display_name,sip_username,sip_password_enc,webrtc_enabled,recording_enabled,active)
+                        VALUES(?,?,?,?,?,?,1)""", (ext, "", ext, encrypted, 0, 1))
+            did = os.getenv("IPCOMMS_DID", "").strip()
+            if did:
+                db.execute("""INSERT OR IGNORE INTO phone_numbers
+                    (number,provider,description,inbound_extension,active) VALUES(?,?,?,?,1)""",
+                           (did, "IPComms", "Primary DID", config.DEFAULT_EXTENSION))
+            db.execute("INSERT INTO settings(key,value) VALUES('bootstrap_complete','true')")
+
     def authenticate(self, username, password):
         with self._connect() as db:
             row = db.execute("SELECT id,username,role,password_hash FROM admin_users WHERE username=? AND active=1", (username,)).fetchone()
@@ -98,6 +120,15 @@ class SettingsStore:
                  int(bool(data.get("webrtc_enabled"))), int(bool(data.get("recording_enabled", True))), int(bool(data.get("active", True)))))
         return extension
 
+    def delete_extension(self, extension):
+        extension = str(extension).strip()
+        with self._connect() as db:
+            if db.execute("SELECT 1 FROM phone_numbers WHERE inbound_extension=?", (extension,)).fetchone():
+                raise ValueError("Cannot delete an extension used by an inbound DID")
+            result = db.execute("DELETE FROM extensions WHERE extension=?", (extension,))
+            if result.rowcount == 0:
+                raise ValueError("Extension not found")
+
     def list_numbers(self):
         with self._connect() as db:
             rows = db.execute("SELECT id,number,provider,description,inbound_extension,active FROM phone_numbers ORDER BY number").fetchall()
@@ -107,13 +138,22 @@ class SettingsStore:
         number = str(data.get("number", "")).strip()
         if not number.startswith("+") or not number[1:].isdigit() or not 8 <= len(number) <= 16:
             raise ValueError("Phone number must be in E.164 format")
+        inbound = str(data.get("inbound_extension", "")).strip()
         with self._connect() as db:
+            if inbound and not db.execute("SELECT 1 FROM extensions WHERE extension=? AND active=1", (inbound,)).fetchone():
+                raise ValueError("Inbound extension must be an active configured extension")
             db.execute("""INSERT INTO phone_numbers(number,provider,description,inbound_extension,active) VALUES(?,?,?,?,?)
                 ON CONFLICT(number) DO UPDATE SET provider=excluded.provider,description=excluded.description,
                 inbound_extension=excluded.inbound_extension,active=excluded.active,updated_at=CURRENT_TIMESTAMP""",
                 (number, str(data.get("provider", "")).strip()[:80], str(data.get("description", "")).strip()[:160],
-                 str(data.get("inbound_extension", "")).strip()[:3], int(bool(data.get("active", True)))))
+                 inbound[:3], int(bool(data.get("active", True)))))
         return number
+
+    def delete_number(self, number):
+        with self._connect() as db:
+            result = db.execute("DELETE FROM phone_numbers WHERE number=?", (str(number).strip(),))
+            if result.rowcount == 0:
+                raise ValueError("Phone number not found")
 
     def list_providers(self):
         with self._connect() as db:
@@ -157,6 +197,7 @@ class SettingsStore:
 def register_admin(app, config):
     store = SettingsStore(config.SETTINGS_DB_PATH, config.SECRET_KEY)
     store.ensure_bootstrap_admin(config.ADMIN_USERNAME, config.ADMIN_PASSWORD)
+    store.bootstrap_telephony(config)
     app.extensions["settings_store"] = store
     web_dir = str(Path(app.root_path).parent / "web")
 
@@ -202,11 +243,25 @@ def register_admin(app, config):
         try: return jsonify({"ok": True, "extension": store.save_extension(request.get_json(silent=True) or {})})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
+    @app.delete("/admin/api/extensions/<extension>")
+    @login_required
+    def admin_delete_extension(extension):
+        try:
+            store.delete_extension(extension); return jsonify({"ok": True})
+        except ValueError as exc: return jsonify({"error": str(exc)}), 400
+
     @app.post("/admin/api/numbers")
     @login_required
     def admin_number():
         try: return jsonify({"ok": True, "number": store.save_number(request.get_json(silent=True) or {})})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
+
+    @app.delete("/admin/api/numbers/<path:number>")
+    @login_required
+    def admin_delete_number(number):
+        try:
+            store.delete_number(number); return jsonify({"ok": True})
+        except ValueError as exc: return jsonify({"error": str(exc)}), 400
 
     @app.post("/admin/api/providers")
     @login_required
