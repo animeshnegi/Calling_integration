@@ -11,6 +11,11 @@ class Config:
     ASTERISK_ARI_USER = os.getenv("ASTERISK_ARI_USER", "")
     ASTERISK_ARI_PASSWORD = os.getenv("ASTERISK_ARI_PASSWORD", "")
     ASTERISK_ARI_APP = os.getenv("ASTERISK_ARI_APP", "engineerip")
+    ASTERISK_AMI_HOST = os.getenv("ASTERISK_AMI_HOST", "asterisk")
+    ASTERISK_AMI_PORT = int(os.getenv("ASTERISK_AMI_PORT", "5038"))
+    ASTERISK_AMI_USER = os.getenv("ASTERISK_AMI_USER", "engineerip")
+    ASTERISK_AMI_PASSWORD = os.getenv("ASTERISK_AMI_PASSWORD", "")
+    ASTERISK_DYNAMIC_CONFIG_PATH = os.getenv("ASTERISK_DYNAMIC_CONFIG_PATH", "/app/asterisk-config/pjsip.dynamic.conf")
     ASTERISK_EXTENSIONS = tuple(
         ext.strip()
         for ext in os.getenv("ASTERISK_EXTENSIONS", "101").split(",")
@@ -20,9 +25,9 @@ class Config:
     SIP_OUTBOUND_PREFIX = os.getenv("SIP_OUTBOUND_PREFIX", "")
     ENABLE_BROWSER_API = os.getenv("ENABLE_BROWSER_API", "false").lower() == "true"
     ENABLE_DIAGNOSTIC_UI = os.getenv("ENABLE_DIAGNOSTIC_UI", "false").lower() == "true"
+    RECORDING_VOLUME_PATH = os.getenv("RECORDING_VOLUME_PATH", "/recordings")
     MAX_CONTENT_LENGTH = 64 * 1024
 
-    # Admin bootstrap credentials are read only when the settings database is first created.
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
     ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
     SETTINGS_DB_PATH = os.getenv("SETTINGS_DB_PATH", "/app/instance/settings.db")
@@ -42,6 +47,7 @@ class Config:
             "TELEPHONY_TOKEN": cls.TELEPHONY_TOKEN,
             "ASTERISK_ARI_USER": cls.ASTERISK_ARI_USER,
             "ASTERISK_ARI_PASSWORD": cls.ASTERISK_ARI_PASSWORD,
+            "ASTERISK_AMI_PASSWORD": cls.ASTERISK_AMI_PASSWORD,
             "ADMIN_USERNAME": cls.ADMIN_USERNAME,
             "ADMIN_PASSWORD": cls.ADMIN_PASSWORD,
         }
@@ -56,6 +62,8 @@ class Config:
             raise RuntimeError("TELEPHONY_TOKEN must be at least 32 characters in production")
         if len(cls.ASTERISK_ARI_PASSWORD) < 20:
             raise RuntimeError("ASTERISK_ARI_PASSWORD must be at least 20 characters in production")
+        if len(cls.ASTERISK_AMI_PASSWORD) < 20:
+            raise RuntimeError("ASTERISK_AMI_PASSWORD must be at least 20 characters in production")
         if len(cls.ADMIN_PASSWORD) < 14:
             raise RuntimeError("ADMIN_PASSWORD must be at least 14 characters in production")
         if not cls.ASTERISK_EXTENSIONS:
