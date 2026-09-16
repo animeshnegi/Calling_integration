@@ -1,6 +1,6 @@
 # Telephony Security Baseline
 
-This project handles SIP credentials, phone numbers and a paid outbound calling capability. Asterisk documentation warns that incorrect authorization/dialplan configuration can permit unauthorized use and unexpected charges. citeturn0search2
+This project handles SIP credentials, phone numbers and a paid outbound calling capability. Asterisk's security guidance warns that incorrect authorization and dialplan configuration can permit unauthorized use and unexpected charges.
 
 ## Implemented controls
 
@@ -18,7 +18,7 @@ This project handles SIP credentials, phone numbers and a paid outbound calling 
 - Browser calling API and diagnostic UI are disabled by default.
 - Security response headers are applied.
 
-These controls address common OWASP API risks including broken authentication, unrestricted resource consumption, security misconfiguration and unsafe sensitive business flows. citeturn0search0turn0search4
+These controls address common OWASP API risks including broken authentication, unrestricted resource consumption, security misconfiguration and unsafe sensitive business flows.
 
 ### Asterisk
 
@@ -33,17 +33,17 @@ These controls address common OWASP API risks including broken authentication, u
 - The current public Compose configuration exposes UDP 5060 and the RTP range only. WSS 8089 is kept unpublished until trusted TLS/reverse-proxy access is ready.
 - The Asterisk runtime image removes most build-time packages after compilation.
 
-Asterisk supports IP-based endpoint identification and ACL controls for PJSIP; provider source-IP matching is therefore retained for the IPComms trunk. citeturn2search4turn1search9
+Asterisk supports IP-based endpoint identification and ACL controls for PJSIP; provider source-IP matching is therefore retained for the IPComms trunk.
 
 ### Containers
 
 - Flask runs as an unprivileged container user.
 - Flask container drops Linux capabilities, uses `no-new-privileges`, a read-only root filesystem and a small `/tmp` tmpfs.
-- Asterisk is started with its runtime process under the `asterisk` account.
+- Asterisk starts its runtime process under the `asterisk` account.
 - No Docker socket is mounted.
 - Secrets are supplied at deployment time rather than baked into images.
 
-OWASP recommends unprivileged container users, capability reduction and careful secret handling; it also recommends dedicated secret-management systems where practical. citeturn3search1turn3search0
+OWASP recommends unprivileged container users, capability reduction and careful secret handling, and recommends dedicated secret-management systems where practical.
 
 ## Required production actions
 
