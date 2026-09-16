@@ -10,5 +10,14 @@ class Config:
     ASTERISK_ARI_USER = os.getenv("ASTERISK_ARI_USER", "engineerip")
     ASTERISK_ARI_PASSWORD = os.getenv("ASTERISK_ARI_PASSWORD", "change-me")
     ASTERISK_ARI_APP = os.getenv("ASTERISK_ARI_APP", "engineerip")
+    ASTERISK_EXTENSIONS = tuple(
+        ext.strip()
+        for ext in os.getenv("ASTERISK_EXTENSIONS", "101").split(",")
+        if ext.strip()
+    )
     DEFAULT_EXTENSION = os.getenv("DEFAULT_EXTENSION", "101")
     SIP_OUTBOUND_PREFIX = os.getenv("SIP_OUTBOUND_PREFIX", "")
+
+    @classmethod
+    def is_extension_configured(cls, extension: str) -> bool:
+        return extension in cls.ASTERISK_EXTENSIONS
