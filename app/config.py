@@ -16,6 +16,7 @@ class Config:
     ASTERISK_AMI_USER = os.getenv("ASTERISK_AMI_USER", "engineerip")
     ASTERISK_AMI_PASSWORD = os.getenv("ASTERISK_AMI_PASSWORD", "")
     ASTERISK_DYNAMIC_CONFIG_PATH = os.getenv("ASTERISK_DYNAMIC_CONFIG_PATH", "/app/asterisk-config/pjsip.dynamic.conf")
+    ARI_READY_PATH = os.getenv("ARI_READY_PATH", "/app/instance/ari.ready")
     ASTERISK_EXTENSIONS = tuple(
         ext.strip()
         for ext in os.getenv("ASTERISK_EXTENSIONS", "101").split(",")
