@@ -6,8 +6,8 @@ services:
     env_file: .env
     environment:
       SETTINGS_DB_PATH: /app/instance/settings.db
+      CALLS_DB_PATH: /app/instance/calls.db
       ASTERISK_DYNAMIC_CONFIG_PATH: /app/asterisk-config/pjsip.dynamic.conf
-      RECORDING_VOLUME_PATH: /recordings
     depends_on:
       asterisk:
         condition: service_healthy
@@ -17,7 +17,6 @@ services:
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
-      - asterisk_recordings:/recordings:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -25,6 +24,33 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
+
+  telephony-ari:
+    build: .
+    container_name: engineerip-telephony-ari
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SETTINGS_DB_PATH: /app/instance/settings.db
+      CALLS_DB_PATH: /app/instance/calls.db
+      ASTERISK_DYNAMIC_CONFIG_PATH: /app/asterisk-config/pjsip.dynamic.conf
+    depends_on:
+      asterisk:
+        condition: service_healthy
+    networks:
+      - crm-network
+      - telephony-internal
+    volumes:
+      - telephony_data:/app/instance
+      - asterisk_dynamic_config:/app/asterisk-config
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    command: ["python", "-m", "app.ari_worker"]
 
   asterisk:
     build: ./asterisk
