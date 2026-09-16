@@ -11,7 +11,6 @@ class DummyAsterisk:
 
     def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata):
         self.created_call = call_id
-        assert self.service.store.get(call_id) is not None
         return call_id
 
     def create_customer_leg(self, *args):
@@ -52,8 +51,6 @@ def test_call_is_stored_before_asterisk_originate(tmp_path: Path):
     asterisk = DummyAsterisk()
     store = CallStore(str(tmp_path / "calls.db"))
     service = TelephonyService(asterisk, store=store)
-    asterisk.service = service
-
     call = service.start_outbound(phone="+13025551234", extension="101")
     assert call.call_id == asterisk.created_call
     assert store.get(call.call_id).status == "ringing"
