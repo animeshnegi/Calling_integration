@@ -29,8 +29,8 @@ class TelephonyConfigSync:
     @staticmethod
     def _clean(value: Any) -> str:
         text = str(value or "")
-        if "\n" in text or "\r" in text:
-            raise ValueError("Telephony configuration contains an invalid newline")
+        if "\n" in text or "\r" in text or ";" in text or "#" in text:
+            raise ValueError("Telephony configuration contains an invalid character")
         return text
 
     @staticmethod
@@ -60,6 +60,17 @@ class TelephonyConfigSync:
             except ValueError as exc:
                 raise ValueError(f"Invalid provider IP/CIDR: {item}") from exc
         return list(dict.fromkeys(result))
+
+    @staticmethod
+    def _valid_extension(value: str) -> bool:
+        return value.isdigit() and 100 <= int(value) <= 999
+
+    def _fallback_extension(self, configured: str, active_extensions: list[str]) -> str:
+        if configured and self._valid_extension(configured) and configured in active_extensions:
+            return configured
+        if active_extensions:
+            return active_extensions[0]
+        return "101"
 
     def render_pjsip(self) -> str:
         lines = [
@@ -124,10 +135,11 @@ class TelephonyConfigSync:
 
     def render_dialplan(self) -> str:
         settings = self.store.get_settings()
-        default_ext = str(settings.get("default_extension", "")).strip()
-        if not default_ext:
-            active_exts = [row["extension"] for row in self.store.list_extensions() if row["active"]]
-            default_ext = active_exts[0] if active_exts else "101"
+        active_exts = [row["extension"] for row in self.store.list_extensions() if row["active"]]
+        default_ext = self._fallback_extension(str(settings.get("default_extension", "")).strip(), active_exts)
+        inbound_fallback = self._fallback_extension(
+            str(settings.get("inbound_fallback_extension", "")).strip(), active_exts
+        )
         lines = [
             "; AUTO-GENERATED EngineerIP DID routing.",
             "[from-internal]",
@@ -141,9 +153,9 @@ class TelephonyConfigSync:
             if not number["active"]:
                 continue
             did = re.sub(r"[^0-9]", "", number["number"])
-            extension = number["inbound_extension"] or default_ext
-            if not did or not str(extension).isdigit():
-                continue
+            extension = number["inbound_extension"] or inbound_fallback
+            if not did or not self._valid_extension(str(extension)) or str(extension) not in active_exts:
+                extension = inbound_fallback
             lines.extend([
                 f"exten => {did},1,NoOp(Inbound DID {did})",
                 f" same => n,Dial(PJSIP/{extension},30)",
