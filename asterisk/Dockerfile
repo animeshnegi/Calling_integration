@@ -8,6 +8,7 @@ RUN apt-get update \
        build-essential \
        ca-certificates \
        curl \
+       openssl \
        libedit-dev \
        libjansson-dev \
        libncurses5-dev \
@@ -27,7 +28,6 @@ RUN apt-get update \
        procps \
        uuid-dev \
        xmlstarlet \
-    && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL "https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${ASTERISK_VERSION}.tar.gz" -o /tmp/asterisk.tar.gz \
     && tar -xzf /tmp/asterisk.tar.gz -C /tmp \
     && cd "/tmp/asterisk-${ASTERISK_VERSION}" \
@@ -37,14 +37,26 @@ RUN apt-get update \
     && make samples \
     && ldconfig \
     && cd / \
-    && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" /tmp/asterisk.tar.gz
+    && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" /tmp/asterisk.tar.gz \
+    && apt-get purge -y --auto-remove \
+       build-essential curl \
+       libedit-dev libjansson-dev libncurses5-dev libnewt-dev \
+       libogg-dev libopus-dev libsamplerate0-dev libsndfile1-dev \
+       libspeex-dev libspeexdsp-dev libsqlite3-dev libssl-dev \
+       libtool libvorbis-dev libxml2-dev pkg-config uuid-dev xmlstarlet \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY config/ /etc/asterisk/
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod 750 /entrypoint.sh \
+    && groupadd --system asterisk \
+    && useradd --system --gid asterisk --home-dir /var/lib/asterisk --no-create-home asterisk \
+    && mkdir -p /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys \
+    && chown -R asterisk:asterisk /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys
 
-# 8088 (ARI) is intentionally not exposed/published; it is private to Docker.
+# ARI 8088 is intentionally not exposed/published. WebRTC WSS is kept internal
+# until a trusted certificate/reverse-proxy path is explicitly deployed.
 EXPOSE 5060/udp 5060/tcp 8089/tcp 10000-10100/udp
-VOLUME ["/var/lib/asterisk", "/var/spool/asterisk", "/etc/asterisk"]
+VOLUME ["/var/lib/asterisk", "/var/spool/asterisk", "/etc/asterisk", "/etc/asterisk/keys"]
 
 ENTRYPOINT ["/entrypoint.sh"]
