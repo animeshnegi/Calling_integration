@@ -39,6 +39,8 @@ class TelephonyConfigSync:
         codecs = [item.strip().lower() for item in value.split(",") if item.strip()]
         if not codecs or any(codec not in allowed for codec in codecs):
             raise ValueError("Unsupported SIP codec configuration")
+        if not ({"ulaw", "alaw"} & set(codecs)):
+            raise ValueError("Provider must allow ulaw or alaw to interoperate with internal extensions")
         return ",".join(dict.fromkeys(codecs))
 
     @staticmethod
