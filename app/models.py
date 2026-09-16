@@ -13,6 +13,7 @@ class Call:
     member_id: str | None
     extension: str
     phone: str
+    provider: str | None = None
     direction: str = "outbound"
     status: str = "initiated"
     answered: bool = False
@@ -20,6 +21,13 @@ class Call:
     answered_at: str | None = None
     ended_at: str | None = None
     duration_seconds: int = 0
+    employee_channel_id: str | None = None
+    customer_channel_id: str | None = None
+    bridge_id: str | None = None
+    recording_name: str | None = None
+    recording_format: str | None = None
+    recording_status: str | None = None
+    recording_path: str | None = None
     disposition: str | None = None
     notes: str | None = None
 
@@ -38,7 +46,15 @@ class CallStore:
         return call
 
     def get(self, call_id: str) -> Call | None:
-        return self._calls.get(call_id)
+        with self._lock:
+            return self._calls.get(call_id)
+
+    def find_by_channel(self, channel_id: str) -> Call | None:
+        with self._lock:
+            for call in self._calls.values():
+                if channel_id in {call.employee_channel_id, call.customer_channel_id}:
+                    return call
+        return None
 
     def update(self, call_id: str, **changes: Any) -> Call | None:
         with self._lock:
