@@ -37,27 +37,105 @@ class AsteriskClient:
             return None
         return response.json()
 
-    def create_outbound_call(self, extension: str, phone: str, metadata: dict[str, Any] | None = None) -> str:
-        call_id = str(uuid.uuid4())
+    def _variables(self, call_id: str, metadata: dict[str, Any] | None = None) -> dict[str, str]:
         variables = {"EIP_CALL_ID": call_id}
         if metadata:
-            variables["EIP_CONTACT_ID"] = str(metadata.get("contact_id", ""))
-            variables["EIP_MEMBER_ID"] = str(metadata.get("member_id", ""))
+            for key in ("contact_id", "member_id"):
+                if metadata.get(key) is not None:
+                    variables[f"EIP_{key.upper()}"] = str(metadata[key])
+        return variables
+
+    def create_outbound_call(
+        self,
+        extension: str,
+        phone: str,
+        provider_endpoint: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Ring the employee first. The customer leg is created only after the employee answers."""
+        call_id = str(uuid.uuid4())
+        employee_channel = f"{call_id}-employee"
         self._request(
             "POST",
             "/channels",
             params={
-                "endpoint": f"Local/{phone}@web-outbound/n",
+                "endpoint": f"PJSIP/{extension}",
                 "app": self.app,
-                "appArgs": f"{extension},{phone}",
-                "channelId": call_id,
-                "variables": json.dumps(variables),
+                "appArgs": f"employee,{call_id},{provider_endpoint},{phone}",
+                "channelId": employee_channel,
+                "timeout": 30,
+                "variables": json.dumps(self._variables(call_id, metadata)),
             },
         )
         return call_id
 
+    def create_customer_leg(
+        self,
+        call_id: str,
+        phone: str,
+        provider_endpoint: str,
+        employee_channel_id: str,
+    ) -> str:
+        customer_channel = f"{call_id}-customer"
+        self._request(
+            "POST",
+            "/channels",
+            params={
+                "endpoint": f"PJSIP/{phone}@{provider_endpoint}",
+                "app": self.app,
+                "appArgs": f"customer,{call_id}",
+                "channelId": customer_channel,
+                "originator": employee_channel_id,
+                "timeout": 60,
+            },
+        )
+        return customer_channel
+
+    def create_bridge(self, call_id: str) -> str:
+        bridge_id = f"bridge-{call_id}"
+        self._request("POST", "/bridges", params={"type": "mixing", "bridgeId": bridge_id, "name": f"EngineerIP {call_id}"})
+        return bridge_id
+
+    def add_channel_to_bridge(self, bridge_id: str, channel_id: str) -> None:
+        self._request("POST", f"/bridges/{bridge_id}/addChannel", params={"channel": channel_id})
+
+    def start_bridge_recording(self, bridge_id: str, name: str, fmt: str, beep: bool, max_duration: int = 0) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/bridges/{bridge_id}/record",
+            params={
+                "name": name,
+                "format": fmt,
+                "ifExists": "fail",
+                "beep": "true" if beep else "false",
+                "maxDurationSeconds": max_duration,
+                "terminateOn": "none",
+            },
+        )
+
+    def stop_recording(self, name: str) -> None:
+        try:
+            self._request("DELETE", f"/recordings/live/{name}")
+        except AsteriskError:
+            # A recording may already have been finalized by Asterisk.
+            pass
+
+    def destroy_bridge(self, bridge_id: str) -> None:
+        try:
+            self._request("DELETE", f"/bridges/{bridge_id}")
+        except AsteriskError:
+            pass
+
     def hangup(self, channel_id: str) -> None:
-        self._request("DELETE", f"/channels/{channel_id}")
+        try:
+            self._request("DELETE", f"/channels/{channel_id}")
+        except AsteriskError:
+            pass
+
+    def hangup_call(self, employee_channel_id: str | None, customer_channel_id: str | None) -> None:
+        for channel_id in (employee_channel_id, customer_channel_id):
+            if channel_id:
+                self.hangup(channel_id)
 
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/asterisk/info")
