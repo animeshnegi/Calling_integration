@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import re
 import secrets
 import time
@@ -48,7 +46,6 @@ def require_token(fn: Callable):
         if not expected or not token or not secrets.compare_digest(token, expected):
             return jsonify({"error": "unauthorized"}), 401
         return fn(*args, **kwargs)
-
     return wrapped
 
 
@@ -58,16 +55,24 @@ def register_routes(app, service):
             return None, (jsonify({"error": "JSON object required"}), 400)
         phone = str(data.get("phone", "")).strip()
         extension = str(data.get("extension") or Config.DEFAULT_EXTENSION).strip()
+        provider = str(data.get("provider") or "").strip() or None
         if not phone:
             return None, (jsonify({"error": "phone is required"}), 400)
         if not E164_RE.fullmatch(phone):
             return None, (jsonify({"error": "phone must be a valid E.164 number"}), 400)
         if not extension.isdigit() or not 100 <= int(extension) <= 999:
             return None, (jsonify({"error": "extension must be a 3-digit number"}), 400)
-        if not Config.is_extension_configured(extension):
+        configured = service.settings_store.list_extensions() if service.settings_store else []
+        if not any(row["extension"] == extension and row["active"] for row in configured):
             return None, (jsonify({"error": "extension is not configured"}), 400)
         try:
-            call = service.start_outbound(phone=phone, extension=extension, contact_id=data.get("contact_id"), member_id=data.get("member_id"))
+            call = service.start_outbound(
+                phone=phone,
+                extension=extension,
+                contact_id=data.get("contact_id"),
+                member_id=data.get("member_id"),
+                provider=provider,
+            )
         except Exception:
             app.logger.exception("Asterisk failed to start outbound call")
             return None, (jsonify({"error": "telephony service unavailable"}), 502)
@@ -85,7 +90,16 @@ def register_routes(app, service):
     @app.get("/api/v1/extensions")
     @require_token
     def list_extensions():
+        if service.settings_store:
+            rows = service.settings_store.list_extensions()
+            return jsonify({"extensions": [row["extension"] for row in rows if row["active"]], "default_extension": Config.DEFAULT_EXTENSION})
         return jsonify({"extensions": list(Config.ASTERISK_EXTENSIONS), "default_extension": Config.DEFAULT_EXTENSION})
+
+    @app.get("/api/v1/providers")
+    @require_token
+    def list_providers():
+        rows = service.settings_store.list_providers() if service.settings_store else []
+        return jsonify({"providers": rows})
 
     @app.get("/api/v1/calls")
     @require_token
