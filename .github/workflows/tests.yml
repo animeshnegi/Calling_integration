@@ -15,4 +15,15 @@ jobs:
           python-version: '3.13'
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements-dev.txt
-      - run: PYTHONPATH=. pytest -q
+      - name: Run pytest
+        run: |
+          set -o pipefail
+          PYTHONPATH=. pytest -q -rA 2>&1 | tee pytest-output.txt
+      - name: Upload pytest output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: pytest-output.txt
+          if-no-files-found: error
+          retention-days: 7
