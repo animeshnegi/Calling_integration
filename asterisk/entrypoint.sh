@@ -13,37 +13,32 @@ require_env() {
 }
 
 require_env ASTERISK_EXTERNAL_ADDRESS
+require_env ASTERISK_EXTENSIONS
+require_env DEFAULT_EXTENSION
 require_env IPCOMMS_SIP_SERVER
 require_env IPCOMMS_SIP_PORT
 require_env IPCOMMS_SIP_USERNAME
 require_env IPCOMMS_SIP_PASSWORD
 require_env IPCOMMS_DID
 require_env IPCOMMS_ALLOWED_IPS
-require_env ASTERISK_EXTENSIONS
 require_env ARI_USER
 require_env ARI_PASSWORD
 
 ASTERISK_EXTENSIONS="$(echo "$ASTERISK_EXTENSIONS" | tr -d '[:space:]')"
+DEFAULT_EXTENSION="$(echo "$DEFAULT_EXTENSION" | tr -d '[:space:]')"
 WEBRTC_EXTENSIONS="$(echo "${WEBRTC_EXTENSIONS:-101}" | tr -d '[:space:]')"
 WEBRTC_EXTENSION_PASSWORD="${WEBRTC_EXTENSION_PASSWORD:-}"
 ASTERISK_RTP_START="${ASTERISK_RTP_START:-10000}"
 ASTERISK_RTP_END="${ASTERISK_RTP_END:-10100}"
 
-case "$IPCOMMS_SIP_PORT" in
-  *[!0-9]*) fail "IPCOMMS_SIP_PORT must be numeric" ;;
-esac
-case "$ASTERISK_RTP_START" in
-  *[!0-9]*) fail "ASTERISK_RTP_START must be numeric" ;;
-esac
-case "$ASTERISK_RTP_END" in
-  *[!0-9]*) fail "ASTERISK_RTP_END must be numeric" ;;
-esac
+case "$IPCOMMS_SIP_PORT" in *[!0-9]*) fail "IPCOMMS_SIP_PORT must be numeric" ;; esac
+case "$ASTERISK_RTP_START" in *[!0-9]*) fail "ASTERISK_RTP_START must be numeric" ;; esac
+case "$ASTERISK_RTP_END" in *[!0-9]*) fail "ASTERISK_RTP_END must be numeric" ;; esac
 
 [ "$ASTERISK_RTP_START" -lt "$ASTERISK_RTP_END" ] || fail "ASTERISK_RTP_START must be less than ASTERISK_RTP_END"
 [ "$IPCOMMS_SIP_PORT" -ge 1 ] && [ "$IPCOMMS_SIP_PORT" -le 65535 ] || fail "IPCOMMS_SIP_PORT must be between 1 and 65535"
 [ "$ASTERISK_RTP_START" -ge 1024 ] && [ "$ASTERISK_RTP_END" -le 65535 ] || fail "RTP range must be between 1024 and 65535"
 
-# Validate and load the configured local SIP extensions.
 validate_extensions() {
   oldifs="$IFS"
   IFS=','
@@ -51,45 +46,38 @@ validate_extensions() {
   for raw_ext in $ASTERISK_EXTENSIONS; do
     ext=$(echo "$raw_ext" | tr -d '[:space:]')
     [ -n "$ext" ] || continue
-    case "$ext" in
-      *[!0-9]*) fail "Invalid extension in ASTERISK_EXTENSIONS: $ext" ;;
-    esac
+    case "$ext" in *[!0-9]*) fail "Invalid extension in ASTERISK_EXTENSIONS: $ext" ;; esac
     [ "$ext" -ge 100 ] && [ "$ext" -le 999 ] || fail "Extension must be between 100 and 999: $ext"
     password_var="EXTENSION_${ext}_PASSWORD"
     eval "password=\${$password_var:-}"
     [ -n "$password" ] || fail "$password_var must be set for extension $ext"
+    [ "$ext" != "$DEFAULT_EXTENSION" ] || default_found=yes
     count=$((count + 1))
   done
   IFS="$oldifs"
   [ "$count" -gt 0 ] || fail "ASTERISK_EXTENSIONS must contain at least one extension"
+  [ "${default_found:-no}" = "yes" ] || fail "DEFAULT_EXTENSION must appear in ASTERISK_EXTENSIONS"
 }
 validate_extensions
 
-# WebRTC extensions are optional. Their password can be configured as
-# WEBRTC_EXTENSION_<number>_PASSWORD; for 101, WEBRTC_EXTENSION_PASSWORD is
-# retained as a backwards-compatible fallback.
 validate_webrtc_extensions() {
   oldifs="$IFS"
   IFS=','
   for raw_ext in $WEBRTC_EXTENSIONS; do
     ext=$(echo "$raw_ext" | tr -d '[:space:]')
     [ -n "$ext" ] || continue
-    case "$ext" in
-      *[!0-9]*) fail "Invalid extension in WEBRTC_EXTENSIONS: $ext" ;;
-    esac
+    case "$ext" in *[!0-9]*) fail "Invalid extension in WEBRTC_EXTENSIONS: $ext" ;; esac
+    [ "$ext" -ge 100 ] && [ "$ext" -le 999 ] || fail "WebRTC extension must be between 100 and 999: $ext"
     password_var="WEBRTC_EXTENSION_${ext}_PASSWORD"
     eval "password=\${$password_var:-}"
-    if [ -z "$password" ] && [ "$ext" = "101" ]; then
-      password="$WEBRTC_EXTENSION_PASSWORD"
-    fi
+    if [ -z "$password" ] && [ "$ext" = "101" ]; then password="$WEBRTC_EXTENSION_PASSWORD"; fi
     [ -n "$password" ] || fail "$password_var must be set for WebRTC extension $ext"
+    case ",$ASTERISK_EXTENSIONS," in *,$ext,*) ;; *) fail "WebRTC extension $ext must also be in ASTERISK_EXTENSIONS" ;; esac
   done
   IFS="$oldifs"
 }
 validate_webrtc_extensions
 
-# IPComms provider IPs are deliberately required so inbound SIP is matched by
-# source address instead of trusting arbitrary SIP usernames.
 validate_ip_list() {
   oldifs="$IFS"
   IFS=','
@@ -97,9 +85,7 @@ validate_ip_list() {
   for raw_ip in $IPCOMMS_ALLOWED_IPS; do
     ip=$(echo "$raw_ip" | tr -d '[:space:]')
     [ -n "$ip" ] || continue
-    case "$ip" in
-      *[!0-9./:]*) fail "Invalid IP/CIDR in IPCOMMS_ALLOWED_IPS: $ip" ;;
-    esac
+    case "$ip" in *[!0-9./:]*) fail "Invalid IP/CIDR in IPCOMMS_ALLOWED_IPS: $ip" ;; esac
     count=$((count + 1))
   done
   IFS="$oldifs"
@@ -122,6 +108,11 @@ DID_USER=$(echo "$IPCOMMS_DID" | tr -d '+ -()')
 cat > /etc/asterisk/pjsip.conf <<EOF
 [global]
 user_agent=EngineerIP-Telephony
+unidentified_request_count=3
+unidentified_request_period=5
+unidentified_request_prune_interval=30
+
+default_auth_algorithms_uas=SHA-256,MD5
 
 [transport-udp]
 type=transport
@@ -139,7 +130,6 @@ bind=0.0.0.0
 
 EOF
 
-# Generate every configured local SIP endpoint.
 i=1
 oldifs="$IFS"
 IFS=','
@@ -149,7 +139,7 @@ for raw_ext in $ASTERISK_EXTENSIONS; do
   password_var="EXTENSION_${ext}_PASSWORD"
   eval "password=\${$password_var:-}"
   cat >> /etc/asterisk/pjsip.conf <<EOF
-; Local SIP extension ${ext} for Zoiper / IP phones.
+; Local SIP extension ${ext}.
 [${ext}]
 type=aor
 max_contacts=5
@@ -160,6 +150,7 @@ type=auth
 auth_type=userpass
 username=${ext}
 password=${password}
+supported_algorithms_uas=SHA-256,MD5
 
 [${ext}]
 type=endpoint
@@ -173,6 +164,7 @@ direct_media=no
 rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
+allow_subscribe=no
 
 EOF
   i=$((i + 1))
@@ -220,7 +212,6 @@ expiration=300
 
 EOF
 
-# Generate optional browser/WebRTC endpoints.
 oldifs="$IFS"
 IFS=','
 for raw_ext in $WEBRTC_EXTENSIONS; do
@@ -228,12 +219,9 @@ for raw_ext in $WEBRTC_EXTENSIONS; do
   [ -n "$ext" ] || continue
   password_var="WEBRTC_EXTENSION_${ext}_PASSWORD"
   eval "password=\${$password_var:-}"
-  if [ -z "$password" ] && [ "$ext" = "101" ]; then
-    password="$WEBRTC_EXTENSION_PASSWORD"
-  fi
+  if [ -z "$password" ] && [ "$ext" = "101" ]; then password="$WEBRTC_EXTENSION_PASSWORD"; fi
   cat >> /etc/asterisk/pjsip.conf <<EOF
-; Browser WebRTC extension ${ext}-web. Replace the temporary certificate with a trusted
-; certificate before production browser use.
+; Browser WebRTC extension ${ext}-web.
 [${ext}-web]
 type=aor
 max_contacts=2
@@ -244,6 +232,7 @@ type=auth
 auth_type=userpass
 username=${ext}-web
 password=${password}
+supported_algorithms_uas=SHA-256,MD5
 
 [${ext}-web]
 type=endpoint
@@ -258,12 +247,12 @@ rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
 webrtc=yes
+allow_subscribe=no
 
 EOF
 done
 IFS="$oldifs"
 
-# Provider identify rules.
 i=1
 oldifs="$IFS"
 IFS=','
@@ -280,8 +269,6 @@ EOF
 done
 IFS="$oldifs"
 
-# Generate the dialplan at runtime so the configured IPComms DID route is
-# always present, even when /etc/asterisk is backed by a persistent volume.
 cat > /etc/asterisk/extensions.conf <<EOF
 [general]
 static=yes
@@ -290,12 +277,10 @@ autofallthrough=yes
 [globals]
 
 [from-internal]
-; Dial another local SIP extension.
 exten => _1XX,1,NoOp(EngineerIP extension \${EXTEN})
  same => n,Dial(PJSIP/\${EXTEN},30)
  same => n,Hangup()
 
-; Outbound E.164 calls through the IPComms trunk.
 exten => _+X.,1,NoOp(Outbound E.164 \${EXTEN})
  same => n,Dial(PJSIP/\${EXTEN}@ipcomms,60)
  same => n,Hangup()
@@ -306,14 +291,12 @@ exten => _+X.,1,NoOp(WebRTC outbound \${EXTEN})
  same => n,Hangup()
 
 [from-provider]
-; IPComms may deliver the DID as the called extension instead of 's'.
 exten => ${DID_USER},1,NoOp(Inbound IPComms DID ${DID_USER} \${CALLERID(all)})
- same => n,Dial(PJSIP/${DEFAULT_EXTENSION:-101},30)
+ same => n,Dial(PJSIP/${DEFAULT_EXTENSION},30)
  same => n,Hangup()
 
-; Fallback for providers that deliver the called number as 's'.
 exten => s,1,NoOp(Inbound IPComms call \${CALLERID(all)})
- same => n,Dial(PJSIP/${DEFAULT_EXTENSION:-101},30)
+ same => n,Dial(PJSIP/${DEFAULT_EXTENSION},30)
  same => n,Hangup()
 EOF
 
@@ -328,8 +311,7 @@ cat > /etc/asterisk/ari.conf <<EOF
 [general]
 enabled = yes
 pretty = yes
-; ARI is only reachable on the private Docker network; 8088 is not published.
-allowed_origins = https://127.0.0.1
+allowed_origins =
 
 [${ARI_USER}]
 type = user
