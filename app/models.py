@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -35,37 +37,111 @@ class Call:
         return asdict(self)
 
 
+_COLUMNS = (
+    "call_id", "contact_id", "member_id", "extension", "phone", "provider", "direction", "status",
+    "answered", "started_at", "answered_at", "ended_at", "duration_seconds", "employee_channel_id",
+    "customer_channel_id", "bridge_id", "recording_name", "recording_format", "recording_status",
+    "recording_path", "disposition", "notes",
+)
+
+
 class CallStore:
-    def __init__(self) -> None:
-        self._calls: dict[str, Call] = {}
+    """SQLite-backed call state shared by the HTTP and ARI worker processes."""
+
+    def __init__(self, path: str = "/app/instance/calls.db") -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS calls (
+                    call_id TEXT PRIMARY KEY,
+                    contact_id TEXT,
+                    member_id TEXT,
+                    extension TEXT NOT NULL,
+                    phone TEXT NOT NULL,
+                    provider TEXT,
+                    direction TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    answered INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT NOT NULL,
+                    answered_at TEXT,
+                    ended_at TEXT,
+                    duration_seconds INTEGER NOT NULL DEFAULT 0,
+                    employee_channel_id TEXT,
+                    customer_channel_id TEXT,
+                    bridge_id TEXT,
+                    recording_name TEXT,
+                    recording_format TEXT,
+                    recording_status TEXT,
+                    recording_path TEXT,
+                    disposition TEXT,
+                    notes TEXT
+                )
+            """)
+            db.execute("CREATE INDEX IF NOT EXISTS idx_calls_employee_channel ON calls(employee_channel_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_calls_customer_channel ON calls(customer_channel_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_calls_recording_name ON calls(recording_name)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_calls_started_at ON calls(started_at)")
+
+    @staticmethod
+    def _from_row(row: sqlite3.Row | None) -> Call | None:
+        if row is None:
+            return None
+        data = dict(row)
+        data["answered"] = bool(data["answered"])
+        return Call(**data)
 
     def create(self, call: Call) -> Call:
-        with self._lock:
-            self._calls[call.call_id] = call
+        values = [getattr(call, col) for col in _COLUMNS]
+        values[_COLUMNS.index("answered")] = int(call.answered)
+        with self._lock, self._connect() as db:
+            db.execute(
+                f"INSERT INTO calls ({','.join(_COLUMNS)}) VALUES ({','.join('?' for _ in _COLUMNS)})",
+                values,
+            )
         return call
 
     def get(self, call_id: str) -> Call | None:
-        with self._lock:
-            return self._calls.get(call_id)
+        with self._connect() as db:
+            return self._from_row(db.execute("SELECT * FROM calls WHERE call_id=?", (call_id,)).fetchone())
 
     def find_by_channel(self, channel_id: str) -> Call | None:
-        with self._lock:
-            for call in self._calls.values():
-                if channel_id in {call.employee_channel_id, call.customer_channel_id}:
-                    return call
-        return None
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM calls WHERE employee_channel_id=? OR customer_channel_id=? ORDER BY started_at DESC LIMIT 1",
+                (channel_id, channel_id),
+            ).fetchone()
+            return self._from_row(row)
+
+    def find_by_recording(self, recording_name: str) -> Call | None:
+        with self._connect() as db:
+            return self._from_row(db.execute("SELECT * FROM calls WHERE recording_name=? LIMIT 1", (recording_name,)).fetchone())
 
     def update(self, call_id: str, **changes: Any) -> Call | None:
-        with self._lock:
-            call = self._calls.get(call_id)
-            if not call:
-                return None
-            for key, value in changes.items():
-                if hasattr(call, key):
-                    setattr(call, key, value)
-            return call
+        valid = {key: value for key, value in changes.items() if key in _COLUMNS and key != "call_id"}
+        if not valid:
+            return self.get(call_id)
+        if "answered" in valid:
+            valid["answered"] = int(bool(valid["answered"]))
+        with self._lock, self._connect() as db:
+            assignments = ",".join(f"{key}=?" for key in valid)
+            values = list(valid.values()) + [call_id]
+            db.execute(f"UPDATE calls SET {assignments} WHERE call_id=?", values)
+            return self._from_row(db.execute("SELECT * FROM calls WHERE call_id=?", (call_id,)).fetchone())
 
     def all(self) -> list[Call]:
-        with self._lock:
-            return list(self._calls.values())
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM calls ORDER BY started_at DESC").fetchall()
+        return [self._from_row(row) for row in rows if row is not None]
