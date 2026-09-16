@@ -80,8 +80,8 @@ def register_routes(app, service):
     @app.get("/health")
     def health():
         try:
-            info = service.asterisk.health()
-            return jsonify({"ok": True, "asterisk": info.get("system", "reachable")})
+            service.asterisk.health()
+            return jsonify({"ok": True, "asterisk": "reachable"})
         except Exception:
             app.logger.exception("Asterisk health check failed")
             return jsonify({"ok": False, "error": "telephony service unavailable"}), 503
