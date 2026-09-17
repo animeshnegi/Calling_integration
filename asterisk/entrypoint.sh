@@ -2,8 +2,8 @@
 set -eu
 
 # Asterisk container entrypoint.
-# Configuration is generated from runtime environment variables and the
-# database-managed dynamic include mounted at /etc/asterisk/dynamic.
+# Static configuration is shipped in the image. Runtime credentials and
+# database-managed objects are generated into the mounted dynamic directory.
 
 : "${ASTERISK_EXTERNAL_ADDRESS:?ASTERISK_EXTERNAL_ADDRESS must be set}"
 : "${ASTERISK_EXTENSIONS:?ASTERISK_EXTENSIONS must be set}"
@@ -22,7 +22,16 @@ set -eu
 ASTERISK_CONFIG_DIR=/etc/asterisk
 DYNAMIC_DIR=/etc/asterisk/dynamic
 
-mkdir -p "$DYNAMIC_DIR" /var/run/asterisk /var/log/asterisk /var/spool/asterisk /var/lib/asterisk
+mkdir -p "$DYNAMIC_DIR" \
+    /var/run/asterisk \
+    /var/log/asterisk \
+    /var/spool/asterisk \
+    /var/lib/asterisk \
+    /var/lib/asterisk/keys/keys
+
+touch "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf"
+chown asterisk:telephony "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf"
+chmod 0660 "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf"
 
 cat > "$ASTERISK_CONFIG_DIR/ari.conf" <<EOF
 [general]
@@ -63,56 +72,94 @@ protocol=tcp
 bind=0.0.0.0:5060
 external_media_address=$ASTERISK_EXTERNAL_ADDRESS
 external_signaling_address=$ASTERISK_EXTERNAL_ADDRESS
+EOF
 
-[asterisk-bootstrap]
+# Bootstrap local SIP extensions so the healthcheck and first registration work
+# before the admin/database sync has rendered the dynamic configuration.
+for EXTENSION in $(printf '%s' "$ASTERISK_EXTENSIONS" | tr ',' ' '); do
+    case "$EXTENSION" in
+        ''|*[!0-9]*)
+            echo "Invalid extension in ASTERISK_EXTENSIONS: $EXTENSION" >&2
+            exit 1
+            ;;
+    esac
+
+    PASSWORD_VAR="EXTENSION_${EXTENSION}_PASSWORD"
+    EXTENSION_PASSWORD="$(printenv "$PASSWORD_VAR" 2>/dev/null || true)"
+    if [ -z "$EXTENSION_PASSWORD" ]; then
+        echo "$PASSWORD_VAR must be set for bootstrap extension $EXTENSION" >&2
+        exit 1
+    fi
+
+    cat >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
+
+[$EXTENSION]
+type=aor
+max_contacts=5
+remove_existing=yes
+
+[auth-$EXTENSION]
+type=auth
+auth_type=userpass
+username=$EXTENSION
+password=$EXTENSION_PASSWORD
+supported_algorithms_uas=SHA-256,MD5
+
+[$EXTENSION]
 type=endpoint
+aors=$EXTENSION
+auth=auth-$EXTENSION
 context=from-internal
 disallow=all
 allow=ulaw,alaw
-aors=asterisk-bootstrap-aor
+transport=transport-udp
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+allow_subscribe=no
+EOF
+done
 
-[asterisk-bootstrap-aor]
-type=aor
-max_contacts=1
+# Bootstrap IPComms trunk. Database-managed provider configuration can replace
+# this object later through pjsip.dynamic.conf.
+cat >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
 
-[ipcomms-bootstrap]
+[ipcomms]
 type=endpoint
 context=from-provider
 disallow=all
 allow=ulaw,alaw
-outbound_auth=ipcomms-bootstrap-auth
-aors=ipcomms-bootstrap-aor
+outbound_auth=ipcomms-auth
+aors=ipcomms-aor
 from_domain=$IPCOMMS_SIP_SERVER
 
-[ipcomms-bootstrap-auth]
+[ipcomms-auth]
 type=auth
 auth_type=userpass
 username=$IPCOMMS_SIP_USERNAME
 password=$IPCOMMS_SIP_PASSWORD
 
-[ipcomms-bootstrap-aor]
+[ipcomms-aor]
 type=aor
-contact=sip:$IPCOMMS_DID@$IPCOMMS_SIP_SERVER:$IPCOMMS_SIP_PORT
+contact=sip:$IPCOMMS_SIP_SERVER:$IPCOMMS_SIP_PORT
 qualify_frequency=30
 
-[ipcomms-bootstrap-identify]
+[ipcomms-identify]
 type=identify
-endpoint=ipcomms-bootstrap
-match=$IPCOMMS_ALLOWED_IPS
+endpoint=ipcomms
 EOF
 
-cat > "$ASTERISK_CONFIG_DIR/extensions.bootstrap.conf" <<EOF
-[from-internal]
-exten => _1XX,1,Dial(PJSIP/\${EXTEN},30)
- same => n,Hangup()
+for IP in $(printf '%s' "$IPCOMMS_ALLOWED_IPS" | tr ',' ' '); do
+    case "$IP" in
+        ''|*[!0-9./:]*)
+            echo "Invalid IP/CIDR in IPCOMMS_ALLOWED_IPS: $IP" >&2
+            exit 1
+            ;;
+    esac
+    printf 'match=%s\n' "$IP" >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf"
+done
 
-[from-provider]
-exten => s,1,Dial(PJSIP/$DEFAULT_EXTENSION,30)
- same => n,Hangup()
-EOF
-
-# Keep a deterministic WSS listener configuration available for future
-# trusted reverse-proxy deployment. It is not published by Compose.
 cat > "$ASTERISK_CONFIG_DIR/http.conf" <<EOF
 [general]
 enabled = yes
@@ -130,6 +177,7 @@ EOF
 # Browser WSS remains intentionally internal until a trusted certificate path
 # is deployed.
 KEY_DIR="$ASTERISK_CONFIG_DIR/keys"
+mkdir -p "$KEY_DIR"
 if [ ! -s "$KEY_DIR/asterisk.key" ] || [ ! -s "$KEY_DIR/asterisk.crt" ]; then
     openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
         -keyout "$KEY_DIR/asterisk.key" \
@@ -140,6 +188,5 @@ if [ ! -s "$KEY_DIR/asterisk.key" ] || [ ! -s "$KEY_DIR/asterisk.crt" ]; then
     chmod 0600 "$KEY_DIR/asterisk.key"
     chmod 0644 "$KEY_DIR/asterisk.crt"
 fi
-
 
 exec asterisk -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"
