@@ -58,7 +58,9 @@ cat > "$ASTERISK_CONFIG_DIR/manager.conf" <<EOF
 enabled = yes
 webenabled = no
 port = 5038
-bindaddr = 127.0.0.1
+# AMI is reachable only through the private telephony-internal Docker network;
+# the host port is not published by docker-compose.
+bindaddr = 0.0.0.0
 
 [$AMI_USER]
 secret = $AMI_PASSWORD
