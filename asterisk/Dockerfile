@@ -1,6 +1,7 @@
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 ARG ASTERISK_VERSION=22.11.0
+ARG ASTERISK_MAKE_JOBS=2
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
@@ -36,9 +37,8 @@ RUN apt-get update \
     && tar -xzf "/tmp/asterisk-${ASTERISK_VERSION}.tar.gz" -C /tmp \
     && cd "/tmp/asterisk-${ASTERISK_VERSION}" \
     && ./configure --with-jansson-bundled --with-pjproject-bundled \
-    && make -j2 \
+    && make -j"${ASTERISK_MAKE_JOBS}" \
     && make install \
-    && make samples \
     && ldconfig \
     && cd / \
     && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" "/tmp/asterisk-${ASTERISK_VERSION}.tar.gz" /tmp/asterisk.sha256 \
@@ -52,6 +52,7 @@ RUN apt-get update \
        libxml2 \
        libsqlite3-0 \
        libedit2 \
+       libcurl4 \
        libspeex1 \
        libspeexdsp1 \
        libogg0 \
@@ -66,7 +67,7 @@ RUN chmod 750 /entrypoint.sh \
     && groupadd --system asterisk \
     && groupadd --gid 2000 telephony \
     && useradd --system --gid asterisk --groups telephony --home-dir /var/lib/asterisk --no-create-home asterisk \
-    && mkdir -p /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys /etc/asterisk/dynamic \
+    && mkdir -p /var/lib/asterisk /var/lib/asterisk/keys/keys /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys /etc/asterisk/dynamic \
     && chown -R asterisk:asterisk /var/lib/asterisk /var/spool/asterisk /var/log/asterisk /var/run/asterisk /etc/asterisk/keys \
     && chown asterisk:telephony /etc/asterisk/dynamic \
     && chmod 0770 /etc/asterisk/dynamic
@@ -74,6 +75,6 @@ RUN chmod 750 /entrypoint.sh \
 # ARI 8088 is intentionally not exposed/published. WebRTC WSS is kept internal
 # until a trusted certificate/reverse-proxy path is explicitly deployed.
 EXPOSE 5060/udp 5060/tcp 8089/tcp 10000-10100/udp
-VOLUME ["/var/lib/asterisk", "/var/spool/asterisk", "/etc/asterisk", "/etc/asterisk/keys"]
+VOLUME ["/var/lib/asterisk", "/var/spool/asterisk", "/etc/asterisk/keys"]
 
 ENTRYPOINT ["/entrypoint.sh"]
