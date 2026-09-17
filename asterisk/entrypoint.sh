@@ -12,6 +12,12 @@ set -eu
 : "${ARI_PASSWORD:?ARI_PASSWORD must be set}"
 : "${AMI_USER:?AMI_USER must be set}"
 : "${AMI_PASSWORD:?AMI_PASSWORD must be set}"
+: "${IPCOMMS_SIP_USERNAME:?IPCOMMS_SIP_USERNAME must be set}"
+: "${IPCOMMS_SIP_PASSWORD:?IPCOMMS_SIP_PASSWORD must be set}"
+: "${IPCOMMS_SIP_SERVER:?IPCOMMS_SIP_SERVER must be set}"
+: "${IPCOMMS_SIP_PORT:?IPCOMMS_SIP_PORT must be set}"
+: "${IPCOMMS_DID:?IPCOMMS_DID must be set}"
+: "${IPCOMMS_ALLOWED_IPS:?IPCOMMS_ALLOWED_IPS must be set}"
 
 ASTERISK_CONFIG_DIR=/etc/asterisk
 DYNAMIC_DIR=/etc/asterisk/dynamic
@@ -76,17 +82,17 @@ disallow=all
 allow=ulaw,alaw
 outbound_auth=ipcomms-bootstrap-auth
 aors=ipcomms-bootstrap-aor
-from_domain=ipcomms.com
+from_domain=$IPCOMMS_SIP_SERVER
 
 [ipcomms-bootstrap-auth]
 type=auth
 auth_type=userpass
-username=$IPCOMMS_USERNAME
-password=$IPCOMMS_PASSWORD
+username=$IPCOMMS_SIP_USERNAME
+password=$IPCOMMS_SIP_PASSWORD
 
 [ipcomms-bootstrap-aor]
 type=aor
-contact=sip:$IPCOMMS_DID@ipcomms.com:5060
+contact=sip:$IPCOMMS_DID@$IPCOMMS_SIP_SERVER:$IPCOMMS_SIP_PORT
 qualify_frequency=30
 
 [ipcomms-bootstrap-identify]
