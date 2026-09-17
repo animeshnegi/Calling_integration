@@ -28,11 +28,11 @@ RUN apt-get update \
        procps \
        uuid-dev \
        xmlstarlet \
-    && curl -fsSL "https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${ASTERISK_VERSION}.tar.gz" -o /tmp/asterisk.tar.gz \
+    && curl -fsSL "https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${ASTERISK_VERSION}.tar.gz" -o "/tmp/asterisk-${ASTERISK_VERSION}.tar.gz" \
     && curl -fsSL "https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${ASTERISK_VERSION}.sha256" -o /tmp/asterisk.sha256 \
     && cd /tmp \
     && sha256sum -c asterisk.sha256 \
-    && tar -xzf /tmp/asterisk.tar.gz -C /tmp \
+    && tar -xzf "/tmp/asterisk-${ASTERISK_VERSION}.tar.gz" -C /tmp \
     && cd "/tmp/asterisk-${ASTERISK_VERSION}" \
     && ./configure --with-jansson-bundled --with-pjproject-bundled \
     && make -j2 \
@@ -40,7 +40,7 @@ RUN apt-get update \
     && make samples \
     && ldconfig \
     && cd / \
-    && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" /tmp/asterisk.tar.gz /tmp/asterisk.sha256 \
+    && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" "/tmp/asterisk-${ASTERISK_VERSION}.tar.gz" /tmp/asterisk.sha256 \
     && apt-get purge -y --auto-remove \
        build-essential curl \
        libedit-dev libjansson-dev libncurses5-dev libnewt-dev \
