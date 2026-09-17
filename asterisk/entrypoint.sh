@@ -66,8 +66,9 @@ read = system,call,log,verbose,command,agent,user,config,dtmf,reporting,originat
 write = system,call,log,verbose,command,agent,user,config,dtmf,reporting,originate
 EOF
 
-if [ "$BOOTSTRAP_PJSIP" -eq 1 ]; then
-    cat > "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
+# Transports are always required by both bootstrap and database-managed PJSIP
+# objects, so keep them outside the conditional bootstrap object block.
+cat > "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
 [transport-udp]
 type=transport
 protocol=udp
@@ -83,6 +84,7 @@ external_media_address=$ASTERISK_EXTERNAL_ADDRESS
 external_signaling_address=$ASTERISK_EXTERNAL_ADDRESS
 EOF
 
+if [ "$BOOTSTRAP_PJSIP" -eq 1 ]; then
     # Bootstrap local SIP extensions so the healthcheck and first registration
     # work before the admin/database sync has rendered dynamic configuration.
     for EXTENSION in $(printf '%s' "$ASTERISK_EXTENSIONS" | tr ',' ' '); do
@@ -159,9 +161,6 @@ type=identify
 endpoint=ipcomms
 match=$IPCOMMS_ALLOWED_IPS
 EOF
-else
-    # Keep the file valid but empty when the database-managed config is active.
-    : > "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf"
 fi
 
 cat > "$ASTERISK_CONFIG_DIR/http.conf" <<EOF
