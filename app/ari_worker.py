@@ -6,8 +6,36 @@ from . import create_app
 from .config import Config
 
 
+def _sync_asterisk_config(app) -> None:
+    """Wait for AMI to become usable before starting the ARI event loop."""
+    sync = app.extensions["telephony_config_sync"]
+    delay = 2.0
+    for attempt in range(1, 11):
+        try:
+            sync.apply()
+            app.logger.info("Initial Asterisk database configuration sync completed")
+            return
+        except Exception:
+            if attempt == 10:
+                raise
+            app.logger.warning(
+                "Asterisk configuration sync attempt %s/10 failed; retrying in %.1fs",
+                attempt,
+                delay,
+                exc_info=True,
+            )
+            time.sleep(delay)
+            delay = min(delay * 1.5, 10.0)
+
+
 def main() -> None:
-    app = create_app(Config, start_ari=False, sync_config=True)
+    # Asterisk is health-gated by docker-compose, but AMI can still need a
+    # short additional startup window. Do the sync explicitly with retries
+    # instead of allowing one transient AMI failure to leave the worker
+    # running with stale database configuration.
+    app = create_app(Config, start_ari=False, sync_config=False)
+    _sync_asterisk_config(app)
+
     service = app.extensions["telephony_service"]
     service.recover_incomplete_calls()
 
