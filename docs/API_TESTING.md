@@ -8,20 +8,20 @@ These tests verify the Flask API from inside the VPS/private Docker network with
 docker compose ps
 ```
 
-Both `asterisk` and `telephony-api` should be running. Asterisk should be healthy before the API starts.
+`asterisk` should be healthy. `telephony-ari` should be running and the API should be able to reach the shared readiness file.
 
 ## 2. Check API health
 
 From the telephony project directory:
 
 ```bash
-docker compose exec telephony-api python -c "import requests; print(requests.get('http://127.0.0.1:5000/health', timeout=5).status_code); print(requests.get('http://127.0.0.1:5000/health', timeout=5).text)"
+docker compose exec telephony-api python -c "import requests; r=requests.get('http://127.0.0.1:5000/health', timeout=5); print(r.status_code); print(r.text)"
 ```
 
-A healthy result is HTTP 200 with JSON similar to:
+A healthy result is HTTP 200 with JSON containing:
 
 ```json
-{"asterisk":"reachable","ok":true}
+{"ok":true,"asterisk":"reachable","ari_ready":true}
 ```
 
 ## 3. Test from the CRM container
@@ -32,7 +32,7 @@ The CRM should use the private Docker DNS name:
 http://engineerip-telephony-api:5000
 ```
 
-Example health check from a container attached to `crm-network`:
+Example:
 
 ```bash
 curl http://engineerip-telephony-api:5000/health
@@ -58,7 +58,18 @@ curl -i \
 
 Expected: HTTP 200.
 
-## 5. Start an outbound test call
+## 5. Verify Asterisk PJSIP
+
+```bash
+docker compose exec asterisk asterisk -rx 'pjsip show transports'
+docker compose exec asterisk asterisk -rx 'pjsip show endpoints'
+docker compose exec asterisk asterisk -rx 'pjsip show registrations'
+docker compose exec asterisk asterisk -rx 'pjsip show contacts'
+```
+
+At minimum, the `transport-udp` object must exist. After bootstrap/admin synchronization, configured extensions and providers should also appear.
+
+## 6. Start an outbound test call
 
 Use an authorized test destination and a registered extension:
 
@@ -72,15 +83,22 @@ curl -i -X POST \
 
 The API should return HTTP 201 and a `call.call_id`.
 
-Then watch Asterisk:
+Then watch both services:
 
 ```bash
-docker compose logs -f asterisk
+docker compose logs -f asterisk telephony-ari
 ```
 
-The call should be originated through Asterisk and then the configured SIP provider.
+Expected lifecycle:
 
-## 6. Get the call
+```text
+API -> persist call -> employee extension rings
+employee answers -> customer leg originates
+customer answers -> bridge created -> optional recording starts
+hangup -> recording finalized -> bridge destroyed -> call completed
+```
+
+## 7. Get the call
 
 Replace `<call_id>` with the ID returned by the create-call response:
 
@@ -90,7 +108,9 @@ curl -i \
   http://engineerip-telephony-api:5000/api/v1/calls/<call_id>
 ```
 
-## 7. Hang up
+The response should show employee/customer channel IDs, bridge state, answer state and final duration after the call completes.
+
+## 8. Hang up
 
 ```bash
 curl -i -X POST \
@@ -98,7 +118,7 @@ curl -i -X POST \
   http://engineerip-telephony-api:5000/api/v1/calls/<call_id>/hangup
 ```
 
-## 8. Set a disposition
+## 9. Set a disposition
 
 ```bash
 curl -i -X POST \
@@ -108,15 +128,15 @@ curl -i -X POST \
   -d '{"disposition":"follow_up","notes":"API test"}'
 ```
 
-## 9. Verify the API can reach ARI
+## 10. Verify ARI directly from the API container
 
 ```bash
-docker compose exec telephony-api python -c "from app.config import Config; from app.asterisk import AsteriskClient; print(AsteriskClient(Config).health())"
+docker compose exec telephony-api python -c "from app.config import Config; from app.asterisk_client import AsteriskClient; print(AsteriskClient(Config).health())"
 ```
 
-Do not publish Asterisk ARI port 8088 just to make this test work. The API should reach ARI using the private Docker hostname `asterisk:8088`.
+Do not publish Asterisk ARI port 8088 just to make this test work. The API should reach ARI using `asterisk:8088` on the private Docker network.
 
-## 10. Run automated tests
+## 11. Run automated tests
 
 On the build/development host:
 
@@ -125,6 +145,22 @@ python -m pytest -q
 python -m compileall app
 ```
 
-## Important limitation
+Validate Compose:
 
-The current `CallStore` is in-memory. A call record therefore does not survive a `telephony-api` container restart. For the initial integration this is acceptable for call-control testing, but production CRM deployment should move call-state persistence to the EngineerIP database or a dedicated persistent store before relying on historical call records after service restarts.
+```bash
+docker compose config
+```
+
+## 12. Restart/recovery test
+
+During an active test call, restart only the ARI worker:
+
+```bash
+docker compose restart telephony-ari
+```
+
+The worker calls `recover_incomplete_calls()` on startup and reconciles persisted call state with live Asterisk channels. Verify that an employee-answered call still proceeds to the customer leg and that an already-connected call still reaches the bridge/completion lifecycle.
+
+## Important boundary
+
+Automated tests use fake Asterisk objects and cannot prove carrier registration, SIP NAT traversal, RTP audio, inbound DID delivery, Zoiper behavior, WebRTC microphone access or real IPComms connectivity. Those require the deployed VPS and live provider account.
