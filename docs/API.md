@@ -20,7 +20,7 @@ The API has a lightweight per-client request limit and a separate outbound-call 
 GET /health
 ```
 
-No authentication is required. It returns only whether Asterisk is reachable; it does not expose the Asterisk version or configured extension list.
+No authentication is required. It returns whether Asterisk and the dedicated ARI event worker are ready.
 
 ## Extensions
 
@@ -29,7 +29,7 @@ GET /api/v1/extensions
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
-Returns the configured extension numbers and default extension. SIP passwords are never returned.
+Returns the configured active extension numbers and default extension. SIP passwords are never returned.
 
 ## Start outbound call
 
@@ -46,9 +46,22 @@ Authorization: Bearer <TELEPHONY_TOKEN>
 }
 ```
 
-`phone` must be E.164 format. `extension` must be a configured three-digit extension. If omitted, `DEFAULT_EXTENSION` is used.
+`phone` must be E.164 format. `extension` must be a configured active three-digit extension. If omitted, the active configured default extension is used.
 
-The current call-originator implementation is still a POC and should not be treated as the final employee-first click-to-call flow until the ARI bridge logic is completed and tested.
+The production call lifecycle is employee-first:
+
+1. Persist the call and deterministic employee channel ID.
+2. Originate the employee extension into the ARI application.
+3. Wait for the employee channel to reach `Up`.
+4. Persist the deterministic customer channel ID before originating the customer leg.
+5. Originate the customer through the selected SIP provider.
+6. Wait for the customer channel to reach `Up`.
+7. Create a deterministic mixing bridge and add both channels.
+8. Mark the call answered and persist `answered_at`.
+9. Start bridge recording when enabled for the system and extension.
+10. On channel destruction, hang up the other leg, stop recording, destroy the bridge, persist final duration/status and emit the completion webhook.
+
+The ARI worker also reconciles persisted incomplete calls with live Asterisk channels after a worker restart.
 
 ## Browser call launcher
 
@@ -72,7 +85,7 @@ Authorization: Bearer <TELEPHONY_TOKEN>
 Content-Type: application/json
 ```
 
-This endpoint is for controlled integration/testing. The built-in ARI WebSocket listener already consumes Asterisk events.
+This endpoint is for controlled integration/testing. The built-in ARI WebSocket listener is the normal event consumer.
 
 ## Security limits
 
@@ -96,20 +109,30 @@ Typical responses:
 - `404` — call not found or disabled endpoint.
 - `429` — API or outbound-call rate limit exceeded.
 - `502` — Asterisk unavailable while starting a call.
-- `503` — Asterisk unavailable for `/health`.
+- `503` — Asterisk/ARI worker unavailable for `/health` or outbound calls.
 
 ## CRM webhook events
 
 When `CRM_WEBHOOK_URL` is configured in production, `CRM_WEBHOOK_TOKEN` is required and is sent as a Bearer token to the CRM.
 
-Possible events:
+The service emits lifecycle events including:
 
 ```text
 call.started
-call.in_progress
-call.ringing
+call.employee_ringing
+call.employee_answered
+call.customer_dialing
+call.bridged
 call.answered
+call.recording_started
+call.recording_finished
+call.recording_failed
+call.recording_announcement_failed
+call.recording_deleted
 call.completed
+call.failed
 call.hangup_requested
 call.disposition
 ```
+
+CRM handlers should treat `call_id` as the stable identifier and make webhook processing idempotent.
