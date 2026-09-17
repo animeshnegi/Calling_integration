@@ -67,7 +67,8 @@ services:
       AMI_USER: ${ASTERISK_AMI_USER:?ASTERISK_AMI_USER must be set in .env}
       AMI_PASSWORD: ${ASTERISK_AMI_PASSWORD:?ASTERISK_AMI_PASSWORD must be set in .env}
     volumes:
-      - asterisk_etc:/etc/asterisk
+      # Static configuration ships with the image. Do not persist /etc/asterisk
+      # as a volume or image updates would be hidden by the old volume contents.
       - asterisk_dynamic_config:/etc/asterisk/dynamic
       - asterisk_lib:/var/lib/asterisk
       - asterisk_spool:/var/spool/asterisk
@@ -81,7 +82,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "asterisk -rx 'core show version' >/dev/null 2>&1 && asterisk -rx 'pjsip show endpoint ${DEFAULT_EXTENSION:-101}' >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "asterisk -rx 'core show version' >/dev/null 2>&1 && asterisk -rx 'pjsip show transports' 2>/dev/null | grep -q 'transport-udp'"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -99,7 +100,6 @@ volumes:
   telephony_data:
   asterisk_dynamic_config:
   asterisk_recordings:
-  asterisk_etc:
   asterisk_lib:
   asterisk_spool:
   asterisk_keys:
