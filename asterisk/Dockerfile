@@ -23,6 +23,7 @@ RUN apt-get update \
        libssl-dev \
        libtool \
        libvorbis-dev \
+       libxml2 \
        libxml2-dev \
        pkg-config \
        procps \
@@ -47,6 +48,10 @@ RUN apt-get update \
        libogg-dev libopus-dev libsamplerate0-dev libsndfile1-dev \
        libspeex-dev libspeexdsp-dev libsqlite3-dev libssl-dev \
        libtool libvorbis-dev libxml2-dev pkg-config uuid-dev xmlstarlet \
+    && apt-get install -y --no-install-recommends \
+       libxml2 \
+       libsqlite3-0 \
+       libedit2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY config/ /etc/asterisk/
