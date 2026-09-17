@@ -29,6 +29,14 @@ mkdir -p "$DYNAMIC_DIR" \
     /var/lib/asterisk \
     /var/lib/asterisk/keys/keys
 
+# Only create bootstrap PJSIP objects when the database-managed include is
+# empty. Once the API has rendered real objects, those objects must not be
+# duplicated by the bootstrap configuration.
+BOOTSTRAP_PJSIP=0
+if [ ! -s "$DYNAMIC_DIR/pjsip.dynamic.conf" ]; then
+    BOOTSTRAP_PJSIP=1
+fi
+
 touch "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf"
 chown asterisk:telephony "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf"
 chmod 0660 "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf"
@@ -58,7 +66,8 @@ read = system,call,log,verbose,command,agent,user,config,dtmf,reporting,originat
 write = system,call,log,verbose,command,agent,user,config,dtmf,reporting,originate
 EOF
 
-cat > "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
+if [ "$BOOTSTRAP_PJSIP" -eq 1 ]; then
+    cat > "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
 [transport-udp]
 type=transport
 protocol=udp
@@ -74,24 +83,24 @@ external_media_address=$ASTERISK_EXTERNAL_ADDRESS
 external_signaling_address=$ASTERISK_EXTERNAL_ADDRESS
 EOF
 
-# Bootstrap local SIP extensions so the healthcheck and first registration work
-# before the admin/database sync has rendered the dynamic configuration.
-for EXTENSION in $(printf '%s' "$ASTERISK_EXTENSIONS" | tr ',' ' '); do
-    case "$EXTENSION" in
-        ''|*[!0-9]*)
-            echo "Invalid extension in ASTERISK_EXTENSIONS: $EXTENSION" >&2
+    # Bootstrap local SIP extensions so the healthcheck and first registration
+    # work before the admin/database sync has rendered dynamic configuration.
+    for EXTENSION in $(printf '%s' "$ASTERISK_EXTENSIONS" | tr ',' ' '); do
+        case "$EXTENSION" in
+            ''|*[!0-9]*)
+                echo "Invalid extension in ASTERISK_EXTENSIONS: $EXTENSION" >&2
+                exit 1
+                ;;
+        esac
+
+        PASSWORD_VAR="EXTENSION_${EXTENSION}_PASSWORD"
+        EXTENSION_PASSWORD="$(printenv "$PASSWORD_VAR" 2>/dev/null || true)"
+        if [ -z "$EXTENSION_PASSWORD" ]; then
+            echo "$PASSWORD_VAR must be set for bootstrap extension $EXTENSION" >&2
             exit 1
-            ;;
-    esac
+        fi
 
-    PASSWORD_VAR="EXTENSION_${EXTENSION}_PASSWORD"
-    EXTENSION_PASSWORD="$(printenv "$PASSWORD_VAR" 2>/dev/null || true)"
-    if [ -z "$EXTENSION_PASSWORD" ]; then
-        echo "$PASSWORD_VAR must be set for bootstrap extension $EXTENSION" >&2
-        exit 1
-    fi
-
-    cat >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
+        cat >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
 
 [$EXTENSION]
 type=aor
@@ -119,11 +128,11 @@ force_rport=yes
 rewrite_contact=yes
 allow_subscribe=no
 EOF
-done
+    done
 
-# Bootstrap IPComms trunk. Database-managed provider configuration can replace
-# this object later through pjsip.dynamic.conf.
-cat >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
+    # Bootstrap IPComms trunk. Database-managed provider configuration replaces
+    # this object after the admin settings are synchronized.
+    cat >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
 
 [ipcomms]
 type=endpoint
@@ -148,17 +157,12 @@ qualify_frequency=30
 [ipcomms-identify]
 type=identify
 endpoint=ipcomms
+match=$IPCOMMS_ALLOWED_IPS
 EOF
-
-for IP in $(printf '%s' "$IPCOMMS_ALLOWED_IPS" | tr ',' ' '); do
-    case "$IP" in
-        ''|*[!0-9./:]*)
-            echo "Invalid IP/CIDR in IPCOMMS_ALLOWED_IPS: $IP" >&2
-            exit 1
-            ;;
-    esac
-    printf 'match=%s\n' "$IP" >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf"
-done
+else
+    # Keep the file valid but empty when the database-managed config is active.
+    : > "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf"
+fi
 
 cat > "$ASTERISK_CONFIG_DIR/http.conf" <<EOF
 [general]
