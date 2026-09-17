@@ -22,8 +22,6 @@ DYNAMIC_DIR=/etc/asterisk/dynamic
 
 mkdir -p "$DYNAMIC_DIR" /var/run/asterisk /var/log/asterisk /var/spool/asterisk /var/lib/asterisk
 
-# Runtime-generated configuration is intentionally written before dropping
-# into the unprivileged Asterisk process.
 cat > "$ASTERISK_CONFIG_DIR/ari.conf" <<EOF
 [general]
 enabled = yes
@@ -120,14 +118,12 @@ bindaddr = 0.0.0.0
 bindport = 8088
 enable_static = no
 
-; WSS remains internal until a trusted certificate/reverse proxy is deployed.
 tlsenable = yes
 tlsbindaddr = 0.0.0.0:8089
 tlsprivatekey = /etc/asterisk/keys/asterisk.key
 tlscertfile = /etc/asterisk/keys/asterisk.crt
 EOF
 
-# Validate the complete generated configuration before starting Asterisk.
 asterisk -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf" -rx 'core show version' >/dev/null
 
 exec asterisk -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"
