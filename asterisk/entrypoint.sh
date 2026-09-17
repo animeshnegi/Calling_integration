@@ -45,7 +45,8 @@ cat > "$ASTERISK_CONFIG_DIR/ari.conf" <<EOF
 [general]
 enabled = yes
 pretty = no
-allowed_origins =
+; ARI is private to the telephony-internal Docker network.
+allowed_origins = http://asterisk:8088,https://asterisk:8089
 
 [$ARI_USER]
 type = user
@@ -58,8 +59,8 @@ cat > "$ASTERISK_CONFIG_DIR/manager.conf" <<EOF
 enabled = yes
 webenabled = no
 port = 5038
-# AMI is reachable only through the private telephony-internal Docker network;
-# the host port is not published by docker-compose.
+; AMI is reachable only through the private telephony-internal Docker network.
+; The host port is not published by docker-compose.
 bindaddr = 0.0.0.0
 
 [$AMI_USER]
