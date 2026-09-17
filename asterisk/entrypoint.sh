@@ -161,8 +161,17 @@ qualify_frequency=30
 [ipcomms-identify]
 type=identify
 endpoint=ipcomms
-match=$IPCOMMS_ALLOWED_IPS
 EOF
+
+    for IP in $(printf '%s' "$IPCOMMS_ALLOWED_IPS" | tr ',' ' '); do
+        case "$IP" in
+            ''|*[!0-9./:]*)
+                echo "Invalid IP/CIDR in IPCOMMS_ALLOWED_IPS: $IP" >&2
+                exit 1
+                ;;
+        esac
+        printf 'match=%s\n' "$IP" >> "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf"
+    done
 fi
 
 cat > "$ASTERISK_CONFIG_DIR/http.conf" <<EOF
