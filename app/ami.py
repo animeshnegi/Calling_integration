@@ -40,7 +40,12 @@ class AsteriskAMI:
         payload.append("")
         with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
             sock.settimeout(self.timeout)
-            self._read_message(sock)  # banner
+
+            # Asterisk's AMI banner is not a CRLF-terminated AMI message on all
+            # versions/configurations. Do not block waiting for a blank-line
+            # terminator before sending the Login action. If the banner is
+            # present, _read_message() below simply parses it together with the
+            # Login response.
             login = (
                 "Action: Login\r\n"
                 f"ActionID: {uuid.uuid4()}\r\n"
@@ -52,6 +57,7 @@ class AsteriskAMI:
             response = self._read_message(sock)
             if response.get("Response") != "Success":
                 raise AMIError("AMI authentication failed")
+
             sock.sendall("\r\n".join(payload).encode())
             response = self._read_message(sock)
             if response.get("Response") != "Success":
