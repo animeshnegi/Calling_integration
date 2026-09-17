@@ -124,6 +124,22 @@ tlsprivatekey = /etc/asterisk/keys/asterisk.key
 tlscertfile = /etc/asterisk/keys/asterisk.crt
 EOF
 
+# Generate a self-signed certificate only when one is not already persisted.
+# Browser WSS remains intentionally internal until a trusted certificate path
+# is deployed.
+KEY_DIR="$ASTERISK_CONFIG_DIR/keys"
+if [ ! -s "$KEY_DIR/asterisk.key" ] || [ ! -s "$KEY_DIR/asterisk.crt" ]; then
+    openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+        -keyout "$KEY_DIR/asterisk.key" \
+        -out "$KEY_DIR/asterisk.crt" \
+        -subj "/CN=$ASTERISK_EXTERNAL_ADDRESS" \
+        >/dev/null 2>&1
+    chown asterisk:asterisk "$KEY_DIR/asterisk.key" "$KEY_DIR/asterisk.crt"
+    chmod 0600 "$KEY_DIR/asterisk.key"
+    chmod 0644 "$KEY_DIR/asterisk.crt"
+fi
+
+# Validate the rendered configuration before starting the foreground daemon.
 asterisk -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf" -rx 'core show version' >/dev/null
 
 exec asterisk -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"
