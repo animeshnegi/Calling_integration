@@ -141,7 +141,5 @@ if [ ! -s "$KEY_DIR/asterisk.key" ] || [ ! -s "$KEY_DIR/asterisk.crt" ]; then
     chmod 0644 "$KEY_DIR/asterisk.crt"
 fi
 
-# Validate the rendered configuration before starting the foreground daemon.
-asterisk -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf" -rx 'core show version' >/dev/null
 
 exec asterisk -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"

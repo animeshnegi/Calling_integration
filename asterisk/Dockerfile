@@ -52,6 +52,12 @@ RUN apt-get update \
        libxml2 \
        libsqlite3-0 \
        libedit2 \
+       libspeex1 \
+       libspeexdsp1 \
+       libogg0 \
+       libvorbis0a \
+       libvorbisenc2 \
+       libvorbisfile3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY config/ /etc/asterisk/
