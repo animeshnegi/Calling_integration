@@ -17,6 +17,10 @@ services:
     networks:
       - crm-network
       - telephony-internal
+    # Expose the Flask admin/API only on the local host.
+    # Use a reverse proxy for remote access instead of publishing it publicly.
+    ports:
+      - "127.0.0.1:5000:5000"
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
