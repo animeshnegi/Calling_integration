@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
+import logging
 import threading
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -14,6 +18,7 @@ from .models import Call, CallStore
 
 
 ARI_READY_STALE_SECONDS = 30
+logger = logging.getLogger(__name__)
 
 
 def iso_now() -> str:
@@ -79,24 +84,82 @@ class TelephonyService:
             "max_duration": max_duration,
         }
 
+    @staticmethod
+    def _send_webhook(url: str, token: str, payload: dict[str, Any], delivery_id: str | None = None) -> tuple[bool, int | None, str | None]:
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        timestamp = str(int(time.time()))
+        delivery_id = delivery_id or str(uuid.uuid4())
+        headers = {
+            "Content-Type": "application/json", "User-Agent": "EngineerIP-Telephony/1.0",
+            "X-EngineerIP-Delivery": delivery_id, "X-EngineerIP-Timestamp": timestamp,
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            signature = hmac.new(token.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+            headers["X-EngineerIP-Signature"] = f"sha256={signature}"
+        try:
+            response = requests.post(url, data=body, headers=headers, timeout=5)
+            return response.ok, response.status_code, None if response.ok else f"HTTP {response.status_code}"
+        except requests.RequestException as exc:
+            return False, None, exc.__class__.__name__
+
+    def _webhook_endpoints(self, event: str) -> list[dict[str, Any]]:
+        endpoints = self.settings_store.list_webhooks(include_tokens=True) if self.settings_store else []
+        selected = []
+        for endpoint in endpoints:
+            subscribed = {item.strip() for item in endpoint["events"].split(",")}
+            if endpoint["active"] and ("*" in subscribed or event in subscribed):
+                selected.append(endpoint)
+        # Keep the environment webhook as a backwards-compatible bootstrap path.
+        if not endpoints and self.config.CRM_WEBHOOK_URL:
+            selected.append({"id": None, "url": self.config.CRM_WEBHOOK_URL, "token": self.config.CRM_WEBHOOK_TOKEN})
+        return selected
+
     def notify_crm(self, event: str, call: Call | None, extra: dict[str, Any] | None = None) -> None:
-        if call is None or not self.config.CRM_WEBHOOK_URL:
+        if call is None:
             return
         payload = {"event": event, "call": call.to_dict()}
         if extra:
             payload.update(extra)
-        headers = {"Content-Type": "application/json"}
-        if self.config.CRM_WEBHOOK_TOKEN:
-            headers["Authorization"] = f"Bearer {self.config.CRM_WEBHOOK_TOKEN}"
-        try:
-            requests.post(self.config.CRM_WEBHOOK_URL, json=payload, headers=headers, timeout=5)
-        except requests.RequestException:
-            pass
+        for endpoint in self._webhook_endpoints(event):
+            if endpoint.get("id") is not None and self.settings_store:
+                try:
+                    self.settings_store.enqueue_webhook(endpoint["id"], event, payload)
+                except Exception:
+                    # Webhook storage failure must not interrupt a live/paid call.
+                    logger.exception("Failed to enqueue webhook event %s", event)
+            else:
+                self._send_webhook(endpoint["url"], endpoint.get("token", ""), payload)
 
-    def start_outbound(self, *, phone: str, extension: str, contact_id=None, member_id=None, provider=None) -> Call:
+    def process_webhook_deliveries(self) -> int:
+        if not self.settings_store:
+            return 0
+        delivered = 0
+        for item in self.settings_store.pending_webhook_deliveries():
+            endpoint = item["endpoint"]
+            ok, _, error = self._send_webhook(endpoint["url"], endpoint.get("token", ""), item["payload"], item["id"])
+            self.settings_store.finish_webhook_delivery(item["id"], ok, error)
+            delivered += int(ok)
+        return delivered
+
+    def test_webhook(self, webhook_id: int) -> dict[str, Any]:
+        endpoints = self.settings_store.list_webhooks(include_tokens=True) if self.settings_store else []
+        endpoint = next((item for item in endpoints if item["id"] == webhook_id), None)
+        if not endpoint:
+            return {"ok": False, "error": "webhook not found"}
+        payload = {"event": "webhook.test", "sent_at": iso_now(), "source": "engineerip-telephony"}
+        ok, status, error = self._send_webhook(endpoint["url"], endpoint.get("token", ""), payload)
+        return {"ok": ok, "status_code": status, "error": error}
+
+    def start_outbound(self, *, phone: str, extension: str, contact_id=None, member_id=None, provider=None, caller_id_number=None) -> Call:
         if not self.ari_ready():
             raise RuntimeError("ARI event worker is not ready")
-        provider_endpoint, provider_name = self._provider_endpoint(provider)
+        source = self.settings_store.get_outbound_number(extension, caller_id_number) if self.settings_store else None
+        if self.settings_store and not source:
+            raise RuntimeError("No active callback number is assigned to this extension")
+        if source and provider and source["provider"] != provider:
+            raise RuntimeError("The selected callback number belongs to a different provider")
+        provider_endpoint, provider_name = self._provider_endpoint(source["provider"] if source else provider)
         call_id = str(uuid.uuid4())
         call = Call(
             call_id=call_id,
@@ -104,6 +167,7 @@ class TelephonyService:
             member_id=str(member_id) if member_id is not None else None,
             extension=str(extension),
             phone=phone,
+            caller_id_number=source["number"] if source else None,
             provider=provider_name,
             employee_channel_id=f"{call_id}-employee",
             status="initiated",
@@ -129,6 +193,36 @@ class TelephonyService:
             self.notify_crm("call.ringing", current)
         return self.store.get(call_id) or call
 
+    def start_inbound(self, channel: dict[str, Any], did: str, extension: str) -> Call | None:
+        if not self.settings_store or not any(row["extension"] == extension and row["active"] for row in self.settings_store.list_extensions()):
+            self.asterisk.hangup(str(channel.get("id") or ""))
+            return None
+        channel_id = str(channel.get("id") or "")
+        if not channel_id:
+            return None
+        existing = self.store.find_by_channel(channel_id)
+        if existing:
+            return existing
+        call_id = str(uuid.uuid4())
+        caller = str((channel.get("caller") or {}).get("number") or "unknown")[:32]
+        owned = next((row for row in self.settings_store.list_numbers() if row["inbound_extension"] == extension and did.lstrip("+") == row["number"].lstrip("+")), None)
+        call = Call(
+            call_id=call_id, contact_id=None, member_id=None, extension=extension, phone=caller,
+            caller_id_number=owned["number"] if owned else did, provider=owned["provider"] if owned else None,
+            direction="inbound", status="ringing", customer_channel_id=channel_id,
+            employee_channel_id=f"{call_id}-employee",
+        )
+        self.store.create(call)
+        self.notify_crm("call.started", call)
+        self.notify_crm("call.employee_ringing", call)
+        try:
+            self.asterisk.create_inbound_employee_leg(call_id, extension, channel_id)
+        except Exception:
+            self.asterisk.hangup(channel_id)
+            updated = self.store.update(call_id, status="failed", ended_at=iso_now())
+            self.notify_crm("call.failed", updated, {"reason": "inbound_extension_originate_failed"})
+        return self.store.get(call_id)
+
     def hangup(self, call_id: str) -> Call | None:
         call = self.store.get(call_id)
         if not call:
@@ -147,7 +241,9 @@ class TelephonyService:
             return
         self.notify_crm("call.customer_dialing", prepared)
         try:
-            self.asterisk.create_customer_leg(call.call_id, call.phone, endpoint, call.employee_channel_id or "")
+            self.asterisk.create_customer_leg(
+                call.call_id, call.phone, endpoint, call.employee_channel_id or "", call.caller_id_number
+            )
         except Exception:
             self.asterisk.hangup(call.employee_channel_id or "")
             updated = self.store.update(call.call_id, status="failed", ended_at=iso_now())
@@ -272,6 +368,11 @@ class TelephonyService:
         if not channel_id:
             return
         call = self.store.find_by_channel(channel_id)
+        if not call and event_type == "StasisStart":
+            args = event.get("args") or []
+            if len(args) >= 3 and args[0] == "inbound":
+                self.start_inbound(channel, str(args[1]), str(args[2]))
+            return
         if not call:
             return
 
@@ -289,7 +390,15 @@ class TelephonyService:
             current = self.store.get(call.call_id)
             if not current:
                 return
-            if channel_id == current.employee_channel_id and not current.customer_channel_id:
+            if channel_id == current.employee_channel_id and current.direction == "inbound":
+                updated = self.store.update(current.call_id, status="employee_answered")
+                self.notify_crm("call.employee_answered", updated)
+                self._start_bridge(updated)
+                updated = self.store.get(current.call_id)
+                if updated and updated.status != "failed" and not updated.answered:
+                    updated = self.store.update(updated.call_id, status="answered", answered=True, answered_at=iso_now())
+                    self.notify_crm("call.answered", updated)
+            elif channel_id == current.employee_channel_id and not current.customer_channel_id:
                 updated = self.store.update(current.call_id, status="employee_answered")
                 self.notify_crm("call.employee_answered", updated)
                 self._start_customer(updated)
@@ -302,6 +411,14 @@ class TelephonyService:
             return
 
         if event_type == "ChannelDestroyed":
+            if call.direction == "inbound" and channel_id == call.employee_channel_id and not call.answered and call.customer_channel_id:
+                self.notify_crm("call.voicemail", call, {"reason": "inbound_not_answered"})
+                try:
+                    self.asterisk.continue_in_dialplan(call.customer_channel_id, "voicemail-inbound", call.extension)
+                except Exception:
+                    self.asterisk.hangup(call.customer_channel_id)
+                self._finalize(call.call_id, "inbound_not_answered")
+                return
             other = call.customer_channel_id if channel_id == call.employee_channel_id else call.employee_channel_id
             if other:
                 self.asterisk.hangup(other)

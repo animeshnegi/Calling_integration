@@ -48,3 +48,7 @@ For production, add provider-specific normalization and fraud controls, includin
 ## FreePBX
 
 This repository uses **plain Asterisk configuration** rather than FreePBX so that the CRM integration owns the call-control contract. FreePBX can still be used as an administrative layer, but do not mix generated FreePBX configuration and hand-managed files in the same deployment without a clear ownership model.
+
+## Voicemail
+
+`voicemail.conf` includes the database-rendered `dynamic/voicemail.dynamic.conf`. Enabled extensions receive a mailbox in the `engineerip` context, unanswered direct/DID calls route to `VoiceMail`, and `*97` opens `VoiceMailMain` for the calling extension. PJSIP mailbox association enables message-waiting indication on compatible phones. See [VOICEMAIL.md](VOICEMAIL.md).

@@ -80,3 +80,46 @@ def test_recording_finished_event_is_correlated_without_channel(tmp_path: Path):
 
     service.handle_ari_event({"type": "RecordingFinished", "recording": {"name": f"call-{call.call_id}"}})
     assert store.get(call.call_id).recording_status == "finalized"
+
+
+def test_webhook_is_bearer_authenticated_and_hmac_signed(tmp_path, monkeypatch):
+    service, _, _ = make_service(tmp_path)
+    captured = {}
+
+    class Response:
+        ok = True
+        status_code = 200
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr("app.services.requests.post", fake_post)
+    ok, status, error = service._send_webhook("https://crm.example/events", "shared-secret", {"event": "call.test"})
+    assert ok is True and status == 200 and error is None
+    assert captured["headers"]["Authorization"] == "Bearer shared-secret"
+    assert captured["headers"]["X-EngineerIP-Signature"].startswith("sha256=")
+    assert captured["headers"]["X-EngineerIP-Timestamp"]
+    assert captured["headers"]["X-EngineerIP-Delivery"]
+
+
+def test_database_webhook_is_queued_and_retried_by_worker(tmp_path, monkeypatch):
+    from app.admin import SettingsStore
+
+    service, _, call_store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    settings.save_webhook({"name": "CRM", "url": "https://crm.example/events", "token": "hook-secret", "events": "*", "active": True})
+    service.settings_store = settings
+    from app.models import Call
+    call = Call(call_id="queued-call", contact_id=None, member_id=None, extension="101", phone="+13025551234")
+    call_store.create(call)
+    service.notify_crm("call.started", call)
+    assert settings.pending_webhook_deliveries()
+
+    class Response:
+        ok = True
+        status_code = 200
+
+    monkeypatch.setattr("app.services.requests.post", lambda *args, **kwargs: Response())
+    assert service.process_webhook_deliveries() >= 1
+    assert all(row["status"] == "delivered" for row in settings.list_webhook_deliveries())

@@ -1,14 +1,27 @@
+# Bound Docker logs prevent SIP noise, health checks, or application errors from
+# filling the VM disk. Limits apply per container and require container recreation.
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+    compress: "true"
+
 services:
   telephony-api:
+    image: engineerip/telephony-api:${IMAGE_TAG:-latest}
     build: .
     container_name: engineerip-telephony-api
     restart: unless-stopped
+    logging: *bounded-logging
     env_file: .env
     environment:
       SETTINGS_DB_PATH: /app/instance/settings.db
       CALLS_DB_PATH: /app/instance/calls.db
       ARI_READY_PATH: /app/instance/ari.ready
       ASTERISK_DYNAMIC_CONFIG_PATH: /app/asterisk-config/pjsip.dynamic.conf
+      VOICEMAIL_PATH: /app/voicemail
+      VOICEMAIL_CONTEXT: engineerip
     depends_on:
       asterisk:
         condition: service_healthy
@@ -24,6 +37,7 @@ services:
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
+      - asterisk_voicemail:/app/voicemail
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -33,9 +47,11 @@ services:
       - /tmp:rw,noexec,nosuid,size=32m
 
   telephony-ari:
+    image: engineerip/telephony-api:${IMAGE_TAG:-latest}
     build: .
     container_name: engineerip-telephony-ari
     restart: unless-stopped
+    logging: *bounded-logging
     env_file: .env
     environment:
       SETTINGS_DB_PATH: /app/instance/settings.db
@@ -51,6 +67,7 @@ services:
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
+      - asterisk_voicemail:/app/voicemail
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -61,9 +78,11 @@ services:
     command: ["python", "-m", "app.ari_worker"]
 
   asterisk:
+    image: engineerip/asterisk:${IMAGE_TAG:-latest}
     build: ./asterisk
     container_name: engineerip-asterisk
     restart: unless-stopped
+    logging: *bounded-logging
     env_file: .env
     environment:
       ARI_USER: ${ASTERISK_ARI_USER:?ASTERISK_ARI_USER must be set in .env}
@@ -77,6 +96,7 @@ services:
       - asterisk_lib:/var/lib/asterisk
       - asterisk_spool:/var/spool/asterisk
       - asterisk_recordings:/var/spool/asterisk/recording
+      - asterisk_voicemail:/var/spool/asterisk/voicemail
       - asterisk_keys:/etc/asterisk/keys
     networks:
       - telephony-internal
@@ -85,6 +105,11 @@ services:
       - "${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}:${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}/udp"
     security_opt:
       - no-new-privileges:true
+    # Asterisk file logs are intentionally ephemeral; durable operational logs
+    # are emitted to stderr/stdout and bounded by the Docker logging policy.
+    tmpfs:
+      - /var/log/asterisk:rw,noexec,nosuid,size=32m
+      - /var/run/asterisk:rw,noexec,nosuid,size=4m
     healthcheck:
       test: ["CMD-SHELL", "asterisk -rx 'core show version' >/dev/null 2>&1 && asterisk -rx 'pjsip show transports' 2>/dev/null | grep -q 'transport-udp'"]
       interval: 15s
@@ -104,6 +129,7 @@ volumes:
   telephony_data:
   asterisk_dynamic_config:
   asterisk_recordings:
+  asterisk_voicemail:
   asterisk_lib:
   asterisk_spool:
   asterisk_keys:

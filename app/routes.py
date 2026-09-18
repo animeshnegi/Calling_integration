@@ -6,7 +6,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
-from flask import jsonify, request, send_from_directory
+from flask import Response, g, jsonify, request, send_file, send_from_directory, stream_with_context
 
 from .config import Config
 
@@ -34,24 +34,35 @@ def _rate_limited(scope: str = "api", limit: int = MAX_REQUESTS_PER_WINDOW) -> b
     return False
 
 
-def require_token(fn: Callable):
-    @wraps(fn)
-    def wrapped(*args: Any, **kwargs: Any):
-        if _rate_limited():
-            return jsonify({"error": "rate limit exceeded"}), 429
-        # Use the config object injected into the application/service. This is
-        # essential for tests and for deployments that subclass Config.
-        from flask import current_app
-        service = current_app.extensions.get("telephony_service")
-        config = getattr(service, "config", Config)
-        expected = config.TELEPHONY_TOKEN
-        supplied = request.headers.get("Authorization", "")
-        prefix = "Bearer "
-        token = supplied[len(prefix):] if supplied.startswith(prefix) else ""
-        if not expected or not token or not secrets.compare_digest(token, expected):
-            return jsonify({"error": "unauthorized"}), 401
-        return fn(*args, **kwargs)
-    return wrapped
+def require_token(scope_or_fn=None):
+    """Authenticate a scoped database API key or the legacy environment master token."""
+    required_scope = scope_or_fn if isinstance(scope_or_fn, str) else None
+
+    def decorator(fn: Callable):
+        @wraps(fn)
+        def wrapped(*args: Any, **kwargs: Any):
+            if _rate_limited():
+                return jsonify({"error": "rate limit exceeded"}), 429
+            from flask import current_app
+            service = current_app.extensions.get("telephony_service")
+            config = getattr(service, "config", Config)
+            supplied = request.headers.get("Authorization", "")
+            token = supplied[7:] if supplied.startswith("Bearer ") else ""
+            if not token:
+                return jsonify({"error": "unauthorized"}), 401
+            if config.TELEPHONY_TOKEN and secrets.compare_digest(token, config.TELEPHONY_TOKEN):
+                g.api_client = "legacy-master"
+                return fn(*args, **kwargs)
+            identity = service.settings_store.authenticate_api_key(token, required_scope) if service.settings_store else None
+            if identity is False:
+                return jsonify({"error": "insufficient API key scope"}), 403
+            if not identity:
+                return jsonify({"error": "unauthorized"}), 401
+            g.api_client = f"key:{identity['id']}"
+            return fn(*args, **kwargs)
+        return wrapped
+
+    return decorator(scope_or_fn) if callable(scope_or_fn) else decorator
 
 
 def _configured_default_extension(service) -> str:
@@ -88,7 +99,14 @@ def register_routes(app, service):
                 contact_id=data.get("contact_id"),
                 member_id=data.get("member_id"),
                 provider=provider,
+                caller_id_number=str(data.get("caller_id_number") or "").strip() or None,
             )
+        except RuntimeError as exc:
+            message = str(exc)
+            if message.startswith(("No active callback number", "The selected callback number", "No active SIP provider")):
+                return None, (jsonify({"error": message}), 400)
+            app.logger.exception("Asterisk failed to start outbound call")
+            return None, (jsonify({"error": "telephony service unavailable"}), 502)
         except Exception:
             app.logger.exception("Asterisk failed to start outbound call")
             return None, (jsonify({"error": "telephony service unavailable"}), 502)
@@ -105,36 +123,69 @@ def register_routes(app, service):
             return jsonify({"ok": False, "error": "telephony service unavailable", "ari_ready": service.ari_ready()}), 503
 
     @app.get("/api/v1/extensions")
-    @require_token
+    @require_token("config:read")
     def list_extensions():
         if service.settings_store:
             rows = service.settings_store.list_extensions()
             return jsonify({"extensions": [row["extension"] for row in rows if row["active"]], "default_extension": _configured_default_extension(service)})
         return jsonify({"extensions": list(service.config.ASTERISK_EXTENSIONS), "default_extension": service.config.DEFAULT_EXTENSION})
 
+    @app.get("/api/v1/numbers")
+    @require_token("config:read")
+    def list_numbers():
+        extension = request.args.get("extension", "").strip()
+        rows = service.settings_store.list_numbers() if service.settings_store else []
+        if extension:
+            rows = [row for row in rows if row["inbound_extension"] == extension]
+        return jsonify({"numbers": rows})
+
     @app.get("/api/v1/providers")
-    @require_token
+    @require_token("config:read")
     def list_providers():
         rows = service.settings_store.list_providers() if service.settings_store else []
         return jsonify({"providers": rows})
 
     @app.get("/api/v1/calls")
-    @require_token
+    @require_token("calls:read")
     def list_calls():
-        return jsonify({"calls": [call.to_dict() for call in service.store.all()]})
+        try:
+            limit = min(100, max(1, int(request.args.get("limit", "50"))))
+            offset = max(0, int(request.args.get("offset", "0")))
+        except ValueError:
+            return jsonify({"error": "invalid pagination"}), 400
+        extension = request.args.get("extension", "").strip() or None
+        status = request.args.get("status", "").strip() or None
+        query = request.args.get("q", "").strip()[:100] or None
+        calls, total = service.store.search(extension=extension, status=status, query=query, limit=limit, offset=offset)
+        return jsonify({"calls": [call.to_dict() for call in calls], "total": total, "limit": limit, "offset": offset})
 
     @app.post("/api/v1/calls")
-    @require_token
+    @require_token("calls:write")
     def create_call():
         if _rate_limited("outbound", MAX_OUTBOUND_CALLS_PER_WINDOW):
             return jsonify({"error": "outbound call rate limit exceeded"}), 429
+        request_key = request.headers.get("Idempotency-Key", "").strip()
+        client = getattr(g, "api_client", "unknown")
+        if request_key and (len(request_key) < 8 or len(request_key) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]+", request_key)):
+            return jsonify({"error": "invalid Idempotency-Key"}), 400
+        if request_key:
+            claimed, prior_call_id = service.settings_store.claim_idempotency(client, request_key)
+            if not claimed:
+                prior = service.store.get(prior_call_id) if prior_call_id else None
+                if prior:
+                    return jsonify({"call": prior.to_dict(), "idempotent_replay": True}), 200
+                return jsonify({"error": "an identical call request is already in progress"}), 409
         call, error = build_call(request.get_json(silent=True))
         if error:
+            if request_key:
+                service.settings_store.finish_idempotency(client, request_key, None)
             return error
-        return jsonify({"call": call.to_dict()}), 201
+        if request_key:
+            service.settings_store.finish_idempotency(client, request_key, call.call_id)
+        return jsonify({"call": call.to_dict(), "idempotent_replay": False}), 201
 
     @app.post("/api/v1/browser/call")
-    @require_token
+    @require_token("calls:write")
     def browser_call():
         if not service.config.ENABLE_BROWSER_API:
             return jsonify({"error": "browser call API is disabled"}), 404
@@ -146,7 +197,7 @@ def register_routes(app, service):
         return jsonify({"call": call.to_dict()}), 201
 
     @app.get("/api/v1/calls/<call_id>")
-    @require_token
+    @require_token("calls:read")
     def get_call(call_id: str):
         if not CALL_ID_RE.fullmatch(call_id):
             return jsonify({"error": "call not found"}), 404
@@ -156,7 +207,7 @@ def register_routes(app, service):
         return jsonify({"call": call.to_dict()})
 
     @app.post("/api/v1/calls/<call_id>/hangup")
-    @require_token
+    @require_token("calls:write")
     def hangup_call(call_id: str):
         if not CALL_ID_RE.fullmatch(call_id):
             return jsonify({"error": "call not found"}), 404
@@ -165,8 +216,126 @@ def register_routes(app, service):
             return jsonify({"error": "call not found"}), 404
         return jsonify({"call": call.to_dict()})
 
+    @app.get("/api/v1/recordings")
+    @require_token("recordings:read")
+    def list_recordings():
+        calls = [call.to_dict() for call in service.store.all() if call.recording_name]
+        return jsonify({"recordings": calls})
+
+    @app.get("/api/v1/recordings/<call_id>/file")
+    @require_token("recordings:read")
+    def recording_file(call_id: str):
+        if not CALL_ID_RE.fullmatch(call_id):
+            return jsonify({"error": "recording not found"}), 404
+        call = service.store.get(call_id)
+        if not call or not call.recording_name or call.recording_status not in {"finalized", "available"}:
+            return jsonify({"error": "recording not found"}), 404
+        upstream = service.asterisk.open_stored_recording(call.recording_name, request.headers.get("Range"))
+        if upstream is None:
+            return jsonify({"error": "recording not found"}), 404
+
+        def body():
+            try:
+                yield from upstream.iter_content(64 * 1024)
+            finally:
+                upstream.close()
+
+        headers = {"Content-Disposition": f'inline; filename="{call.recording_name}.{call.recording_format or "wav"}"'}
+        for header in ("Content-Length", "Content-Range", "Accept-Ranges"):
+            if upstream.headers.get(header):
+                headers[header] = upstream.headers[header]
+        return Response(
+            stream_with_context(body()), status=upstream.status_code,
+            content_type=upstream.headers.get("Content-Type", "application/octet-stream"), headers=headers,
+            direct_passthrough=True,
+        )
+
+    @app.get("/api/v1/voicemail/mailboxes")
+    @require_token("voicemail:read")
+    def list_voicemail_mailboxes():
+        messages = app.extensions["voicemail_store"].list_messages()
+        counts: dict[str, dict[str, int]] = {}
+        for message in messages:
+            mailbox_counts = counts.setdefault(message["mailbox"], {"new": 0, "old": 0, "urgent": 0, "total": 0})
+            mailbox_counts["total"] += 1
+            mailbox_counts["new" if message["folder"] == "inbox" else message["folder"]] += 1
+        mailboxes = []
+        for extension in service.settings_store.list_extensions():
+            if not extension.get("voicemail_enabled"):
+                continue
+            mailboxes.append({
+                "extension": extension["extension"], "display_name": extension["display_name"],
+                "active": bool(extension["active"]), "counts": counts.get(extension["extension"], {"new": 0, "old": 0, "urgent": 0, "total": 0}),
+            })
+        return jsonify({"mailboxes": mailboxes})
+
+    @app.get("/api/v1/voicemails")
+    @require_token("voicemail:read")
+    def list_voicemails():
+        mailbox = request.args.get("extension", "").strip() or None
+        folder = request.args.get("folder", "").strip() or None
+        if mailbox and not any(row["extension"] == mailbox and row.get("voicemail_enabled") for row in service.settings_store.list_extensions()):
+            return jsonify({"error": "voicemail mailbox not found"}), 404
+        try:
+            messages = app.extensions["voicemail_store"].list_messages(mailbox, folder)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"voicemails": messages, "total": len(messages)})
+
+    @app.get("/api/v1/voicemails/<mailbox>/<folder>/<message>/file")
+    @require_token("voicemail:read")
+    def voicemail_file(mailbox: str, folder: str, message: str):
+        path = app.extensions["voicemail_store"].audio_path(mailbox, folder, message)
+        if not path:
+            return jsonify({"error": "voicemail not found"}), 404
+        return send_file(path, conditional=True, as_attachment=False, download_name=f"voicemail-{mailbox}-{message}{path.suffix}")
+
+    @app.post("/api/v1/voicemails/<mailbox>/<folder>/<message>/read")
+    @require_token("voicemail:write")
+    def voicemail_read(mailbox: str, folder: str, message: str):
+        if not app.extensions["voicemail_store"].mark_read(mailbox, folder, message):
+            return jsonify({"error": "new voicemail not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.delete("/api/v1/voicemails/<mailbox>/<folder>/<message>")
+    @require_token("voicemail:write")
+    def voicemail_delete(mailbox: str, folder: str, message: str):
+        if not app.extensions["voicemail_store"].delete(mailbox, folder, message):
+            return jsonify({"error": "voicemail not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.get("/api/v1/webhooks")
+    @require_token("webhooks:manage")
+    def list_webhooks():
+        return jsonify({"webhooks": service.settings_store.list_webhooks()})
+
+    @app.post("/api/v1/webhooks")
+    @require_token("webhooks:manage")
+    def save_webhook():
+        try:
+            webhook_id = service.settings_store.save_webhook(request.get_json(silent=True) or {})
+            return jsonify({"ok": True, "webhook_id": webhook_id}), 201
+        except (ValueError, TypeError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.delete("/api/v1/webhooks/<int:webhook_id>")
+    @require_token("webhooks:manage")
+    def delete_webhook(webhook_id: int):
+        try:
+            service.settings_store.delete_webhook(webhook_id)
+            return jsonify({"ok": True})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 404
+
+    @app.post("/api/v1/webhooks/<int:webhook_id>/test")
+    @require_token("webhooks:manage")
+    def test_webhook(webhook_id: int):
+        result = service.test_webhook(webhook_id)
+        status = 200 if result.get("ok") else (404 if result.get("error") == "webhook not found" else 502)
+        return jsonify(result), status
+
     @app.post("/api/v1/calls/<call_id>/disposition")
-    @require_token
+    @require_token("calls:write")
     def disposition(call_id: str):
         if not CALL_ID_RE.fullmatch(call_id):
             return jsonify({"error": "call not found"}), 404
@@ -184,8 +353,10 @@ def register_routes(app, service):
         return jsonify({"call": call.to_dict()})
 
     @app.post("/api/v1/webhooks/ari")
-    @require_token
+    @require_token("*")
     def ari_webhook():
+        if not service.config.ENABLE_ARI_WEBHOOK:
+            return jsonify({"error": "not found"}), 404
         event = request.get_json(silent=True) or {}
         if not isinstance(event, dict):
             return jsonify({"error": "JSON object required"}), 400

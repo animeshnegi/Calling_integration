@@ -72,7 +72,23 @@ class AsteriskClient:
         )
         return call_id
 
-    def create_customer_leg(self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str) -> str:
+    def create_inbound_employee_leg(self, call_id: str, extension: str, customer_channel_id: str) -> str:
+        employee_channel = f"{call_id}-employee"
+        self._request(
+            "POST", "/channels",
+            params={
+                "endpoint": f"PJSIP/{extension}", "app": self.app,
+                "appArgs": f"inbound_employee,{call_id}", "channelId": employee_channel,
+                "originator": customer_channel_id, "timeout": 30,
+            },
+            json={"variables": self._variables(call_id)},
+        )
+        return employee_channel
+
+    def create_customer_leg(
+        self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str,
+        caller_id_number: str | None = None,
+    ) -> str:
         customer_channel = f"{call_id}-customer"
         self._request(
             "POST",
@@ -83,6 +99,7 @@ class AsteriskClient:
                 "appArgs": f"customer,{call_id}",
                 "channelId": customer_channel,
                 "originator": employee_channel_id,
+                "callerId": caller_id_number or "",
                 "timeout": 60,
             },
         )
@@ -147,6 +164,20 @@ class AsteriskClient:
         except AsteriskError:
             return None
 
+    def open_stored_recording(self, name: str, byte_range: str | None = None):
+        """Open a stored recording through private ARI without mounting its volume."""
+        if not name or len(name) > 128 or any(char in name for char in "/\\\r\n"):
+            return None
+        headers = {"Range": byte_range} if byte_range and byte_range.startswith("bytes=") else {}
+        response = requests.get(
+            f"{self.base_url}/recordings/stored/{name}/file",
+            auth=(self.user, self.password), headers=headers, timeout=30, stream=True,
+        )
+        if response.status_code not in {200, 206}:
+            response.close()
+            return None
+        return response
+
     def list_stored_recordings(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/recordings/stored")
         return result if isinstance(result, list) else []
@@ -167,6 +198,9 @@ class AsteriskClient:
         retention is enforced by TelephonyService from persisted call ended_at timestamps.
         """
         return 0
+
+    def continue_in_dialplan(self, channel_id: str, context: str, extension: str) -> None:
+        self._request("POST", f"/channels/{channel_id}/continue", params={"context": context, "extension": extension, "priority": 1})
 
     def destroy_bridge(self, bridge_id: str) -> None:
         try:

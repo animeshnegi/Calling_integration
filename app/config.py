@@ -27,7 +27,10 @@ class Config:
     SIP_OUTBOUND_PREFIX = os.getenv("SIP_OUTBOUND_PREFIX", "")
     ENABLE_BROWSER_API = os.getenv("ENABLE_BROWSER_API", "false").lower() == "true"
     ENABLE_DIAGNOSTIC_UI = os.getenv("ENABLE_DIAGNOSTIC_UI", "false").lower() == "true"
+    ENABLE_ARI_WEBHOOK = os.getenv("ENABLE_ARI_WEBHOOK", "false").lower() == "true"
     RECORDING_VOLUME_PATH = os.getenv("RECORDING_VOLUME_PATH", "/recordings")
+    VOICEMAIL_PATH = os.getenv("VOICEMAIL_PATH", "/app/voicemail")
+    VOICEMAIL_CONTEXT = os.getenv("VOICEMAIL_CONTEXT", "engineerip")
     CALLS_DB_PATH = os.getenv("CALLS_DB_PATH", "/app/instance/calls.db")
     MAX_CONTENT_LENGTH = 64 * 1024
 

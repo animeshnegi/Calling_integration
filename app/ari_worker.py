@@ -49,8 +49,22 @@ def main() -> None:
 
     ari_event_loop(on_event, Config)
     last_cleanup = 0.0
+    last_voicemail_scan = 0.0
+    last_webhook_scan = 0.0
     while True:
         now = time.monotonic()
+        if now - last_webhook_scan >= 5:
+            try:
+                service.process_webhook_deliveries()
+            except Exception:
+                app.logger.exception("Webhook delivery processing failed")
+            last_webhook_scan = now
+        if now - last_voicemail_scan >= 30:
+            try:
+                app.extensions["voicemail_notifier"].process()
+            except Exception:
+                app.logger.exception("Voicemail email processing failed")
+            last_voicemail_scan = now
         if now - last_cleanup >= 3600:
             try:
                 service.cleanup_recordings()

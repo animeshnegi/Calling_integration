@@ -1,36 +1,130 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Telephony Administration</title>
-<style>
-body{font-family:system-ui,sans-serif;background:#f5f7fa;margin:0;color:#17202a}.top{background:#182230;color:#fff;padding:16px 28px;display:flex;align-items:center;gap:18px}.top strong{flex:1}.top button{margin:0}.shell{max-width:1200px;margin:25px auto;padding:0 18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:18px}.card{background:#fff;border:1px solid #e1e6ed;border-radius:12px;padding:20px;box-shadow:0 2px 8px #00000008}h2{margin:0 0 12px;font-size:20px}h3{font-size:15px;margin-top:22px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}label{display:block;font-size:13px;font-weight:650;margin:10px 0 5px}input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cbd3df;border-radius:7px}input[type=checkbox]{width:auto;margin-right:7px}button{padding:9px 13px;border:0;border-radius:7px;background:#182230;color:#fff;font-weight:650;cursor:pointer;margin-top:10px}.secondary{background:#667085}.danger{background:#a61b1b}.muted{color:#667085}.item{border-top:1px solid #eee;padding:12px 0}.item:first-child{border-top:0}.actions{display:flex;gap:7px;flex-wrap:wrap}.actions button{margin:6px 0 0}.pill{font-size:11px;padding:3px 7px;border-radius:10px;background:#eef2f6}.msg{position:fixed;right:20px;bottom:20px;background:#182230;color:white;padding:12px 16px;border-radius:8px;display:none;z-index:10}.full{grid-column:1/-1}small{display:block}
-</style></head>
-<body><header class="top"><strong>EngineerIP Telephony Administration</strong><span id="who"></span><button onclick="logout()">Logout</button></header>
-<main class="shell"><p class="muted">Extensions, DIDs, SIP providers and recording policy are stored in the telephony control database. SIP passwords are encrypted and never displayed.</p><div class="grid">
-<section class="card"><h2>Extensions</h2><div id="extensions"></div><h3>Add / update extension</h3><div class="row"><div><label>Extension</label><input id="ex" placeholder="102"></div><div><label>Employee / label</label><input id="exname"></div></div><div class="row"><div><label>SIP username</label><input id="exuser"></div><div><label>SIP password</label><input id="expass" type="password" autocomplete="new-password"><small class="muted">Leave blank when updating to keep the existing password.</small></div></div><label><input id="exwebrtc" type="checkbox">WebRTC enabled</label><label><input id="exrec" type="checkbox" checked>Record calls</label><label><input id="exactive" type="checkbox" checked>Active</label><div class="actions"><button onclick="saveExtension()">Save extension</button><button class="secondary" onclick="clearExtension()">Clear</button></div></section>
-<section class="card"><h2>Phone numbers / DIDs</h2><div id="numbers"></div><h3>Add / update number</h3><label>E.164 number</label><input id="num" placeholder="+13025551234"><label>Provider</label><input id="numprov" placeholder="IPComms"><label>Description</label><input id="numdesc"><label>Inbound extension</label><input id="numext" placeholder="101"><label><input id="numactive" type="checkbox" checked>Active</label><div class="actions"><button onclick="saveNumber()">Save number</button><button class="secondary" onclick="clearNumber()">Clear</button></div></section>
-<section class="card"><h2>SIP Providers</h2><div id="providers"></div><h3>Add / update provider</h3><label>Name</label><input id="pname" placeholder="IPComms"><div class="row"><div><label>SIP server</label><input id="pserver"></div><div><label>Port</label><input id="pport" value="5060"></div></div><div class="row"><div><label>Username</label><input id="puser"></div><div><label>Password</label><input id="ppass" type="password" autocomplete="new-password"></div></div><div class="row"><div><label>Transport</label><select id="ptransport"><option>udp</option><option>tcp</option></select></div><div><label>Codecs</label><input id="pcodecs" value="ulaw,alaw"></div></div><label>Allowed provider IPs/CIDRs (comma separated)</label><input id="pips" placeholder="203.0.113.10/32,203.0.113.11/32"><small class="muted">Required for inbound SIP. Only packets matching these networks can identify the provider.</small><label><input id="pactive" type="checkbox" checked>Active</label><button onclick="saveProvider()">Save provider</button></section>
-<section class="card"><h2>Call recording</h2><label><input id="recEnabled" type="checkbox">Recording enabled</label><label>Format</label><select id="recFormat"><option>wav</option><option>wav49</option><option>gsm</option><option>slin16</option></select><label>Retention (days)</label><input id="recRetention" type="number" min="1" max="3650" value="90"><label>Maximum recording duration (seconds, 0 = unlimited)</label><input id="recMaxDuration" type="number" min="0" max="86400" value="0"><label><input id="recAnnouncement" type="checkbox">Play recording announcement</label><label>Announcement media URI</label><input id="recAnnouncementMedia" placeholder="sound:your-recording-notice"><small class="muted">The sound must exist in Asterisk's sounds directory. Leave blank to disable playback.</small><label><input id="recBeep" type="checkbox">Beep when recording starts</label><button onclick="saveSettings()">Save recording settings</button></section>
-<section class="card"><h2>Security</h2><p class="muted">The bootstrap password from <code>.env</code> is used only to create the first admin account. The database password is used afterwards.</p><label>New admin password</label><input id="newpass" type="password" minlength="14" autocomplete="new-password"><button onclick="changePassword()">Change password</button></section>
-</div></main><div id="msg" class="msg"></div>
-<script>
-const $=id=>document.getElementById(id);let csrf='';const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));const msg=t=>{ $('msg').textContent=t;$('msg').style.display='block';setTimeout(()=>$('msg').style.display='none',2500)};
-async function api(path,opts={}){const headers={'Content-Type':'application/json',...(opts.headers||{})};if(csrf)headers['X-CSRF-Token']=csrf;const r=await fetch(path,{...opts,headers});if(r.status===401){location='/admin/login';throw Error('login required')}const d=await r.json();if(d.csrf_token)csrf=d.csrf_token;if(!r.ok)throw Error(d.error||'Request failed');return d}
-function clearExtension(){['ex','exname','exuser','expass'].forEach(id=>$(id).value='');$('exwebrtc').checked=false;$('exrec').checked=true;$('exactive').checked=true}
-function editExtension(x){$('ex').value=x.extension;$('exname').value=x.display_name||'';$('exuser').value=x.sip_username||'';$('expass').value='';$('exwebrtc').checked=!!x.webrtc_enabled;$('exrec').checked=!!x.recording_enabled;$('exactive').checked=!!x.active;window.scrollTo({top:0,behavior:'smooth'})}
-function editNumber(x){$('num').value=x.number;$('numprov').value=x.provider||'';$('numdesc').value=x.description||'';$('numext').value=x.inbound_extension||'';$('numactive').checked=!!x.active;window.scrollTo({top:0,behavior:'smooth'})}
-function clearNumber(){['num','numprov','numdesc','numext'].forEach(id=>$(id).value='');$('numactive').checked=true}
-function editProvider(x){$('pname').value=x.name;$('pserver').value=x.server;$('pport').value=x.port;$('puser').value=x.username||'';$('ppass').value='';$('ptransport').value=x.transport;$('pcodecs').value=x.codecs;$('pips').value=x.allowed_ips||'';$('pactive').checked=!!x.active;window.scrollTo({top:0,behavior:'smooth'})}
-async function load(){try{const d=await api('/admin/api/state');csrf=d.csrf_token||csrf;$('who').textContent=d.username+' · '+d.role;
-$('extensions').innerHTML=d.extensions.map(x=>`<div class=item><b>${esc(x.extension)}</b> ${esc(x.display_name)} <span class=pill>${x.active?'active':'disabled'}</span><br><span class=muted>SIP: ${esc(x.sip_username)} · WebRTC: ${x.webrtc_enabled?'yes':'no'} · Recording: ${x.recording_enabled?'yes':'no'}</span><div class=actions><button class=secondary onclick='editExtension(${JSON.stringify(x)})'>Edit</button><button class=danger onclick='deleteExtension(${JSON.stringify(x.extension)})'>Delete</button></div></div>`).join('')||'<p class=muted>No extensions.</p>';
-$('numbers').innerHTML=d.phone_numbers.map(x=>`<div class=item><b>${esc(x.number)}</b> <span class=pill>${x.active?'active':'disabled'}</span><br><span class=muted>${esc(x.provider)||'No provider'} · inbound → ${esc(x.inbound_extension)||'not set'}<br>${esc(x.description)}</span><div class=actions><button class=secondary onclick='editNumber(${JSON.stringify(x)})'>Edit</button><button class=danger onclick='deleteNumber(${JSON.stringify(x.number)})'>Delete</button></div></div>`).join('')||'<p class=muted>No numbers.</p>';
-$('providers').innerHTML=d.providers.map(x=>`<div class=item><b>${esc(x.name)}</b> <span class=pill>${x.active?'active':'disabled'}</span><br><span class=muted>${esc(x.server)}:${x.port} · ${esc(x.transport)} · ${esc(x.codecs)} · allowlist: ${esc(x.allowed_ips)}</span><div class=actions><button class=secondary onclick='editProvider(${JSON.stringify(x)})'>Edit</button></div></div>`).join('')||'<p class=muted>No providers.</p>';
-$('recEnabled').checked=d.settings.recording_enabled!=='false';$('recFormat').value=d.settings.recording_format||'wav';$('recRetention').value=d.settings.recording_retention_days||90;$('recMaxDuration').value=d.settings.recording_max_duration_seconds||0;$('recAnnouncement').checked=d.settings.recording_announcement==='true';$('recAnnouncementMedia').value=d.settings.recording_announcement_media||'';$('recBeep').checked=d.settings.recording_beep==='true';
-}catch(e){msg(e.message)}}
-async function saveExtension(){try{await api('/admin/api/extensions',{method:'POST',body:JSON.stringify({extension:$('ex').value,display_name:$('exname').value,sip_username:$('exuser').value,sip_password:$('expass').value,webrtc_enabled:$('exwebrtc').checked,recording_enabled:$('exrec').checked,active:$('exactive').checked})});msg('Extension saved');clearExtension();load()}catch(e){msg(e.message)}}
-async function deleteExtension(ext){if(!confirm('Delete extension '+ext+'? It cannot be deleted while an inbound DID uses it.'))return;try{await api('/admin/api/extensions/'+encodeURIComponent(ext),{method:'DELETE'});msg('Extension deleted');load()}catch(e){msg(e.message)}}
-async function saveNumber(){try{await api('/admin/api/numbers',{method:'POST',body:JSON.stringify({number:$('num').value,provider:$('numprov').value,description:$('numdesc').value,inbound_extension:$('numext').value,active:$('numactive').checked})});msg('Number saved');clearNumber();load()}catch(e){msg(e.message)}}
-async function deleteNumber(number){if(!confirm('Delete DID '+number+'?'))return;try{await api('/admin/api/numbers/'+encodeURIComponent(number),{method:'DELETE'});msg('Number deleted');load()}catch(e){msg(e.message)}}
-async function saveProvider(){try{await api('/admin/api/providers',{method:'POST',body:JSON.stringify({name:$('pname').value,server:$('pserver').value,port:$('pport').value,username:$('puser').value,password:$('ppass').value,transport:$('ptransport').value,codecs:$('pcodecs').value,allowed_ips:$('pips').value,active:$('pactive').checked})});msg('Provider saved');load()}catch(e){msg(e.message)}}
-async function saveSettings(){try{await api('/admin/api/settings',{method:'POST',body:JSON.stringify({recording_enabled:$('recEnabled').checked,recording_format:$('recFormat').value,recording_retention_days:$('recRetention').value,recording_max_duration_seconds:$('recMaxDuration').value,recording_announcement:$('recAnnouncement').checked,recording_announcement_media:$('recAnnouncementMedia').value,recording_beep:$('recBeep').checked})});msg('Recording settings saved')}catch(e){msg(e.message)}}
-async function changePassword(){try{await api('/admin/api/password',{method:'POST',body:JSON.stringify({password:$('newpass').value})});$('newpass').value='';msg('Password changed')}catch(e){msg(e.message)}}
-async function logout(){await api('/admin/logout',{method:'POST'});location='/admin/login'}load();
-</script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>EngineerIP Telephony Admin</title>
+  <link rel="stylesheet" href="/admin-assets/admin.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><span class="brand-mark">E</span><div><strong>EngineerIP</strong><small>Telephony control</small></div></div>
+    <nav id="nav">
+      <button class="nav-item active" data-page="dashboard"><span>⌂</span>Dashboard</button>
+      <p>TELEPHONY</p>
+      <button class="nav-item" data-page="extensions" data-admin-only><span>⌁</span>Extensions</button>
+      <button class="nav-item" data-page="numbers"><span>☎</span>Phone numbers</button>
+      <button class="nav-item" data-page="providers" data-admin-only><span>⇄</span>SIP providers</button>
+      <p>ACTIVITY</p>
+      <button class="nav-item" data-page="calls"><span>◷</span>Call history</button>
+      <button class="nav-item" data-page="recordings"><span>◉</span>Recordings</button>
+      <button class="nav-item" data-page="voicemails"><span>✉</span>Voicemails</button>
+      <button class="nav-item" data-page="webhooks" data-admin-only><span>◇</span>Webhooks</button>
+      <p>SYSTEM</p>
+      <button class="nav-item" data-page="users" data-admin-only><span>♙</span>Users</button>
+      <button class="nav-item" data-page="keys" data-admin-only><span>⌘</span>API keys</button>
+      <button class="nav-item" data-page="email" data-admin-only><span>✉</span>Email delivery</button>
+      <button class="nav-item" data-page="settings" data-admin-only><span>⚙</span>Call settings</button>
+      <button class="nav-item" data-page="security"><span>♢</span>Security</button>
+    </nav>
+    <div class="sidebar-user"><div class="avatar" id="avatar">A</div><div><strong id="who">Admin</strong><small id="role">Administrator</small></div><button title="Sign out" id="logout">↪</button></div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar"><button class="menu-button" id="menu">☰</button><div><h1 id="page-title">Dashboard</h1><p id="page-subtitle">Your telephony system at a glance</p></div><div class="health" id="health"><i></i><span>Checking system…</span></div></header>
+
+    <div class="content">
+      <section class="page active" id="page-dashboard">
+        <div class="stat-grid">
+          <article class="stat"><span class="stat-icon blue">☎</span><div><small>Total calls</small><strong id="stat-total">0</strong><em>All time</em></div></article>
+          <article class="stat"><span class="stat-icon green">✓</span><div><small>Answered</small><strong id="stat-answered">0</strong><em id="answer-rate">0% answer rate</em></div></article>
+          <article class="stat"><span class="stat-icon red">!</span><div><small>Failed</small><strong id="stat-failed">0</strong><em>Needs attention</em></div></article>
+          <article class="stat"><span class="stat-icon purple">◉</span><div><small>Recordings</small><strong id="stat-recordings">0</strong><em>Available to play</em></div></article>
+          <article class="stat"><span class="stat-icon blue">✉</span><div><small>New voicemail</small><strong id="stat-voicemails">0</strong><em>Waiting to be heard</em></div></article>
+        </div>
+        <div class="panel-grid dashboard-grid" data-admin-only>
+          <article class="panel"><div class="panel-head"><div><h2>Quick actions</h2><p>Common configuration tasks</p></div></div><div class="quick-grid">
+            <button data-go="extensions" data-new="extension"><b>＋</b><span>Add extension<small>Create a SIP account</small></span></button>
+            <button data-go="numbers" data-new="number"><b>＋</b><span>Add phone number<small>Route a DID inbound</small></span></button>
+            <button data-go="providers" data-new="provider"><b>＋</b><span>Add SIP provider<small>Connect your carrier</small></span></button>
+            <button data-go="webhooks" data-new="webhook"><b>＋</b><span>Add webhook<small>Connect your CRM</small></span></button>
+          </div></article>
+          <article class="panel"><div class="panel-head"><div><h2>System configuration</h2><p>Current active resources</p></div></div><div class="system-list"><div><span>Active extensions</span><strong id="dash-extensions">0</strong></div><div><span>Active phone numbers</span><strong id="dash-numbers">0</strong></div><div><span>SIP providers</span><strong id="dash-providers">0</strong></div><div><span>CRM webhooks</span><strong id="dash-webhooks">0</strong></div></div></article>
+        </div>
+        <article class="panel"><div class="panel-head"><div><h2>Recent calls</h2><p>Latest activity across all extensions</p></div><button class="button ghost" data-go="calls">View all</button></div><div id="recent-calls" class="table-wrap"></div></article>
+      </section>
+
+      <section class="page" id="page-extensions">
+        <div class="page-actions" data-admin-only><div class="search"><span>⌕</span><input id="extension-search" placeholder="Search extension or employee"></div><button class="button primary" data-open="extension">＋ Add extension</button></div>
+        <article class="panel"><div class="panel-head"><div><h2>Extensions</h2><p>SIP users, availability and per-extension recording policy</p></div><span class="count" id="extension-count">0 extensions</span></div><div id="extension-list" class="card-list"></div></article>
+      </section>
+
+      <section class="page" id="page-numbers">
+        <div class="page-actions" data-admin-only><div class="search"><span>⌕</span><input id="number-search" placeholder="Search number, provider or description"></div><button class="button primary" data-open="number">＋ Add phone number</button></div>
+        <article class="info-banner"><b>Number ownership</b><span>Assign each DID to one extension. Outbound calls present that number, and customer callbacks ring only its assigned employee—not every extension.</span></article>
+        <article class="panel"><div class="panel-head"><div><h2>Phone numbers & DIDs</h2><p>Manage inbound numbers and destinations</p></div><span class="count" id="number-count">0 numbers</span></div><div id="number-list" class="card-list"></div></article>
+      </section>
+
+      <section class="page" id="page-providers">
+        <div class="page-actions" data-admin-only><div></div><button class="button primary" data-open="provider">＋ Add SIP provider</button></div>
+        <article class="panel"><div class="panel-head"><div><h2>SIP providers</h2><p>Carrier registration, codecs and trusted inbound networks</p></div></div><div id="provider-list" class="card-list"></div></article>
+      </section>
+
+      <section class="page" id="page-calls">
+        <div class="page-actions"><div><span class="count">Outbound calls ring your extension first</span></div><button class="button primary" data-open="call">＋ New outbound call</button></div>
+        <div class="filterbar"><div class="search"><span>⌕</span><input id="call-search" placeholder="Search phone, call ID, contact or member"></div><select id="call-extension"><option value="">All extensions</option></select><select id="call-status"><option value="">All statuses</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="answered">Answered</option><option value="ringing">Ringing</option></select><button class="button ghost" id="refresh-calls">Refresh</button></div>
+        <article class="panel"><div class="panel-head"><div><h2>Call history</h2><p>Outbound lifecycle, CRM references and duration</p></div><span class="count" id="call-count">0 calls</span></div><div id="call-list" class="table-wrap"></div><div class="pager" id="call-pager"></div></article>
+      </section>
+
+      <section class="page" id="page-recordings">
+        <div class="filterbar"><div class="search"><span>⌕</span><input id="recording-search" placeholder="Search phone or call ID"></div><select id="recording-extension"><option value="">All extensions</option></select><button class="button ghost" id="refresh-recordings">Refresh</button></div>
+        <article class="panel"><div class="panel-head"><div><h2>Recordings by extension</h2><p>Secure playback grouped by employee extension</p></div><span class="count" id="recording-count">0 recordings</span></div><div id="recording-list" class="recording-groups"></div><div class="pager" id="recording-pager"></div></article>
+      </section>
+
+      <section class="page" id="page-voicemails">
+        <div class="filterbar"><div class="search"><span>⌕</span><input id="voicemail-search" placeholder="Search caller or message"></div><select id="voicemail-extension"><option value="">All mailboxes</option></select><select id="voicemail-folder"><option value="">All folders</option><option value="inbox">New</option><option value="old">Read</option><option value="urgent">Urgent</option></select><button class="button ghost" id="refresh-voicemails">Refresh</button></div>
+        <article class="panel"><div class="panel-head"><div><h2>Extension voicemails</h2><p>Listen, mark as read, and delete mailbox messages</p></div><span class="count" id="voicemail-count">0 messages</span></div><div id="voicemail-list" class="recording-groups"></div></article>
+      </section>
+
+      <section class="page" id="page-webhooks">
+        <div class="page-actions" data-admin-only><div></div><button class="button primary" data-open="webhook">＋ Add webhook</button></div>
+        <article class="panel"><div class="panel-head"><div><h2>CRM webhooks</h2><p>Send selected call events to your CRM or other services</p></div></div><div id="webhook-list" class="card-list"></div></article>
+        <article class="panel" style="margin-top:16px"><div class="panel-head"><div><h2>Recent webhook deliveries</h2><p>Persistent outbox attempts, success and terminal errors</p></div></div><div id="webhook-delivery-list" class="table-wrap"></div></article>
+      </section>
+
+      <section class="page" id="page-settings">
+        <form class="panel form-panel" id="settings-form"><div class="panel-head"><div><h2>Call routing</h2><p>Defaults used by API calls and unmatched inbound calls</p></div></div><div class="form-grid"><label>Default outbound extension<select id="default-extension"></select><small>Used when an API request omits extension.</small></label><label>Inbound fallback extension<select id="inbound-fallback"></select><small>Used when a DID has no valid destination.</small></label></div><hr><div class="panel-head"><div><h2>Recording policy</h2><p>Global controls; individual extensions can opt out</p></div></div><label class="switch-row"><span><b>Enable call recording</b><small>Record bridged calls when the extension also allows it.</small></span><input id="rec-enabled" type="checkbox"><i></i></label><div class="form-grid"><label>Audio format<select id="rec-format"><option value="wav">WAV — recommended</option><option value="wav49">WAV49</option><option value="gsm">GSM</option><option value="slin16">Signed linear 16 kHz</option></select></label><label>Retention days<input id="rec-retention" type="number" min="1" max="3650"></label><label>Maximum duration in seconds<input id="rec-max" type="number" min="0" max="86400"><small>Use 0 for unlimited.</small></label><label>Announcement media URI<input id="rec-media" placeholder="sound:your-recording-notice"></label></div><label class="switch-row"><span><b>Play recording announcement</b><small>Play the configured media when recording begins.</small></span><input id="rec-announcement" type="checkbox"><i></i></label><label class="switch-row"><span><b>Recording beep</b><small>Play an audible beep at recording start.</small></span><input id="rec-beep" type="checkbox"><i></i></label><div class="form-actions"><button class="button primary" type="submit">Save call settings</button></div></form>
+      </section>
+
+      <section class="page" id="page-users">
+        <div class="page-actions"><div></div><button class="button primary" data-open="user">＋ Add user</button></div>
+        <article class="panel"><div class="panel-head"><div><h2>Admin panel users</h2><p>Assign each user to an extension or grant full administrator access</p></div></div><div id="user-list" class="card-list"></div></article>
+      </section>
+
+      <section class="page" id="page-keys">
+        <div class="page-actions"><div></div><button class="button primary" data-open="apikey">＋ Create API key</button></div>
+        <article class="info-banner"><b>CRM authentication</b><span>Keys are shown once. Give each CRM its own least-privilege key and revoke it immediately if exposed.</span></article>
+        <article class="panel"><div class="panel-head"><div><h2>Integration API keys</h2><p>Hashed credentials and granular scopes</p></div></div><div id="api-key-list" class="card-list"></div></article>
+      </section>
+
+      <section class="page" id="page-email">
+        <form class="panel form-panel" id="email-form"><div class="panel-head"><div><h2>SendGrid voicemail delivery</h2><p>The API key is encrypted and can only be configured by an administrator</p></div></div><label class="switch-row"><span><b>Enable voicemail email</b><small>Send each new voicemail as an email attachment.</small></span><input id="email-enabled" type="checkbox"><i></i></label><div class="form-grid"><label>SendGrid API key<input id="sendgrid-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><small id="sendgrid-key-status">No key configured</small></label><label>Verified sender email<input id="sendgrid-from" type="email" placeholder="voicemail@example.com"></label><label>Sender name<input id="sendgrid-name" maxlength="120" placeholder="EngineerIP Voicemail"></label><label>Test recipient<input id="sendgrid-test" type="email" placeholder="admin@example.com"><button class="button ghost" type="button" id="test-email">Send test email</button></label></div><div class="form-actions"><button class="button primary" type="submit">Save email configuration</button></div></form>
+        <article class="panel" style="margin-top:16px"><div class="panel-head"><div><h2>Recent email deliveries</h2><p>Latest SendGrid attempts and errors</p></div></div><div id="email-delivery-list" class="table-wrap"></div></article>
+      </section>
+
+      <section class="page" id="page-security">
+        <form class="panel form-panel narrow" id="profile-email-form"><div class="panel-head"><div><h2>My voicemail email</h2><p>Messages for your assigned extension are sent here</p></div></div><label>Email address<input id="profile-email" type="email" placeholder="you@example.com"></label><div class="form-actions"><button class="button primary" type="submit">Save email address</button></div></form>
+
+        <form class="panel form-panel narrow" id="password-form"><div class="panel-head"><div><h2>Account password</h2><p>Use a unique password with at least 14 characters</p></div></div><label>New password<input id="new-password" type="password" minlength="14" maxlength="256" autocomplete="new-password" required></label><label>Confirm new password<input id="confirm-password" type="password" minlength="14" maxlength="256" autocomplete="new-password" required></label><div class="form-actions"><button class="button primary" type="submit">Change password</button></div></form>
+        <article class="security-note"><b>Security boundary</b><p>ARI and AMI remain private. Recordings stream through authenticated routes and SIP/webhook secrets are encrypted. Keep this panel behind HTTPS, VPN, or a trusted reverse proxy.</p></article>
+      </section>
+    </div>
+  </main>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="modal" id="modal" aria-hidden="true"><div class="modal-card"><header><div><h2 id="modal-title">Add item</h2><p id="modal-subtitle"></p></div><button class="icon-button" id="modal-close">×</button></header><form id="modal-form"><div id="modal-fields"></div><footer><button type="button" class="button ghost" id="modal-cancel">Cancel</button><button type="submit" class="button primary" id="modal-save">Save</button></footer></form></div></div>
+<div class="toast" id="toast"><span id="toast-icon">✓</span><span id="toast-text"></span></div>
+<script src="/admin-assets/admin.js" defer></script>
+</body>
+</html>

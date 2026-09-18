@@ -8,7 +8,8 @@ RUN groupadd --system appuser \
     && groupadd --gid 2000 telephony \
     && useradd --system --gid appuser --groups telephony --create-home appuser \
     && install -d -o appuser -g appuser -m 0750 /app/instance \
-    && install -d -o appuser -g telephony -m 0770 /app/asterisk-config
+    && install -d -o appuser -g telephony -m 0770 /app/asterisk-config \
+    && install -d -o appuser -g telephony -m 0770 /app/voicemail
 
 WORKDIR /app
 COPY requirements.txt .

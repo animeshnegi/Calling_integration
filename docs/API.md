@@ -10,7 +10,9 @@ All `/api/v1/*` endpoints require:
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
-Production requires a random `TELEPHONY_TOKEN` of at least 32 characters. Authentication uses constant-time token comparison. Never put the master token, ARI password, SIP passwords, or provider credentials in browser JavaScript.
+Production retains `TELEPHONY_TOKEN` as an emergency/legacy master credential. Normal CRM integrations should create a separate `eip_...` key in **Admin > API keys** with least-privilege scopes. API keys are generated with cryptographic randomness, displayed once, stored only as SHA-256 hashes, track last use, and can be revoked. Invalid credentials return 401 and insufficient scopes return 403. Never put any API key, master token, ARI password, SIP password, or provider credential in browser JavaScript.
+
+Available scopes are `calls:read`, `calls:write`, `config:read`, `recordings:read`, `voicemail:read`, `voicemail:write`, and `webhooks:manage`; `*` is full access.
 
 The API has a lightweight per-client request limit and a separate outbound-call limit to reduce abuse and toll-fraud risk. A production reverse proxy/API gateway should enforce equivalent limits across multiple replicas.
 
@@ -31,22 +33,36 @@ Authorization: Bearer <TELEPHONY_TOKEN>
 
 Returns the configured active extension numbers and default extension. SIP passwords are never returned.
 
+## Phone numbers and ownership
+
+```http
+GET /api/v1/numbers
+GET /api/v1/numbers?extension=101
+Authorization: Bearer <TELEPHONY_TOKEN>
+```
+
+Returns configured DIDs with provider, owning `inbound_extension`, active state and `default_outbound`. Use this before presenting caller-ID choices in a CRM. It never returns provider credentials.
+
 ## Start outbound call
 
 ```http
 POST /api/v1/calls
 Content-Type: application/json
-Authorization: Bearer <TELEPHONY_TOKEN>
+Authorization: Bearer <CRM_API_KEY>
+Idempotency-Key: <unique CRM request UUID>
 
 {
   "contact_id": "582",
   "member_id": "37",
   "extension": "102",
-  "phone": "+16235551234"
+  "phone": "+16235551234",
+  "caller_id_number": "+13025550102"
 }
 ```
 
-`phone` must be E.164 format. `extension` must be a configured active three-digit extension. If omitted, the active configured default extension is used.
+`phone` must be E.164 format. `extension` must be a configured active three-digit extension. If omitted, the active configured default extension is used. `caller_id_number` is optional, but when supplied it must be an active DID assigned to that extension. Otherwise the extension's default/first assigned active number is used. Calls are rejected when the extension has no assigned callback number. See [`NUMBER_OWNERSHIP.md`](NUMBER_OWNERSHIP.md).
+
+Send a unique `Idempotency-Key` (8–128 safe characters) for every user click/CRM job. The key is scoped to the API client for 24 hours. A successful replay returns HTTP 200 with the original call and `idempotent_replay: true`; a concurrent in-progress duplicate returns 409. This prevents network retries from originating duplicate paid calls.
 
 The production call lifecycle is employee-first:
 
@@ -85,7 +101,7 @@ Authorization: Bearer <TELEPHONY_TOKEN>
 Content-Type: application/json
 ```
 
-This endpoint is for controlled integration/testing. The built-in ARI WebSocket listener is the normal event consumer.
+This endpoint is disabled by default (`ENABLE_ARI_WEBHOOK=false`) and requires full access when deliberately enabled for isolated testing. Keep it disabled in production. The private ARI WebSocket worker is the normal event consumer.
 
 ## Security limits
 
@@ -105,7 +121,8 @@ This endpoint is for controlled integration/testing. The built-in ARI WebSocket 
 Typical responses:
 
 - `400` — invalid JSON, phone, extension, or disposition data.
-- `401` — missing or invalid Bearer token.
+- `401` — missing, invalid, expired/revoked Bearer credential.
+- `403` — authenticated API key lacks the endpoint scope.
 - `404` — call not found or disabled endpoint.
 - `429` — API or outbound-call rate limit exceeded.
 - `502` — Asterisk unavailable while starting a call.
@@ -136,3 +153,98 @@ call.disposition
 ```
 
 CRM handlers should treat `call_id` as the stable identifier and make webhook processing idempotent.
+
+## Recordings
+
+List calls that have recording metadata:
+
+```http
+GET /api/v1/recordings
+Authorization: Bearer <TELEPHONY_TOKEN>
+```
+
+Stream a finalized recording by its **call ID**:
+
+```http
+GET /api/v1/recordings/<call_id>/file
+Authorization: Bearer <TELEPHONY_TOKEN>
+Range: bytes=0-
+```
+
+The response uses `Content-Disposition: inline`. HTTP range requests are passed to private ARI so compatible clients can seek. A recording is available only after its status is `finalized`; deleted, failed, active, or unknown recordings return 404. Do not put the master bearer token in a public HTML audio element. CRM should authorize its user server-side and proxy this endpoint when browser playback is required.
+
+Example download:
+
+```bash
+curl --fail --location \
+  -H "Authorization: Bearer $TELEPHONY_TOKEN" \
+  -o call.wav \
+  "http://telephony-api:5000/api/v1/recordings/$CALL_ID/file"
+```
+
+## Webhook management
+
+Webhook responses never return the stored bearer token; `has_token` indicates whether one exists.
+
+```http
+GET /api/v1/webhooks
+Authorization: Bearer <TELEPHONY_TOKEN>
+```
+
+Create a webhook:
+
+```http
+POST /api/v1/webhooks
+Authorization: Bearer <TELEPHONY_TOKEN>
+Content-Type: application/json
+
+{
+  "name": "Production CRM",
+  "url": "https://crm.example.com/api/telephony/events",
+  "token": "a-long-random-shared-secret",
+  "events": "call.started,call.answered,call.completed,call.failed",
+  "active": true
+}
+```
+
+Use `"events": "*"` for all call events. To update, send the returned `webhook_id` as `id`. Leave `token` empty during an update to retain the existing encrypted token.
+
+Test delivery:
+
+```http
+POST /api/v1/webhooks/<webhook_id>/test
+Authorization: Bearer <TELEPHONY_TOKEN>
+```
+
+The receiver gets:
+
+```json
+{
+  "event": "webhook.test",
+  "sent_at": "2026-09-18T12:00:00+00:00",
+  "source": "engineerip-telephony"
+}
+```
+
+Delete:
+
+```http
+DELETE /api/v1/webhooks/<webhook_id>
+Authorization: Bearer <TELEPHONY_TOKEN>
+```
+
+Webhook configuration can also be managed in `/admin`. Database webhook tokens are encrypted using a key derived from `SECRET_KEY`. When one or more database webhooks exist they replace the legacy single `CRM_WEBHOOK_URL`; the environment URL remains a bootstrap fallback only while the database list is empty.
+
+## Voicemail API
+
+Extension mailbox messages can be listed, played, marked read, and deleted through bearer-authenticated endpoints:
+
+```text
+GET    /api/v1/voicemail/mailboxes
+GET    /api/v1/voicemails?extension=101&folder=inbox
+GET    /api/v1/voicemails/101/inbox/msg0000/file
+POST   /api/v1/voicemails/101/inbox/msg0000/read
+DELETE /api/v1/voicemails/101/old/msg0000
+```
+
+Valid folders are `inbox`, `old`, and `urgent`. Audio supports HTTP conditional/range delivery. Mailbox PINs are write-only admin values and are never included in responses. See [`VOICEMAIL.md`](VOICEMAIL.md) for call flow, response fields, storage, phone access, security, and troubleshooting.

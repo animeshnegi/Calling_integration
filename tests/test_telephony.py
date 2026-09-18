@@ -40,8 +40,8 @@ class FakeAsterisk:
         self.created_call_id = call_id
         return call_id
 
-    def create_customer_leg(self, call_id, phone, provider_endpoint, employee_channel_id):
-        self.customer_calls.append((call_id, phone, provider_endpoint, employee_channel_id))
+    def create_customer_leg(self, call_id, phone, provider_endpoint, employee_channel_id, caller_id_number=None):
+        self.customer_calls.append((call_id, phone, provider_endpoint, employee_channel_id, caller_id_number))
         return f"{call_id}-customer"
 
     def create_bridge(self, call_id):

@@ -1,5 +1,7 @@
 # Deployment Guide
 
+For building the images on a personal computer, exporting them, and importing them on a low-resource Google VM without rebuilding, follow [`OPERATIONS.md`](OPERATIONS.md) first. This guide covers telephony configuration and live verification.
+
 ## 1. Create/connect the private Docker network
 
 If EngineerIP already creates a Docker network named `crm-network`, use it. Otherwise create it once:
@@ -59,7 +61,7 @@ docker compose logs --tail=200 asterisk
 
 Static Asterisk configuration is part of the image. The dynamic PJSIP and dialplan files are stored in the shared `asterisk_dynamic_config` volume so the API/ARI worker can update Asterisk without rebuilding the image. `/etc/asterisk` itself is intentionally not a Docker volume, so a newly imported image cannot be masked by stale configuration.
 
-The Asterisk entrypoint validates required environment variables, creates required runtime directories, generates the bootstrap PJSIP transports/extensions/provider objects when the dynamic database configuration is empty, and then starts Asterisk in the foreground. Docker's healthcheck verifies that Asterisk is running and that `transport-udp` is loaded before dependent services start.
+The Asterisk entrypoint validates its runtime/ARI/AMI variables, creates required directories, and generates only the static PJSIP transports before starting Asterisk in the foreground. The ARI worker then bootstraps the administration database from optional environment credentials and renders extensions, providers, registrations, identify rules, and DID routing into the dynamic includes. Keeping SIP objects out of the static bootstrap file prevents duplicate PJSIP object errors after an admin reload. Docker's healthcheck verifies that Asterisk and `transport-udp` are ready before the worker synchronizes configuration.
 
 ## 5. Verify Asterisk
 

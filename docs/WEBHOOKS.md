@@ -1,6 +1,6 @@
 # Webhook/Event Contract
 
-Telephony emits normalized events to `CRM_WEBHOOK_URL` when configured. The `Authorization` header is `Bearer <CRM_WEBHOOK_TOKEN>`.
+Telephony emits normalized events to active database-managed webhook endpoints. Each endpoint has a URL, encrypted bearer token, active flag, and either `*` or a comma-separated event subscription. Manage these through `/admin` or the bearer-authenticated `/api/v1/webhooks` API. `CRM_WEBHOOK_URL` and `CRM_WEBHOOK_TOKEN` remain a first-run fallback only when no database webhook rows exist. The delivery `Authorization` header is `Bearer <endpoint token>`. The same secret signs the exact JSON body with HMAC-SHA256.
 
 ## Event names
 
@@ -17,6 +17,7 @@ The current service can emit:
 - `call.recording_failed`
 - `call.recording_announcement_failed`
 - `call.recording_deleted`
+- `call.voicemail` (inbound call handed to extension voicemail)
 - `call.completed`
 - `call.failed`
 - `call.hangup_requested`
@@ -33,6 +34,7 @@ The current service can emit:
     "member_id": "37",
     "extension": "103",
     "phone": "+16235551234",
+    "caller_id_number": "+13025550103",
     "provider": "IPComms",
     "direction": "outbound",
     "status": "answered",
@@ -54,6 +56,19 @@ The current service can emit:
 }
 ```
 
+## Authentication and signature verification
+
+Every delivery includes:
+
+```http
+Authorization: Bearer <webhook secret>
+X-EngineerIP-Delivery: <unique UUID>
+X-EngineerIP-Timestamp: <Unix seconds>
+X-EngineerIP-Signature: sha256=<hex HMAC>
+```
+
+Compute `HMAC-SHA256(secret, timestamp + "." + raw_request_body)` and compare it to the signature with a constant-time comparison. Reject timestamps older than five minutes, require HTTPS outside a private network, and store `X-EngineerIP-Delivery` as a unique idempotency key. Signature verification must use the raw body bytes before JSON parsing.
+
 ## CRM handler guidance
 
 1. Authenticate the bearer token.
@@ -66,11 +81,11 @@ The current service can emit:
 
 ## Failure behavior
 
-Webhook delivery is currently best-effort: the telephony service sends the event with a short HTTP timeout and logs the request failure without retrying it. If durable delivery/retry is required for production, the CRM integration should add an outbox/queue or the telephony service should persist outbound webhook attempts before claiming durable delivery.
+Database-managed lifecycle events are written to a persistent SQLite outbox before delivery. The dedicated worker sends queued events every few seconds, treats non-2xx responses as failures, and retries with backoff up to five attempts. Delivery ID remains stable across retries. The admin/API test endpoint is immediate and is not queued. The legacy environment-only webhook remains best-effort, so production should migrate it into the admin-managed webhook list. CRM handlers must remain idempotent.
 
 ## Incoming calls
 
-The current Asterisk dialplan routes inbound provider calls directly to the configured extension. The repository does **not yet implement an inbound CRM webhook lifecycle** equivalent to the outbound ARI flow. Therefore `CRM_INTEGRATION.md` should be treated as the intended future inbound mapping, not as an implemented guarantee.
+Configured DID routes enter the private ARI application. Telephony creates an inbound call record, emits `call.started` and `call.employee_ringing`, rings only the DID's owning extension, then emits answered/bridged/completed or failed events with `direction: inbound`. If the extension does not answer and voicemail is enabled, ARI returns the carrier channel to the private voicemail dialplan context. The generic unmatched `s` fallback remains a direct single-extension route and does not provide the full inbound CRM lifecycle; configure every production DID explicitly.
 
 ## Security
 
