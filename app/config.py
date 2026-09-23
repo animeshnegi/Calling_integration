@@ -27,12 +27,18 @@ class Config:
     SIP_OUTBOUND_PREFIX = os.getenv("SIP_OUTBOUND_PREFIX", "")
     ENABLE_BROWSER_API = os.getenv("ENABLE_BROWSER_API", "false").lower() == "true"
     ENABLE_DIAGNOSTIC_UI = os.getenv("ENABLE_DIAGNOSTIC_UI", "false").lower() == "true"
+    ENABLE_ARI_WEBHOOK = os.getenv("ENABLE_ARI_WEBHOOK", "false").lower() == "true"
     RECORDING_VOLUME_PATH = os.getenv("RECORDING_VOLUME_PATH", "/recordings")
+    VOICEMAIL_PATH = os.getenv("VOICEMAIL_PATH", "/app/voicemail")
+    VOICEMAIL_CONTEXT = os.getenv("VOICEMAIL_CONTEXT", "engineerip")
     CALLS_DB_PATH = os.getenv("CALLS_DB_PATH", "/app/instance/calls.db")
     MAX_CONTENT_LENGTH = 64 * 1024
 
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
     ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+    # MySQL is recommended in production. Tests and local development may leave
+    # this empty to use the legacy SQLite paths.
+    DATABASE_URI = os.getenv("DATABASE_URI", "").strip()
     SETTINGS_DB_PATH = os.getenv("SETTINGS_DB_PATH", "/app/instance/settings.db")
 
     @classmethod
@@ -43,10 +49,13 @@ class Config:
     def validate(cls) -> None:
         if cls.FLASK_ENV not in {"production", "development", "testing"}:
             raise RuntimeError("FLASK_ENV must be production, development, or testing")
+        if cls.DATABASE_URI and not cls.DATABASE_URI.startswith(("mysql://", "mysql+pymysql://", "sqlite:///")):
+            raise RuntimeError("DATABASE_URI must use mysql+pymysql:// (or sqlite:/// for local testing)")
         if cls.FLASK_ENV != "production":
             return
         required = {
             "SECRET_KEY": cls.SECRET_KEY,
+            "DATABASE_URI": cls.DATABASE_URI,
             "TELEPHONY_TOKEN": cls.TELEPHONY_TOKEN,
             "ASTERISK_ARI_USER": cls.ASTERISK_ARI_USER,
             "ASTERISK_ARI_PASSWORD": cls.ASTERISK_ARI_PASSWORD,

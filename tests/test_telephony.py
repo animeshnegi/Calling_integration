@@ -40,8 +40,8 @@ class FakeAsterisk:
         self.created_call_id = call_id
         return call_id
 
-    def create_customer_leg(self, call_id, phone, provider_endpoint, employee_channel_id):
-        self.customer_calls.append((call_id, phone, provider_endpoint, employee_channel_id))
+    def create_customer_leg(self, call_id, phone, provider_endpoint, employee_channel_id, caller_id_number=None):
+        self.customer_calls.append((call_id, phone, provider_endpoint, employee_channel_id, caller_id_number))
         return f"{call_id}-customer"
 
     def create_bridge(self, call_id):
@@ -129,7 +129,7 @@ def test_call_is_persisted_before_originate(tmp_path: Path):
     assert store.get(call.call_id).status == "ringing"
 
 
-def test_full_employee_customer_bridge_recording_lifecycle(tmp_path: Path):
+def test_full_employee_customer_bridge_lifecycle_defaults_to_no_recording(tmp_path: Path):
     ready = tmp_path / "ari.ready"
     ready.touch()
     db = tmp_path / "calls.db"
@@ -160,15 +160,8 @@ def test_full_employee_customer_bridge_recording_lifecycle(tmp_path: Path):
     updated = store.get(call.call_id)
     assert updated.answered is True
     assert updated.bridge_id == f"bridge-{call.call_id}"
-    assert updated.recording_status == "recording"
-
-    service.handle_ari_event({
-        "type": "RecordingFinished",
-        "recording": {"name": updated.recording_name},
-    })
-    updated = store.get(call.call_id)
-    assert updated.recording_status == "finalized"
-    assert updated.recording_path.endswith(".wav")
+    assert updated.recording_status is None
+    assert fake.recordings == []
 
     service.handle_ari_event({
         "type": "ChannelDestroyed",

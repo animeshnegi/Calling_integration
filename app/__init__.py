@@ -7,6 +7,8 @@ from .config import Config
 from .routes import register_routes
 from .services import TelephonyService
 from .telephony_config import TelephonyConfigSync
+from .voicemail import VoicemailStore
+from .voicemail_email import VoicemailEmailNotifier
 
 
 def create_app(config_class=Config, *, start_ari: bool = False, sync_config: bool = False):
@@ -31,6 +33,8 @@ def create_app(config_class=Config, *, start_ari: bool = False, sync_config: boo
     app.extensions["telephony_config_sync"] = TelephonyConfigSync(settings_store, ami, config_class.ASTERISK_DYNAMIC_CONFIG_PATH)
     service = TelephonyService(asterisk, config_class, settings_store=settings_store)
     app.extensions["telephony_service"] = service
+    app.extensions["voicemail_store"] = VoicemailStore(config_class.VOICEMAIL_PATH, config_class.VOICEMAIL_CONTEXT)
+    app.extensions["voicemail_notifier"] = VoicemailEmailNotifier(app.extensions["voicemail_store"], settings_store)
 
     if sync_config:
         try:

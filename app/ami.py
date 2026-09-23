@@ -69,3 +69,6 @@ class AsteriskAMI:
 
     def reload_dialplan(self) -> dict[str, str]:
         return self.action("Reload", Module="pbx_config.so")
+
+    def reload_voicemail(self) -> dict[str, str]:
+        return self.action("Reload", Module="app_voicemail.so")
