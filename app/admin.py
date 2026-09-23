@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
+import io
 import ipaddress
 import os
 import re
@@ -579,6 +581,10 @@ class SettingsStore:
             if not result.rowcount:
                 raise ValueError("Notification not found")
 
+    def mark_all_notifications_read(self, user_id: int):
+        with self._connect() as db:
+            db.execute("UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL", (int(user_id),))
+
     def create_request(self, user_id: int, request_type: str, details: str):
         if request_type not in {"number", "access", "routing", "billing"}:
             raise ValueError("Unsupported request type")
@@ -626,6 +632,18 @@ class SettingsStore:
         label = self._validate_config_value(data.get("label") or username, "SIP label", 120)
         server = self._validate_provider_server(data.get("server"))
         password = str(data.get("sip_password") or "")
+        phone_number = str(data.get("phone_number", "")).strip()
+        extension = str(data.get("extension", "")).strip()
+        transport = str(data.get("transport", "udp")).lower()
+        port = int(data.get("port", 5060))
+        if transport not in {"udp", "tcp", "tls"}:
+            raise ValueError("SIP transport must be UDP, TCP, or TLS")
+        if not 1 <= port <= 65535:
+            raise ValueError("SIP port must be between 1 and 65535")
+        if phone_number and not any(row["number"] == phone_number for row in self.list_numbers(owner_user_id)):
+            raise ValueError("SIP phone number is not assigned to this customer")
+        if extension and not any(row["extension"] == extension for row in self.list_extensions(owner_user_id)):
+            raise ValueError("SIP extension is not assigned to this customer")
         account_id = int(data["id"]) if str(data.get("id", "")).isdigit() else None
         with self._connect() as db:
             existing = db.execute("SELECT owner_user_id,sip_password_enc FROM customer_sip_accounts WHERE id=?", (account_id,)).fetchone() if account_id else None
@@ -634,7 +652,7 @@ class SettingsStore:
             encrypted = self.encrypt(password) if password else (existing["sip_password_enc"] if existing else "")
             if not encrypted:
                 raise ValueError("SIP password is required")
-            values = (label, username, encrypted, server, int(data.get("port", 5060)), str(data.get("transport", "udp")), str(data.get("phone_number", "")), str(data.get("extension", "")), int(bool(data.get("active", True))))
+            values = (label, username, encrypted, server, port, transport, phone_number, extension, int(bool(data.get("active", True))))
             if existing:
                 db.execute("UPDATE customer_sip_accounts SET label=?,sip_username=?,sip_password_enc=?,server=?,port=?,transport=?,phone_number=?,extension=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (*values, account_id))
                 return account_id
@@ -647,10 +665,12 @@ class SettingsStore:
                 raise ValueError("SIP account not found")
             db.commit()
 
-    def list_call_routes(self, owner_user_id: int):
+    def list_call_routes(self, owner_user_id: int | None = None):
         import json
         with self._connect() as db:
-            rows = db.execute("SELECT id,owner_user_id,phone_number,name,route_json,active,created_at,updated_at FROM call_routes WHERE owner_user_id=? ORDER BY name", (int(owner_user_id),)).fetchall()
+            where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
+            params = (int(owner_user_id),) if owner_user_id is not None else ()
+            rows = db.execute(f"SELECT id,owner_user_id,phone_number,name,route_json,active,created_at,updated_at FROM call_routes{where} ORDER BY name", params).fetchall()
         result = []
         for row in rows:
             item = dict(row); item["route"] = json.loads(item.pop("route_json")); result.append(item)
@@ -667,6 +687,30 @@ class SettingsStore:
         allowed_types = {"incoming", "simultaneous", "sequential", "ring_group", "business_hours", "after_hours", "extension", "voicemail", "forward"}
         if any(not isinstance(node, dict) or node.get("type") not in allowed_types for node in route["nodes"]):
             raise ValueError("Call route contains an unsupported node")
+        owned_extensions = {row["extension"] for row in self.list_extensions(int(owner_user_id))}
+        for node in route["nodes"]:
+            node_type = node["type"]
+            if node_type in {"simultaneous", "sequential", "ring_group"}:
+                destinations = node.get("extensions")
+                if not isinstance(destinations, list) or not destinations or any(str(ext) not in owned_extensions for ext in destinations):
+                    raise ValueError("Ring destinations must be extensions owned by this customer")
+                if not 5 <= int(node.get("timeout", 0)) <= 120:
+                    raise ValueError("Ring timeout must be between 5 and 120 seconds")
+            elif node_type == "extension" and str(node.get("extension", "")) not in owned_extensions:
+                raise ValueError("Route extension is not owned by this customer")
+            elif node_type == "voicemail" and str(node.get("mailbox", "")) not in owned_extensions:
+                raise ValueError("Voicemail mailbox is not owned by this customer")
+            elif node_type == "forward":
+                if not re.fullmatch(r"\+[1-9][0-9]{7,14}", str(node.get("phone", ""))):
+                    raise ValueError("Forwarding destination must use E.164 format")
+                if not 5 <= int(node.get("timeout", 0)) <= 120:
+                    raise ValueError("Forward timeout must be between 5 and 120 seconds")
+            elif node_type == "business_hours":
+                if not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", str(node.get("start", ""))) or not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", str(node.get("end", ""))):
+                    raise ValueError("Business hours must include valid opening and closing times")
+                days = node.get("days")
+                if not isinstance(days, list) or not days or any(int(day) not in range(1, 8) for day in days):
+                    raise ValueError("Business hours must include valid weekdays")
         payload = json.dumps(route, separators=(",", ":"))
         with self._connect() as db:
             existing = db.execute("SELECT id,owner_user_id FROM call_routes WHERE phone_number=?", (phone_number,)).fetchone()
@@ -1317,7 +1361,7 @@ def register_admin(app, config, on_telephony_change=None):
             "pending_request_count": sum(row["status"] == "pending" for row in store.list_requests(None if is_admin else user_id)),
             "activity": store.list_activity(None if is_admin else user_id),
             "notifications": store.list_notifications(user_id),
-            "call_routes": [] if is_admin else store.list_call_routes(user_id),
+            "call_routes": store.list_call_routes(None if is_admin else user_id),
             "api_keys": store.list_api_keys(owner_user_id=None if is_admin else user_id),
             "invoices": store.list_invoices(None if is_admin else user_id),
             "email_config": store.get_email_config() if is_admin else {},
@@ -1417,6 +1461,61 @@ def register_admin(app, config, on_telephony_change=None):
             query=query or None, limit=limit, offset=offset,
         )
         return jsonify({"calls": [call.to_dict() for call in calls], "total": total, "limit": limit, "offset": offset})
+
+    def visible_call_rows():
+        calls = current_app.extensions["telephony_service"].store.all()
+        if session.get("admin_role") == "admin":
+            return calls
+        owned = {row["extension"] for row in store.list_extensions(int(session["admin_user_id"]))}
+        return [call for call in calls if call.extension in owned]
+
+    @app.get("/admin/api/calls/export.csv")
+    @login_required
+    def export_calls_csv():
+        recordings_only = request.args.get("recordings", "false").lower() == "true"
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Call ID", "Started", "Direction", "Caller / destination", "Assigned number", "Extension", "Status", "Answered", "Duration seconds", "Provider", "Recording status"])
+        def csv_safe(value):
+            text = str(value or "")
+            return f"'{text}" if text.startswith(("=", "+", "-", "@")) else text
+        for call in visible_call_rows():
+            if recordings_only and not call.recording_name:
+                continue
+            writer.writerow([csv_safe(value) for value in [call.call_id, call.started_at, call.direction, call.phone, call.caller_id_number, call.extension, call.status, "yes" if call.answered else "no", call.duration_seconds or 0, call.provider or "", call.recording_status or ""]])
+        filename = "recordings.csv" if recordings_only else "call-history.csv"
+        return Response(output.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @app.get("/admin/api/analytics")
+    @login_required
+    def call_analytics():
+        calls = visible_call_rows()
+        cutoff = (date.today() - timedelta(days=13)).isoformat()
+        recent = [call for call in calls if str(call.started_at)[:10] >= cutoff]
+        answered = sum(bool(call.answered) for call in calls)
+        missed = sum(call.direction == "inbound" and not call.answered for call in calls)
+        completed_durations = [int(call.duration_seconds or 0) for call in calls if call.answered]
+        days = {(date.today() - timedelta(days=offset)).isoformat(): {"total": 0, "answered": 0} for offset in range(13, -1, -1)}
+        extensions = {}
+        for call in calls:
+            bucket = extensions.setdefault(call.extension, {"extension": call.extension, "total": 0, "answered": 0, "duration_seconds": 0})
+            bucket["total"] += 1
+            bucket["answered"] += int(bool(call.answered))
+            bucket["duration_seconds"] += int(call.duration_seconds or 0)
+        for call in recent:
+            key = str(call.started_at)[:10]
+            if key in days:
+                days[key]["total"] += 1
+                days[key]["answered"] += int(bool(call.answered))
+        return jsonify({
+            "total": len(calls), "answered": answered, "missed": missed,
+            "answer_rate": round(answered * 100 / len(calls), 1) if calls else 0,
+            "average_duration_seconds": round(sum(completed_durations) / len(completed_durations)) if completed_durations else 0,
+            "inbound": sum(call.direction == "inbound" for call in calls),
+            "outbound": sum(call.direction == "outbound" for call in calls),
+            "daily": [{"date": key, **value} for key, value in days.items()],
+            "extensions": sorted(extensions.values(), key=lambda row: row["total"], reverse=True)[:10],
+        })
 
     def mailbox_allowed(mailbox: str) -> bool:
         return session.get("admin_role") == "admin" or any(
@@ -1690,12 +1789,24 @@ def register_admin(app, config, on_telephony_change=None):
     def save_customer_call_route():
         try:
             data = request.get_json(silent=True) or {}
-            owner = int(data.get("owner_user_id")) if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            if session.get("admin_role") == "admin":
+                number = next((row for row in store.list_numbers() if row["number"] == str(data.get("phone_number", ""))), None)
+                if not number or not number.get("owner_user_id"):
+                    raise ValueError("Assign this number to a customer before configuring its call flow")
+                owner = int(number["owner_user_id"])
+            else:
+                owner = int(session["admin_user_id"])
             route_id = store.save_call_route(owner, data)
             store.add_activity(owner, int(session["admin_user_id"]), "route.saved", "call_route", route_id, f"Call flow for {data.get('phone_number')} updated")
             return jsonify({"ok": True, "route_id": route_id})
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
+
+    @app.post("/admin/api/notifications/read-all")
+    @login_required
+    def read_all_customer_notifications():
+        store.mark_all_notifications_read(int(session["admin_user_id"]))
+        return jsonify({"ok": True})
 
     @app.post("/admin/api/notifications/<int:notification_id>/read")
     @login_required

@@ -46,6 +46,10 @@
           <article class="stat"><span class="stat-icon purple">◉</span><div><small>Recordings</small><strong id="stat-recordings">0</strong><em>Available to play</em></div></article>
           <article class="stat"><span class="stat-icon blue">✉</span><div><small>New voicemail</small><strong id="stat-voicemails">0</strong><em>Waiting to be heard</em></div></article>
         </div>
+        <div class="analytics-grid">
+          <article class="panel analytics-card"><div class="panel-head"><div><h2>14-day call volume</h2><p>Answered calls compared with total attempts</p></div><span class="count" id="analytics-period">Last 14 days</span></div><div class="trend-chart" id="call-trend"><div class="skeleton"></div></div></article>
+          <article class="panel analytics-card"><div class="panel-head"><div><h2>Service performance</h2><p>Operational metrics across your environment</p></div></div><div class="metric-list"><div><span>Answer rate</span><strong id="metric-answer-rate">0%</strong></div><div><span>Missed inbound</span><strong id="metric-missed">0</strong></div><div><span>Average answered duration</span><strong id="metric-duration">0s</strong></div><div><span>Inbound / outbound</span><strong id="metric-direction">0 / 0</strong></div></div></article>
+        </div>
         <article class="onboarding panel" data-customer-only><div class="panel-head"><div><h2>Your setup journey</h2><p>Complete each step to launch your phone system.</p></div><button class="button primary" id="request-number">Request a number</button></div><div class="journey"><span class="done">✓ Signup</span><i></i><span>2 Request Number</span><i></i><span>3 Number Assigned</span><i></i><span>4 SIP Credentials</span><i></i><span>5 Extensions</span><i></i><span>6 Call Routing</span><i></i><span>7 APIs</span></div></article>
         <div class="panel-grid dashboard-grid" data-admin-only>
           <article class="panel"><div class="panel-head"><div><h2>Quick actions</h2><p>Common configuration tasks</p></div></div><div class="quick-grid">
@@ -65,7 +69,7 @@
       </section>
 
       <section class="page" id="page-numbers">
-        <div class="page-actions" data-admin-only><div class="search"><span>⌕</span><input id="number-search" placeholder="Search number, provider or description"></div><button class="button primary" data-open="number">＋ Add phone number</button></div>
+        <div class="page-actions"><div class="search"><span>⌕</span><input id="number-search" placeholder="Search number, owner or extension"></div><button class="button primary" data-open="number" data-admin-only>＋ Add phone number</button></div>
         <article class="info-banner"><b>Number ownership</b><span>Assign each DID to one extension. Outbound calls present that number, and customer callbacks ring only its assigned employee—not every extension.</span></article>
         <article class="panel"><div class="panel-head"><div><h2>Phone numbers & DIDs</h2><p>Manage inbound numbers and destinations</p></div><span class="count" id="number-count">0 numbers</span></div><div id="number-list" class="card-list"></div></article>
       </section>
@@ -76,13 +80,13 @@
       </section>
 
       <section class="page" id="page-calls">
-        <div class="page-actions"><div><span class="count">Outbound calls ring your extension first</span></div><button class="button primary" data-open="call">＋ New outbound call</button></div>
+        <div class="page-actions"><div><span class="count">Outbound calls ring your extension first</span></div><div class="action-cluster"><a class="button ghost" href="/admin/api/calls/export.csv" download>Export CSV</a><button class="button primary" data-open="call">＋ New outbound call</button></div></div>
         <div class="filterbar"><div class="search"><span>⌕</span><input id="call-search" placeholder="Search phone, call ID, contact or member"></div><select id="call-extension"><option value="">All extensions</option></select><select id="call-status"><option value="">All statuses</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="answered">Answered</option><option value="ringing">Ringing</option></select><button class="button ghost" id="refresh-calls">Refresh</button></div>
         <article class="panel"><div class="panel-head"><div><h2>Call history</h2><p>Outbound lifecycle, CRM references and duration</p></div><span class="count" id="call-count">0 calls</span></div><div id="call-list" class="table-wrap"></div><div class="pager" id="call-pager"></div></article>
       </section>
 
       <section class="page" id="page-recordings">
-        <div class="filterbar"><div class="search"><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div><select id="recording-customer" data-admin-only><option value="">All customers</option></select><select id="recording-extension"><option value="">All extensions</option></select><input id="recording-from" type="date" title="From date"><input id="recording-to" type="date" title="To date"><button class="button ghost" id="refresh-recordings">Refresh</button></div>
+        <div class="filterbar"><div class="search"><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div><select id="recording-customer" data-admin-only><option value="">All customers</option></select><select id="recording-extension"><option value="">All extensions</option></select><input id="recording-from" type="date" title="From date"><input id="recording-to" type="date" title="To date"><a class="button ghost" href="/admin/api/calls/export.csv?recordings=true" download>Export CSV</a><button class="button ghost" id="refresh-recordings">Refresh</button></div>
         <article class="panel"><div class="panel-head"><div><h2>Recordings by extension</h2><p>Secure playback grouped by employee extension</p></div><span class="count" id="recording-count">0 recordings</span></div><div id="recording-list" class="recording-groups"></div><div class="pager" id="recording-pager"></div></article>
       </section>
 
@@ -117,7 +121,7 @@
       </section>
 
       <section class="page" id="page-notifications">
-        <article class="panel"><div class="panel-head"><div><h2>Notifications</h2><p>Assignments, devices, missed calls, billing and integration alerts</p></div></div><div id="notification-list" class="card-list"></div></article>
+        <article class="panel"><div class="panel-head"><div><h2>Notifications</h2><p>Assignments, devices, missed calls, billing and integration alerts</p></div><button class="button ghost" id="read-all-notifications">Mark all read</button></div><div id="notification-list" class="card-list"></div></article>
       </section>
 
       <section class="page" id="page-settings">
@@ -125,7 +129,7 @@
       </section>
 
       <section class="page" id="page-users">
-        <div class="page-actions"><div></div><button class="button primary" data-open="user">＋ Add customer</button></div>
+        <div class="page-actions"><div class="search"><span>⌕</span><input id="customer-search" placeholder="Search company, contact, email or phone"></div><button class="button primary" data-open="user">＋ Add customer</button></div>
         <article class="panel"><div class="panel-head"><div><h2>Customer accounts</h2><p>Create customer login accounts, then assign numbers and SIP-backed extensions separately</p></div></div><div id="user-list" class="card-list"></div></article>
         <article class="panel" style="margin-top:16px"><div class="panel-head"><div><h2>Platform administrators</h2><p>Separate privileged accounts; customers are never given this role</p></div><button class="button ghost" data-open="platformadmin">＋ Add administrator</button></div><div id="platform-admin-list" class="card-list"></div></article>
       </section>
@@ -152,6 +156,8 @@
     </div>
   </main>
 </div>
+<div class="modal" id="flow-config-modal" aria-hidden="true"><div class="modal-card"><form id="flow-config-form"><div class="modal-head"><div><h2 id="flow-config-title">Configure routing node</h2><p>Set the destination and timing for this step.</p></div><button type="button" class="icon-button" id="flow-config-close">×</button></div><div class="modal-body" id="flow-config-fields"></div><div class="modal-actions"><button type="button" class="button ghost" id="flow-config-cancel">Cancel</button><button type="submit" class="button primary">Apply node</button></div></form></div></div>
+
 <aside class="detail-drawer" id="customer-drawer" aria-hidden="true"><header><div><small>CUSTOMER COMMAND CENTER</small><h2 id="customer-drawer-title">Customer</h2><p id="customer-drawer-meta"></p></div><button class="icon-button" id="customer-drawer-close">×</button></header><div class="drawer-metrics" id="customer-drawer-metrics"></div><nav class="drawer-tabs"><button class="active" data-customer-tab="access">Access</button><button data-customer-tab="numbers">Numbers</button><button data-customer-tab="sip">SIP</button><button data-customer-tab="extensions">Extensions</button><button data-customer-tab="recordings">Recordings</button><button data-customer-tab="payments">Payments</button><button data-customer-tab="activity">Activity</button></nav><div id="customer-drawer-content" class="drawer-content"></div></aside>
 <div class="scrim" id="scrim"></div>
 <div class="modal" id="modal" aria-hidden="true"><div class="modal-card"><header><div><h2 id="modal-title">Add item</h2><p id="modal-subtitle"></p></div><button class="icon-button" id="modal-close">×</button></header><form id="modal-form"><div id="modal-fields"></div><footer><button type="button" class="button ghost" id="modal-cancel">Cancel</button><button type="submit" class="button primary" id="modal-save">Save</button></footer></form></div></div>

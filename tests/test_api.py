@@ -412,11 +412,20 @@ def test_public_signup_and_customer_resources_are_tenant_isolated(tmp_path):
     assert credentials.json["sip_account"]["sip_password"] == "strong-sip-password"
     route = customer.post("/admin/api/call-routes", json={
         "phone_number": "+13025550201", "name": "Main", "route": {"nodes": [
-            {"type": "business_hours"}, {"type": "simultaneous"}, {"type": "extension", "extension": "201"}, {"type": "voicemail"}
+            {"type": "business_hours", "start": "09:00", "end": "17:00", "days": [1, 2, 3, 4, 5]},
+            {"type": "simultaneous", "extensions": ["201"], "timeout": 25},
+            {"type": "extension", "extension": "201"}, {"type": "voicemail", "mailbox": "201"}
         ]}, "active": True,
     }, headers={"X-CSRF-Token": state["csrf_token"]})
     assert route.status_code == 200
     assert customer.get("/admin/api/state").json["call_routes"][0]["route"]["nodes"][1]["type"] == "simultaneous"
+    assert admin.get("/admin/api/state").json["call_routes"][0]["owner_user_id"] == user["id"]
+    analytics = customer.get("/admin/api/analytics")
+    assert analytics.status_code == 200
+    assert {"answer_rate", "average_duration_seconds", "daily", "extensions"} <= set(analytics.json)
+    exported = customer.get("/admin/api/calls/export.csv")
+    assert exported.status_code == 200 and exported.mimetype == "text/csv"
+    assert "Call ID,Started,Direction" in exported.get_data(as_text=True)
 
     key_id = customer.get("/admin/api/state").json["api_keys"][0]["id"]
     assert customer.delete(f"/admin/api/api-keys/{key_id}", headers={"X-CSRF-Token": state["csrf_token"]}).status_code == 200
