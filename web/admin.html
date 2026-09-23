@@ -6,7 +6,7 @@
   <title>EIP Telephony Control</title>
   <link rel="stylesheet" href="/admin-assets/admin.css">
 </head>
-<body>
+<body class="theme-loading">
 <div class="app-shell">
   <aside class="sidebar" id="sidebar">
     <div class="brand"><span class="brand-mark">E</span><div><strong>EIP Telephony</strong><small>Control</small></div></div>
@@ -16,12 +16,12 @@
       <button class="nav-item" data-page="dashboard"><span>⌂</span>Overview</button>
       <button class="nav-item" data-page="numbers"><span>☎</span>Numbers</button>
       <button class="nav-item" data-page="sipaccounts"><span>◈</span>SIP Accounts</button>
-      <button class="nav-item" data-page="extensions"><span>⌁</span>Extensions</button>
-      <button class="nav-item" data-page="routing"><span>⌘</span>Call Routing</button>
-      <button class="nav-item" data-page="calls"><span>◷</span>Calls</button>
-      <button class="nav-item" data-page="recordings"><span>◉</span>Recordings</button>
+      <button class="nav-item" data-page="extensions" data-customer-only><span>⌁</span>Extensions</button>
+      <button class="nav-item" data-page="routing" data-customer-only><span>⌘</span>Call Routing</button>
+      <button class="nav-item" data-page="calls" data-customer-only><span>◷</span>Calls</button>
+      <button class="nav-item" data-page="recordings" data-customer-only><span>◉</span>Recordings</button>
       <button class="nav-item" data-page="billing"><span>▣</span>Payments</button>
-      <button class="nav-item" data-page="webhooks"><span>◇</span>APIs & Webhooks</button>
+      <button class="nav-item" data-page="webhooks" data-customer-only><span>◇</span>APIs & Webhooks</button>
       <p data-admin-only>PLATFORM</p>
       <button class="nav-item" data-page="requests" data-admin-only><span>↗</span>Pending Requests <b class="nav-badge" id="request-badge">0</b></button>
       <button class="nav-item" data-page="activity" data-admin-only><span>◌</span>Activity History</button>
@@ -39,28 +39,28 @@
 
     <div class="content">
       <section class="page active" id="page-dashboard">
-        <div class="stat-grid">
+        <div class="stat-grid" data-customer-only>
           <article class="stat"><span class="stat-icon blue">☎</span><div><small>Total calls</small><strong id="stat-total">0</strong><em>All time</em></div></article>
           <article class="stat"><span class="stat-icon green">✓</span><div><small>Answered</small><strong id="stat-answered">0</strong><em id="answer-rate">0% answer rate</em></div></article>
           <article class="stat"><span class="stat-icon red">!</span><div><small>Failed</small><strong id="stat-failed">0</strong><em>Needs attention</em></div></article>
           <article class="stat"><span class="stat-icon purple">◉</span><div><small>Recordings</small><strong id="stat-recordings">0</strong><em>Available to play</em></div></article>
           <article class="stat"><span class="stat-icon blue">✉</span><div><small>New voicemail</small><strong id="stat-voicemails">0</strong><em>Waiting to be heard</em></div></article>
         </div>
-        <div class="analytics-grid">
+        <div class="analytics-grid" data-customer-only>
           <article class="panel analytics-card"><div class="panel-head"><div><h2>14-day call volume</h2><p>Answered calls compared with total attempts</p></div><span class="count" id="analytics-period">Last 14 days</span></div><div class="trend-chart" id="call-trend"><div class="skeleton"></div></div></article>
           <article class="panel analytics-card"><div class="panel-head"><div><h2>Service performance</h2><p>Operational metrics across your environment</p></div></div><div class="metric-list"><div><span>Answer rate</span><strong id="metric-answer-rate">0%</strong></div><div><span>Missed inbound</span><strong id="metric-missed">0</strong></div><div><span>Average answered duration</span><strong id="metric-duration">0s</strong></div><div><span>Inbound / outbound</span><strong id="metric-direction">0 / 0</strong></div></div></article>
         </div>
         <article class="onboarding panel" data-customer-only><div class="panel-head"><div><h2>Your setup journey</h2><p>Complete each step to launch your phone system.</p></div><button class="button primary" id="request-number">Request a number</button></div><div class="journey"><span class="done">✓ Signup</span><i></i><span>2 Request Number</span><i></i><span>3 Number Assigned</span><i></i><span>4 SIP Credentials</span><i></i><span>5 Extensions</span><i></i><span>6 Call Routing</span><i></i><span>7 APIs</span></div></article>
         <div class="panel-grid dashboard-grid" data-admin-only>
           <article class="panel"><div class="panel-head"><div><h2>Quick actions</h2><p>Common configuration tasks</p></div></div><div class="quick-grid">
-            <button data-go="extensions" data-new="extension"><b>＋</b><span>Add extension<small>Create a SIP account</small></span></button>
-            <button data-go="numbers" data-new="number"><b>＋</b><span>Add phone number<small>Route a DID inbound</small></span></button>
+            <button data-go="users" data-new="user"><b>＋</b><span>Add customer<small>Create customer access</small></span></button>
+            <button data-go="numbers" data-new="number"><b>＋</b><span>Assign phone number<small>Provision a customer DID</small></span></button>
+            <button data-go="sipaccounts" data-new="sipaccount"><b>＋</b><span>Assign SIP account<small>Provision secure service</small></span></button>
             <button data-go="providers" data-new="provider"><b>＋</b><span>Add SIP provider<small>Connect your carrier</small></span></button>
-            <button data-go="webhooks" data-new="webhook"><b>＋</b><span>Add webhook<small>Connect your CRM</small></span></button>
           </div></article>
-          <article class="panel"><div class="panel-head"><div><h2>System configuration</h2><p>Current active resources</p></div></div><div class="system-list"><div><span>Active extensions</span><strong id="dash-extensions">0</strong></div><div><span>Active phone numbers</span><strong id="dash-numbers">0</strong></div><div><span>SIP providers</span><strong id="dash-providers">0</strong></div><div><span>CRM webhooks</span><strong id="dash-webhooks">0</strong></div></div></article>
+          <article class="panel"><div class="panel-head"><div><h2>System configuration</h2><p>Current active resources</p></div></div><div class="system-list"><div><span>Active customers</span><strong id="dash-customers">0</strong></div><div><span>Assigned phone numbers</span><strong id="dash-numbers">0</strong></div><div><span>Customer SIP accounts</span><strong id="dash-sipaccounts">0</strong></div><div><span>SIP providers</span><strong id="dash-providers">0</strong></div></div></article>
         </div>
-        <article class="panel"><div class="panel-head"><div><h2>Recent calls</h2><p>Latest activity across all extensions</p></div><button class="button ghost" data-go="calls">View all</button></div><div id="recent-calls" class="table-wrap"></div></article>
+        <article class="panel" data-customer-only><div class="panel-head"><div><h2>Recent calls</h2><p>Latest activity across all extensions</p></div><button class="button ghost" data-go="calls">View all</button></div><div id="recent-calls" class="table-wrap"></div></article>
       </section>
 
       <section class="page" id="page-extensions">
@@ -109,7 +109,7 @@
 
       <section class="page" id="page-routing">
         <article class="flow-toolbar panel"><div><h2>Visual Call Flow Builder</h2><p>Build the incoming journey, then save it to your assigned number.</p></div><div><select id="route-number"></select><button class="button primary" id="save-route">Save flow</button></div></article>
-        <div class="flow-layout"><aside class="panel flow-palette"><h3>Routing nodes</h3><button draggable="true" data-node-type="business_hours">◷ Business hours</button><button draggable="true" data-node-type="simultaneous">⇉ Simultaneous ring</button><button draggable="true" data-node-type="sequential">⇢ Sequential ring</button><button draggable="true" data-node-type="ring_group">◎ Ring group</button><button draggable="true" data-node-type="extension">⌁ Extension</button><button draggable="true" data-node-type="voicemail">✉ Voicemail</button><button draggable="true" data-node-type="forward">↗ Forward</button></aside><section class="panel flow-canvas" id="flow-canvas"><div class="flow-node incoming" data-fixed><i></i><b>Incoming call</b><small>Drop routing nodes below</small></div><div id="flow-nodes"></div></section></div>
+        <div class="flow-layout"><aside class="panel flow-palette"><div class="palette-title"><span>FLOW BLOCKS</span><h3>Build the caller journey</h3><p>Drag a block onto the canvas or click to add.</p></div><button draggable="true" data-node-type="business_hours"><b class="node-glyph hours">◷</b><span>Business hours<small>Open and closed schedules</small></span></button><button draggable="true" data-node-type="simultaneous"><b class="node-glyph ring">⇉</b><span>Simultaneous ring<small>Reach everyone at once</small></span></button><button draggable="true" data-node-type="sequential"><b class="node-glyph sequence">⇢</b><span>Sequential ring<small>Try agents in order</small></span></button><button draggable="true" data-node-type="ring_group"><b class="node-glyph group">◎</b><span>Ring group<small>Route to a department</small></span></button><button draggable="true" data-node-type="extension"><b class="node-glyph extension">⌁</b><span>Extension<small>Send to one teammate</small></span></button><button draggable="true" data-node-type="voicemail"><b class="node-glyph voicemail">✉</b><span>Voicemail<small>Capture unanswered calls</small></span></button><button draggable="true" data-node-type="forward"><b class="node-glyph forward">↗</b><span>Forward number<small>Route outside the system</small></span></button></aside><section class="panel flow-canvas" id="flow-canvas"><div class="canvas-orb orb-one"></div><div class="canvas-orb orb-two"></div><div class="canvas-status"><span><i></i> LIVE CALL PATH</span><small>Drag nodes to reorder · click to configure</small></div><div class="flow-node incoming configured" data-fixed><div class="flow-node-icon">☎</div><div><b>Incoming call</b><small id="flow-entry-number">Your assigned number</small></div><span class="node-step">START</span></div><div id="flow-nodes"></div><div class="flow-drop-hint"><b>＋</b><span>Drop the next routing block here</span></div></section></div>
       </section>
 
       <section class="page" id="page-requests">
@@ -158,7 +158,7 @@
 </div>
 <div class="modal" id="flow-config-modal" aria-hidden="true"><div class="modal-card"><form id="flow-config-form"><div class="modal-head"><div><h2 id="flow-config-title">Configure routing node</h2><p>Set the destination and timing for this step.</p></div><button type="button" class="icon-button" id="flow-config-close">×</button></div><div class="modal-body" id="flow-config-fields"></div><div class="modal-actions"><button type="button" class="button ghost" id="flow-config-cancel">Cancel</button><button type="submit" class="button primary">Apply node</button></div></form></div></div>
 
-<aside class="detail-drawer" id="customer-drawer" aria-hidden="true"><header><div><small>CUSTOMER COMMAND CENTER</small><h2 id="customer-drawer-title">Customer</h2><p id="customer-drawer-meta"></p></div><button class="icon-button" id="customer-drawer-close">×</button></header><div class="drawer-metrics" id="customer-drawer-metrics"></div><nav class="drawer-tabs"><button class="active" data-customer-tab="access">Access</button><button data-customer-tab="numbers">Numbers</button><button data-customer-tab="sip">SIP</button><button data-customer-tab="extensions">Extensions</button><button data-customer-tab="recordings">Recordings</button><button data-customer-tab="payments">Payments</button><button data-customer-tab="activity">Activity</button></nav><div id="customer-drawer-content" class="drawer-content"></div></aside>
+<aside class="detail-drawer" id="customer-drawer" aria-hidden="true"><header><div><small>CUSTOMER COMMAND CENTER</small><h2 id="customer-drawer-title">Customer</h2><p id="customer-drawer-meta"></p></div><button class="icon-button" id="customer-drawer-close">×</button></header><div class="drawer-metrics" id="customer-drawer-metrics"></div><nav class="drawer-tabs"><button class="active" data-customer-tab="access">Access</button><button data-customer-tab="numbers">Numbers</button><button data-customer-tab="sip">SIP</button><button data-customer-tab="payments">Payments</button><button data-customer-tab="activity">Activity</button></nav><div id="customer-drawer-content" class="drawer-content"></div></aside>
 <div class="scrim" id="scrim"></div>
 <div class="modal" id="modal" aria-hidden="true"><div class="modal-card"><header><div><h2 id="modal-title">Add item</h2><p id="modal-subtitle"></p></div><button class="icon-button" id="modal-close">×</button></header><form id="modal-form"><div id="modal-fields"></div><footer><button type="button" class="button ghost" id="modal-cancel">Cancel</button><button type="submit" class="button primary" id="modal-save">Save</button></footer></form></div></div>
 <div class="toast" id="toast"><span id="toast-icon">✓</span><span id="toast-text"></span></div>
