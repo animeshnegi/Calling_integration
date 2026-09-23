@@ -396,6 +396,12 @@ def test_public_signup_and_customer_resources_are_tenant_isolated(tmp_path):
         headers={"X-CSRF-Token": state["csrf_token"]},
     )
     assert request_result.status_code == 201
+    duplicate_request = customer.post(
+        "/admin/api/requests", json={"request_type": "number", "details": "A second pending request"},
+        headers={"X-CSRF-Token": state["csrf_token"]},
+    )
+    assert duplicate_request.status_code == 400
+    assert "pending number request" in duplicate_request.json["error"]
     admin = client.application.test_client()
     assert admin.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
     admin_state = admin.get("/admin/api/state").json

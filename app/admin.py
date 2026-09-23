@@ -592,6 +592,9 @@ class SettingsStore:
         if not details or len(details) > 2000:
             raise ValueError("Request details are required and must be under 2000 characters")
         with self._connect() as db:
+            pending = db.execute("SELECT id FROM customer_requests WHERE user_id=? AND request_type=? AND status='pending'", (int(user_id), request_type)).fetchone()
+            if pending:
+                raise ValueError(f"A pending {request_type} request already exists")
             request_id = db.execute("INSERT INTO customer_requests(user_id,request_type,details) VALUES(?,?,?)", (int(user_id), request_type, details)).lastrowid
         self.add_activity(user_id, user_id, "request.created", "request", request_id, f"{request_type.title()} request submitted")
         return request_id
