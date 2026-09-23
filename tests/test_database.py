@@ -16,6 +16,7 @@ def test_mysql_schema_compiles_all_application_tables():
         "admin_users", "settings", "extensions", "phone_numbers", "sip_providers",
         "webhook_endpoints", "webhook_deliveries", "api_keys", "api_idempotency",
         "email_config", "voicemail_deliveries", "billing_invoices", "calls",
+        "customer_requests", "customer_sip_accounts", "call_routes", "activity_history", "notifications",
     }
     assert expected <= set(metadata.tables)
     rendered = "\n".join(statements)

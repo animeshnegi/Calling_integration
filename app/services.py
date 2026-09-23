@@ -141,6 +141,11 @@ class TelephonyService:
             endpoint = item["endpoint"]
             ok, _, error = self._send_webhook(endpoint["url"], endpoint.get("token", ""), item["payload"], item["id"])
             self.settings_store.finish_webhook_delivery(item["id"], ok, error)
+            if not ok and endpoint.get("owner_user_id") and hasattr(self.settings_store, "add_notification"):
+                self.settings_store.add_notification(
+                    int(endpoint["owner_user_id"]), "webhook_failure", "Webhook delivery failed",
+                    f"{endpoint.get('name') or 'Webhook'} could not be delivered. Automatic retries are scheduled.",
+                )
             delivered += int(ok)
         return delivered
 
@@ -309,6 +314,13 @@ class TelephonyService:
                 self.notify_crm("call.completed", updated, {"reason": reason})
             else:
                 self.notify_crm("call.failed", updated, {"reason": "call_ended_before_answer" if reason == "channel_destroyed" else reason})
+                if call.direction == "inbound" and self.settings_store and hasattr(self.settings_store, "add_notification"):
+                    number = next((row for row in self.settings_store.list_numbers() if row["number"] == call.caller_id_number), None)
+                    if number and number.get("owner_user_id"):
+                        self.settings_store.add_notification(
+                            int(number["owner_user_id"]), "missed_call", "Missed call",
+                            f"Missed inbound call from {call.phone} to {call.caller_id_number}.",
+                        )
         finally:
             with self._finalize_lock:
                 self._finalizing.discard(call_id)

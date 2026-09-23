@@ -81,22 +81,47 @@ class TelephonyConfigSync:
             "; This file contains SIP credentials and is shared only on the internal Docker network.",
             "",
         ]
+        # A customer SIP account linked to an extension becomes that extension's
+        # live PJSIP credential, so credentials shown in the portal really ring.
+        sip_accounts = [row for row in self.store.list_sip_accounts(include_password=True) if row["active"]]
+        sip_by_extension = {str(row["extension"]): row for row in sip_accounts if row.get("extension")}
+        configured_extensions: set[str] = set()
         for ext in self.store.list_extensions():
             if not ext["active"]:
                 continue
             extension = self._clean(ext["extension"])
-            username = self._clean(ext["sip_username"])
-            password = self._clean(self.store.get_extension_password(extension))
+            linked = sip_by_extension.get(extension)
+            username = self._clean(linked["sip_username"] if linked else ext["sip_username"])
+            password = self._clean(linked["sip_password"] if linked else self.store.get_extension_password(extension))
+            transport = self._transport(linked["transport"] if linked else "udp")
+            configured_extensions.add(extension)
             lines.extend([
                 f"; Extension {extension}",
                 f"[{extension}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
                 f"[auth-{extension}]", "type=auth", "auth_type=userpass",
                 f"username={username}", f"password={password}", "supported_algorithms_uas=SHA-256,MD5", "",
                 f"[{extension}]", "type=endpoint", f"aors={extension}", f"auth=auth-{extension}",
-                "context=from-internal", "disallow=all", "allow=ulaw,alaw", "transport=transport-udp",
+                "context=from-internal", "disallow=all", "allow=ulaw,alaw", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
                 f"allow_subscribe={'yes' if ext.get('voicemail_enabled') else 'no'}",
                 *([f"mailboxes={extension}@engineerip"] if ext.get("voicemail_enabled") else []), "",
+            ])
+
+        for account in sip_accounts:
+            extension = self._clean(str(account.get("extension") or ""))
+            if extension in configured_extensions:
+                continue
+            endpoint = self._id("device", str(account["sip_username"]))
+            username = self._clean(account["sip_username"])
+            password = self._clean(account["sip_password"])
+            transport = self._transport(account["transport"])
+            lines.extend([
+                f"; Customer device {username}",
+                f"[{endpoint}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                f"[auth-{endpoint}]", "type=auth", "auth_type=userpass", f"username={username}", f"password={password}", "",
+                f"[{endpoint}]", "type=endpoint", f"aors={endpoint}", f"auth=auth-{endpoint}",
+                "context=from-internal", "disallow=all", "allow=ulaw,alaw", f"transport=transport-{transport}",
+                "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes", "",
             ])
 
         for provider in self.store.list_provider_details():

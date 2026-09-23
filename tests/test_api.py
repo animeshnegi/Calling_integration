@@ -336,6 +336,7 @@ def test_call_creation_idempotency_prevents_duplicate_originate(tmp_path):
 def test_public_signup_and_customer_resources_are_tenant_isolated(tmp_path):
     client = app_client(tmp_path)
     created = client.post("/signup", json={
+        "full_name": "Customer One", "company_name": "One Company", "job_role": "Owner", "phone": "+13025550199",
         "username": "customer-one", "email": "one@example.com", "password": "a-secure-customer-password",
     })
     assert created.status_code == 201
@@ -389,6 +390,33 @@ def test_public_signup_and_customer_resources_are_tenant_isolated(tmp_path):
         "/admin/api/numbers/+13025550202/discontinue", headers={"X-CSRF-Token": state["csrf_token"]},
     )
     assert other_cancellation.status_code == 400
+
+    request_result = customer.post(
+        "/admin/api/requests", json={"request_type": "number", "details": "New York area code"},
+        headers={"X-CSRF-Token": state["csrf_token"]},
+    )
+    assert request_result.status_code == 201
+    admin = client.application.test_client()
+    assert admin.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    admin_state = admin.get("/admin/api/state").json
+    assert admin_state["pending_request_count"] == 1
+    sip = admin.post("/admin/api/sip-accounts", json={
+        "owner_user_id": user["id"], "label": "Primary device", "sip_username": "customer-one-device",
+        "sip_password": "strong-sip-password", "server": "sip.eip.example", "phone_number": "+13025550201", "extension": "201",
+    }, headers={"X-CSRF-Token": admin_state["csrf_token"]})
+    assert sip.status_code == 200
+    refreshed = customer.get("/admin/api/state").json
+    account_id = refreshed["sip_accounts"][0]["id"]
+    credentials = customer.get(f"/admin/api/sip-accounts/{account_id}/credentials")
+    assert credentials.status_code == 200
+    assert credentials.json["sip_account"]["sip_password"] == "strong-sip-password"
+    route = customer.post("/admin/api/call-routes", json={
+        "phone_number": "+13025550201", "name": "Main", "route": {"nodes": [
+            {"type": "business_hours"}, {"type": "simultaneous"}, {"type": "extension", "extension": "201"}, {"type": "voicemail"}
+        ]}, "active": True,
+    }, headers={"X-CSRF-Token": state["csrf_token"]})
+    assert route.status_code == 200
+    assert customer.get("/admin/api/state").json["call_routes"][0]["route"]["nodes"][1]["type"] == "simultaneous"
 
     key_id = customer.get("/admin/api/state").json["api_keys"][0]["id"]
     assert customer.delete(f"/admin/api/api-keys/{key_id}", headers={"X-CSRF-Token": state["csrf_token"]}).status_code == 200

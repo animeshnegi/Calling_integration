@@ -24,6 +24,8 @@ def _timestamps():
 admin_users = Table("admin_users", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("username", String(80), unique=True, nullable=False),
     Column("email", String(254), nullable=False, server_default=""), Column("extension", String(3), nullable=False, server_default=""),
+    Column("full_name", String(120), nullable=False, server_default=""), Column("company_name", String(160), nullable=False, server_default=""),
+    Column("job_role", String(120), nullable=False, server_default=""), Column("phone", String(30), nullable=False, server_default=""),
     Column("password_hash", String(512), nullable=False), Column("role", String(20), nullable=False, server_default="user"),
     Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
 settings = Table("settings", metadata, Column("key", String(100), primary_key=True), Column("value", Text, nullable=False), Column("updated_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
@@ -76,6 +78,32 @@ billing_invoices = Table("billing_invoices", metadata,
     Column("period_start", String(10), nullable=False), Column("period_end", String(10), nullable=False), Column("amount_cents", Integer, nullable=False),
     Column("status", String(20), nullable=False, server_default="open"), Column("due_at", String(10), nullable=False), Column("paid_at", String(40)),
     Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+customer_requests = Table("customer_requests", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True), Column("user_id", BigInteger, nullable=False),
+    Column("request_type", String(40), nullable=False, server_default="number"), Column("details", Text, nullable=False),
+    Column("status", String(20), nullable=False, server_default="pending"), Column("admin_note", Text),
+    Column("resolved_at", String(40)), *_timestamps())
+customer_sip_accounts = Table("customer_sip_accounts", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True), Column("owner_user_id", BigInteger, nullable=False),
+    Column("label", String(120), nullable=False), Column("sip_username", String(100), unique=True, nullable=False),
+    Column("sip_password_enc", Text, nullable=False), Column("server", String(255), nullable=False),
+    Column("port", Integer, nullable=False, server_default="5060"), Column("transport", String(10), nullable=False, server_default="udp"),
+    Column("phone_number", String(16), nullable=False, server_default=""), Column("extension", String(3), nullable=False, server_default=""),
+    Column("registration_status", String(20), nullable=False, server_default="offline"), Column("last_registered_at", String(40)),
+    Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
+call_routes = Table("call_routes", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True), Column("owner_user_id", BigInteger, nullable=False),
+    Column("phone_number", String(16), unique=True, nullable=False), Column("name", String(120), nullable=False, server_default="Main call flow"),
+    Column("route_json", Text, nullable=False), Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
+activity_history = Table("activity_history", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True), Column("owner_user_id", BigInteger),
+    Column("actor_user_id", BigInteger), Column("action", String(80), nullable=False), Column("resource_type", String(40), nullable=False),
+    Column("resource_id", String(128)), Column("description", String(500), nullable=False),
+    Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+notifications = Table("notifications", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True), Column("user_id", BigInteger, nullable=False),
+    Column("kind", String(40), nullable=False), Column("title", String(160), nullable=False), Column("message", String(1000), nullable=False),
+    Column("read_at", String(40)), Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 calls = Table("calls", metadata,
     Column("call_id", String(128), primary_key=True), Column("contact_id", String(255)), Column("member_id", String(255)),
     Column("extension", String(3), nullable=False), Column("phone", String(16), nullable=False), Column("caller_id_number", String(16)),

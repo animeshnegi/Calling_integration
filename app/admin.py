@@ -44,7 +44,16 @@ class SettingsStore:
     def _init_db(self):
         if self.database.is_mysql:
             self.database.create_all()
+            existing_user_columns = self.database.columns("admin_users")
             with self._connect() as db:
+                for column, definition in (
+                    ("full_name", "VARCHAR(120) NOT NULL DEFAULT ''"),
+                    ("company_name", "VARCHAR(160) NOT NULL DEFAULT ''"),
+                    ("job_role", "VARCHAR(120) NOT NULL DEFAULT ''"),
+                    ("phone", "VARCHAR(30) NOT NULL DEFAULT ''"),
+                ):
+                    if column not in existing_user_columns:
+                        db.execute(f"ALTER TABLE admin_users ADD COLUMN {column} {definition}")
                 if not db.execute("SELECT 1 FROM settings WHERE `key`='recording_policy_v2_initialized'").fetchone():
                     db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','false') ON DUPLICATE KEY UPDATE value='false',updated_at=CURRENT_TIMESTAMP")
                     db.execute("INSERT IGNORE INTO settings(`key`,value) VALUES('recording_policy_v2_initialized','true')")
@@ -123,6 +132,12 @@ class SettingsStore:
                 db.execute("ALTER TABLE admin_users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
             if "extension" not in user_columns:
                 db.execute("ALTER TABLE admin_users ADD COLUMN extension TEXT NOT NULL DEFAULT ''")
+            for definition in (
+                "full_name TEXT NOT NULL DEFAULT ''", "company_name TEXT NOT NULL DEFAULT ''",
+                "job_role TEXT NOT NULL DEFAULT ''", "phone TEXT NOT NULL DEFAULT ''",
+            ):
+                if definition.split()[0] not in user_columns:
+                    db.execute(f"ALTER TABLE admin_users ADD COLUMN {definition}")
             extension_columns = {row["name"] for row in db.execute("PRAGMA table_info(extensions)").fetchall()}
             if "voicemail_enabled" not in extension_columns:
                 db.execute("ALTER TABLE extensions ADD COLUMN voicemail_enabled INTEGER NOT NULL DEFAULT 0")
@@ -156,6 +171,34 @@ class SettingsStore:
                 status TEXT NOT NULL DEFAULT 'open', due_at TEXT NOT NULL, paid_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )""")
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS customer_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, request_type TEXT NOT NULL DEFAULT 'number',
+                    details TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', admin_note TEXT, resolved_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS customer_sip_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, owner_user_id INTEGER NOT NULL, label TEXT NOT NULL,
+                    sip_username TEXT NOT NULL UNIQUE, sip_password_enc TEXT NOT NULL, server TEXT NOT NULL,
+                    port INTEGER NOT NULL DEFAULT 5060, transport TEXT NOT NULL DEFAULT 'udp', phone_number TEXT NOT NULL DEFAULT '',
+                    extension TEXT NOT NULL DEFAULT '', registration_status TEXT NOT NULL DEFAULT 'offline', last_registered_at TEXT,
+                    active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS call_routes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, owner_user_id INTEGER NOT NULL, phone_number TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL DEFAULT 'Main call flow', route_json TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS activity_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, owner_user_id INTEGER, actor_user_id INTEGER, action TEXT NOT NULL,
+                    resource_type TEXT NOT NULL, resource_id TEXT, description TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
+                    message TEXT NOT NULL, read_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             # One-time privacy/resource migration: upgrades and new installs
             # start globally off. A later explicit administrator choice persists.
             if not db.execute("SELECT 1 FROM settings WHERE `key`='recording_policy_v2_initialized'").fetchone():
@@ -438,6 +481,7 @@ class SettingsStore:
 
     def ensure_monthly_invoices(self):
         today = date.today()
+        created = []
         with self._connect() as db:
             numbers = db.execute("SELECT number,owner_user_id,monthly_price_cents,billing_start,billing_cycle_day FROM phone_numbers WHERE owner_user_id IS NOT NULL AND active=1 AND (discontinue_at='' OR date(discontinue_at)>date('now'))").fetchall()
             for item in numbers:
@@ -458,7 +502,11 @@ class SettingsStore:
                     continue
                 exists = db.execute("SELECT 1 FROM billing_invoices WHERE number=? AND period_start=?", (item["number"], start.isoformat())).fetchone()
                 if not exists:
-                    db.execute("INSERT INTO billing_invoices(user_id,number,period_start,period_end,amount_cents,due_at) VALUES(?,?,?,?,?,?)", (item["owner_user_id"], item["number"], start.isoformat(), end.isoformat(), item["monthly_price_cents"], (start + timedelta(days=7)).isoformat()))
+                    due_at = (start + timedelta(days=7)).isoformat()
+                    db.execute("INSERT INTO billing_invoices(user_id,number,period_start,period_end,amount_cents,due_at) VALUES(?,?,?,?,?,?)", (item["owner_user_id"], item["number"], start.isoformat(), end.isoformat(), item["monthly_price_cents"], due_at))
+                    created.append((int(item["owner_user_id"]), item["number"], due_at, int(item["monthly_price_cents"])))
+        for user_id, number, due_at, amount_cents in created:
+            self.add_notification(user_id, "payment", "Payment reminder", f"Your ${amount_cents / 100:.2f} invoice for {number} is due {due_at}. Payment is handled externally.")
 
     def request_number_discontinuation(self, number: str, user_id: int) -> str:
         today = date.today()
@@ -503,6 +551,131 @@ class SettingsStore:
                 "INSERT INTO billing_invoices(user_id,number,period_start,period_end,amount_cents,due_at) VALUES(?,?,?,?,?,?)",
                 (int(user_id), number, period_start, period_end, int(amount_cents), due_at),
             ).lastrowid
+
+    def add_activity(self, owner_user_id, actor_user_id, action, resource_type, resource_id, description):
+        with self._connect() as db:
+            db.execute("INSERT INTO activity_history(owner_user_id,actor_user_id,action,resource_type,resource_id,description) VALUES(?,?,?,?,?,?)",
+                       (owner_user_id, actor_user_id, str(action)[:80], str(resource_type)[:40], str(resource_id or "")[:128], str(description)[:500]))
+
+    def list_activity(self, owner_user_id: int | None = None, limit: int = 100):
+        with self._connect() as db:
+            where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
+            rows = db.execute(f"SELECT id,owner_user_id,actor_user_id,action,resource_type,resource_id,description,created_at FROM activity_history{where} ORDER BY created_at DESC,id DESC LIMIT ?", ((int(owner_user_id), limit) if owner_user_id is not None else (limit,))).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_notification(self, user_id: int, kind: str, title: str, message: str):
+        with self._connect() as db:
+            return db.execute("INSERT INTO notifications(user_id,kind,title,message) VALUES(?,?,?,?)",
+                              (int(user_id), str(kind)[:40], str(title)[:160], str(message)[:1000])).lastrowid
+
+    def list_notifications(self, user_id: int):
+        with self._connect() as db:
+            rows = db.execute("SELECT id,kind,title,message,read_at,created_at FROM notifications WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 100", (int(user_id),)).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_notification_read(self, notification_id: int, user_id: int):
+        with self._connect() as db:
+            result = db.execute("UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?", (int(notification_id), int(user_id)))
+            if not result.rowcount:
+                raise ValueError("Notification not found")
+
+    def create_request(self, user_id: int, request_type: str, details: str):
+        if request_type not in {"number", "access", "routing", "billing"}:
+            raise ValueError("Unsupported request type")
+        details = str(details).strip()
+        if not details or len(details) > 2000:
+            raise ValueError("Request details are required and must be under 2000 characters")
+        with self._connect() as db:
+            request_id = db.execute("INSERT INTO customer_requests(user_id,request_type,details) VALUES(?,?,?)", (int(user_id), request_type, details)).lastrowid
+        self.add_activity(user_id, user_id, "request.created", "request", request_id, f"{request_type.title()} request submitted")
+        return request_id
+
+    def list_requests(self, user_id: int | None = None):
+        with self._connect() as db:
+            where = " WHERE r.user_id=?" if user_id is not None else ""
+            rows = db.execute(f"SELECT r.id,r.user_id,r.request_type,r.details,r.status,r.admin_note,r.resolved_at,r.created_at,r.updated_at,u.username,u.company_name FROM customer_requests r JOIN admin_users u ON u.id=r.user_id{where} ORDER BY CASE WHEN r.status='pending' THEN 0 ELSE 1 END,r.created_at DESC", (int(user_id),) if user_id is not None else ()).fetchall()
+        return [dict(row) for row in rows]
+
+    def resolve_request(self, request_id: int, status: str, admin_note: str, actor_user_id: int):
+        if status not in {"approved", "rejected", "fulfilled"}:
+            raise ValueError("Request status must be approved, rejected, or fulfilled")
+        with self._connect() as db:
+            row = db.execute("SELECT user_id,request_type FROM customer_requests WHERE id=?", (int(request_id),)).fetchone()
+            if not row:
+                raise ValueError("Request not found")
+            db.execute("UPDATE customer_requests SET status=?,admin_note=?,resolved_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, str(admin_note)[:2000], int(request_id)))
+        self.add_notification(row["user_id"], "request", f"{row['request_type'].title()} request {status}", admin_note or f"Your request was {status}.")
+        self.add_activity(row["user_id"], actor_user_id, f"request.{status}", "request", request_id, f"Request {status}")
+
+    def list_sip_accounts(self, owner_user_id: int | None = None, include_password: bool = False):
+        with self._connect() as db:
+            where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
+            rows = db.execute(f"SELECT id,owner_user_id,label,sip_username,sip_password_enc,server,port,transport,phone_number,extension,registration_status,last_registered_at,active,created_at,updated_at FROM customer_sip_accounts{where} ORDER BY label", (int(owner_user_id),) if owner_user_id is not None else ()).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row); encrypted = item.pop("sip_password_enc")
+            item["has_password"] = bool(encrypted)
+            if include_password:
+                item["sip_password"] = self.decrypt(encrypted)
+            result.append(item)
+        return result
+
+    def save_sip_account(self, data, owner_user_id: int):
+        owner_user_id = int(owner_user_id)
+        username = self._validate_config_value(data.get("sip_username"), "SIP username", 100)
+        label = self._validate_config_value(data.get("label") or username, "SIP label", 120)
+        server = self._validate_provider_server(data.get("server"))
+        password = str(data.get("sip_password") or "")
+        account_id = int(data["id"]) if str(data.get("id", "")).isdigit() else None
+        with self._connect() as db:
+            existing = db.execute("SELECT owner_user_id,sip_password_enc FROM customer_sip_accounts WHERE id=?", (account_id,)).fetchone() if account_id else None
+            if existing and existing["owner_user_id"] != owner_user_id:
+                raise ValueError("SIP account belongs to another customer")
+            encrypted = self.encrypt(password) if password else (existing["sip_password_enc"] if existing else "")
+            if not encrypted:
+                raise ValueError("SIP password is required")
+            values = (label, username, encrypted, server, int(data.get("port", 5060)), str(data.get("transport", "udp")), str(data.get("phone_number", "")), str(data.get("extension", "")), int(bool(data.get("active", True))))
+            if existing:
+                db.execute("UPDATE customer_sip_accounts SET label=?,sip_username=?,sip_password_enc=?,server=?,port=?,transport=?,phone_number=?,extension=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (*values, account_id))
+                return account_id
+            return db.execute("INSERT INTO customer_sip_accounts(label,sip_username,sip_password_enc,server,port,transport,phone_number,extension,active,owner_user_id) VALUES(?,?,?,?,?,?,?,?,?,?)", (*values, owner_user_id)).lastrowid
+
+    def delete_sip_account(self, account_id: int):
+        with self._connect() as db:
+            cursor = db.execute("DELETE FROM customer_sip_accounts WHERE id=?", (int(account_id),))
+            if cursor.rowcount == 0:
+                raise ValueError("SIP account not found")
+            db.commit()
+
+    def list_call_routes(self, owner_user_id: int):
+        import json
+        with self._connect() as db:
+            rows = db.execute("SELECT id,owner_user_id,phone_number,name,route_json,active,created_at,updated_at FROM call_routes WHERE owner_user_id=? ORDER BY name", (int(owner_user_id),)).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row); item["route"] = json.loads(item.pop("route_json")); result.append(item)
+        return result
+
+    def save_call_route(self, owner_user_id: int, data: dict):
+        import json
+        phone_number = str(data.get("phone_number", "")).strip()
+        if not any(row["number"] == phone_number for row in self.list_numbers(int(owner_user_id))):
+            raise ValueError("Phone number is not assigned to this customer")
+        route = data.get("route")
+        if not isinstance(route, dict) or not isinstance(route.get("nodes"), list) or len(route["nodes"]) > 100:
+            raise ValueError("Call route must contain a nodes array with at most 100 nodes")
+        allowed_types = {"incoming", "simultaneous", "sequential", "ring_group", "business_hours", "after_hours", "extension", "voicemail", "forward"}
+        if any(not isinstance(node, dict) or node.get("type") not in allowed_types for node in route["nodes"]):
+            raise ValueError("Call route contains an unsupported node")
+        payload = json.dumps(route, separators=(",", ":"))
+        with self._connect() as db:
+            existing = db.execute("SELECT id,owner_user_id FROM call_routes WHERE phone_number=?", (phone_number,)).fetchone()
+            if existing and existing["owner_user_id"] != int(owner_user_id):
+                raise ValueError("Call route belongs to another customer")
+            if existing:
+                db.execute("UPDATE call_routes SET name=?,route_json=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (str(data.get("name", "Main call flow"))[:120], payload, int(bool(data.get("active", True))), existing["id"]))
+                return existing["id"]
+            return db.execute("INSERT INTO call_routes(owner_user_id,phone_number,name,route_json,active) VALUES(?,?,?,?,?)", (int(owner_user_id), phone_number, str(data.get("name", "Main call flow"))[:120], payload, int(bool(data.get("active", True))))).lastrowid
 
     def list_providers(self):
         with self._connect() as db:
@@ -779,7 +952,7 @@ class SettingsStore:
 
     def list_users(self):
         with self._connect() as db:
-            rows = db.execute("SELECT id,username,email,extension,role,active,created_at,updated_at FROM admin_users ORDER BY username").fetchall()
+            rows = db.execute("SELECT id,username,email,extension,full_name,company_name,job_role,phone,role,active,created_at,updated_at FROM admin_users ORDER BY username").fetchall()
         return [dict(row) for row in rows]
 
     def save_user(self, data, current_user_id: int | None = None):
@@ -788,6 +961,12 @@ class SettingsStore:
         extension = str(data.get("extension", "")).strip()
         role = str(data.get("role", "user")).strip().lower()
         password = str(data.get("password") or "")
+        full_name = str(data.get("full_name", "")).strip()[:120]
+        company_name = str(data.get("company_name", "")).strip()[:160]
+        job_role = str(data.get("job_role", "")).strip()[:120]
+        phone = str(data.get("phone", "")).strip()[:30]
+        if phone and not re.fullmatch(r"\+?[0-9 ()-]{7,30}", phone):
+            raise ValueError("Phone number is invalid")
         if not re.fullmatch(r"[a-z0-9._-]{3,80}", username):
             raise ValueError("Username must be 3–80 letters, numbers, dots, underscores, or hyphens")
         if len(email) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
@@ -820,13 +999,13 @@ class SettingsStore:
             if email_conflict and (not existing or email_conflict["id"] != existing["id"]):
                 raise ValueError("Email address already has an account")
             if existing:
-                db.execute("UPDATE admin_users SET username=?,email=?,extension=?,role=?,active=?,password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                           (username, email, extension, role, active, password_hash, existing["id"]))
+                db.execute("UPDATE admin_users SET username=?,email=?,extension=?,full_name=?,company_name=?,job_role=?,phone=?,role=?,active=?,password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                           (username, email, extension, full_name, company_name, job_role, phone, role, active, password_hash, existing["id"]))
                 if role == "user" and extension and email:
                     db.execute("UPDATE extensions SET voicemail_email=?,updated_at=CURRENT_TIMESTAMP WHERE extension=?", (email, extension))
                 return existing["id"]
-            user_id = db.execute("INSERT INTO admin_users(username,email,extension,role,active,password_hash) VALUES(?,?,?,?,?,?)",
-                                 (username, email, extension, role, active, password_hash)).lastrowid
+            user_id = db.execute("INSERT INTO admin_users(username,email,extension,full_name,company_name,job_role,phone,role,active,password_hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                 (username, email, extension, full_name, company_name, job_role, phone, role, active, password_hash)).lastrowid
             if role == "user" and extension and email:
                 db.execute("UPDATE extensions SET voicemail_email=?,updated_at=CURRENT_TIMESTAMP WHERE extension=?", (email, extension))
             return user_id
@@ -1044,8 +1223,14 @@ def register_admin(app, config, on_telephony_change=None):
             return jsonify({"error": "too many signup attempts; try again later"}), 429
         try:
             data = request.get_json(silent=True) or {}
+            required = {"full_name": "Name", "company_name": "Company name", "job_role": "Role", "phone": "Phone number"}
+            missing = [label for field, label in required.items() if not str(data.get(field, "")).strip()]
+            if missing:
+                raise ValueError(f"Required fields: {', '.join(missing)}")
             data.update({"role": "user", "extension": "", "active": True})
             user_id = store.save_user(data)
+            store.add_activity(user_id, user_id, "customer.signup", "customer", user_id, f"{data['company_name']} account created")
+            store.add_notification(user_id, "welcome", "Welcome to EIP Telephony", "Request a phone number to begin configuring your telephony environment.")
             return jsonify({"ok": True, "user_id": user_id, "message": "Account created. Sign in to continue."}), 201
         except INPUT_DB_ERRORS as exc:
             return jsonify({"error": str(exc)}), 400
@@ -1103,6 +1288,20 @@ def register_admin(app, config, on_telephony_change=None):
             visible_numbers = store.list_numbers(user_id)
             for number in visible_numbers:
                 number.pop("provider", None)
+        all_users = store.list_users() if is_admin else []
+        all_sip = store.list_sip_accounts(None if is_admin else user_id)
+        customer_metrics = []
+        if is_admin:
+            all_numbers = store.list_numbers()
+            all_extensions = store.list_extensions()
+            for customer in (row for row in all_users if row["role"] == "user"):
+                customer_metrics.append({
+                    **customer,
+                    "number_count": sum(row.get("owner_user_id") == customer["id"] for row in all_numbers),
+                    "sip_count": sum(row.get("owner_user_id") == customer["id"] for row in all_sip),
+                    "extension_count": sum(row.get("owner_user_id") == customer["id"] for row in all_extensions),
+                    "payment_status": "overdue" if any(row["user_id"] == customer["id"] and row["status"] == "open" and row["due_at"] < date.today().isoformat() for row in store.list_invoices()) else "current",
+                })
         return jsonify({
             "username": session.get("admin_username"), "email": session.get("admin_email", ""),
             "assigned_extension": assigned, "role": session.get("admin_role"), "is_admin": is_admin,
@@ -1111,7 +1310,14 @@ def register_admin(app, config, on_telephony_change=None):
             "providers": store.list_providers() if is_admin else [],
             "webhooks": store.list_webhooks(owner_user_id=None if is_admin else user_id),
             "webhook_deliveries": store.list_webhook_deliveries(owner_user_id=None if is_admin else user_id),
-            "users": store.list_users() if is_admin else [],
+            "users": all_users,
+            "customers": customer_metrics,
+            "sip_accounts": all_sip,
+            "requests": store.list_requests(None if is_admin else user_id),
+            "pending_request_count": sum(row["status"] == "pending" for row in store.list_requests(None if is_admin else user_id)),
+            "activity": store.list_activity(None if is_admin else user_id),
+            "notifications": store.list_notifications(user_id),
+            "call_routes": [] if is_admin else store.list_call_routes(user_id),
             "api_keys": store.list_api_keys(owner_user_id=None if is_admin else user_id),
             "invoices": store.list_invoices(None if is_admin else user_id),
             "email_config": store.get_email_config() if is_admin else {},
@@ -1132,7 +1338,10 @@ def register_admin(app, config, on_telephony_change=None):
         try:
             data = request.get_json(silent=True) or {}
             owner = data.get("owner_user_id") if session.get("admin_role") == "admin" else int(session["admin_user_id"])
-            result = store.save_extension(data, int(owner) if str(owner or "").isdigit() else None, session.get("admin_role") != "admin")
+            owner_id = int(owner) if str(owner or "").isdigit() else None
+            result = store.save_extension(data, owner_id, session.get("admin_role") != "admin")
+            if owner_id:
+                store.add_activity(owner_id, int(session["admin_user_id"]), "extension.saved", "extension", result, f"Extension {result} configured")
             apply_change(); return jsonify({"ok": True, "extension": result})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
@@ -1150,7 +1359,12 @@ def register_admin(app, config, on_telephony_change=None):
     @admin_required
     def admin_number():
         try:
-            result = store.save_number(request.get_json(silent=True) or {})
+            data = request.get_json(silent=True) or {}
+            result = store.save_number(data)
+            owner = int(data["owner_user_id"]) if str(data.get("owner_user_id", "")).isdigit() else None
+            if owner:
+                store.add_activity(owner, int(session["admin_user_id"]), "number.assigned", "phone_number", result, f"Number {result} assigned")
+                store.add_notification(owner, "number", "Phone number assigned", f"{result} is now available in your account.")
             apply_change(); return jsonify({"ok": True, "number": result})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
@@ -1378,6 +1592,120 @@ def register_admin(app, config, on_telephony_change=None):
             apply_change(); return jsonify({"ok": True})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
+    @app.get("/admin/api/customers/<int:customer_id>")
+    @admin_required
+    def admin_customer_detail(customer_id):
+        customer = store.get_user(customer_id)
+        if not customer or customer["role"] != "user":
+            return jsonify({"error": "customer not found"}), 404
+        extensions = store.list_extensions(customer_id)
+        numbers = store.list_numbers(customer_id)
+        calls, total = current_app.extensions["telephony_service"].store.search(extensions=[row["extension"] for row in extensions], limit=20)
+        return jsonify({
+            "customer": next((row for row in store.list_users() if row["id"] == customer_id), customer),
+            "extensions": extensions, "numbers": numbers, "sip_accounts": store.list_sip_accounts(customer_id),
+            "invoices": store.list_invoices(customer_id), "requests": store.list_requests(customer_id),
+            "activity": store.list_activity(customer_id), "calls": [call.to_dict() for call in calls], "call_total": total,
+        })
+
+    @app.post("/admin/api/requests")
+    @login_required
+    def customer_create_request():
+        try:
+            data = request.get_json(silent=True) or {}
+            request_id = store.create_request(int(session["admin_user_id"]), str(data.get("request_type", "number")), str(data.get("details", "")))
+            return jsonify({"ok": True, "request_id": request_id}), 201
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/admin/api/requests/<int:request_id>/resolve")
+    @admin_required
+    def admin_resolve_request(request_id):
+        try:
+            data = request.get_json(silent=True) or {}
+            store.resolve_request(request_id, str(data.get("status", "")), str(data.get("admin_note", "")), int(session["admin_user_id"]))
+            return jsonify({"ok": True})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/admin/api/sip-accounts")
+    @admin_required
+    def admin_save_sip_account():
+        try:
+            data = request.get_json(silent=True) or {}
+            owner = int(data.get("owner_user_id"))
+            account_id = store.save_sip_account(data, owner)
+            store.add_activity(owner, int(session["admin_user_id"]), "sip.saved", "sip_account", account_id, f"SIP account {data.get('label') or data.get('sip_username')} configured")
+            store.add_notification(owner, "sip", "SIP credentials available", "A SIP account has been configured for your organization.")
+            apply_change()
+            return jsonify({"ok": True, "sip_account_id": account_id})
+        except (ValueError, TypeError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.delete("/admin/api/sip-accounts/<int:account_id>")
+    @admin_required
+    def admin_delete_sip_account(account_id):
+        try:
+            store.delete_sip_account(account_id)
+            apply_change()
+            return jsonify({"ok": True})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 404
+
+    @app.get("/admin/api/device-status")
+    @login_required
+    def admin_device_status():
+        user = _current_user()
+        accounts = store.list_sip_accounts(None if _is_admin(user) else int(user["id"]))
+        try:
+            endpoints = service.asterisk.list_endpoints()
+            live = {
+                str(row.get("resource") or ""): str(row.get("state") or "offline").lower()
+                for row in endpoints if str(row.get("technology") or "").lower() == "pjsip"
+            }
+        except Exception:
+            live = {}
+        def registration(row):
+            username = str(row["sip_username"])
+            safe_username = re.sub(r"[^A-Za-z0-9_-]", "-", username).strip("-")[:64]
+            for resource in (str(row.get("extension") or ""), username, f"device-{safe_username}"):
+                if resource and resource in live:
+                    return "online" if live[resource] in {"online", "available"} else "offline"
+            return row["registration_status"]
+
+        return jsonify({"devices": [{"id": row["id"], "registration_status": registration(row)} for row in accounts]})
+
+    @app.get("/admin/api/sip-accounts/<int:account_id>/credentials")
+    @login_required
+    def sip_account_credentials(account_id):
+        owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+        rows = store.list_sip_accounts(owner, include_password=True)
+        account = next((row for row in rows if row["id"] == account_id), None)
+        if not account:
+            return jsonify({"error": "SIP account not found"}), 404
+        return jsonify({"sip_account": account})
+
+    @app.post("/admin/api/call-routes")
+    @login_required
+    def save_customer_call_route():
+        try:
+            data = request.get_json(silent=True) or {}
+            owner = int(data.get("owner_user_id")) if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            route_id = store.save_call_route(owner, data)
+            store.add_activity(owner, int(session["admin_user_id"]), "route.saved", "call_route", route_id, f"Call flow for {data.get('phone_number')} updated")
+            return jsonify({"ok": True, "route_id": route_id})
+        except (ValueError, TypeError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/admin/api/notifications/<int:notification_id>/read")
+    @login_required
+    def read_customer_notification(notification_id):
+        try:
+            store.mark_notification_read(notification_id, int(session["admin_user_id"]))
+            return jsonify({"ok": True})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 404
+
     @app.post("/admin/api/users")
     @admin_required
     def admin_save_user():
@@ -1416,6 +1744,7 @@ def register_admin(app, config, on_telephony_change=None):
             data = request.get_json(silent=True) or {}
             owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
             key_id, token = store.create_api_key(str(data.get("name", "")), str(data.get("scopes", "*")), owner)
+            store.add_activity(owner, int(session["admin_user_id"]), "api_key.created", "api_key", key_id, f"API key {data.get('name')} generated")
             return jsonify({"ok": True, "key_id": key_id, "token": token}), 201
         except (ValueError, sqlite3.IntegrityError, MySQLIntegrityError) as exc:
             return jsonify({"error": str(exc)}), 400

@@ -39,6 +39,10 @@ class AsteriskClient:
             return None
         return response.json()
 
+    def list_endpoints(self) -> list[dict[str, Any]]:
+        """Return ARI endpoint/device state for live registration indicators."""
+        return self._request("GET", "/endpoints") or []
+
     @staticmethod
     def _variables(call_id: str, metadata: dict[str, Any] | None = None) -> dict[str, str]:
         variables = {"EIP_CALL_ID": call_id}
