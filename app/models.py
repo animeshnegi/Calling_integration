@@ -7,6 +7,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from .database import Database
+
 
 @dataclass
 class Call:
@@ -15,6 +17,7 @@ class Call:
     member_id: str | None
     extension: str
     phone: str
+    caller_id_number: str | None = None
     provider: str | None = None
     direction: str = "outbound"
     status: str = "initiated"
@@ -38,7 +41,7 @@ class Call:
 
 
 _COLUMNS = (
-    "call_id", "contact_id", "member_id", "extension", "phone", "provider", "direction", "status",
+    "call_id", "contact_id", "member_id", "extension", "phone", "caller_id_number", "provider", "direction", "status",
     "answered", "started_at", "answered_at", "ended_at", "duration_seconds", "employee_channel_id",
     "customer_channel_id", "bridge_id", "recording_name", "recording_format", "recording_status",
     "recording_path", "disposition", "notes",
@@ -49,20 +52,19 @@ class CallStore:
     """SQLite-backed call state shared by the HTTP and ARI worker processes."""
 
     def __init__(self, path: str = "/app/instance/calls.db") -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        uri = path if "://" in path else f"sqlite:///{path}"
+        self.database = Database(uri)
+        self.path = Path(path) if not self.database.is_mysql else None
         self._lock = Lock()
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+    def _connect(self):
+        return self.database.connect()
 
     def _init_db(self) -> None:
+        if self.database.is_mysql:
+            self.database.create_all()
+            return
         with self._connect() as db:
             db.execute("""
                 CREATE TABLE IF NOT EXISTS calls (
@@ -71,6 +73,7 @@ class CallStore:
                     member_id TEXT,
                     extension TEXT NOT NULL,
                     phone TEXT NOT NULL,
+                    caller_id_number TEXT,
                     provider TEXT,
                     direction TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -90,13 +93,16 @@ class CallStore:
                     notes TEXT
                 )
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(calls)").fetchall()}
+            if "caller_id_number" not in columns:
+                db.execute("ALTER TABLE calls ADD COLUMN caller_id_number TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_employee_channel ON calls(employee_channel_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_customer_channel ON calls(customer_channel_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_recording_name ON calls(recording_name)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_started_at ON calls(started_at)")
 
     @staticmethod
-    def _from_row(row: sqlite3.Row | None) -> Call | None:
+    def _from_row(row: Any | None) -> Call | None:
         if row is None:
             return None
         data = dict(row)
@@ -145,3 +151,62 @@ class CallStore:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM calls ORDER BY started_at DESC").fetchall()
         return [self._from_row(row) for row in rows if row is not None]
+
+    def search(
+        self,
+        *,
+        extension: str | None = None,
+        extensions: list[str] | None = None,
+        status: str | None = None,
+        recordings_only: bool = False,
+        query: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[Call], int]:
+        """Return a filtered, paginated call list and total result count."""
+        clauses: list[str] = []
+        values: list[Any] = []
+        if extension:
+            clauses.append("extension=?")
+            values.append(extension)
+        elif extensions is not None:
+            if not extensions:
+                clauses.append("1=0")
+            else:
+                clauses.append(f"extension IN ({','.join('?' for _ in extensions)})")
+                values.extend(extensions)
+        if status:
+            clauses.append("status=?")
+            values.append(status)
+        if recordings_only:
+            clauses.append("recording_name IS NOT NULL AND recording_status NOT IN ('deleted','failed')")
+        if query:
+            clauses.append("(phone LIKE ? OR call_id LIKE ? OR contact_id LIKE ? OR member_id LIKE ?)")
+            pattern = f"%{query}%"
+            values.extend([pattern, pattern, pattern, pattern])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as db:
+            total = int(db.execute(f"SELECT COUNT(*) FROM calls{where}", values).fetchone()[0])
+            rows = db.execute(
+                f"SELECT * FROM calls{where} ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                [*values, limit, offset],
+            ).fetchall()
+        return [self._from_row(row) for row in rows if row is not None], total
+
+    def summary(self, extension: str | None = None, extensions: list[str] | None = None) -> dict[str, int]:
+        if extension:
+            where, values = " WHERE extension=?", (extension,)
+        elif extensions is not None:
+            where = f" WHERE extension IN ({','.join('?' for _ in extensions)})" if extensions else " WHERE 1=0"
+            values = tuple(extensions)
+        else:
+            where, values = "", ()
+        with self._connect() as db:
+            row = db.execute(f"""
+                SELECT COUNT(*) AS total,
+                    SUM(CASE WHEN answered=1 THEN 1 ELSE 0 END) AS answered,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN recording_status='finalized' THEN 1 ELSE 0 END) AS recordings
+                FROM calls{where}
+            """, values).fetchone()
+        return {key: int(row[key] or 0) for key in ("total", "answered", "failed", "recordings")}

@@ -1,6 +1,6 @@
-# EngineerIP Telephony Integration
+# EIP Telephony Control
 
-Standalone Asterisk + Flask telephony service for EngineerIP CRM.
+A multi-tenant Asterisk + Flask platform for managed US business numbers, calling, voicemail and CRM automation.
 
 ## Current architecture
 
@@ -33,7 +33,7 @@ Asterisk is the telephony engine. The Flask service provides the CRM-facing API.
 - Employee extension rings first; the customer leg is created only after employee answer.
 - Employee and customer legs are placed into a mixing bridge after customer answer.
 - Optional bridge recording with retention managed through private ARI.
-- Persistent call state in SQLite so worker restarts do not erase call metadata.
+- Persistent customer, configuration, billing, and call state in MySQL, with automatic table creation and pooled connection health checks.
 - Deterministic channel IDs are persisted before each originate so fast ARI events can be correlated even before the originate request returns.
 - Call lifecycle events, answer status and answered-call duration tracking.
 - Optional CRM webhook integration.
@@ -91,6 +91,12 @@ Calling_integration/
     └── DEPLOYMENT.md
 ```
 
+## Administration console
+
+Open `/` for the public EIP Telephony Control landing, $5-per-number pricing, signup, and customer login. See [`docs/MULTI_TENANCY_AND_BILLING.md`](docs/MULTI_TENANCY_AND_BILLING.md) for resource ownership, carrier provisioning, tenant isolation, invoices, number discontinuation, and the secure `engineerip` customer provisioning command.
+
+Open `/admin` through the recommended HTTPS reverse proxy to use the responsive telephony control center. Its sidebar separates Dashboard, Extensions, Phone Numbers, SIP Providers, Call History, extension-grouped Recordings, CRM Webhooks, Call Settings, and Security. Administrators can add multiple DIDs, assign each number to one active extension, select per-extension outbound caller IDs, create/revoke scoped CRM API keys, search call history, play finalized recordings, manage extension voicemail inboxes, configure SendGrid attachment delivery, create extension-scoped users, set default/fallback extensions, and configure signed CRM webhooks without editing Asterisk files manually. Customer callbacks to a known DID ring only its owning extension; see [`docs/NUMBER_OWNERSHIP.md`](docs/NUMBER_OWNERSHIP.md). For the endpoint scope matrix, HMAC verification, durable webhook flow and production checklist, see [`docs/CRM_SECURITY_AUDIT.md`](docs/CRM_SECURITY_AUDIT.md). Voicemail can be enabled per extension with a private numeric PIN; users dial `*97` from their registered phone to enter their mailbox. See [`docs/EMAIL_AND_USERS.md`](docs/EMAIL_AND_USERS.md) for SendGrid and role-based access.
+
 ## Multiple extensions
 
 Local SIP extensions are configuration-driven. The administration database manages active extensions and their encrypted SIP credentials. The Asterisk container receives the rendered configuration through the private shared configuration volume.
@@ -119,15 +125,27 @@ The intended outbound lifecycle is:
 8. Recording-finished and channel lifecycle events update the persistent call record and CRM webhooks.
 9. On hangup, the bridge is destroyed and the final call status/duration is persisted.
 
-Asterisk's ARI channel originate API creates the channel immediately and supports caller-selected channel IDs and channel variables in the request body. urlAsterisk Channels REST APIhttps://docs.asterisk.org/Latest_API/API_Documentation/Asterisk_REST_Interface/Channels_REST_API/
+Asterisk's ARI channel originate API creates the channel immediately and supports caller-selected channel IDs and channel variables in the request body. See the [Asterisk Channels REST API](https://docs.asterisk.org/Latest_API/API_Documentation/Asterisk_REST_Interface/Channels_REST_API/).
 
 ## API endpoints
 
 ```text
 GET  /health
 GET  /api/v1/extensions
+GET  /api/v1/numbers
 GET  /api/v1/providers
 GET  /api/v1/calls
+GET  /api/v1/recordings
+GET  /api/v1/recordings/<call_id>/file
+GET  /api/v1/voicemail/mailboxes
+GET  /api/v1/voicemails
+GET  /api/v1/voicemails/<extension>/<folder>/<message>/file
+POST /api/v1/voicemails/<extension>/<folder>/<message>/read
+DELETE /api/v1/voicemails/<extension>/<folder>/<message>
+GET  /api/v1/webhooks
+POST /api/v1/webhooks
+POST /api/v1/webhooks/<id>/test
+DELETE /api/v1/webhooks/<id>
 POST /api/v1/calls
 POST /api/v1/browser/call
 GET  /api/v1/calls/<call_id>
@@ -152,7 +170,9 @@ Provider inbound traffic is matched using explicit IP/CIDR allowlists rendered a
 
 ## Recording
 
-Recordings are stored by Asterisk in the persistent recording volume. The Flask/API containers do not mount the recording volume. Retention is enforced by the ARI worker through the private Asterisk recordings API.
+Call recording is **off by default** globally and for every new extension. The administrator controls a master switch; when it is off, no administrator or user preference can start a recording. When the master switch is on, each assigned extension user can opt their own extension in or out from the Security page, and administrators can manage every extension's preference.
+
+Recordings are stored by Asterisk in the persistent recording volume. The Flask/API containers do not mount the recording volume. Retention is enforced by the ARI worker through the private Asterisk recordings API. Finalized recordings can be listed and securely streamed with the bearer-authenticated recording API, or played in the authenticated admin console; the underlying volume is never published.
 
 Recording settings include:
 
@@ -164,9 +184,39 @@ Recording settings include:
 - optional recording beep;
 - optional announcement playback using an Asterisk `sound:` or `recording:` media URI.
 
+## Database
+
+Production uses the `DATABASE_URI` value from `.env`, for example:
+
+```dotenv
+DATABASE_URI=mysql+pymysql://eip_app:URL_ENCODED_PASSWORD@mysql.example.internal:3306/eip_telephony?charset=utf8mb4
+```
+
+The database and restricted MySQL user must exist; application tables and indexes are created automatically. See [`docs/MYSQL.md`](docs/MYSQL.md) for grants, URI encoding, TLS, connectivity verification, backups, and migration guidance.
+
 ## Docker deployment
 
-Before deployment:
+Container logs are bounded to three compressed 10 MB files per service, and Asterisk file logs use a capped tmpfs. If an older deployment has already consumed disk, follow [`docs/LOGGING_AND_DISK.md`](docs/LOGGING_AND_DISK.md) and run the safe dry-run helper:
+
+```bash
+./scripts/cleanup-logs.sh
+```
+
+For the low-resource Google VM workflow, including cross-platform build, compressed image export, checksum verification, import without rebuilding, backups, rollback, admin operation, and troubleshooting, see [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+Build and export on the personal computer:
+
+```bash
+./scripts/build-export-images.sh v1
+```
+
+Then copy the archive/repository to the VM and start without compiling:
+
+```bash
+./scripts/import-start-images.sh engineerip-telephony-v1.tar.gz v1
+```
+
+For a normal local build, before deployment:
 
 ```bash
 cp .env.example .env

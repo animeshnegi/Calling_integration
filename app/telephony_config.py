@@ -20,6 +20,7 @@ class TelephonyConfigSync:
         self.ami = ami
         self.path = Path(path)
         self.dialplan_path = self.path.with_name("extensions.dynamic.conf")
+        self.voicemail_path = self.path.with_name("voicemail.dynamic.conf")
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -80,21 +81,47 @@ class TelephonyConfigSync:
             "; This file contains SIP credentials and is shared only on the internal Docker network.",
             "",
         ]
+        # A customer SIP account linked to an extension becomes that extension's
+        # live PJSIP credential, so credentials shown in the portal really ring.
+        sip_accounts = [row for row in self.store.list_sip_accounts(include_password=True) if row["active"]]
+        sip_by_extension = {str(row["extension"]): row for row in sip_accounts if row.get("extension")}
+        configured_extensions: set[str] = set()
         for ext in self.store.list_extensions():
             if not ext["active"]:
                 continue
             extension = self._clean(ext["extension"])
-            username = self._clean(ext["sip_username"])
-            password = self._clean(self.store.get_extension_password(extension))
+            linked = sip_by_extension.get(extension)
+            username = self._clean(linked["sip_username"] if linked else ext["sip_username"])
+            password = self._clean(linked["sip_password"] if linked else self.store.get_extension_password(extension))
+            transport = self._transport(linked["transport"] if linked else "udp")
+            configured_extensions.add(extension)
             lines.extend([
                 f"; Extension {extension}",
                 f"[{extension}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
                 f"[auth-{extension}]", "type=auth", "auth_type=userpass",
                 f"username={username}", f"password={password}", "supported_algorithms_uas=SHA-256,MD5", "",
                 f"[{extension}]", "type=endpoint", f"aors={extension}", f"auth=auth-{extension}",
-                "context=from-internal", "disallow=all", "allow=ulaw,alaw", "transport=transport-udp",
+                "context=from-internal", "disallow=all", "allow=ulaw,alaw", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
-                "allow_subscribe=no", "",
+                f"allow_subscribe={'yes' if ext.get('voicemail_enabled') else 'no'}",
+                *([f"mailboxes={extension}@engineerip"] if ext.get("voicemail_enabled") else []), "",
+            ])
+
+        for account in sip_accounts:
+            extension = self._clean(str(account.get("extension") or ""))
+            if extension in configured_extensions:
+                continue
+            endpoint = self._id("device", str(account["sip_username"]))
+            username = self._clean(account["sip_username"])
+            password = self._clean(account["sip_password"])
+            transport = self._transport(account["transport"])
+            lines.extend([
+                f"; Customer device {username}",
+                f"[{endpoint}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                f"[auth-{endpoint}]", "type=auth", "auth_type=userpass", f"username={username}", f"password={password}", "",
+                f"[{endpoint}]", "type=endpoint", f"aors={endpoint}", f"auth=auth-{endpoint}",
+                "context=from-internal", "disallow=all", "allow=ulaw,alaw", f"transport=transport-{transport}",
+                "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes", "",
             ])
 
         for provider in self.store.list_provider_details():
@@ -118,6 +145,7 @@ class TelephonyConfigSync:
                 f"; SIP provider {name}", f"[{endpoint}]", "type=endpoint", f"transport=transport-{transport}",
                 "context=from-provider", "disallow=all", f"allow={codecs}", f"outbound_auth={auth}",
                 f"aors={endpoint}", "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
+                "send_pai=yes", "send_rpid=yes", "trust_id_outbound=yes",
                 f"from_user={username}", f"from_domain={server}", "",
                 f"[{auth}]", "type=auth", "auth_type=userpass", f"username={username}", f"password={password}", "",
                 f"[{endpoint}]", "type=aor", f"contact=sip:{server}:{port}", "qualify_frequency=60", "",
@@ -135,22 +163,52 @@ class TelephonyConfigSync:
                 ])
         return "\n".join(lines) + "\n"
 
+    def render_voicemail(self) -> str:
+        lines = [
+            "; AUTO-GENERATED EngineerIP voicemail mailboxes.",
+            "[engineerip]",
+        ]
+        for extension in self.store.list_extensions():
+            if not extension["active"] or not extension.get("voicemail_enabled"):
+                continue
+            number = self._clean(extension["extension"])
+            pin = self._clean(self.store.get_voicemail_pin(number))
+            display_name = self._clean(extension.get("display_name") or f"Extension {number}")
+            lines.append(f"{number} => {pin},{display_name},,,attach=no|delete=no")
+        lines.append("")
+        return "\n".join(lines)
+
     def render_dialplan(self) -> str:
         settings = self.store.get_settings()
-        active_exts = [row["extension"] for row in self.store.list_extensions() if row["active"]]
+        extensions = [row for row in self.store.list_extensions() if row["active"]]
+        active_exts = [row["extension"] for row in extensions]
+        voicemail_exts = {row["extension"] for row in extensions if row.get("voicemail_enabled")}
         default_ext = self._fallback_extension(str(settings.get("default_extension", "")).strip(), active_exts)
         inbound_fallback = self._fallback_extension(
             str(settings.get("inbound_fallback_extension", "")).strip(), active_exts
         )
         lines = [
-            "; AUTO-GENERATED EngineerIP DID routing.",
+            "; AUTO-GENERATED EngineerIP DID and voicemail routing.",
             "[from-internal]",
-            "exten => _1XX,1,NoOp(EngineerIP extension ${EXTEN})",
-            " same => n,Dial(PJSIP/${EXTEN},30)",
+            "exten => *97,1,NoOp(EngineerIP voicemail login)",
+            " same => n,VoiceMailMain(@engineerip)",
             " same => n,Hangup()",
-            "",
-            "[from-provider]",
         ]
+        for extension in extensions:
+            number = extension["extension"]
+            lines.extend([
+                f"exten => {number},1,NoOp(EngineerIP extension {number})",
+                f" same => n,Dial(PJSIP/{number},30)",
+                *([f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({number}@engineerip,u))'] if number in voicemail_exts else []),
+                " same => n,Hangup()",
+            ])
+        lines.extend(["", "[voicemail-inbound]"])
+        for extension in sorted(voicemail_exts):
+            lines.extend([
+                f"exten => {extension},1,VoiceMail({extension}@engineerip,u)",
+                " same => n,Hangup()",
+            ])
+        lines.extend(["", "[from-provider]"])
         for number in self.store.list_numbers():
             if not number["active"]:
                 continue
@@ -158,14 +216,17 @@ class TelephonyConfigSync:
             extension = number["inbound_extension"] or inbound_fallback
             if not did or not self._valid_extension(str(extension)) or str(extension) not in active_exts:
                 extension = inbound_fallback
-            lines.extend([
-                f"exten => {did},1,NoOp(Inbound DID {did})",
-                f" same => n,Dial(PJSIP/{extension},30)",
-                " same => n,Hangup()",
-            ])
+            for dialed_number in (did, f"+{did}"):
+                lines.extend([
+                    f"exten => {dialed_number},1,NoOp(Inbound DID {dialed_number} owned by extension {extension})",
+                    f" same => n,Stasis(engineerip,inbound,{dialed_number},{extension})",
+                    *([f" same => n,VoiceMail({extension}@engineerip,u)"] if extension in voicemail_exts else []),
+                    " same => n,Hangup()",
+                ])
         lines.extend([
             "exten => s,1,NoOp(Inbound provider call ${CALLERID(all)})",
             f" same => n,Dial(PJSIP/{default_ext},30)",
+            *([f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({default_ext}@engineerip,u))'] if default_ext in voicemail_exts else []),
             " same => n,Hangup()",
             "",
         ])
@@ -187,5 +248,7 @@ class TelephonyConfigSync:
     def apply(self) -> None:
         self._atomic_write(self.path, self.render_pjsip())
         self._atomic_write(self.dialplan_path, self.render_dialplan())
+        self._atomic_write(self.voicemail_path, self.render_voicemail())
         self.ami.reload_pjsip()
+        self.ami.reload_voicemail()
         self.ami.reload_dialplan()
