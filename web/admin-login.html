@@ -3,25 +3,57 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Sign in · EIP Telephony Control</title>
   <link rel="stylesheet" href="/admin-assets/admin.css">
-  <style>
-    body{min-height:100vh;background:#f4f7fb;display:grid;grid-template-columns:minmax(320px,460px) 1fr}.login-side{padding:clamp(30px,7vw,90px);display:flex;flex-direction:column;justify-content:center;background:#fff}.login-brand{display:flex;align-items:center;gap:12px;margin-bottom:58px}.login-brand .brand-mark{flex:none}.login-brand strong,.login-brand small{display:block}.login-brand small{color:#667085}.login-side h1{font-size:28px;margin:0 0 8px}.login-side>p{color:#667085;margin:0 0 28px}.login-side label{font-size:12px;font-weight:700;display:block;margin:15px 0}.login-side input{display:block;margin-top:6px;padding:11px}.login-side .button{width:100%;padding:12px;margin-top:6px}.login-error{color:#b42318;background:#fef3f2;border-radius:7px;padding:0;font-size:12px;transition:.2s}.login-error:not(:empty){padding:9px 11px;margin-top:12px}.login-visual{background:linear-gradient(145deg,#101828,#15367a);display:grid;place-items:center;padding:50px;color:#fff;overflow:hidden;position:relative}.login-visual:before,.login-visual:after{content:"";position:absolute;border-radius:50%;border:1px solid #ffffff12;width:560px;height:560px}.login-visual:after{width:360px;height:360px}.login-copy{position:relative;max-width:500px}.login-copy span{display:inline-block;background:#ffffff12;border:1px solid #ffffff20;padding:6px 10px;border-radius:18px;font-size:11px}.login-copy h2{font-size:38px;line-height:1.12;margin:20px 0 12px}.login-copy p{color:#cbd5e1;font-size:15px}.login-foot{margin-top:36px;color:#98a2b3;font-size:11px}@media(max-width:780px){body{display:block;background:#fff}.login-side{min-height:100vh;padding:30px}.login-visual{display:none}.login-brand{margin-bottom:50px}}
-  </style>
 </head>
-<body>
-<main class="login-side">
-  <div class="login-brand"><span class="brand-mark">E</span><div><strong>EIP Telephony</strong><small>Control</small></div></div>
-  <h1>Welcome back</h1><p>Sign in to manage calls, extensions, phone numbers, recordings and CRM integrations.</p>
-  <form id="login"><label>Username<input name="username" autocomplete="username" autofocus required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="button primary" type="submit">Sign in to your control panel</button><div id="error" class="login-error" role="alert"></div></form>
-  <div class="login-foot">New to EIP? <a href="/#signup" style="color:#4f67d8">Create your account</a></div>
+<body class="admin-theme login-body">
+<div class="aurora" aria-hidden="true"><b></b><b></b><b></b></div>
+
+<main class="login-shell">
+  <section class="login-card">
+    <div class="brand">
+      <span class="brand-mark">E</span>
+      <div><strong>EIP Telephony</strong><small>Control</small></div>
+    </div>
+
+    <h1>Welcome back</h1>
+    <p class="login-lede">Sign in to manage calls, extensions, phone numbers, recordings and CRM integrations.</p>
+
+    <form id="login" novalidate>
+      <label class="field">Username
+        <input name="username" autocomplete="username" autofocus required>
+      </label>
+      <label class="field">Password
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn primary block" type="submit">Sign in to your control panel</button>
+      <div id="error" class="notice warn login-error" role="alert"></div>
+    </form>
+
+    <p class="login-foot">New to EIP? <a href="/#signup">Create your account</a></p>
+  </section>
+
+  <aside class="login-aside">
+    <div class="login-copy">
+      <span>EIP TELEPHONY CONTROL</span>
+      <h2>Everything your calling system needs, in one place.</h2>
+      <p>Manage extensions and DIDs, organize recordings by employee, connect SIP providers, and deliver call events directly to your CRM.</p>
+      <ul class="login-points">
+        <li><i>✓</i>Live registration and device status for every extension</li>
+        <li><i>✓</i>Call recordings and voicemail filed by employee</li>
+        <li><i>✓</i>REST APIs and signed webhooks for your own systems</li>
+      </ul>
+    </div>
+  </aside>
 </main>
-<aside class="login-visual"><div class="login-copy"><span>EIP TELEPHONY CONTROL</span><h2>Everything your calling system needs, in one place.</h2><p>Manage extensions and DIDs, organize recordings by employee, connect SIP providers, and deliver call events directly to your CRM.</p></div></aside>
+
 <script>
 document.querySelector('#login').addEventListener('submit', async event => {
   event.preventDefault();
   const button = event.target.querySelector('button');
   const error = document.querySelector('#error');
+  const label = button.textContent;
   button.disabled = true;
   button.textContent = 'Signing in…';
   error.textContent = '';
@@ -45,7 +77,7 @@ document.querySelector('#login').addEventListener('submit', async event => {
   } catch (exception) {
     error.textContent = exception.message || 'Unable to contact the login service';
     button.disabled = false;
-    button.textContent = 'Sign in to your control panel';
+    button.textContent = label;
   }
 });
 </script>
