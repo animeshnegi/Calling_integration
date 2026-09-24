@@ -75,8 +75,10 @@
           <article class="stat tone-info"><div class="stat-top"><span class="stat-icon">✉</span><span class="stat-label">New voicemail</span></div><div class="stat-value" id="stat-voicemails">0</div><div class="stat-note">Waiting to be heard</div></article>
         </div>
 
+        <div class="ws-status" id="customer-status" data-customer-only style="margin-top:16px"></div>
+
         <div class="grid split-analytics" data-customer-only style="margin-top:16px">
-          <article class="panel feature">
+          <article class="panel feature sheen">
             <div class="panel-head"><div><h2>14-day call volume</h2><p>Answered calls compared with total attempts</p></div><span class="count" id="analytics-period">Last 14 days</span></div>
             <div class="panel-body"><div class="chart" id="call-trend"><div class="skeleton" style="height:150px"></div></div></div>
           </article>
@@ -91,7 +93,7 @@
           </article>
         </div>
 
-        <section class="hero" data-customer-only style="margin-top:16px">
+        <section class="hero sheen" data-customer-only style="margin-top:16px">
           <h2>Your setup journey</h2>
           <p>Complete each step to get your phone system fully live. Progress is saved automatically.</p>
           <div class="journey" id="customer-journey"></div>
@@ -124,7 +126,7 @@
           <div class="panel-body flush"><div id="recent-calls" class="table-wrap"></div></div>
         </article>
 
-        <article class="panel" data-customer-only style="margin-top:16px">
+        <article class="panel sheen" data-customer-only style="margin-top:16px">
           <div class="panel-head"><div><h2>My requests</h2><p>Track number provisioning and administrator responses</p></div><span class="count" id="my-request-count">0 requests</span></div>
           <div class="panel-body flush"><div id="my-request-list" class="timeline"></div></div>
         </article>
@@ -196,7 +198,7 @@
 
       <!-- ============================================================ ROUTING -->
       <section class="page" id="page-routing">
-        <div class="flow-toolbar">
+        <div class="flow-toolbar sheen">
           <div><h2>Visual call flow builder</h2><p>Drag blocks onto the canvas, then save the flow to an assigned number.</p></div>
           <div class="tools"><select id="route-number"></select><button class="btn primary" id="save-route">Save flow</button></div>
         </div>
@@ -214,6 +216,17 @@
           <section class="panel canvas" id="flow-canvas">
             <div class="canvas-orb a"></div><div class="canvas-orb b"></div>
             <div class="canvas-status"><span><span class="live-dot"></span> LIVE CALL PATH</span><small>Drag nodes to reorder · click to configure</small></div>
+            <div class="canvas-empty">
+              <div class="glyph">⌘</div>
+              <h4>Design how this number answers</h4>
+              <p>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
+              <ol>
+                <li>Choose the number</li>
+                <li>Add routing blocks</li>
+                <li>Configure each step</li>
+                <li>Save the flow</li>
+              </ol>
+            </div>
             <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Your assigned number</small></div><span class="step">START</span></div>
             <div id="flow-nodes"></div>
             <div class="flow-drop"><b>＋</b><span>Drop the next routing block here</span></div>
@@ -438,7 +451,10 @@
       </div>
       <button class="icon-btn ws-close" id="ws-close" aria-label="Close customer workspace">✕</button>
     </div>
+    <div class="ws-status" id="ws-status"></div>
     <div class="ws-metrics" id="ws-metrics"></div>
+    <div class="ws-quick" id="ws-quick"></div>
+    <div class="ws-recent" id="ws-recent"></div>
   </header>
   <nav class="ws-tabs" id="ws-tabs" aria-label="Customer resources"></nav>
   <div class="ws-body" id="ws-body"></div>

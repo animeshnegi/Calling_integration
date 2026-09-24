@@ -114,25 +114,89 @@ function notify(message, isError = false) {
   if (!host) return;
   const node = document.createElement('div');
   node.className = `toast${isError ? ' error' : ''}`;
+  const life = isError ? 5200 : 3200;
+  node.style.setProperty('--toast-life', `${life}ms`);
   node.innerHTML = `<span class="glyph">${isError ? '!' : '✓'}</span><span>${esc(message)}</span>`;
   host.appendChild(node);
   setTimeout(() => {
     node.classList.add('leaving');
     node.addEventListener('animationend', () => node.remove(), { once: true });
-  }, isError ? 5200 : 3200);
+  }, life);
 }
 
-function empty(title, text, glyph = '∅') {
-  return `<div class="empty"><span class="empty-icon">${glyph}</span><b>${esc(title)}</b><span>${esc(text)}</span></div>`;
+function empty(title, text, glyph = '∅', tone = '', action = '') {
+  return `<div class="empty${tone ? ` tone-${tone}` : ''}"><span class="empty-icon">${glyph}</span>
+    <b>${esc(title)}</b><span>${esc(text)}</span>${action ? `<div class="empty-action">${action}</div>` : ''}</div>`;
 }
+/* Empty states offer the action that fills them, reusing existing flows. */
+function emptyAction(label, attrs, primary = false) {
+  return `<button class="btn ${primary ? 'primary' : 'ghost'} sm" ${attrs}>${label}</button>`;
+}
+/* Failures get a real state with a way out, not a blank panel. */
+function errorState(title, text, action) {
+  return `<div class="empty tone-bad"><span class="empty-icon">⚠</span><b>${esc(title)}</b><span>${esc(text)}</span>
+    <div class="empty-action"><button class="btn ghost sm" data-retry="${esc(action)}">Try again</button></div></div>`;
+}
+const RETRY = {
+  calls: () => loadCalls(), recordings: () => loadRecordings(),
+  voicemails: () => loadVoicemails(), state: () => loadState(),
+};
 function skeletonPanel(rows = 3) {
   const widths = ['', 'w-60', 'w-80', 'w-40'];
-  return `<div style="padding:18px 20px">${Array.from({ length: rows }, (_, i) => `<div class="skeleton line ${widths[i % widths.length]}" style="margin-bottom:10px"></div>`).join('')}</div>`;
+  return `<div class="skeleton-list">${Array.from({ length: rows }, (_, i) => `<div class="skeleton line ${widths[i % widths.length]}"></div>`).join('')}</div>`;
+}
+/* Mark the panel that owns a list while its request is in flight. */
+function setLoading(el, on) {
+  el?.closest('.panel')?.classList.toggle('loading', !!on);
+}
+function skeletonRows(rows = 6) {
+  return `<div class="skeleton-list">${Array.from({ length: rows }, (_, i) => `<div class="skeleton" style="height:52px;opacity:${(1 - i * 0.09).toFixed(2)}"></div>`).join('')}</div>`;
+}
+
+/* A badge pulses once when its count changes, then stays quiet across polls. */
+function setBadge(el, value) {
+  if (!el) return;
+  const next = String(value);
+  const changed = el.dataset.value !== undefined && el.dataset.value !== next;
+  el.dataset.value = next;
+  el.textContent = next;
+  el.hidden = !Number(value);
+  if (changed) {
+    el.classList.remove('pulse');
+    void el.offsetWidth;
+    el.classList.add('pulse');
+  }
+}
+
+/* Sequential entrances: children of these hosts animate in with a short stagger
+   (capped, otherwise a 50-row table would still be arriving a second later). */
+const STAGGER_HOSTS = [
+  'user-list', 'number-list', 'provider-list', 'sip-account-list', 'api-key-list',
+  'webhook-list', 'webhook-delivery-list', 'email-delivery-list', 'extension-list',
+  'request-list', 'my-request-list', 'activity-list', 'notification-list',
+  'invoice-list', 'subscription-list', 'platform-admin-list', 'recording-list',
+  'voicemail-list',
+];
+function markStagger() {
+  STAGGER_HOSTS.forEach(id => {
+    const host = $(id);
+    if (!host) return;
+    [...host.children].forEach((child, index) => child.style.setProperty('--i', String(Math.min(index, 10))));
+  });
+  document.querySelectorAll('table.data tbody').forEach(body => {
+    [...body.rows].forEach((row, index) => row.style.setProperty('--i', String(Math.min(index, 14))));
+  });
 }
 /* Status pill with a leading dot; keeps wording human across both themes. */
-function statusPill(value) {
+const seenStatus = new Map();
+/* Passing a stable key lets a status pill pulse the first time it changes after
+   a refresh, so approvals, cancellations and finalisations are noticeable. */
+function statusPill(value, key) {
   const v = String(value || 'unknown');
-  return `<span class="status ${esc(v)}">${esc(v.replaceAll('_', ' '))}</span>`;
+  const previous = key ? seenStatus.get(key) : undefined;
+  const changed = previous !== undefined && previous !== v;
+  if (key) seenStatus.set(key, v);
+  return `<span class="status ${esc(v)}${changed ? ' changed' : ''}">${esc(v.replaceAll('_', ' '))}</span>`;
 }
 function tag(text, tone = '', glyph = '') {
   return `<span class="tag ${tone}">${glyph ? `${glyph} ` : ''}${esc(text)}</span>`;
@@ -234,6 +298,8 @@ async function refreshDeviceStatus() {
     if (currentPage === 'sipaccounts') renderSipAccounts();
     if (workspace && $('workspace').classList.contains('open')) {
       (workspace.sip_accounts || []).forEach(a => { if (live.has(a.id)) a.registration_status = live.get(a.id); });
+      updateWsDeviceChip();
+      syncDeviceChip('#customer-status', state.sip_accounts);
       if (wsTab === 'devices' || wsTab === 'overview') renderWsTab(wsTab);
     }
   } catch { /* health polling already surfaces connectivity problems */ }
@@ -257,14 +323,10 @@ function renderAll() {
   countTo($('dash-providers'), state.providers.filter(p => p.active).length);
 
   const pending = (state.requests || []).filter(r => r.status === 'pending').length;
-  const requestBadge = $('request-badge');
-  requestBadge.textContent = pending;
-  requestBadge.hidden = !pending;
-  const unread = (state.notifications || []).filter(n => !n.read_at).length;
-  const notifyBadge = $('notification-badge');
-  notifyBadge.textContent = unread;
-  notifyBadge.hidden = !unread;
+  setBadge($('request-badge'), pending);
+  setBadge($('notification-badge'), (state.notifications || []).filter(n => !n.read_at).length);
 
+  if (!state.is_admin) renderCustomerStatus();
   renderExtensions();
   renderNumbers();
   renderProviders();
@@ -291,6 +353,7 @@ function renderAll() {
     ? 'Global recording is enabled; you can opt your extension in or out.'
     : 'The administrator has switched recording off for everyone; your preference is still saved for later.';
   $('profile-email').value = state.email || '';
+  markStagger();
 }
 
 /* --------------------------------------------------- 9. Render: customers */
@@ -299,8 +362,8 @@ function renderCustomers() {
   const rows = state.customers.filter(c =>
     `${c.company_name} ${c.full_name} ${c.username} ${c.email} ${c.phone}`.toLowerCase().includes(query));
   $('customer-count').textContent = `${rows.length} customer${rows.length === 1 ? '' : 's'}`;
-  $('user-list').innerHTML = rows.map(c => `
-    <article class="glass-card">
+  $('user-list').innerHTML = rows.map((c, i) => `
+    <article class="glass-card card-enter" style="--i:${Math.min(i, 10)}">
       <div class="glass-card-head">
         <span class="ws-glyph">${esc((c.company_name || c.username || 'C')[0].toUpperCase())}</span>
         <div>
@@ -319,7 +382,8 @@ function renderCustomers() {
         <button class="btn primary sm" data-open-customer="${c.id}">Open workspace</button>
         <button class="btn ghost sm" data-edit-user="${c.id}">Edit details</button>
       </div>
-    </article>`).join('') || empty('No customers yet', 'Create a customer, or wait for a public signup.', '◍');
+    </article>`).join('') || empty('No customers yet', 'Create a customer, or wait for a public signup.', '◍', '',
+      emptyAction('Create customer', 'data-open="user"', true));
 
   $('platform-admin-list').innerHTML = state.users.filter(u => u.role === 'admin').map(u => `
     <div class="row">
@@ -328,6 +392,7 @@ function renderCustomers() {
       <div class="tags">${u.active ? tag('Active', 'on') : tag('Disabled', 'off')}${tag('Administrator', 'violet')}</div>
       <div class="row-actions"><button class="btn danger sm" data-delete-user="${u.id}">Delete</button></div>
     </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂');
+  markStagger();
 }
 
 /* -------------------------------------------------- 10. Render: extensions */
@@ -367,8 +432,10 @@ function renderExtensions() {
         <div class="acc-body" style="padding:0">${items.map(card).join('')}</div>
       </div>`).join('') || empty('No extensions found', 'Open a customer workspace to create an extension.', '⌁');
   } else {
-    $('extension-list').innerHTML = rows.map(card).join('') || empty('No extensions yet', 'Create departments such as Sales, Support or Operations.', '⌁');
+    $('extension-list').innerHTML = rows.map(card).join('') || empty('No extensions yet', 'Create departments such as Sales, Support or Operations.', '⌁', '',
+      emptyAction('Create extension', 'data-open="extension"', true));
   }
+  markStagger();
 }
 
 /* ----------------------------------------------------- 11. Render: numbers */
@@ -400,7 +467,9 @@ function renderNumbers() {
           : (x.active && !x.default_outbound ? `<button class="btn primary sm" data-default-number="${x.id}">Use for outbound</button>` : '')}
       </div>
     </div>`;
-  }).join('') || empty('No phone numbers', state.is_admin ? 'Assign a number from a customer workspace.' : 'Request a number to get started.', '☎');
+  }).join('') || empty('No phone numbers', state.is_admin ? 'Assign a number from a customer workspace.' : 'Request a number to get started.', '☎', '',
+      state.is_admin ? emptyAction('Assign a number', 'data-open="number"', true) : emptyAction('Request a number', 'data-open="request"', true));
+  markStagger();
 }
 
 /* --------------------------------------------------- 12. Render: providers */
@@ -420,17 +489,19 @@ function renderProviders() {
         <button class="btn ghost sm" data-edit-provider="${x.id}">Edit</button>
         <button class="btn danger sm" data-delete-provider="${x.id}">Delete</button>
       </div>
-    </div>`).join('') || empty('No SIP providers', 'Add a carrier before assigning phone numbers.', '⇄');
+    </div>`).join('') || empty('No SIP providers', 'Add a carrier before assigning phone numbers.', '⇄', '',
+      emptyAction('Add provider', 'data-open="provider"', true));
+  markStagger();
 }
 
 /* ------------------------------------------------ 13. Render: SIP accounts */
 function renderSipAccounts() {
   const rows = state.sip_accounts || [];
   $('sip-count').textContent = `${rows.length} account${rows.length === 1 ? '' : 's'}`;
-  $('sip-account-list').innerHTML = rows.map(x => {
+  $('sip-account-list').innerHTML = rows.map((x, i) => {
     const owner = state.users.find(u => u.id === x.owner_user_id);
     return `
-    <article class="glass-card">
+    <article class="glass-card card-enter" style="--i:${Math.min(i, 10)}">
       <div class="glass-card-head">
         <span class="ws-glyph">◈</span>
         <div><h3>${esc(x.label)}</h3><p>${esc(owner?.company_name || owner?.username || 'My account')}</p></div>
@@ -447,7 +518,9 @@ function renderSipAccounts() {
         ${state.is_admin ? `<button class="btn ghost sm" data-edit-sip="${x.id}">Edit</button><button class="btn danger sm" data-delete-sip="${x.id}">Delete</button>` : ''}
       </div>
     </article>`;
-  }).join('') || empty('No devices yet', state.is_admin ? 'Assign SIP service from a customer workspace.' : 'An administrator will assign your SIP credentials.', '◈');
+  }).join('') || empty('No devices yet', state.is_admin ? 'Assign SIP credentials here or from a customer workspace.' : 'Add the phone or softphone you want to connect.', '◈', '',
+      emptyAction(state.is_admin ? 'Assign SIP service' : 'Add a device', 'data-open="sipaccount"', true));
+  markStagger();
 }
 
 /* ------------------------------------------------- 14. Render: API & hooks */
@@ -462,7 +535,9 @@ function renderApiKeys() {
         ${tag(`Last used ${x.last_used_at ? fmtDate(x.last_used_at) : 'never'}`)}
       </div>
       <div class="row-actions"><button class="btn danger sm" data-revoke-key="${x.id}">Revoke</button></div>
-    </div>`).join('') || empty('No API keys', 'Create a scoped key so your own software can call the EIP API.', '⌘');
+    </div>`).join('') || empty('No API keys', 'Create a scoped key so your own software can call the EIP API.', '⌘', '',
+      emptyAction('Create API key', 'data-open="apikey"', true));
+  markStagger();
 }
 
 function renderWebhooks() {
@@ -480,7 +555,9 @@ function renderWebhooks() {
         <button class="btn ghost sm" data-edit-webhook="${x.id}">Edit</button>
         <button class="btn danger sm" data-delete-webhook="${x.id}">Delete</button>
       </div>
-    </div>`).join('') || empty('No webhook endpoints', 'Add an endpoint to push call events to your CRM.', '◇');
+    </div>`).join('') || empty('No webhook endpoints', 'Add an endpoint to push call events to your CRM.', '◇', '',
+      emptyAction('Add webhook', 'data-open="webhook"', true));
+  markStagger();
 }
 
 function renderDeliveries() {
@@ -507,7 +584,7 @@ function renderRequests() {
     <div class="row">
       <span class="row-icon">↗</span>
       <div><h3>${esc(x.company_name || x.username)} · ${esc(String(x.request_type).replaceAll('_', ' '))}</h3><p>${esc(x.details)}</p></div>
-      <div>${statusPill(x.status)}<p style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(fmtDate(x.created_at))}</p></div>
+      <div>${statusPill(x.status, `request-${x.id}`)}<p style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(fmtDate(x.created_at))}</p></div>
       <div class="row-actions">
         ${x.status === 'pending' ? `
           <button class="btn primary sm" data-resolve-request="${x.id}:approved">Approve</button>
@@ -515,6 +592,7 @@ function renderRequests() {
           <button class="btn danger sm" data-resolve-request="${x.id}:rejected">Reject</button>` : ''}
       </div>
     </div>`).join('') || empty('No requests', 'Customer number and access requests will appear here.', '↗');
+  markStagger();
 }
 
 function renderMyRequests() {
@@ -533,26 +611,53 @@ function renderMyRequests() {
       <p>${esc(x.details)}</p>
       ${x.admin_note ? `<small>Administrator: ${esc(x.admin_note)}</small>` : ''}
       <small>${esc(fmtDate(x.created_at))}</small>
-      <div class="tags" style="margin-top:7px">${statusPill(x.status)}</div>
+      <div class="tags" style="margin-top:7px">${statusPill(x.status, `myrequest-${x.id}`)}</div>
     </div>`).join('') || empty('No requests yet', 'Request a phone number and its progress will appear here.', '↗');
 
-  const steps = {
-    request: rows.some(r => r.request_type === 'number'),
-    number: state.phone_numbers.length,
-    sip: state.sip_accounts.length,
-    extensions: state.extensions.length,
-    routing: state.call_routes.length,
-    api: state.api_keys.length,
-  };
-  const labels = { request: 'Request a number', number: 'Number assigned', sip: 'SIP credentials', extensions: 'Extensions', routing: 'Call routing', api: 'APIs' };
-  $('customer-journey').innerHTML = Object.entries(steps)
-    .map(([step, done], i) => `${i ? '<i></i>' : ''}<span class="${done ? 'done' : ''}">${done ? '✓' : i + 1} ${esc(labels[step])}</span>`).join('');
+  /* Setup journey: completed steps are ticked, the first unfinished step is the
+     current milestone, and every milestone links to the page that advances it. */
+  // Customers raise requests from their dashboard; administrators review them
+  // on the requests page, so each milestone points at the right surface.
+  const requestPage = state.is_admin ? 'requests' : 'dashboard';
+  const steps = [
+    ['request', 'Request a number', rows.some(r => r.request_type === 'number'), requestPage],
+    ['number', 'Number assigned', !!state.phone_numbers.length, 'numbers'],
+    ['sip', 'Connect a device', !!state.sip_accounts.length, 'sipaccounts'],
+    ['extensions', 'Extensions', !!state.extensions.length, 'extensions'],
+    ['routing', 'Call routing', !!state.call_routes.length, 'routing'],
+    ['api', 'APIs & webhooks', !!(state.api_keys.length || myWebhooks()), 'webhooks'],
+  ];
+  const currentIndex = steps.findIndex(([, , done]) => !done);
+  const doneCount = steps.filter(([, , done]) => done).length;
+  const percent = Math.round((doneCount / steps.length) * 100);
+  const journey = [
+    `<div class="journey-head"><b>${doneCount} of ${steps.length} steps complete</b>`,
+    `<span class="journey-bar"><i style="--p:${percent}%"></i></span>`,
+    `<small>${steps.length - doneCount === 0 ? 'Your phone system is fully live' : `Next: ${esc(steps[currentIndex][1])}`}</small></div>`,
+    '<div class="journey-steps">',
+  ];
+  steps.forEach(([key, label, done, page], index) => {
+    if (index) journey.push(`<i class="${steps[index - 1][2] ? 'done' : ''}"></i>`);
+    const state = done ? 'done' : (index === currentIndex ? 'current' : '');
+    const glyph = done ? '✓' : index === currentIndex ? '◐' : index + 1;
+    journey.push(`<button class="journey-step ${state}" data-page="${esc(page)}" data-journey="${esc(key)}" type="button">
+      <span class="tick">${glyph}</span>${esc(label)}</button>`);
+  });
+  journey.push('</div>');
+  $('customer-journey').innerHTML = journey.join('');
+  markStagger();
+}
+
+/* Webhooks are already scoped to the signed-in customer in non-admin payloads. */
+function myWebhooks() {
+  return (state.webhooks || []).length;
 }
 
 function renderActivity() {
   $('activity-list').innerHTML = (state.activity || []).map(x => `
     <div class="tl-item"><b>${esc(x.description)}</b><p>${esc(String(x.action).replaceAll('.', ' '))} · ${esc(x.resource_type)}</p><small>${esc(fmtDate(x.created_at))}</small></div>
   `).join('') || empty('No activity yet', 'Important platform changes will be recorded here.', '◌');
+  markStagger();
 }
 
 function renderNotifications() {
@@ -563,6 +668,7 @@ function renderNotifications() {
       <div>${x.read_at ? tag('Read') : tag('Unread', 'warn')}<p style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(fmtDate(x.created_at))}</p></div>
       <div class="row-actions">${x.read_at ? '' : `<button class="btn ghost sm" data-read-notification="${x.id}">Mark read</button>`}</div>
     </div>`).join('') || empty('You are all caught up', 'New assignments and service events will appear here.', '●');
+  markStagger();
 }
 
 /* --------------------------------------------------- 16. Render: billing */
@@ -592,6 +698,7 @@ function renderBilling() {
       <td>${esc(fmtDay(x.due_at))}</td>
       <td>${state.is_admin && x.status === 'open' ? `<button class="btn ghost sm" data-paid-invoice="${x.id}">Mark paid</button>` : '—'}</td>
     </tr>`).join('')}</tbody></table>` : empty('No invoices yet', 'Invoices appear automatically for assigned numbers.', '▣');
+  markStagger();
 }
 
 /* --------------------------------------------------- 17. Render: settings */
@@ -625,6 +732,7 @@ function renderSettings() {
   $('rec-announcement').checked = truth(s.recording_announcement);
   $('rec-media').value = s.recording_announcement_media || '';
   $('rec-beep').checked = truth(s.recording_beep);
+  markStagger();
 }
 
 function renderEmailSettings() {
@@ -637,7 +745,7 @@ function renderEmailSettings() {
   $('email-delivery-list').innerHTML = rows.length ? `
     <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
     <tbody>${rows.map(x => `<tr>
-      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${statusPill(x.status)}</td>
+      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${statusPill(x.status, `mail-${x.id}`)}</td>
       <td>${esc(x.attempts)}</td><td>${esc(fmtDate(x.updated_at))}</td><td>${esc(x.last_error || '—')}</td>
     </tr>`).join('')}</tbody></table>` : empty('No delivery attempts', 'New voicemail email attempts will appear here.', '✎');
 }
@@ -652,7 +760,7 @@ function callTable(calls, compact = false) {
       <td>${tag(x.direction || 'outbound', x.direction === 'inbound' ? 'info' : '')}</td>
       <td>${esc(x.caller_id_number || '—')}</td>
       <td>${esc(x.extension)}<span class="cell-sub">${esc(extensionName(x.extension))}</span></td>
-      <td>${statusPill(x.status)}</td>
+      <td>${statusPill(x.status, `call-${x.call_id}`)}</td>
       <td>${esc(fmtDate(x.started_at))}</td>
       <td>${fmtDuration(x.duration_seconds)}</td>
       ${compact ? '' : `<td>${x.recording_status === 'finalized' ? tag('Available', 'on') : tag('None')}<span class="cell-sub">${esc(x.contact_id || x.call_id || '—')}</span></td>`}
@@ -664,12 +772,20 @@ async function loadCalls() {
   if (val('call-extension')) params.set('extension', val('call-extension'));
   if (val('call-status')) params.set('status', val('call-status'));
   if (val('call-search')) params.set('q', val('call-search'));
+  $('call-list').innerHTML = skeletonRows(6);
+  setLoading($('call-list'), true);
   try {
     const data = await api(`/admin/api/calls?${params}`);
     $('call-count').textContent = `${fmtNum(data.total)} call${data.total === 1 ? '' : 's'}`;
     $('call-list').innerHTML = callTable(data.calls);
     renderPager('call-pager', data.total, callOffset, value => { callOffset = value; loadCalls(); });
-  } catch (error) { notify(error.message, true); }
+    markStagger();
+  } catch (error) {
+    $('call-list').innerHTML = errorState('Calls could not be loaded', error.message, 'calls');
+    notify(error.message, true);
+  } finally {
+    setLoading($('call-list'), false);
+  }
 }
 
 function renderPager(id, total, offset, callback) {
@@ -697,6 +813,7 @@ async function loadRecordings() {
   const params = new URLSearchParams({ limit: '50', offset: String(recordingOffset), recordings: 'true' });
   if (val('recording-extension')) params.set('extension', val('recording-extension'));
   if (val('recording-search')) params.set('q', val('recording-search'));
+  setLoading($('recording-list'), true);
   try {
     const data = await api(`/admin/api/calls?${params}`);
     const customerId = Number(val('recording-customer') || 0);
@@ -719,7 +836,7 @@ async function loadRecordings() {
         <div class="acc-body" style="padding:0 18px 16px">${items.map(x => `
           <div class="row rec-row" style="grid-template-columns:minmax(150px,1fr) minmax(140px,auto) minmax(240px,1.4fr)">
             <div><h3>${esc(x.phone)}</h3><p>${esc(fmtDate(x.started_at))} · ${fmtDuration(x.duration_seconds)}</p></div>
-            <div>${statusPill(x.recording_status)}<span class="cell-sub">Call ${esc(x.call_id)}</span></div>
+            <div>${statusPill(x.recording_status, `rec-${x.call_id}`)}<span class="cell-sub">Call ${esc(x.call_id)}</span></div>
             <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap">
               ${waveform()}
               ${x.recording_status === 'finalized'
@@ -730,7 +847,13 @@ async function loadRecordings() {
           </div>`).join('')}</div>
       </div>`).join('') || empty('No recordings found', 'Try another extension, or complete a recorded call.', '◉');
     renderPager('recording-pager', data.total, recordingOffset, value => { recordingOffset = value; loadRecordings(); });
-  } catch (error) { notify(error.message, true); }
+    markStagger();
+  } catch (error) {
+    $('recording-list').innerHTML = errorState('Recordings could not be loaded', error.message, 'recordings');
+    notify(error.message, true);
+  } finally {
+    setLoading($('recording-list'), false);
+  }
 }
 
 /* -------------------------------------------------------- 20. Voicemail */
@@ -738,6 +861,7 @@ async function loadVoicemails() {
   const params = new URLSearchParams();
   if (val('voicemail-extension')) params.set('extension', val('voicemail-extension'));
   if (val('voicemail-folder')) params.set('folder', val('voicemail-folder'));
+  setLoading($('voicemail-list'), true);
   try {
     const data = await api(`/admin/api/voicemails?${params}`);
     const query = val('voicemail-search').toLowerCase();
@@ -765,7 +889,13 @@ async function loadVoicemails() {
             </div>
           </div>`).join('')}</div>
       </div>`).join('') || empty('No voicemail messages', 'Enable voicemail on an extension and unanswered callers can leave a message.', '✉');
-  } catch (error) { notify(error.message, true); }
+    markStagger();
+  } catch (error) {
+    $('voicemail-list').innerHTML = errorState('Voicemail could not be loaded', error.message, 'voicemails');
+    notify(error.message, true);
+  } finally {
+    setLoading($('voicemail-list'), false);
+  }
 }
 
 async function voicemailAction(action, value) {
@@ -800,7 +930,7 @@ function renderFlowNodes() {
   const host = $('flow-nodes');
   if (!host) return;
   host.innerHTML = flowNodes.map((node, index) => `
-    <div class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="true" data-flow-index="${index}">
+    <div class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="true" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
       <span class="icon ${FLOW_TILES[node.type] || 'tile-ext'}">${FLOW_ICONS[node.type] || '◇'}</span>
       <div class="copy"><b>${esc(String(node.type).replaceAll('_', ' '))}</b><small>${esc(node.label || 'Click to configure this step')}</small></div>
       <span class="step">${String(index + 1).padStart(2, '0')}</span>
@@ -1253,31 +1383,14 @@ const wsRecordings = () => wsCalls().filter(c => c.recording_name && c.recording
 async function openCustomer(customerId, tab = 'overview', silent = false) {
   if (!state.is_admin) return;
   try {
-    if (!silent) $('ws-body').innerHTML = skeletonPanel(4);
+    if (!silent) {
+      $('ws-body').innerHTML = skeletonPanel(4);
+      $('ws-status').innerHTML = '<div class="skeleton line w-60" style="margin:0"></div>';
+      $('ws-quick').innerHTML = '';
+      $('ws-recent').innerHTML = '';
+    }
     workspace = await api(`/admin/api/customers/${customerId}`);
-    const c = workspace.customer;
-    const initials = (c.company_name || c.full_name || c.username || 'C').trim()[0].toUpperCase();
-    $('ws-avatar').textContent = initials;
-    $('ws-title').textContent = c.company_name || c.username;
-    $('ws-meta').textContent = `${c.full_name || c.username} · ${c.email}`;
-    const openInvoices = workspace.invoices.filter(i => i.status === 'open');
-    const overdue = openInvoices.some(i => i.due_at && i.due_at < new Date().toISOString().slice(0, 10));
-    $('ws-flags').innerHTML = [
-      c.active ? tag('Active', 'on') : tag('Access disabled', 'off'),
-      c.username ? tag(c.username, '', '@') : '',
-      tag(`${workspace.numbers.length} number${workspace.numbers.length === 1 ? '' : 's'}`, '', '☎'),
-      tag(`${workspace.sip_accounts.length} device${workspace.sip_accounts.length === 1 ? '' : 's'}`, '', '◈'),
-      overdue ? tag(`${openInvoices.length} payment due`, 'warn', '▣') : (openInvoices.length ? tag(`${openInvoices.length} open invoice`, 'info', '▣') : tag('Paid up', 'on', '▣')),
-    ].join('');
-
-    $('ws-metrics').innerHTML = [
-      ['☎', 'Numbers', workspace.numbers.length],
-      ['◈', 'Devices', workspace.sip_accounts.length],
-      ['⌁', 'Extensions', workspace.extensions.length],
-      ['↗', 'Pending requests', workspace.requests.filter(r => r.status === 'pending').length],
-    ].map(([glyph, label, value]) => `
-      <div class="ws-metric"><span class="glyph">${glyph}</span><p><small>${label}</small><b>${value}</b></p></div>`).join('');
-
+    renderWsHeader();
     renderWsTabs();
     wsTab = WS_TABS.some(t => t[0] === tab) ? tab : 'overview';
     renderWsTab(wsTab);
@@ -1287,14 +1400,145 @@ async function openCustomer(customerId, tab = 'overview', silent = false) {
   } catch (error) { notify(error.message, true); }
 }
 
+/* The workspace header is a compact command centre: identity, account state,
+   live device count, billing position and the customer's latest activity, with
+   shortcuts into the flows an administrator reaches for most often. */
+function renderWsHeader() {
+  if (!workspace) return;
+  const c = workspace.customer;
+  const today = new Date().toISOString().slice(0, 10);
+  const openInvoices = workspace.invoices.filter(i => i.status === 'open');
+  const overdue = openInvoices.filter(i => i.due_at && i.due_at < today);
+  const pendingRequests = workspace.requests.filter(r => r.status === 'pending').length;
+  const devices = workspace.sip_accounts || [];
+  const online = devices.filter(d => d.registration_status === 'online').length;
+
+  const avatar = $('ws-avatar');
+  avatar.textContent = (c.company_name || c.full_name || c.username || 'C').trim()[0].toUpperCase();
+  avatar.classList.toggle('muted', !c.active);
+  avatar.classList.add('pop');
+  $('ws-title').textContent = c.company_name || c.username;
+  $('ws-meta').textContent = `${c.full_name || c.username} · ${c.email}`;
+  $('ws-flags').innerHTML = [
+    c.active ? tag('Active', 'on') : tag('Access disabled', 'off'),
+    c.username ? tag(c.username, '', '@') : '',
+    c.job_role ? tag(c.job_role, 'violet') : '',
+    overdue.length ? tag(`${overdue.length} payment due`, 'warn', '▣') : tag('Paid up', 'on', '▣'),
+  ].join('');
+
+  const deviceTone = !devices.length ? '' : online === devices.length ? 'ok' : online ? 'warn' : 'bad';
+  const paymentTone = overdue.length ? 'bad' : openInvoices.length ? 'warn' : 'ok';
+  $('ws-status').innerHTML = [
+    ['user', c.active ? 'Active account' : 'Access disabled', c.active ? 'ok' : 'bad',
+      `Member since ${fmtDay(c.created_at)}`],
+    ['devices', devices.length ? `${online} of ${devices.length} registered` : 'No devices yet',
+      deviceTone, devices.length ? 'Live SIP registration' : 'Add a device to go live'],
+    ['payments', overdue.length ? `${overdue.length} invoice overdue`
+      : openInvoices.length ? `${openInvoices.length} invoice open` : 'Paid up', paymentTone,
+      `${workspace.invoices.length} invoice${workspace.invoices.length === 1 ? '' : 's'} on file`],
+    ['requests', pendingRequests ? `${pendingRequests} awaiting decision` : 'Nothing pending',
+      pendingRequests ? 'warn' : 'ok', `${workspace.requests.length} request${workspace.requests.length === 1 ? '' : 's'} raised`],
+  ].map(([key, value, tone, hint]) => `<div class="ws-chip ${tone}" data-chip="${key}">
+      <i>${WS_CHIP_GLYPHS[key]}</i><p><small>${esc(hint)}</small><b>${esc(value)}</b></p></div>`).join('');
+
+  // Quick actions reuse the existing modals and pages — nothing new is created.
+  $('ws-quick').innerHTML = [
+    ['extension', 'Add extension', '⌁', 'data-open="extension"'],
+    ['sipaccount', 'Add device', '◈', 'data-open="sipaccount"'],
+    ['number', 'Assign number', '☎', 'data-open="number"'],
+    ['routing', 'Open call flow', '⌘', `data-ws-goto="routing"`],
+    ['customer', 'Edit customer', '✎', 'data-ws-edit-customer="1"'],
+  ].map(([, label, glyph, attr]) => `<button type="button" ${attr}><span class="glyph">${glyph}</span>${label}</button>`).join('');
+
+  const recent = (workspace.activity || []).slice(0, 3);
+  $('ws-recent').innerHTML = recent.length
+    ? recent.map(x => `<div class="tl-item"><b>${esc(x.description)}</b>
+        <p>${esc(String(x.action).replaceAll('.', ' '))} · ${esc(x.resource_type)}</p>
+        <small>${esc(fmtDate(x.created_at))}</small></div>`).join('')
+    : '<div class="tl-item"><b>No recorded activity yet</b><p>Provisioning and access changes will appear here.</p></div>';
+
+  $('ws-metrics').innerHTML = [
+    ['☎', 'Numbers', workspace.numbers.length, 'ws-metric-numbers'],
+    ['◈', 'Devices', devices.length, 'ws-metric-devices'],
+    ['⌁', 'Extensions', workspace.extensions.length, 'ws-metric-extensions'],
+    ['↗', 'Pending requests', pendingRequests, 'ws-metric-requests'],
+  ].map(([glyph, label, value, id]) => `
+    <div class="ws-metric"><span class="glyph">${glyph}</span><p><small>${label}</small><b id="${id}">0</b></p></div>`).join('');
+  [['ws-metric-numbers', workspace.numbers.length], ['ws-metric-devices', devices.length],
+    ['ws-metric-extensions', workspace.extensions.length], ['ws-metric-requests', pendingRequests]]
+    .forEach(([id, value]) => countTo($(id), value));
+}
+
+const WS_CHIP_GLYPHS = { user: '◍', devices: '◈', payments: '▣', requests: '↗' };
+let wsTabCounts = {};
+
+/* Live registration polls update the device chip in place, so neither header
+   re-animates every eight seconds. */
+function syncDeviceChip(rootSelector, accounts) {
+  const chip = document.querySelector(`${rootSelector} [data-chip="devices"]`);
+  if (!chip) return;
+  const devices = accounts || [];
+  const online = devices.filter(d => d.registration_status === 'online').length;
+  const next = devices.length ? `${online} of ${devices.length} registered` : 'No devices yet';
+  const tone = !devices.length ? '' : online === devices.length ? 'ok' : online ? 'warn' : 'bad';
+  const label = chip.querySelector('b');
+  if (!label || label.textContent === next) return;
+  label.textContent = next;
+  chip.classList.remove('ok', 'warn', 'bad');
+  if (tone) chip.classList.add(tone);
+  label.classList.remove('bump');
+  void label.offsetWidth;
+  label.classList.add('bump');
+}
+function updateWsDeviceChip() {
+  if (workspace) syncDeviceChip('#ws-status', workspace.sip_accounts);
+}
+
+/* Customer dashboard summary: the same chips as the administrator's workspace,
+   limited to what a customer owns and can act on. */
+function renderCustomerStatus() {
+  const host = $('customer-status');
+  if (!host) return;
+  const devices = state.sip_accounts || [];
+  const online = devices.filter(d => d.registration_status === 'online').length;
+  const numbers = state.phone_numbers || [];
+  const invoices = (state.invoices || []).filter(i => i.status === 'open');
+  const overdue = invoices.filter(i => i.due_at && i.due_at < new Date().toISOString().slice(0, 10));
+  const deviceTone = !devices.length ? '' : online === devices.length ? 'ok' : online ? 'warn' : 'bad';
+  host.innerHTML = [
+    ['user', 'Account', `${state.username} · active`, 'ok', `${state.extensions?.length || 0} extension${state.extensions?.length === 1 ? '' : 's'} ready`],
+    ['numbers', 'Phone numbers', numbers.length ? `${numbers.length} assigned` : 'None yet',
+      numbers.length ? 'ok' : 'warn', numbers.length ? 'Receiving calls' : 'Request a number to begin'],
+    ['devices', 'Devices', devices.length ? `${online} of ${devices.length} registered` : 'No devices yet',
+      deviceTone, devices.length ? 'Live SIP registration' : 'Add the phone or softphone you use'],
+    ['payments', 'Billing', overdue.length ? `${overdue.length} overdue`
+      : invoices.length ? `${invoices.length} open` : 'Paid up',
+      overdue.length ? 'bad' : invoices.length ? 'warn' : 'ok',
+      `${(state.invoices || []).length} invoice${(state.invoices || []).length === 1 ? '' : 's'} on file`],
+  ].map(([key, label, value, tone, hint]) => `<div class="ws-chip ${tone}" data-chip="${key}">
+      <i>${WS_CHIP_GLYPHS[key] || '•'}</i><p><small>${esc(hint)}</small><b>${esc(value)}</b></p></div>`).join('');
+}
+
 function renderWsTabs() {
   const pending = workspace.requests.filter(r => r.status === 'pending').length;
   const counts = { numbers: workspace.numbers.length, devices: workspace.sip_accounts.length, requests: pending, integrations: wsOwned('webhooks').length + wsOwned('api_keys').length };
+  const pulse = key => (counts[key] !== wsTabCounts[key] ? ' pulse' : '');
   $('ws-tabs').innerHTML = WS_TABS.map(([key, glyph, label]) => `
     <button class="ws-tab ${key === wsTab ? 'active' : ''}" data-ws-tab="${key}">
       <span class="glyph">${glyph}</span>${esc(label)}
-      ${counts[key] ? `<span class="dot">${counts[key]}</span>` : ''}
-    </button>`).join('');
+      ${counts[key] ? `<span class="dot${pulse(key)}">${counts[key]}</span>` : ''}
+    </button>`).join('') + '<span class="ws-tab-ink" id="ws-tab-ink" aria-hidden="true"></span>';
+  wsTabCounts = { ...counts };
+  moveTabInk();
+}
+
+/* One indicator glides between tabs instead of an underline per tab. */
+function moveTabInk() {
+  const ink = $('ws-tab-ink');
+  const active = document.querySelector('#ws-tabs .ws-tab.active');
+  if (!ink || !active) return;
+  ink.style.setProperty('--ink-x', `${active.offsetLeft}px`);
+  ink.style.setProperty('--ink-w', `${active.offsetWidth}px`);
 }
 
 function wsEmpty(title, text, glyph) { return `<div class="ws-empty">${empty(title, text, glyph)}</div>`; }
@@ -1310,6 +1554,11 @@ function renderWsTab(tab) {
     billing: wsBilling(), integrations: wsIntegrations(), activity: wsActivityTab(),
   }[tab] || wsOverview());
   body.scrollTop = 0;
+  body.classList.remove('swapping');
+  void body.offsetWidth;
+  body.classList.add('swapping');
+  moveTabInk();
+  markStagger();
 }
 
 /* --- Overview: everything that needs attention, at a glance. --- */
@@ -1556,7 +1805,7 @@ function wsBilling() {
         <tbody>${invoices.map(x => `<tr>
           <td class="cell-strong">#${esc(x.id)}</td><td>${esc(x.number)}</td>
           <td>${esc(x.period_start)} → ${esc(x.period_end)}</td><td>${money(x.amount_cents)}</td>
-          <td>${statusPill(x.status)}</td><td>${esc(fmtDay(x.due_at))}</td>
+          <td>${statusPill(x.status, `invoice-${x.id}`)}</td><td>${esc(fmtDay(x.due_at))}</td>
           <td>${x.status === 'open' ? `<button class="btn ghost sm" data-paid-invoice="${x.id}">Mark paid</button>` : '—'}</td>
         </tr>`).join('')}</tbody></table>` : empty('No invoices', 'Invoices are generated for each assigned number.', '▣')}</div>
     </div>
@@ -1624,6 +1873,7 @@ document.addEventListener('click', async event => {
   const d = button.dataset;
   const keepWorkspace = () => workspace?.customer?.id;
 
+  if (d.retry) return RETRY[d.retry]?.();
   if (d.openCustomer) return openCustomer(Number(d.openCustomer));
   if (d.wsTab) return renderWsTab(d.wsTab);
   if (d.wsGoto) { closeWorkspace(); showPage(d.wsGoto); return; }
@@ -1697,6 +1947,7 @@ document.addEventListener('click', async event => {
   if (d.editProvider) return openModal('provider', state.providers.find(x => x.id === Number(d.editProvider)));
   if (d.editWebhook) return openModal('webhook', state.webhooks.find(x => x.id === Number(d.editWebhook)));
   if (d.editUser) return openModal('user', state.users.find(x => x.id === Number(d.editUser)));
+  if (d.wsEditCustomer) return openModal('user', workspace?.customer);
 
   if (d.deleteExtension) return remove('extension', d.deleteExtension, d.deleteExtension);
   if (d.deleteNumber) { const item = state.phone_numbers.find(x => x.id === Number(d.deleteNumber)); return remove('number', item.id, item.number); }
@@ -1831,16 +2082,31 @@ wire('flow-nodes', 'drop', event => {
     renderFlowNodes();
   }
 });
+const dragSurface = $('flow-canvas');
+const dragging = (el, on) => el?.classList.toggle('dragging', on);
 document.querySelectorAll('[data-node-type]').forEach(button => {
-  button.addEventListener('dragstart', event => event.dataTransfer.setData('text/plain', button.dataset.nodeType));
+  button.addEventListener('dragstart', event => {
+    event.dataTransfer.setData('text/plain', button.dataset.nodeType);
+    dragging(button, true);
+  });
+  button.addEventListener('dragend', () => dragging(button, false));
   button.onclick = () => { flowNodes.push({ type: button.dataset.nodeType, label: 'Click to configure' }); renderFlowNodes(); };
 });
-wire('flow-canvas', 'dragover', event => event.preventDefault());
-wire('flow-canvas', 'drop', event => {
-  event.preventDefault();
-  const type = event.dataTransfer.getData('text/plain');
-  if (type) { flowNodes.push({ type, label: 'Click to configure' }); renderFlowNodes(); }
-});
+wire('flow-nodes', 'dragstart', event => dragging(event.target.closest('[data-flow-index]'), true));
+wire('flow-nodes', 'dragend', event => dragging(event.target.closest('[data-flow-index]'), false));
+if (dragSurface) {
+  let depth = 0;
+  dragSurface.addEventListener('dragenter', () => { depth += 1; dragSurface.classList.add('drag-over'); });
+  dragSurface.addEventListener('dragleave', () => { depth -= 1; if (depth <= 0) { depth = 0; dragSurface.classList.remove('drag-over'); } });
+  dragSurface.addEventListener('dragover', event => event.preventDefault());
+  dragSurface.addEventListener('drop', event => {
+    event.preventDefault();
+    depth = 0;
+    dragSurface.classList.remove('drag-over');
+    const type = event.dataTransfer.getData('text/plain');
+    if (type) { flowNodes.push({ type, label: 'Click to configure' }); renderFlowNodes(); }
+  });
+}
 wire('route-number', 'change', () => {
   $('flow-entry-number').textContent = $('route-number').value || 'Assign a number to begin';
   flowNodes = (state.call_routes || []).find(x => x.phone_number === $('route-number').value)?.route?.nodes || [];
@@ -1919,6 +2185,9 @@ wire('password-form', 'submit', async event => {
 
 /* -------------------------------------------------------------- 29. Boot */
 window.addEventListener('scroll', () => $('topbar')?.classList.toggle('scrolled', window.scrollY > 6), { passive: true });
+window.addEventListener('resize', () => { if (workspace) moveTabInk(); }, { passive: true });
+// Webfonts change tab widths after first paint; realign the indicator once loaded.
+document.fonts?.ready.then(() => { if (workspace) moveTabInk(); });
 
 loadState().then(() => {
   const requested = location.hash.slice(1);
