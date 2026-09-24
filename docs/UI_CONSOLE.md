@@ -59,7 +59,34 @@ pages are linkable.
   class in the stylesheet that nothing applies is dead weight. Status values come from
   the API, so they are checked against captured fixtures instead of guessed.
 
+## Motion and interaction
+
+All animation lives in `admin.css` and follows one vocabulary, so timings stay
+consistent and nothing outruns the interface:
+
+| Concern | Rule |
+| --- | --- |
+| Entrances | `fadeUp` / `popIn` / `rowIn`; lists stagger through a `--i` index that `markStagger()` writes onto rows, cards and rows of grouped lists |
+| Page changes | `.page.active > *` cascades its children with 26ms steps, capped at ~150ms |
+| Workspace | one `.ws-tab-ink` element glides between tabs, tab bodies cross-fade with `.swapping`, header chips and metrics stage in |
+| Hover | transform-only lifts on cards, rows, metrics and quick actions, plus a one-shot glass sheen on large surfaces |
+| Live state | status pills pulse when a value changes, badges and tab dots pulse when a count changes, the workspace device chip updates in place |
+| Loading | `skeletonPanel` / `skeletonRows` placeholders and a `.panel.loading` progress hairline |
+| Feedback | toasts carry a timer bar sized by `--toast-life` |
+
+Two rules keep it feeling fast rather than busy:
+
+1. **Cascades stay under ~0.2s** and only run on real navigation or re-render.
+2. **Polls never re-animate.** `refreshDeviceStatus()` compares state before
+   touching the DOM, so an unchanged 8-second poll is a no-op.
+
 ## Keyboard and motion
 
-Every interactive element has a `:focus-visible` ring, and all animation is disabled
-under `prefers-reduced-motion: reduce`.
+Every interactive element — buttons, nav items, tabs, rows, cards, journey
+milestones, quick actions and form fields — has a `:focus-visible` ring.
+
+Under `prefers-reduced-motion: reduce` all animation resolves instantly
+(duration and delay are zeroed), looping ambience such as the workspace ring,
+aurora and empty-state glyphs stops, sheen overlays are removed, and smooth
+scrolling is disabled. Entrance animations are additionally switched off for
+page cascades and list items, so nothing moves at all.
