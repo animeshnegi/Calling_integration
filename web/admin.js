@@ -294,13 +294,23 @@ async function refreshDeviceStatus() {
   try {
     const data = await api('/admin/api/device-status');
     const live = new Map(data.devices.map(d => [d.id, d.registration_status]));
-    state.sip_accounts.forEach(a => { if (live.has(a.id)) a.registration_status = live.get(a.id); });
-    if (currentPage === 'sipaccounts') renderSipAccounts();
+    // Only touch the DOM when a state actually changed: re-rendering on every
+    // poll would replay entrance animations while nothing had moved.
+    const apply = accounts => (accounts || []).reduce((changed, account) => {
+      const next = live.get(account.id);
+      if (next === undefined || next === account.registration_status) return changed;
+      account.registration_status = next;
+      return true;
+    }, false);
+    const ownChanged = apply(state.sip_accounts);
+    if (ownChanged && currentPage === 'sipaccounts') renderSipAccounts();
     if (workspace && $('workspace').classList.contains('open')) {
-      (workspace.sip_accounts || []).forEach(a => { if (live.has(a.id)) a.registration_status = live.get(a.id); });
+      const changed = apply(workspace.sip_accounts);
       updateWsDeviceChip();
       syncDeviceChip('#customer-status', state.sip_accounts);
-      if (wsTab === 'devices' || wsTab === 'overview') renderWsTab(wsTab);
+      if (changed && (wsTab === 'devices' || wsTab === 'overview')) renderWsTab(wsTab);
+    } else if (ownChanged) {
+      syncDeviceChip('#customer-status', state.sip_accounts);
     }
   } catch { /* health polling already surfaces connectivity problems */ }
 }
