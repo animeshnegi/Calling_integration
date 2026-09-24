@@ -1214,13 +1214,13 @@ def register_admin(app, config, on_telephony_change=None):
             if not session.get("admin_user_id"):
                 if request.path.startswith("/admin/api/"):
                     return jsonify({"error": "authentication required"}), 401
-                return redirect("/admin/login")
+                return redirect("/login")
             user = store.get_user(int(session["admin_user_id"]))
             if not user or not user["active"]:
                 session.clear()
                 if request.path.startswith("/admin/api/"):
                     return jsonify({"error": "account disabled"}), 401
-                return redirect("/admin/login")
+                return redirect("/login")
             session["admin_username"], session["admin_email"] = user["username"], user["email"]
             session["admin_extension"], session["admin_role"] = user["extension"], user["role"]
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
@@ -1282,9 +1282,11 @@ def register_admin(app, config, on_telephony_change=None):
         except INPUT_DB_ERRORS as exc:
             return jsonify({"error": str(exc)}), 400
 
+    @app.get("/login")
     @app.get("/admin/login")
     def admin_login_page(): return send_from_directory(web_dir, "admin-login.html")
 
+    @app.post("/login")
     @app.post("/admin/login")
     def admin_login():
         # This endpoint is consumed by JavaScript and must always return JSON.

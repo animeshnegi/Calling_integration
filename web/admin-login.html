@@ -7,7 +7,7 @@
   <title>Sign in · EIP Telephony Control</title>
   <link rel="stylesheet" href="/admin-assets/admin.css">
 </head>
-<body class="admin-theme login-body">
+<body class="theme-dark login-body">
 <div class="aurora" aria-hidden="true"><b></b><b></b><b></b></div>
 
 <main class="login-shell">
@@ -58,7 +58,7 @@ document.querySelector('#login').addEventListener('submit', async event => {
   button.textContent = 'Signing in…';
   error.textContent = '';
   try {
-    const response = await fetch('/admin/login', {
+    const response = await fetch('/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
       body: JSON.stringify(Object.fromEntries(new FormData(event.target))),

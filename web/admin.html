@@ -8,6 +8,18 @@
   <link rel="stylesheet" href="/admin-assets/admin.css">
 </head>
 <body class="theme-loading">
+  <script>
+    /* Applies the remembered skin before the first paint so a reload never
+       flashes the other theme. The role decides the default on a first visit,
+       once the state payload names it. */
+    (function () {
+      try {
+        var role = localStorage.getItem('eip-console-role');
+        var skin = localStorage.getItem('eip-console-theme' + (role ? ':' + role : ''));
+        if (skin === 'light' || skin === 'dark') document.body.classList.add('theme-' + skin);
+      } catch (e) { /* storage unavailable: keep the role default */ }
+    })();
+  </script>
 <!-- Ambient gradient field; purely decorative. -->
 <div class="aurora" aria-hidden="true"><b></b><b></b><b></b></div>
 
@@ -61,6 +73,11 @@
       <div class="page-head"><h1 id="page-title">Overview</h1><p id="page-subtitle">Your telephony environment at a glance</p></div>
       <div class="topbar-tools">
         <div class="health" id="health"><i></i><span>Checking system…</span></div>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false">
+          <span class="knob" aria-hidden="true"></span>
+          <span class="glyph" id="theme-glyph" aria-hidden="true">☾</span>
+          <span class="label" id="theme-label">Dark</span>
+        </button>
       </div>
     </header>
 

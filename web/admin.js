@@ -102,7 +102,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   let data = {};
   try { data = await response.json(); } catch { /* empty body is valid for deletes */ }
-  if (response.status === 401) { location = '/admin/login'; throw Error('Login required'); }
+  if (response.status === 401) { location = '/login'; throw Error('Login required'); }
   if (data.csrf_token) csrf = data.csrf_token;
   if (!response.ok) throw Error(data.error || `Request failed (${response.status})`);
   return data;
@@ -215,16 +215,73 @@ function showPage(name) {
   if (!state.is_admin && CUSTOMER_BLOCKED.includes(name)) name = 'dashboard';
   if (name === 'users' && !state.is_admin) name = 'dashboard';
   currentPage = name;
-  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === `page-${name}`));
+  // A navigation is the one moment the console is allowed to animate: drop the
+  // background-repaint suppression and let the incoming page cascade once.
+  endQuiet();
+  const incoming = $(`page-${name}`);
+  document.querySelectorAll('.page').forEach(p => {
+    p.classList.toggle('active', p === incoming);
+    p.classList.remove('entering');
+  });
+  if (incoming) {
+    void incoming.offsetWidth; // restart the cascade even when the page was already mounted
+    incoming.classList.add('entering');
+    clearTimeout(showPage.cascade);
+    showPage.cascade = setTimeout(() => incoming.classList.remove('entering'), 700);
+  }
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.page === name));
   $('page-title').textContent = pageMeta[name][0];
   $('page-subtitle').textContent = pageMeta[name][1];
   history.replaceState(null, '', `#${name}`);
   $('sidebar').classList.remove('open');
+  document.querySelector('.content')?.scrollTo?.({ top: 0, behavior: 'auto' });
+  window.scrollTo({ top: 0, behavior: 'auto' });
   if (!$('workspace').classList.contains('open')) $('scrim').classList.remove('open');
   if (name === 'calls') loadCalls();
   if (name === 'recordings') loadRecordings();
   if (name === 'voicemails') loadVoicemails();
+}
+
+/* ------------------------------------------------------- 5b. Theme switch */
+/* Role decides the default skin; the operator's choice wins from then on and
+   is remembered per browser. */
+const THEME_KEY = 'eip-console-theme';
+const ROLE_KEY = 'eip-console-role';
+/* Preferences are per role, so an administrator who prefers light does not drag
+   customers onto the dark palette (and vice versa) in a shared browser. */
+const themeKey = () => `${THEME_KEY}:${state.is_admin ? 'admin' : 'customer'}`;
+function currentSkin() {
+  try {
+    const saved = localStorage.getItem(themeKey());
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch { /* private mode: fall back to the role default */ }
+  return state.is_admin ? 'dark' : 'light';
+}
+function applySkin() {
+  const skin = currentSkin();
+  try {
+    // Remembered for the pre-paint boot script, which has no role yet.
+    localStorage.setItem(ROLE_KEY, state.is_admin ? 'admin' : 'customer');
+    localStorage.setItem(themeKey(), skin);
+  } catch { /* ignore */ }
+  document.body.classList.toggle('theme-dark', skin === 'dark');
+  document.body.classList.toggle('theme-light', skin === 'light');
+  const toggle = $('theme-toggle');
+  if (toggle) {
+    const goingTo = skin === 'dark' ? 'light' : 'dark';
+    toggle.setAttribute('aria-pressed', String(skin === 'dark'));
+    toggle.setAttribute('title', `Switch to ${goingTo} theme`);
+    toggle.setAttribute('aria-label', `Switch to ${goingTo} theme`);
+    $('theme-label').textContent = skin === 'dark' ? 'Dark' : 'Light';
+    $('theme-glyph').textContent = skin === 'dark' ? '☾' : '☀';
+  }
+  return skin;
+}
+function toggleSkin() {
+  const next = currentSkin() === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem(themeKey(), next); } catch { /* ignore */ }
+  applySkin();
+  notify(`${next === 'dark' ? 'Dark' : 'Light'} theme enabled`);
 }
 
 /* ------------------------------------------------- 6. Health & analytics */
@@ -269,24 +326,57 @@ async function loadRecent() {
 }
 
 /* ------------------------------------------------------- 7. Boot & refresh */
+/* Background polling must not repaint the console. Every 15s the state payload
+   is compared with the previous one; identical payloads skip rendering
+   entirely, so nothing flickers, replays an entrance animation or loses focus.
+   When something did change, the repaint runs with animations suppressed. */
+let stateSignature = '';
+function signatureOf(payload) {
+  const { csrf_token, ...rest } = payload || {};
+  return JSON.stringify(rest);
+}
+/* Animation is enabled for anything the operator drives from here on. */
+function endQuiet() { document.body.classList.remove('updating'); }
+function quietly(task) {
+  document.body.classList.add('updating');
+  // Deliberately not removed here: `updating` is cleared by the next navigation
+  // (showPage). Removing it right after the repaint would restore the animations
+  // on the nodes just rendered and replay the entrance a frame later.
+  return task();
+}
+
 async function loadState() {
   const keepWorkspace = workspace?.customer?.id;
+  const firstPaint = !stateSignature;
   try {
-    state = await api('/admin/api/state');
+    const payload = await api('/admin/api/state');
+    const signature = signatureOf(payload);
+    const changed = signature !== stateSignature;
+    stateSignature = signature;
+    state = payload;
     csrf = state.csrf_token;
     document.body.classList.toggle('admin-theme', !!state.is_admin);
     document.body.classList.toggle('customer-theme', !state.is_admin);
+    // The skin is applied before the boot guard is lifted, so the console never
+    // paints in the wrong theme first.
+    applySkin();
     document.body.classList.remove('theme-loading');
-    $('who').textContent = state.username;
-    $('role').textContent = state.is_admin ? 'Platform administrator' : 'Customer account';
-    $('avatar').textContent = (state.username || 'A')[0].toUpperCase();
-    document.querySelectorAll('[data-admin-only]').forEach(el => (el.hidden = !state.is_admin));
-    document.querySelectorAll('[data-customer-only]').forEach(el => (el.hidden = !!state.is_admin));
-    renderAll();
+    if (!changed && !firstPaint) { checkHealth(); return; }
+    quietly(() => {
+      $('who').textContent = state.username;
+      $('role').textContent = state.is_admin ? 'Platform administrator' : 'Customer account';
+      $('avatar').textContent = (state.username || 'A')[0].toUpperCase();
+      document.querySelectorAll('[data-admin-only]').forEach(el => (el.hidden = !state.is_admin));
+      document.querySelectorAll('[data-customer-only]').forEach(el => (el.hidden = !!state.is_admin));
+      renderAll();
+      loadAnalytics();
+      loadRecent();
+      // Keep the open workspace in step with the new data, without animating it
+      // again or stealing the scroll position.
+      if (keepWorkspace && $('workspace').classList.contains('open')) return openCustomer(keepWorkspace, wsTab, true);
+      return undefined;
+    });
     checkHealth();
-    loadAnalytics();
-    loadRecent();
-    if (keepWorkspace && $('workspace').classList.contains('open')) await openCustomer(keepWorkspace, wsTab, true);
   } catch (error) { notify(error.message, true); }
 }
 
@@ -303,15 +393,19 @@ async function refreshDeviceStatus() {
       return true;
     }, false);
     const ownChanged = apply(state.sip_accounts);
-    if (ownChanged && currentPage === 'sipaccounts') renderSipAccounts();
-    if (workspace && $('workspace').classList.contains('open')) {
-      const changed = apply(workspace.sip_accounts);
-      updateWsDeviceChip();
-      syncDeviceChip('#customer-status', state.sip_accounts);
-      if (changed && (wsTab === 'devices' || wsTab === 'overview')) renderWsTab(wsTab);
-    } else if (ownChanged) {
-      syncDeviceChip('#customer-status', state.sip_accounts);
-    }
+    // A registration change is worth showing, but it must arrive as a status
+    // pill flipping over, not as the whole list rebuilding itself.
+    quietly(() => {
+      if (ownChanged && currentPage === 'sipaccounts') renderSipAccounts();
+      if (workspace && $('workspace').classList.contains('open')) {
+        const changed = apply(workspace.sip_accounts);
+        updateWsDeviceChip();
+        syncDeviceChip('#customer-status', state.sip_accounts);
+        if (changed && (wsTab === 'devices' || wsTab === 'overview')) renderWsTab(wsTab);
+      } else if (ownChanged) {
+        syncDeviceChip('#customer-status', state.sip_accounts);
+      }
+    });
   } catch { /* health polling already surfaces connectivity problems */ }
 }
 
@@ -474,7 +568,11 @@ function renderNumbers() {
       <div class="row-actions">
         ${state.is_admin
           ? `<button class="btn ghost sm" data-edit-number="${x.id}">Manage</button><button class="btn danger sm" data-delete-number="${x.id}">Delete</button>`
-          : (x.active && !x.default_outbound ? `<button class="btn primary sm" data-default-number="${x.id}">Use for outbound</button>` : '')}
+          : (x.active && !x.default_outbound && x.inbound_extension
+              ? `<button class="btn primary sm" data-default-number="${x.id}">Use for outbound</button>`
+              : (x.active && !x.default_outbound
+                ? '<span class="cell-sub">Assign an extension to set the caller ID</span>'
+                : ''))}
       </div>
     </div>`;
   }).join('') || empty('No phone numbers', state.is_admin ? 'Assign a number from a customer workspace.' : 'Request a number to get started.', '☎', '',
@@ -1400,6 +1498,17 @@ async function openCustomer(customerId, tab = 'overview', silent = false) {
       $('ws-recent').innerHTML = '';
     }
     workspace = await api(`/admin/api/customers/${customerId}`);
+    if (silent) {
+      // Called from a background refresh, which already holds body.updating.
+      const scroll = $('ws-body').scrollTop;
+      renderWsHeader();
+      renderWsTabs();
+      wsTab = WS_TABS.some(t => t[0] === tab) ? tab : 'overview';
+      renderWsTab(wsTab);
+      $('ws-body').scrollTop = scroll;
+      return;
+    }
+    endQuiet();
     renderWsHeader();
     renderWsTabs();
     wsTab = WS_TABS.some(t => t[0] === tab) ? tab : 'overview';
@@ -1885,7 +1994,7 @@ document.addEventListener('click', async event => {
 
   if (d.retry) return RETRY[d.retry]?.();
   if (d.openCustomer) return openCustomer(Number(d.openCustomer));
-  if (d.wsTab) return renderWsTab(d.wsTab);
+  if (d.wsTab) { endQuiet(); return renderWsTab(d.wsTab); }
   if (d.wsGoto) { closeWorkspace(); showPage(d.wsGoto); return; }
   if (d.wsRoute) {
     const number = d.wsRoute;
@@ -2007,6 +2116,9 @@ document.addEventListener('click', async event => {
   }
   if (d.defaultNumber) {
     const item = state.phone_numbers.find(x => x.id === Number(d.defaultNumber));
+    // The API resolves the caller ID from the number's inbound extension, so a
+    // number without one cannot be promoted and must not offer the action.
+    if (!item?.inbound_extension) return notify('Assign an extension to this number first', true);
     try {
       await api('/admin/api/numbers/default', { method: 'POST', body: JSON.stringify({ number: item.number, extension: item.inbound_extension }) });
       notify('Default outbound number updated');
@@ -2062,9 +2174,10 @@ wire('read-all-notifications', 'click', async () => {
   try { await api('/admin/api/notifications/read-all', { method: 'POST' }); notify('Notifications marked as read'); await loadState(); }
   catch (error) { notify(error.message, true); }
 });
+wire('theme-toggle', 'click', toggleSkin);
 wire('request-number', 'click', () => openModal('request'));
 wire('logout', 'click', async () => {
-  try { await api('/admin/logout', { method: 'POST' }); } finally { location = '/admin/login'; }
+  try { await api('/admin/logout', { method: 'POST' }); } finally { location = '/login'; }
 });
 
 /* Call-flow canvas: click to configure, drag to reorder, palette drag to add. */
