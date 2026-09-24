@@ -218,6 +218,32 @@ body.theme-light .sidebar{background:linear-gradient(180deg,#ffffffeb,#fbfcfff0)
 }
 .icon-btn:hover{background:#8b93a81f;color:var(--text);border-color:var(--line);transform:translateY(-1px)}
 
+/* ------------------------------------------- 4c. Provisioning & groups */
+/* Shown where credentials are generated: what the platform just built and how
+   to change it later. */
+.credential-note{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:2px 0 13px;
+  padding:10px 12px;border-radius:var(--r-md);border:1px dashed var(--line-strong);
+  background:#8b93a80f;font-size:11.5px;color:var(--text-2);
+}
+.credential-note span{flex:1 1 200px}
+body.theme-light .credential-note{background:#ffffffb8}
+
+/* Group manager sits under the canvas and can be long, so it scrolls the rows
+   it owns instead of stretching the page. */
+.groups-panel{margin-top:18px}
+.groups-panel .title{margin-bottom:12px}
+.groups-panel .title .btn{margin-top:12px}
+.groups-panel .rows{max-height:420px;overflow-y:auto;padding-right:4px}
+
+/* A row that is the current target of the builder. */
+.row.selected{border-color:var(--acc-1);box-shadow:0 0 0 1px #6366f159,var(--shadow-sm)}
+body.theme-light .row.selected{box-shadow:0 0 0 1px #6366f142,var(--shadow-sm)}
+
+/* Tight list inside a provisioning summary. */
+ul.plain{margin:6px 0 0;padding-left:18px;display:grid;gap:3px}
+ul.plain li::marker{color:var(--acc-2)}
+
 /* ------------------------------------------------- 4b. Theme switch */
 /* One control, both roles: the console opens in the skin that suits the role
    and remembers whatever the operator picks. */

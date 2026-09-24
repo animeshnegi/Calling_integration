@@ -208,6 +208,10 @@
         </div>
         <article class="notice"><span class="glyph">◈</span><div><b>Connected devices</b>Each SIP account is the credential set a physical phone, softphone or device uses to register. Share credentials only with the person using that device.</div></article>
         <article class="panel">
+          <div class="panel-head"><div><h2>Extension credentials</h2><p>The username and password each extension registers with</p></div><span class="count" id="extension-credential-count">0 extensions</span></div>
+          <div class="panel-body flush"><div id="extension-credential-list" class="rows"></div></div>
+        </article>
+        <article class="panel">
           <div class="panel-head"><div><h2>Devices &amp; SIP accounts</h2><p>Ownership, registration, number and extension mapping</p></div><span class="count" id="sip-count">0 accounts</span></div>
           <div class="panel-body flush"><div id="sip-account-list" class="cards"></div></div>
         </article>
@@ -216,8 +220,8 @@
       <!-- ============================================================ ROUTING -->
       <section class="page" id="page-routing">
         <div class="flow-toolbar sheen">
-          <div><h2>Visual call flow builder</h2><p>Drag blocks onto the canvas, then save the flow to an assigned number.</p></div>
-          <div class="tools"><select id="route-number"></select><button class="btn primary" id="save-route">Save flow</button></div>
+          <div><h2>Visual call flow builder</h2><p>One builder for every target: save a flow to a number, an extension or a group.</p></div>
+          <div class="tools"><select id="route-target" aria-label="Call flow target"></select><button class="btn primary" id="save-route">Save flow</button></div>
         </div>
         <div class="flow-layout">
           <aside class="panel palette">
@@ -235,10 +239,10 @@
             <div class="canvas-status"><span><span class="live-dot"></span> LIVE CALL PATH</span><small>Drag nodes to reorder · click to configure</small></div>
             <div class="canvas-empty">
               <div class="glyph">⌘</div>
-              <h4>Design how this number answers</h4>
+              <h4>Design how this line answers</h4>
               <p>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
               <ol>
-                <li>Choose the number</li>
+                <li>Choose a number, extension or group</li>
                 <li>Add routing blocks</li>
                 <li>Configure each step</li>
                 <li>Save the flow</li>
@@ -249,6 +253,12 @@
             <div class="flow-drop"><b>＋</b><span>Drop the next routing block here</span></div>
           </section>
         </div>
+        <aside class="panel palette groups-panel">
+          <div class="title"><span>RING GROUPS</span><h3>Teams and departments</h3>
+            <p>A group rings its members together and can carry its own call flow: choose it as the target above, or as a ring destination inside any flow.</p>
+            <button class="btn primary" data-open="group">＋ Add group</button></div>
+          <div id="group-list" class="rows"></div>
+        </aside>
       </section>
 
       <!-- ============================================================== CALLS -->

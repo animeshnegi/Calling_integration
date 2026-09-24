@@ -191,6 +191,20 @@ class SettingsStore:
                     name TEXT NOT NULL DEFAULT 'Main call flow', route_json TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS extension_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, owner_user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL, members TEXT NOT NULL DEFAULT '', timeout INTEGER NOT NULL DEFAULT 25,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(owner_user_id, name)
+                );
+                CREATE TABLE IF NOT EXISTS routing_flows (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, owner_user_id INTEGER NOT NULL,
+                    target_type TEXT NOT NULL DEFAULT 'extension', target TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT 'Call flow', route_json TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(owner_user_id, target_type, target)
+                );
                 CREATE TABLE IF NOT EXISTS activity_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, owner_user_id INTEGER, actor_user_id INTEGER, action TEXT NOT NULL,
                     resource_type TEXT NOT NULL, resource_id TEXT, description TEXT NOT NULL,
@@ -342,12 +356,22 @@ class SettingsStore:
             existing = db.execute(
                 "SELECT sip_password_enc,voicemail_enabled,voicemail_pin_enc,owner_user_id FROM extensions WHERE extension=?", (extension,)
             ).fetchone()
+            created = existing is None
             if existing and enforce_owner and owner_user_id is not None and existing["owner_user_id"] != int(owner_user_id):
                 raise ValueError("Extension belongs to another customer")
             voicemail_enabled = bool(voicemail_enabled_value) if voicemail_enabled_value is not None else bool(existing and existing["voicemail_enabled"])
-            encrypted = self.encrypt(password) if password else (existing["sip_password_enc"] if existing else "")
-            if not encrypted:
-                raise ValueError("SIP password is required for a new extension")
+            # A new extension provisions its own SIP credentials, so a customer
+            # can create an extension and register a device without inventing a
+            # password first. An explicit password always wins, and editing
+            # without one keeps the existing secret.
+            generated = False
+            if password:
+                encrypted = self.encrypt(password)
+            elif existing:
+                encrypted = existing["sip_password_enc"]
+            else:
+                encrypted = self.encrypt(self.generate_sip_password())
+                generated = True
             voicemail_pin_enc = self.encrypt(voicemail_pin) if voicemail_pin else (existing["voicemail_pin_enc"] if existing else "")
             if voicemail_enabled and not voicemail_pin_enc:
                 raise ValueError("Voicemail PIN is required when voicemail is enabled")
@@ -371,7 +395,76 @@ class SettingsStore:
                     int(owner_user_id) if owner_user_id is not None else (int(data["owner_user_id"]) if str(data.get("owner_user_id", "")).isdigit() else None),
                 ),
             )
+        owner = owner_user_id if owner_user_id is not None else (existing["owner_user_id"] if existing else None)
+        # Every extension gets a working call flow of its own. It is only written
+        # when the extension is created, so a flow the customer later edits is
+        # never overwritten.
+        if created and owner is not None and int(bool(data.get("active", True))):
+            self.ensure_extension_flow(int(owner), extension, voicemail=bool(voicemail_enabled))
         return extension
+
+    def generate_sip_password(self, length: int = 16) -> str:
+        alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        return "".join(secrets.choice(alphabet) for _ in range(max(12, int(length))))
+
+    def next_extension_number(self, owner_user_id: int | None = None) -> str:
+        """Lowest free three-digit extension.
+
+        Extension numbers are the primary key, so they are unique platform-wide:
+        one customer cannot be handed a number another customer already owns.
+        Passing an owner treats that customer's own extensions as reusable.
+        """
+        with self._connect() as db:
+            rows = db.execute("SELECT extension,owner_user_id FROM extensions").fetchall()
+        taken = {
+            str(row["extension"]) for row in rows
+            if owner_user_id is None or row["owner_user_id"] != int(owner_user_id)
+        }
+        for candidate in range(101, 1000):
+            if str(candidate) not in taken:
+                return str(candidate)
+        raise ValueError("No free extension numbers remain")
+
+    def reveal_extension_credentials(self, extension, owner_user_id: int | None = None):
+        """The SIP credentials a device registers with, plus where to register.
+
+        A device account linked to the extension overrides the extension's own
+        secret in the generated Asterisk config, so the effective credential is
+        what gets returned.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT extension,display_name,sip_username,sip_password_enc,owner_user_id,voicemail_enabled,active FROM extensions WHERE extension=?",
+                (str(extension),),
+            ).fetchone()
+        if not row or (owner_user_id is not None and row["owner_user_id"] != int(owner_user_id)):
+            raise ValueError("Extension not found")
+        owner = row["owner_user_id"]
+        numbers = [item for item in self.list_numbers(owner) if item["inbound_extension"] == row["extension"] and item["active"]] if owner is not None else []
+        device = next(
+            (item for item in self.list_sip_accounts(owner) if str(item.get("extension") or "") == row["extension"] and item["active"]),
+            None,
+        )
+        provider = None
+        if device:
+            server = device["server"]
+        else:
+            provider = self.get_provider(next((item["provider"] for item in numbers if item["provider"]), None)) or self.get_provider()
+            server = (provider or {}).get("server", "")
+        return {
+            "extension": row["extension"],
+            "display_name": row["display_name"],
+            "active": bool(row["active"]),
+            "sip_username": device["sip_username"] if device else (row["sip_username"] or row["extension"]),
+            "sip_password": self.decrypt(device["sip_password_enc"]) if device else (self.decrypt(row["sip_password_enc"]) if row["sip_password_enc"] else ""),
+            "server": server or "",
+            "port": int((device or provider or {}).get("port") or 5060),
+            "transport": (device or provider or {}).get("transport") or "udp",
+            "registration": "device" if device else "extension",
+            "device_label": (device or {}).get("label", ""),
+            "numbers": [item["number"] for item in numbers],
+            "voicemail_enabled": bool(row["voicemail_enabled"]),
+        }
 
     def set_extension_recording(self, extension: str, enabled: bool):
         extension = str(extension).strip()
@@ -400,6 +493,13 @@ class SettingsStore:
             result = db.execute("DELETE FROM extensions WHERE extension=?", (extension,))
             if result.rowcount == 0:
                 raise ValueError("Extension not found")
+            # Take the extension out of every group and drop the flow written for
+            # it, so no group or call flow is left pointing at a gone extension.
+            for group in db.execute("SELECT id,members FROM extension_groups").fetchall():
+                members = [ext for ext in str(group["members"] or "").split(",") if ext and ext != extension]
+                if len(members) != len(str(group["members"] or "").split(",")):
+                    db.execute("UPDATE extension_groups SET members=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (",".join(members), group["id"]))
+            db.execute("DELETE FROM routing_flows WHERE target_type='extension' AND target=?", (extension,))
 
     def list_numbers(self, owner_user_id: int | None = None):
         with self._connect() as db:
@@ -476,10 +576,12 @@ class SettingsStore:
             db.execute("UPDATE phone_numbers SET default_outbound=CASE WHEN number=? THEN 1 ELSE 0 END,updated_at=CURRENT_TIMESTAMP WHERE inbound_extension=?", (number, extension))
 
     def delete_number(self, number):
+        number = str(number).strip()
         with self._connect() as db:
-            result = db.execute("DELETE FROM phone_numbers WHERE number=?", (str(number).strip(),))
+            result = db.execute("DELETE FROM phone_numbers WHERE number=?", (number,))
             if result.rowcount == 0:
                 raise ValueError("Phone number not found")
+            db.execute("DELETE FROM call_routes WHERE phone_number=?", (number,))
 
     def ensure_monthly_invoices(self):
         today = date.today()
@@ -679,18 +781,24 @@ class SettingsStore:
             item = dict(row); item["route"] = json.loads(item.pop("route_json")); result.append(item)
         return result
 
-    def save_call_route(self, owner_user_id: int, data: dict):
-        import json
-        phone_number = str(data.get("phone_number", "")).strip()
-        if not any(row["number"] == phone_number for row in self.list_numbers(int(owner_user_id))):
-            raise ValueError("Phone number is not assigned to this customer")
-        route = data.get("route")
+    ROUTE_NODE_TYPES = {
+        "incoming", "simultaneous", "sequential", "ring_group", "business_hours",
+        "after_hours", "extension", "voicemail", "forward",
+    }
+
+    def _validate_route_nodes(self, route: dict, owner_user_id: int, target_type: str = "number") -> None:
+        """One validator for every kind of call flow.
+
+        Ring destinations must be extensions the customer owns, and a step that
+        names a saved group must belong to that customer with members drawn from
+        the group, so a flow can never ring somebody else's phone.
+        """
         if not isinstance(route, dict) or not isinstance(route.get("nodes"), list) or len(route["nodes"]) > 100:
             raise ValueError("Call route must contain a nodes array with at most 100 nodes")
-        allowed_types = {"incoming", "simultaneous", "sequential", "ring_group", "business_hours", "after_hours", "extension", "voicemail", "forward"}
-        if any(not isinstance(node, dict) or node.get("type") not in allowed_types for node in route["nodes"]):
+        if any(not isinstance(node, dict) or node.get("type") not in self.ROUTE_NODE_TYPES for node in route["nodes"]):
             raise ValueError("Call route contains an unsupported node")
         owned_extensions = {row["extension"] for row in self.list_extensions(int(owner_user_id))}
+        owned_groups = {str(row["id"]): set(row["members"]) for row in self.list_groups(int(owner_user_id))}
         for node in route["nodes"]:
             node_type = node["type"]
             if node_type in {"simultaneous", "sequential", "ring_group"}:
@@ -699,6 +807,12 @@ class SettingsStore:
                     raise ValueError("Ring destinations must be extensions owned by this customer")
                 if not 5 <= int(node.get("timeout", 0)) <= 120:
                     raise ValueError("Ring timeout must be between 5 and 120 seconds")
+                group_id = str(node.get("group_id") or "")
+                if group_id:
+                    if group_id not in owned_groups:
+                        raise ValueError("Ring group is not owned by this customer")
+                    if any(str(ext) not in owned_groups[group_id] for ext in destinations):
+                        raise ValueError("Ring destinations must come from the selected group")
             elif node_type == "extension" and str(node.get("extension", "")) not in owned_extensions:
                 raise ValueError("Route extension is not owned by this customer")
             elif node_type == "voicemail" and str(node.get("mailbox", "")) not in owned_extensions:
@@ -714,6 +828,262 @@ class SettingsStore:
                 days = node.get("days")
                 if not isinstance(days, list) or not days or any(int(day) not in range(1, 8) for day in days):
                     raise ValueError("Business hours must include valid weekdays")
+
+    def list_groups(self, owner_user_id: int | None = None):
+        with self._connect() as db:
+            where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
+            rows = db.execute(
+                f"SELECT id,owner_user_id,name,members,timeout,active,created_at,updated_at FROM extension_groups{where} ORDER BY name",
+                (int(owner_user_id),) if owner_user_id is not None else (),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["members"] = [ext for ext in str(item["members"] or "").split(",") if ext]
+            result.append(item)
+        return result
+
+    def get_group(self, group_id, owner_user_id: int | None = None):
+        return next(
+            (group for group in self.list_groups(owner_user_id) if str(group["id"]) == str(group_id)),
+            None,
+        )
+
+    def save_group(self, data: dict, owner_user_id: int):
+        """A group is a named set of the customer's extensions: ring them together,
+        and give the group its own call flow."""
+        owner_user_id = int(owner_user_id)
+        group_id = int(data["id"]) if str(data.get("id", "")).isdigit() else None
+        name = str(data.get("name", "")).strip()
+        if not 2 <= len(name) <= 80 or any(char in name for char in "\r\n;"):
+            raise ValueError("Group name must be 2 to 80 characters")
+        owned = {row["extension"] for row in self.list_extensions(owner_user_id)}
+        members = [str(ext).strip() for ext in (data.get("members") or [])]
+        members = [ext for index, ext in enumerate(members) if ext and ext not in members[:index]]
+        if any(ext not in owned for ext in members):
+            raise ValueError("Group members must be extensions owned by this customer")
+        try:
+            timeout = min(120, max(5, int(data.get("timeout", 25))))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Ring timeout must be between 5 and 120 seconds") from exc
+        with self._connect() as db:
+            if db.execute(
+                "SELECT id FROM extension_groups WHERE owner_user_id=? AND name=? AND id IS NOT ?", (owner_user_id, name, group_id)
+            ).fetchone():
+                raise ValueError("A group with this name already exists")
+            if group_id:
+                existing = db.execute("SELECT id FROM extension_groups WHERE id=? AND owner_user_id=?", (group_id, owner_user_id)).fetchone()
+                if not existing:
+                    raise ValueError("Group not found")
+                db.execute(
+                    "UPDATE extension_groups SET name=?,members=?,timeout=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (name, ",".join(members), timeout, int(bool(data.get("active", True))), group_id),
+                )
+                return group_id
+            return db.execute(
+                "INSERT INTO extension_groups(owner_user_id,name,members,timeout,active) VALUES(?,?,?,?,?)",
+                (owner_user_id, name, ",".join(members), timeout, int(bool(data.get("active", True)))),
+            ).lastrowid
+
+    def delete_group(self, group_id, owner_user_id: int | None = None):
+        """Deleting a group also removes the flow that was written for it; the
+        member extensions themselves are untouched."""
+        with self._connect() as db:
+            where = " WHERE id=?" + (" AND owner_user_id=?" if owner_user_id is not None else "")
+            params = (int(group_id), int(owner_user_id)) if owner_user_id is not None else (int(group_id),)
+            row = db.execute(f"SELECT owner_user_id FROM extension_groups{where}", params).fetchone()
+            if not row:
+                raise ValueError("Group not found")
+            db.execute("DELETE FROM routing_flows WHERE owner_user_id=? AND target_type='group' AND target=?", (row["owner_user_id"], str(group_id)))
+            db.execute("DELETE FROM extension_groups WHERE id=?", (int(group_id),))
+
+    @staticmethod
+    def default_number_route(extension: str, voicemail: bool = False) -> dict:
+        """The flow a freshly assigned number starts with, expressed with the same
+        node shapes the routing canvas edits: hours, ring the extension, voicemail."""
+        extension = str(extension)
+        nodes = [
+            {
+                "type": "business_hours", "start": "09:00", "end": "17:00", "days": [1, 2, 3, 4, 5],
+                "label": "Business hours · Mon–Fri 09:00–17:00", "configured": True,
+            },
+            {
+                "type": "ring_group", "extensions": [extension], "timeout": 25,
+                "label": f"Ring extension {extension} for 25s", "configured": True,
+            },
+        ]
+        if voicemail:
+            nodes.append({"type": "voicemail", "mailbox": extension, "label": f"Voicemail {extension}", "configured": True})
+        return {"nodes": nodes}
+
+    @staticmethod
+    def default_extension_route(extension: str, voicemail: bool = False) -> dict:
+        """The flow a new extension starts with: ring it, then take a message."""
+        extension = str(extension)
+        nodes = [{"type": "extension", "extension": extension, "label": f"Ring extension {extension}", "configured": True}]
+        if voicemail:
+            nodes.append({"type": "voicemail", "mailbox": extension, "label": f"Voicemail {extension}", "configured": True})
+        return {"nodes": nodes}
+
+    def ensure_extension_flow(self, owner_user_id: int, extension: str, voicemail: bool = False) -> bool:
+        """Write the default flow for an extension that does not have one yet."""
+        owner_user_id, extension = int(owner_user_id), str(extension)
+        if any(
+            flow["target_type"] == "extension" and flow["target"] == extension
+            for flow in self.list_routing_flows(owner_user_id, target_type="extension")
+        ):
+            return False
+        self.save_routing_flow(
+            owner_user_id,
+            {"name": "Extension call flow", "route": self.default_extension_route(extension, voicemail), "active": True},
+            target_type="extension", target=extension,
+        )
+        return True
+
+    def provision_number(self, owner_user_id: int, number: str, description: str = "", actor_user_id: int | None = None) -> dict:
+        """Give a newly assigned number everything it needs to work.
+
+        One call creates the extension, its SIP credentials, the DID link (so
+        inbound calls actually ring), the default caller ID and both default call
+        flows: one for the number and one for the extension. Every piece then
+        stays editable - nothing here is a one-way door.
+        """
+        owner_user_id, number = int(owner_user_id), str(number).strip()
+        with self._connect() as db:
+            customer = db.execute(
+                "SELECT id,username,company_name FROM admin_users WHERE id=? AND role='user' AND active=1", (owner_user_id,)
+            ).fetchone()
+        if not customer:
+            raise ValueError("Customer account is not active")
+        assigned = next((row for row in self.list_numbers(owner_user_id) if row["number"] == number), None)
+        if not assigned:
+            raise ValueError("Assign the number to this customer before provisioning it")
+        if assigned.get("inbound_extension"):
+            raise ValueError("This number already has an inbound extension")
+
+        extension = self.next_extension_number()
+        display_name = (str(description).strip() or assigned.get("description") or f"{customer['company_name'] or customer['username']} main line")[:120]
+        password = self.generate_sip_password()
+        self.save_extension({
+            "extension": extension, "display_name": display_name, "sip_username": extension, "sip_password": password,
+            "active": True, "recording_enabled": bool(self.get_settings().get("recording_enabled") == "true"),
+        }, owner_user_id)
+
+        # Link the DID to the new extension, carrying the existing billing and
+        # carrier fields through untouched.
+        self.save_number({
+            "number": number, "provider": assigned.get("provider", ""),
+            "description": assigned.get("description") or display_name,
+            "inbound_extension": extension, "default_outbound": False, "active": True,
+            "owner_user_id": owner_user_id,
+            "monthly_price": (assigned.get("monthly_price_cents") or 500) / 100,
+            "billing_cycle_day": assigned.get("billing_cycle_day") or 1,
+            "billing_start": assigned.get("billing_start", ""), "discontinue_at": assigned.get("discontinue_at", ""),
+        })
+        device = next((item for item in self.list_sip_accounts(owner_user_id) if str(item.get("extension") or "") == extension and item["active"]), None)
+        has_default = False
+        with self._connect() as db:
+            has_default = bool(db.execute(
+                "SELECT 1 FROM phone_numbers WHERE inbound_extension=? AND default_outbound=1 AND active=1", (extension,)
+            ).fetchone())
+        if not has_default:
+            self.set_default_outbound_number(extension, number)
+
+        settings = self.get_settings()
+        voicemail = extension in {str(settings.get("default_extension", "")), str(settings.get("inbound_fallback_extension", ""))}
+        self.save_call_route(owner_user_id, {
+            "phone_number": number, "name": "Main call flow",
+            "route": self.default_number_route(extension, voicemail=voicemail), "active": True,
+        })
+        self.ensure_extension_flow(owner_user_id, extension, voicemail=voicemail)
+
+        self.add_activity(
+            owner_user_id, actor_user_id or owner_user_id, "number.provisioned", "phone_number", number,
+            f"Number {number} assigned with extension {extension}, SIP credentials and default call flows",
+        )
+        return {
+            "number": number,
+            "extension": extension,
+            "display_name": display_name,
+            "sip_username": extension,
+            "sip_password": password,
+            "device_linked": bool(device),
+            "default_outbound": not has_default,
+            "voicemail": voicemail,
+            "flows": ["number", "extension"],
+        }
+
+    def list_routing_flows(self, owner_user_id: int | None = None, target_type: str | None = None):
+        """Call flows written for one extension or one group.
+
+        Number flows live in `call_routes`: that table carries a legacy UNIQUE
+        constraint on the number column, so a second kind of target gets its own
+        table with the key it actually needs.
+        """
+        import json
+        clauses, params = [], []
+        if owner_user_id is not None:
+            clauses.append("owner_user_id=?"); params.append(int(owner_user_id))
+        if target_type:
+            clauses.append("target_type=?"); params.append(str(target_type))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT id,owner_user_id,target_type,target,name,route_json,active,created_at,updated_at FROM routing_flows{where} ORDER BY target_type,target",
+                tuple(params),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row); item["route"] = json.loads(item.pop("route_json")); result.append(item)
+        return result
+
+    def save_routing_flow(self, owner_user_id: int, data: dict, target_type: str | None = None, target: str | None = None):
+        import json
+        owner_user_id = int(owner_user_id)
+        target_type = str(target_type or data.get("target_type") or "").strip()
+        target = str(target if target is not None else data.get("target") or "").strip()
+        if target_type not in {"extension", "group"}:
+            raise ValueError("Call flow target must be an extension or a group")
+        if target_type == "extension":
+            if not any(row["extension"] == target for row in self.list_extensions(owner_user_id)):
+                raise ValueError("Extension is not owned by this customer")
+        else:
+            group = self.get_group(target, owner_user_id)
+            if not group:
+                raise ValueError("Group not found")
+            target = str(group["id"])
+        route = data.get("route")
+        self._validate_route_nodes(route, owner_user_id, target_type=target_type)
+        payload = json.dumps(route, separators=(",", ":"))
+        default_name = "Extension call flow" if target_type == "extension" else "Group call flow"
+        with self._connect() as db:
+            existing = db.execute(
+                "SELECT id FROM routing_flows WHERE owner_user_id=? AND target_type=? AND target=?", (owner_user_id, target_type, target)
+            ).fetchone()
+            values = (str(data.get("name") or default_name)[:120], payload, int(bool(data.get("active", True))))
+            if existing:
+                db.execute("UPDATE routing_flows SET name=?,route_json=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (*values, existing["id"]))
+                return existing["id"]
+            return db.execute(
+                "INSERT INTO routing_flows(owner_user_id,target_type,target,name,route_json,active) VALUES(?,?,?,?,?,?)",
+                (owner_user_id, target_type, target, *values),
+            ).lastrowid
+
+    def delete_routing_flow(self, flow_id, owner_user_id: int | None = None):
+        with self._connect() as db:
+            where = " WHERE id=?" + (" AND owner_user_id=?" if owner_user_id is not None else "")
+            params = (int(flow_id), int(owner_user_id)) if owner_user_id is not None else (int(flow_id),)
+            cursor = db.execute(f"DELETE FROM routing_flows{where}", params)
+            if cursor.rowcount == 0:
+                raise ValueError("Call flow not found")
+
+    def save_call_route(self, owner_user_id: int, data: dict):
+        import json
+        phone_number = str(data.get("phone_number", "")).strip()
+        if not any(row["number"] == phone_number for row in self.list_numbers(int(owner_user_id))):
+            raise ValueError("Phone number is not assigned to this customer")
+        route = data.get("route")
+        self._validate_route_nodes(route, int(owner_user_id), target_type="number")
         payload = json.dumps(route, separators=(",", ":"))
         with self._connect() as db:
             existing = db.execute("SELECT id,owner_user_id FROM call_routes WHERE phone_number=?", (phone_number,)).fetchone()
@@ -1367,6 +1737,8 @@ def register_admin(app, config, on_telephony_change=None):
             "activity": store.list_activity(None if is_admin else user_id),
             "notifications": store.list_notifications(user_id),
             "call_routes": store.list_call_routes(None if is_admin else user_id),
+            "routing_flows": store.list_routing_flows(None if is_admin else user_id),
+            "groups": store.list_groups(None if is_admin else user_id),
             "api_keys": store.list_api_keys(owner_user_id=None if is_admin else user_id),
             "invoices": store.list_invoices(None if is_admin else user_id),
             "email_config": store.get_email_config() if is_admin else {},
@@ -1388,11 +1760,36 @@ def register_admin(app, config, on_telephony_change=None):
             data = request.get_json(silent=True) or {}
             owner = data.get("owner_user_id") if session.get("admin_role") == "admin" else int(session["admin_user_id"])
             owner_id = int(owner) if str(owner or "").isdigit() else None
+            existed = any(row["extension"] == str(data.get("extension", "")).strip() for row in store.list_extensions())
             result = store.save_extension(data, owner_id, session.get("admin_role") != "admin")
+            credentials = None
             if owner_id:
                 store.add_activity(owner_id, int(session["admin_user_id"]), "extension.saved", "extension", result, f"Extension {result} configured")
-            apply_change(); return jsonify({"ok": True, "extension": result})
+                # The caller created it, so they get the credentials back once:
+                # the console shows them with the provisioning summary.
+                if not existed:
+                    store.add_activity(
+                        owner_id, int(session["admin_user_id"]), "extension.provisioned", "extension", result,
+                        f"Extension {result} created with SIP credentials and a default call flow",
+                    )
+                    credentials = store.reveal_extension_credentials(result, owner_id)
+            apply_change()
+            return jsonify({"ok": True, "extension": result, "created": not existed, "credentials": credentials})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
+
+    @app.get("/admin/api/extensions/<extension>/credentials")
+    @login_required
+    def admin_extension_credentials(extension):
+        try:
+            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            return jsonify({"credentials": store.reveal_extension_credentials(extension, owner)})
+        except ValueError as exc: return jsonify({"error": str(exc)}), 404
+
+    @app.get("/admin/api/extensions/next")
+    @login_required
+    def admin_next_extension():
+        """The extension number a new line would get, for the console to prefill."""
+        return jsonify({"extension": store.next_extension_number()})
 
     @app.delete("/admin/api/extensions/<extension>")
     @login_required
@@ -1409,12 +1806,25 @@ def register_admin(app, config, on_telephony_change=None):
     def admin_number():
         try:
             data = request.get_json(silent=True) or {}
-            result = store.save_number(data)
             owner = int(data["owner_user_id"]) if str(data.get("owner_user_id", "")).isdigit() else None
-            if owner:
+            inbound = str(data.get("inbound_extension", "")).strip()
+            auto = "auto" in {inbound.lower(), str(data.get("auto_provision", "")).lower()} or bool(data.get("auto_provision"))
+            if auto:
+                # Assign first, then provision: a carrier or format problem must
+                # not leave a half-built line behind.
+                data = {**data, "inbound_extension": "", "default_outbound": False}
+            result = store.save_number(data)
+            provisioned = None
+            if auto and owner:
+                provisioned = store.provision_number(owner, result, str(data.get("description", "")), int(session["admin_user_id"]))
+                store.add_notification(
+                    owner, "number", "Phone line ready",
+                    f"{result} is live on extension {provisioned['extension']}. SIP credentials and default call flows were created for you.",
+                )
+            if owner and not provisioned:
                 store.add_activity(owner, int(session["admin_user_id"]), "number.assigned", "phone_number", result, f"Number {result} assigned")
                 store.add_notification(owner, "number", "Phone number assigned", f"{result} is now available in your account.")
-            apply_change(); return jsonify({"ok": True, "number": result})
+            apply_change(); return jsonify({"ok": True, "number": result, "provisioned": provisioned})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
     @app.delete("/admin/api/numbers/<path:number>")
@@ -1696,6 +2106,37 @@ def register_admin(app, config, on_telephony_change=None):
             apply_change(); return jsonify({"ok": True})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
+    @app.post("/admin/api/groups")
+    @login_required
+    def customer_group():
+        """Create or rename a ring group. Customers manage their own; an
+        administrator manages one for a customer from the workspace."""
+        try:
+            data = request.get_json(silent=True) or {}
+            if session.get("admin_role") == "admin":
+                owner = int(data["owner_user_id"]) if str(data.get("owner_user_id", "")).isdigit() else None
+                if not owner:
+                    raise ValueError("Choose the customer this group belongs to")
+            else:
+                owner = int(session["admin_user_id"])
+                data = {**data, "owner_user_id": owner}
+            group_id = store.save_group(data, owner)
+            store.add_activity(owner, int(session["admin_user_id"]), "group.saved", "extension_group", group_id, f"Group {data.get('name')} saved")
+            apply_change(); return jsonify({"ok": True, "group_id": group_id})
+        except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
+
+    @app.delete("/admin/api/groups/<int:group_id>")
+    @login_required
+    def customer_group_delete(group_id):
+        try:
+            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            group = store.get_group(group_id, owner)
+            store.delete_group(group_id, owner)
+            if group:
+                store.add_activity(group["owner_user_id"], int(session["admin_user_id"]), "group.deleted", "extension_group", group_id, f"Group {group['name']} deleted")
+            apply_change(); return jsonify({"ok": True})
+        except ValueError as exc: return jsonify({"error": str(exc)}), 404
+
     @app.get("/admin/api/customers/<int:customer_id>")
     @admin_required
     def admin_customer_detail(customer_id):
@@ -1710,6 +2151,11 @@ def register_admin(app, config, on_telephony_change=None):
             "extensions": extensions, "numbers": numbers, "sip_accounts": store.list_sip_accounts(customer_id),
             "invoices": store.list_invoices(customer_id), "requests": store.list_requests(customer_id),
             "activity": store.list_activity(customer_id), "calls": [call.to_dict() for call in calls], "call_total": total,
+            # The workspace routing tab manages this customer's flows, so it needs
+            # the same three targets the customer sees: numbers, extensions, groups.
+            "call_routes": store.list_call_routes(customer_id),
+            "routing_flows": store.list_routing_flows(customer_id),
+            "groups": store.list_groups(customer_id),
         })
 
     @app.post("/admin/api/requests")
@@ -1794,20 +2240,48 @@ def register_admin(app, config, on_telephony_change=None):
     @app.post("/admin/api/call-routes")
     @login_required
     def save_customer_call_route():
+        """One endpoint for every kind of call flow: a number, an extension or a
+        group. The target decides which store call and who owns it."""
         try:
             data = request.get_json(silent=True) or {}
+            target_type = str(data.get("target_type") or "number").strip().lower()
+            target = str(data.get("target") or "").strip()
             if session.get("admin_role") == "admin":
-                number = next((row for row in store.list_numbers() if row["number"] == str(data.get("phone_number", ""))), None)
-                if not number or not number.get("owner_user_id"):
-                    raise ValueError("Assign this number to a customer before configuring its call flow")
-                owner = int(number["owner_user_id"])
+                if target_type == "number":
+                    number = next((row for row in store.list_numbers() if row["number"] == str(data.get("phone_number", ""))), None)
+                    if not number or not number.get("owner_user_id"):
+                        raise ValueError("Assign this number to a customer before configuring its call flow")
+                    owner = int(number["owner_user_id"])
+                else:
+                    owner = int(data["owner_user_id"]) if str(data.get("owner_user_id", "")).isdigit() else None
+                    if not owner:
+                        raise ValueError("Choose the customer this call flow belongs to")
             else:
                 owner = int(session["admin_user_id"])
-            route_id = store.save_call_route(owner, data)
-            store.add_activity(owner, int(session["admin_user_id"]), "route.saved", "call_route", route_id, f"Call flow for {data.get('phone_number')} updated")
+            if target_type == "number":
+                route_id = store.save_call_route(owner, data)
+                label = data.get("phone_number")
+            else:
+                route_id = store.save_routing_flow(owner, data, target_type=target_type, target=target or None)
+                label = f"{target_type} {target}"
+            if target_type != "number":
+                store.add_activity(owner, int(session["admin_user_id"]), "route.saved", "routing_flow", route_id, f"Call flow for {label} updated")
+            else:
+                store.add_activity(owner, int(session["admin_user_id"]), "route.saved", "call_route", route_id, f"Call flow for {label} updated")
             return jsonify({"ok": True, "route_id": route_id})
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
+
+    @app.delete("/admin/api/call-routes/<int:route_id>")
+    @login_required
+    def delete_customer_call_route(route_id):
+        """Removes an extension or group flow so it can be rebuilt from the
+        default; number flows keep their own endpoint behaviour."""
+        try:
+            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            store.delete_routing_flow(route_id, owner)
+            apply_change(); return jsonify({"ok": True})
+        except ValueError as exc: return jsonify({"error": str(exc)}), 404
 
     @app.post("/admin/api/notifications/read-all")
     @login_required

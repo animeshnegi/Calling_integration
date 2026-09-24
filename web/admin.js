@@ -63,7 +63,8 @@ let csrf = '';
 let state = {
   extensions: [], phone_numbers: [], providers: [], webhooks: [], webhook_deliveries: [],
   users: [], customers: [], sip_accounts: [], requests: [], activity: [], notifications: [],
-  call_routes: [], api_keys: [], invoices: [], email_deliveries: [], settings: {}, email_config: {},
+  call_routes: [], routing_flows: [], groups: [], api_keys: [], invoices: [],
+  email_deliveries: [], settings: {}, email_config: {},
   call_summary: {}, voicemail_summary: {}, is_admin: false,
 };
 let modalType = '', editing = null, callOffset = 0, recordingOffset = 0;
@@ -237,6 +238,7 @@ function showPage(name) {
   document.querySelector('.content')?.scrollTo?.({ top: 0, behavior: 'auto' });
   window.scrollTo({ top: 0, behavior: 'auto' });
   if (!$('workspace').classList.contains('open')) $('scrim').classList.remove('open');
+  if (name === 'routing') { renderFlow(); renderGroups(); }
   if (name === 'calls') loadCalls();
   if (name === 'recordings') loadRecordings();
   if (name === 'voicemails') loadVoicemails();
@@ -496,6 +498,7 @@ function renderCustomers() {
       <div class="tags">${u.active ? tag('Active', 'on') : tag('Disabled', 'off')}${tag('Administrator', 'violet')}</div>
       <div class="row-actions"><button class="btn danger sm" data-delete-user="${u.id}">Delete</button></div>
     </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂');
+  if (currentPage === 'routing') { renderFlow($('route-target')?.value); renderGroups(); }
   markStagger();
 }
 
@@ -518,6 +521,8 @@ function renderExtensions() {
         ${x.voicemail_enabled ? tag('Voicemail on', 'info') : tag('Voicemail off')}
       </div>
       <div class="row-actions">
+        <button class="btn ghost sm" data-extension-credentials="${x.extension}">Credentials</button>
+        <button class="btn ghost sm" data-extension-flow="${x.extension}">Call flow</button>
         <button class="btn ghost sm" data-edit-extension="${x.extension}">Edit</button>
         <button class="btn danger sm" data-delete-extension="${x.extension}">Delete</button>
       </div>
@@ -603,6 +608,31 @@ function renderProviders() {
 }
 
 /* ------------------------------------------------ 13. Render: SIP accounts */
+/* The SIP identities the customer actually registers: one per extension, with the
+   same reveal treatment as a device account. */
+function renderExtensionCredentials() {
+  const host = $('extension-credential-list');
+  if (!host) return;
+  const rows = (state.extensions || []).filter(x => x.active);
+  $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
+  const numbers = extension => (state.phone_numbers || []).filter(x => x.inbound_extension === extension).map(x => x.number);
+  host.innerHTML = rows.map(x => {
+    const linked = numbers(x.extension);
+    const flows = (state.routing_flows || []).filter(flow => flow.target_type === 'extension' && flow.target === x.extension);
+    return `<div class="row">
+      <span class="row-icon">${esc(x.extension)}</span>
+      <div><h3>${esc(x.display_name || `Extension ${x.extension}`)}</h3>
+        <p>Register with username ${esc(x.sip_username || x.extension)} · ${linked.length ? esc(linked.join(', ')) : 'no number linked yet'}</p></div>
+      <div class="tags">${flows.length ? tag('Call flow ready', 'info') : tag('No call flow', 'off')}${x.voicemail_enabled ? tag('Voicemail on', 'on') : ''}</div>
+      <div class="row-actions">
+        <button class="btn primary sm" data-extension-credentials="${x.extension}">Show credentials</button>
+        <button class="btn ghost sm" data-extension-flow="${x.extension}">Call flow</button>
+      </div>
+    </div>`;
+  }).join('') || empty('No extensions yet', 'Extensions are created with your phone numbers, and each one gets SIP credentials and a call flow.', '⌁');
+  markStagger();
+}
+
 function renderSipAccounts() {
   const rows = state.sip_accounts || [];
   $('sip-count').textContent = `${rows.length} account${rows.length === 1 ? '' : 's'}`;
@@ -628,6 +658,7 @@ function renderSipAccounts() {
     </article>`;
   }).join('') || empty('No devices yet', state.is_admin ? 'Assign SIP credentials here or from a customer workspace.' : 'Add the phone or softphone you want to connect.', '◈', '',
       emptyAction(state.is_admin ? 'Assign SIP service' : 'Add a device', 'data-open="sipaccount"', true));
+  renderExtensionCredentials();
   markStagger();
 }
 
@@ -1022,16 +1053,121 @@ async function voicemailAction(action, value) {
 const FLOW_ICONS = { business_hours: '◷', simultaneous: '⇉', sequential: '⇢', ring_group: '◎', extension: '⌁', voicemail: '✉', forward: '↗' };
 const FLOW_TILES = { business_hours: 'tile-hours', simultaneous: 'tile-ring', sequential: 'tile-seq', ring_group: 'tile-group', extension: 'tile-ext', voicemail: 'tile-vm', forward: 'tile-fwd' };
 
-function renderFlow() {
-  const select = $('route-number');
+/* ------------------------------------------------- 21a. Flow targets */
+/* Numbers, extensions and groups all get a call flow. Numbers stay in
+   state.call_routes (their own API contract), the other two in
+   state.routing_flows, and the builder treats them identically. */
+const flowKey = (type, target) => `${type}:${target}`;
+function flowTargetParts(raw) {
+  const [type, ...rest] = String(raw || '').split(':');
+  return { type, target: rest.join(':') };
+}
+function flowOwnerId() {
+  const { type, target } = flowTargetParts($('route-target')?.value);
+  if (type === 'number') return (state.phone_numbers || []).find(x => x.number === target)?.owner_user_id ?? null;
+  if (type === 'extension') return (state.extensions || []).find(x => x.extension === target)?.owner_user_id ?? null;
+  if (type === 'group') return (state.groups || []).find(x => String(x.id) === String(target))?.owner_user_id ?? null;
+  return null;
+}
+function routeTargets() {
+  const targets = [];
+  // An administrator sees every customer's targets in one list, so each label
+  // names its owner; a customer only ever sees their own.
+  const ownerName = id => {
+    if (!state.is_admin) return '';
+    const owner = (state.users || []).find(u => u.id === id);
+    return owner ? ` · ${owner.company_name || owner.username}` : ' · platform';
+  };
+  (state.phone_numbers || []).forEach(x => targets.push({
+    key: flowKey('number', x.number), section: 'Numbers', type: 'number', target: x.number,
+    label: `${x.number} — ${x.description || (x.inbound_extension ? `ext ${x.inbound_extension}` : 'unassigned')}${ownerName(x.owner_user_id)}`,
+  }));
+  (state.extensions || []).filter(x => x.active).forEach(x => targets.push({
+    key: flowKey('extension', x.extension), section: 'Extensions', type: 'extension', target: x.extension,
+    label: `${x.extension} — ${x.display_name || 'Extension'}${ownerName(x.owner_user_id)}`,
+  }));
+  (state.groups || []).forEach(group => targets.push({
+    key: flowKey('group', group.id), section: 'Groups', type: 'group', target: String(group.id),
+    label: `${group.name} — ${group.members.length} member${group.members.length === 1 ? '' : 's'}${ownerName(group.owner_user_id)}`,
+  }));
+  return targets;
+}
+/* Every flow that belongs to one owner, in the shape the pickers expect. */
+function allFlowsFor(ownerUserId) {
+  const owns = row => ownerUserId === undefined || row.owner_user_id === ownerUserId;
+  return [
+    ...(state.call_routes || []).filter(row => owns(row)).map(row => ({
+      key: flowKey('number', row.phone_number), type: 'number', target: row.phone_number,
+      name: row.name || 'Main call flow', nodes: row.route?.nodes || [], owner_user_id: row.owner_user_id, active: row.active,
+    })),
+    ...(state.routing_flows || []).filter(row => owns(row)).map(row => ({
+      key: flowKey(row.target_type, row.target), type: row.target_type, target: String(row.target),
+      name: row.name || (row.target_type === 'group' ? 'Group call flow' : 'Extension call flow'),
+      nodes: row.route?.nodes || [], owner_user_id: row.owner_user_id, active: row.active,
+    })),
+  ];
+}
+
+function savedFlowFor(type, target) {
+  if (type === 'number') return (state.call_routes || []).find(row => row.phone_number === target);
+  return (state.routing_flows || []).find(row => row.target_type === type && String(row.target) === String(target));
+}
+function renderRouteTargets(preferred) {
+  const select = $('route-target');
+  if (!select) return '';
+  const targets = routeTargets();
+  const prior = preferred ?? select.value;
+  const sections = ['Numbers', 'Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
+  select.innerHTML = sections.map(section => `<optgroup label="${section}">${targets.filter(t => t.section === section)
+    .map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}</optgroup>`).join('');
+  if (targets.some(t => t.key === prior)) select.value = prior;
+  else if (targets.length) select.value = targets[0].key;
+  else select.innerHTML = '<option value="">No target yet</option>';
+  return select.value;
+}
+
+function renderFlow(preferred) {
+  const select = $('route-target');
   if (!select) return;
-  const prior = select.value;
-  select.innerHTML = (state.phone_numbers || []).map(x => `<option value="${esc(x.number)}">${esc(x.number)} — ${esc(x.description || 'Main')}</option>`).join('');
-  select.value = prior || select.options[0]?.value || '';
-  $('flow-entry-number').textContent = select.value || 'Assign a number to begin';
-  const saved = (state.call_routes || []).find(x => x.phone_number === select.value);
-  if (saved) flowNodes = saved.route?.nodes || [];
+  const key = renderRouteTargets(preferred);
+  const { type, target } = flowTargetParts(key);
+  const saved = key ? savedFlowFor(type, target) : null;
+  flowNodes = saved?.route?.nodes ? saved.route.nodes.map(node => ({ ...node })) : [];
+  const entry = $('flow-entry-number');
+  if (entry) entry.textContent = key ? (select.selectedOptions[0]?.textContent || key) : 'Add a number, extension or group to begin';
   renderFlowNodes();
+}
+
+function renderGroups() {
+  const host = $('group-list');
+  if (!host) return;
+  const groups = state.groups || [];
+  const rows = groups.map(group => {
+    const active = flowTargetParts($('route-target')?.value).type === 'group'
+      && String(flowTargetParts($('route-target')?.value).target) === String(group.id);
+    const flow = savedFlowFor('group', group.id);
+    return `<div class="row${active ? ' selected' : ''}">
+      <span class="row-icon">◎</span>
+      <div><h3>${esc(group.name)}</h3><p>${group.members.length ? group.members.map(ext => esc(ext)).join(' · ') : 'No members yet'} · rings for ${group.timeout}s</p></div>
+      <div class="tags">${flow ? tag(`${flow.route?.nodes?.length || 0} step flow`, 'info') : tag('Default flow', 'off')}${group.active ? '' : tag('Paused', 'off')}</div>
+      <div class="row-actions">
+        <button class="btn ghost sm" data-edit-group="${group.id}">Edit</button>
+        <button class="btn ghost sm" data-group-flow="${group.id}">Call flow</button>
+        <button class="btn danger sm" data-delete-group="${group.id}">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+  host.innerHTML = rows || empty('No groups yet', 'A group rings its members together and can carry its own call flow.', '◎');
+}
+
+/* Ring steps can target a saved group; picking one fills in its members. */
+function flowGroupOptions(selected = '') {
+  // Only groups belonging to the target's owner: a ring step may not use
+  // somebody else's group, and validation rejects it if it does.
+  const owner = flowOwnerId();
+  const groups = state.is_admin && owner ? (state.groups || []).filter(g => g.owner_user_id === owner) : (state.groups || []);
+  return `<option value="">Individual extensions</option>${groups.map(group =>
+    `<option value="${group.id}" ${String(selected) === String(group.id) ? 'selected' : ''}>${esc(group.name)} — ${group.members.length} member${group.members.length === 1 ? '' : 's'}</option>`).join('')}`;
 }
 
 function renderFlowNodes() {
@@ -1049,11 +1185,11 @@ function renderFlowNodes() {
 
 function flowExtensionOptions(selected = []) {
   const values = Array.isArray(selected) ? selected : [selected];
-  const number = (state.phone_numbers || []).find(x => x.number === $('route-number').value);
-  const available = state.is_admin && number?.owner_user_id
-    ? state.extensions.filter(x => x.owner_user_id === number.owner_user_id)
+  const owner = flowOwnerId();
+  const available = state.is_admin && owner
+    ? state.extensions.filter(x => x.owner_user_id === owner)
     : state.extensions;
-  return available.map(x => `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
 }
 
 function openFlowConfig(index) {
@@ -1071,7 +1207,9 @@ function openFlowConfig(index) {
         .map((day, i) => `<option value="${i + 1}" ${(node.days || [1,2,3,4,5]).includes(i + 1) ? 'selected' : ''}>${day}</option>`).join('')}</select>
         <small>Use Ctrl/Cmd to select multiple days.</small></label>`;
   } else if (['simultaneous', 'sequential', 'ring_group'].includes(node.type)) {
-    fields = `<label class="field">Ring destinations<select name="extensions" multiple size="6" required>${flowExtensionOptions(node.extensions || [])}</select><small>Select at least one extension.</small></label>
+    fields = `<label class="field">Ring a saved group<select name="group_id">${flowGroupOptions(node.group_id)}</select>
+        <small>Choosing a group fills in its members below; you can still adjust them for this step.</small></label>
+      <label class="field">Ring destinations<select name="extensions" multiple size="6" required>${flowExtensionOptions(node.extensions || [])}</select><small>Select at least one extension.</small></label>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
   } else if (node.type === 'extension') {
     fields = `<label class="field">Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension || '')}</select></label>`;
@@ -1099,10 +1237,14 @@ function saveFlowConfig(event) {
     if (!node.days.length) return notify('Select at least one business day', true);
     node.label = node.label || `${node.start}–${node.end} · ${node.days.length} days`;
   } else if (['simultaneous', 'sequential', 'ring_group'].includes(node.type)) {
+    const groupId = String(form.get('group_id') || '');
+    const group = (state.groups || []).find(x => String(x.id) === groupId);
     node.extensions = form.getAll('extensions');
+    if (group && !node.extensions.length) node.extensions = [...group.members];
     node.timeout = Number(form.get('timeout'));
+    if (group) node.group_id = groupId; else delete node.group_id;
     if (!node.extensions.length) return notify('Select at least one extension', true);
-    node.label = node.label || `${node.extensions.join(', ')} · ${node.timeout}s`;
+    node.label = node.label || `${group ? `${group.name} · ` : ''}${node.extensions.join(', ')} · ${node.timeout}s`;
   } else if (node.type === 'extension') {
     node.extension = form.get('extension');
     node.label = node.label || `Extension ${node.extension}`;
@@ -1131,6 +1273,19 @@ function closeOverlay(id) {
   node.classList.remove('open');
   node.setAttribute('aria-hidden', 'true');
 }
+/* Extension numbers are unique platform-wide, so the suggestion comes from the
+   server rather than from whatever this session can see. */
+async function prefillNextExtension() {
+  const field = $('modal-fields')?.querySelector('[name=extension]');
+  if (!field || editing) return;
+  try {
+    const { extension } = await api('/admin/api/extensions/next');
+    if (!$('modal').classList.contains('open') || field.value) return;
+    field.value = extension;
+    field.placeholder = extension;
+  } catch { /* the field stays editable by hand */ }
+}
+
 function closeModal() {
   closeOverlay('modal');
   $('modal-form').reset();
@@ -1138,6 +1293,69 @@ function closeModal() {
   $('modal-card').classList.remove('wide');
   editing = null;
   pendingFulfilRequest = null;
+}
+
+/* ------------------------------------------------- 23a. Groups & credentials */
+function groupMemberOptions(item) {
+  const owner = state.is_admin ? item?.owner_user_id : null;
+  const available = state.is_admin && owner
+    ? state.extensions.filter(x => x.owner_user_id === Number(owner))
+    : state.extensions;
+  const selected = item?.members || [];
+  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+}
+
+/* The credentials a device registers with. The password is only ever fetched on
+   demand, and it is the same secret the Asterisk config is generated from. */
+async function showExtensionCredentials(extension) {
+  try {
+    const { credentials } = await api(`/admin/api/extensions/${encodeURIComponent(extension)}/credentials`);
+    const rows = [
+      ['Extension', credentials.extension], ['Display name', credentials.display_name || '—'],
+      ['SIP username', credentials.sip_username], ['SIP password', credentials.sip_password],
+      ['Registration server', credentials.server || 'Ask EIP for your registration host'],
+      ['Port', credentials.port], ['Transport', String(credentials.transport || 'udp').toUpperCase()],
+      ['Numbers', credentials.numbers?.join(', ') || 'No number assigned yet'],
+      ['Credential source', credentials.registration === 'device' ? `Device account${credentials.device_label ? ` · ${credentials.device_label}` : ''}` : 'Extension'],
+    ];
+    const registration = credentials.device_label
+      ? `A device account (<b>${esc(credentials.device_label)}</b>) is linked to this extension and takes precedence in the generated Asterisk configuration.`
+      : `These are the credentials for this extension. Change the password from <b>Edit</b> and new registrations pick it up immediately.`;
+    showSecret({
+      title: `Extension ${credentials.extension} credentials`,
+      subtitle: 'Enter these into a phone or softphone to register this extension',
+      value: credentials.sip_password,
+      body: `<div class="notice warn"><span class="glyph">⚿</span><div><b>Treat these as secrets</b>Anyone with them can place calls as this extension. Rotate the password from Edit if they are ever exposed.</div></div>
+        <div class="grid cols-2">${rows.map(([label, value]) => `
+          <label class="field">${esc(label)}<input readonly value="${esc(String(value ?? '—'))}"></label>`).join('')}</div>
+        <label class="field">SIP password<div class="secret"><input id="created-api-key" readonly><button class="btn primary" type="button" data-copy-secret>Copy</button></div></label>
+        <article class="notice"><span class="glyph">◈</span><div><b>Where this comes from</b>${registration}</div></article>`,
+    });
+  } catch (error) { notify(error.message, true); }
+}
+
+/* What the platform built when a number was assigned: the extension, its
+   credentials and the flows that are already handling calls. */
+function showProvisioned(provisioned) {
+  const items = [
+    `Extension <b>${esc(provisioned.extension)}</b> created${provisioned.display_name ? ` — ${esc(provisioned.display_name)}` : ''}`,
+    `SIP credentials generated (username <b>${esc(provisioned.sip_username)}</b>)`,
+    `Inbound calls to <b>${esc(provisioned.number)}</b> now ring that extension`,
+    provisioned.default_outbound ? 'Set as the default caller ID for the new extension' : 'Caller ID left as it was',
+    'Default call flow written for the number and for the extension',
+  ];
+  showSecret({
+    title: `Line ready — ${provisioned.number}`,
+    subtitle: 'The extension, its credentials and the call flows were created automatically',
+    value: provisioned.sip_password,
+    body: `<div class="notice ok"><span class="glyph">✓</span><div><b>Created for the customer</b><ul class="plain">${items.map(item => `<li>${item}</li>`).join('')}</ul></div></div>
+      <div class="grid cols-2">
+        <label class="field">Extension<input readonly value="${esc(provisioned.extension)}"></label>
+        <label class="field">SIP username<input readonly value="${esc(provisioned.sip_username)}"></label>
+      </div>
+      <label class="field">SIP password<div class="secret"><input id="created-api-key" readonly><button class="btn primary" type="button" data-copy-secret>Copy</button></div></label>
+      <article class="notice"><span class="glyph">⌘</span><div><b>Both flows are editable</b>Open the flow builder to adjust how the number answers, or how the extension itself rings, at any time.</div></article>`,
+  });
 }
 
 /* --------------------------------------------------- 23. Modal templates */
@@ -1171,8 +1389,11 @@ const templates = {
       </div>
       <div class="field-row">
         <label class="field">SIP username<input name="sip_username" maxlength="80" placeholder="Defaults to extension" value="${esc(item?.sip_username || '')}"></label>
-        <label class="field">SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Required'}"></label>
+        <label class="field">SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Leave blank to generate one'}"></label>
       </div>
+      <div class="credential-note">${item
+        ? `<span>Credentials are created automatically and can be changed any time.</span><button class="btn ghost sm" type="button" data-reveal-extension="${esc(item.extension)}">Reveal credentials</button>`
+        : '<span>A SIP username and a strong password are generated for this extension, and it gets a default call flow straight away.</span>'}</div>
       <label class="check" style="margin-bottom:13px"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Active and allowed to make calls</label>
       <label class="check" style="margin-bottom:13px"><input name="recording_enabled" type="checkbox" ${item?.recording_enabled ? 'checked' : ''}> Allow recording when global recording is enabled</label>
       <div class="field-row">
@@ -1181,6 +1402,20 @@ const templates = {
       </div>
       <label class="field">Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(item?.voicemail_email || '')}"><small>New messages are sent here when SendGrid is enabled.</small></label>
       <label class="check"><input name="webrtc_enabled" type="checkbox" ${item?.webrtc_enabled ? 'checked' : ''}> WebRTC enabled</label>`,
+  }),
+  group: item => ({
+    title: item ? `Edit group ${item.name}` : 'Add a ring group',
+    subtitle: 'Group the extensions that ring together, then give the group its own call flow',
+    fields: `${state.is_admin ? `<label class="field">Customer account<select name="owner_user_id" required>${activeCustomers()
+      .map(x => `<option value="${x.id}" ${Number(item?.owner_user_id) === x.id ? 'selected' : ''}>${esc(x.company_name || x.username)}</option>`).join('')}</select>
+      <small>Groups belong to one customer and can only ring that customer's extensions.</small></label>` : ''}
+      <div class="field-row">
+        <label class="field">Group name<input name="name" maxlength="80" required placeholder="Sales desk" value="${esc(item?.name || '')}"></label>
+        <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${item?.timeout || 25}" required></label>
+      </div>
+      <label class="field">Members<select name="members" multiple size="6">${groupMemberOptions(item)}</select>
+        <small>Extensions that ring together. A group can also be the target of its own call flow.</small></label>
+      <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Group is active</label>`,
   }),
   number: item => ({
     title: item ? 'Manage phone number' : 'Assign phone number',
@@ -1191,8 +1426,9 @@ const templates = {
       <div class="field-row">
         <label class="field">SIP provider<select name="provider" required><option value="">Select provider</option>${state.providers.filter(x => x.active)
           .map(x => `<option value="${esc(x.name)}" ${item?.provider === x.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
-        <label class="field">Inbound extension<select name="inbound_extension"><option value="">Choose after creating an extension</option>${state.extensions.filter(x => x.active && String(x.owner_user_id ?? '') === String(item?.owner_user_id ?? ''))
-          .map(x => `<option value="${x.extension}" ${item?.inbound_extension === x.extension ? 'selected' : ''}>${x.extension} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}</select></label>
+        <label class="field">Inbound extension<select name="inbound_extension">${item ? '' : '<option value="auto" selected>Auto-create extension, SIP credentials and call flow</option>'}<option value="">Choose after creating an extension</option>${state.extensions.filter(x => x.active && String(x.owner_user_id ?? '') === String(item?.owner_user_id ?? ''))
+          .map(x => `<option value="${x.extension}" ${item?.inbound_extension === x.extension ? 'selected' : ''}>${x.extension} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}</select>
+          ${item ? '' : '<small>Leave it on auto-create and the platform builds the whole line: a 3-digit extension, its SIP password, the DID link and default call flows for both the number and the extension.</small>'}</label>
       </div>
       <label class="field">Description<input name="description" maxlength="160" placeholder="Customer primary number" value="${esc(item?.description || '')}"></label>
       <div class="field-row">
@@ -1391,8 +1627,9 @@ async function saveModal(event) {
   event.target.querySelectorAll('input[type=checkbox]').forEach(x => (data[x.name] = x.checked));
   if (modalType === 'apikey') data.scopes = [...event.target.querySelector('[name=scopes]').selectedOptions].map(x => x.value).join(',');
   if (modalType === 'webhook') data.events = [...event.target.querySelector('[name=events]').selectedOptions].map(x => x.value).join(',');
-  if (['webhook', 'user'].includes(modalType) && editing) data.id = editing.id;
+  if (['webhook', 'user', 'group'].includes(modalType) && editing) data.id = editing.id;
   if (modalType === 'sipaccount' && editing) data.id = editing.id;
+  if (modalType === 'group') data.members = [...event.target.querySelector('[name=members]').selectedOptions].map(x => x.value);
   try {
     const collection = { number: 'numbers', webhook: 'webhooks', apikey: 'api-keys', sipaccount: 'sip-accounts' }[modalType] || `${modalType}s`;
     const result = await api(`/admin/api/${collection}`, { method: 'POST', body: JSON.stringify(data) });
@@ -1400,6 +1637,39 @@ async function saveModal(event) {
     if (modalType === 'number' && pendingFulfilRequest) {
       await api(`/admin/api/requests/${pendingFulfilRequest}/resolve`, { method: 'POST', body: JSON.stringify({ status: 'fulfilled', admin_note: `Number ${data.number} assigned` }) });
       pendingFulfilRequest = null;
+    }
+    if (modalType === 'number' && result.provisioned) {
+      // The platform built the whole line: show the administrator exactly what
+      // now exists, credentials included, so they can hand them over.
+      const refreshed = workspace?.customer?.id, refreshedTab = wsTab;
+      closeModal();
+      await loadState();
+      if (refreshed) await openCustomer(refreshed, refreshedTab, true);
+      showProvisioned(result.provisioned);
+      notify(`Extension ${result.provisioned.extension} provisioned for ${result.number}`);
+      return;
+    }
+    if (modalType === 'extension' && result.created && result.credentials) {
+      closeModal();
+      await loadState();
+      const id = workspace?.customer?.id, tab = wsTab;
+      if (id) await openCustomer(id, tab, true);
+      showSecret({
+        title: `Extension ${result.extension} created`,
+        subtitle: 'A SIP password and a default call flow were generated automatically',
+        value: result.credentials.sip_password,
+        body: `<div class="notice ok"><span class="glyph">✓</span><div><b>Ready to register</b>Enter these into a phone or softphone. Change the password from Edit at any time — the generated Asterisk configuration follows it.</div></div>
+          <div class="grid cols-2">
+            <label class="field">Extension<input readonly value="${esc(result.credentials.extension)}"></label>
+            <label class="field">SIP username<input readonly value="${esc(result.credentials.sip_username)}"></label>
+            <label class="field">Registration server<input readonly value="${esc(result.credentials.server || 'Ask EIP for your registration host')}"></label>
+            <label class="field">Port · transport<input readonly value="${esc(`${result.credentials.port} · ${String(result.credentials.transport).toUpperCase()}`)}"></label>
+          </div>
+          <label class="field">SIP password<div class="secret"><input id="created-api-key" readonly><button class="btn primary" type="button" data-copy-secret>Copy</button></div></label>
+          <article class="notice"><span class="glyph">⌘</span><div><b>Call flow included</b>Extension ${esc(result.extension)} already has a default flow. Open the flow builder and choose it to customise how it rings.</div></article>`,
+      });
+      notify(`Extension ${result.extension} created`);
+      return;
     }
     if (modalType === 'apikey') {
       const refreshedCustomer = workspace?.customer?.id, refreshedTab = wsTab;
@@ -1417,7 +1687,7 @@ async function saveModal(event) {
       return;
     }
     const messages = {
-      call: 'Outbound call started', extension: 'Extension saved', number: 'Phone number saved',
+      group: 'Group saved', call: 'Outbound call started', extension: 'Extension saved', number: 'Phone number saved',
       sipaccount: 'SIP service saved', provider: 'Provider saved', webhook: 'Webhook saved',
       user: 'Customer saved', platformadmin: 'Administrator added',
     };
@@ -1746,7 +2016,7 @@ function wsNumbers() {
   const c = workspace.customer;
   const cards = workspace.numbers.map(x => {
     const sip = workspace.sip_accounts.find(a => a.phone_number === x.number);
-    const route = wsOwned('call_routes').find(r => r.phone_number === x.number);
+    const route = (state.call_routes || []).find(r => r.phone_number === x.number && r.owner_user_id === workspace?.customer?.id);
     return `<article class="ws-card">
       <div class="ws-card-head">
         <span class="ws-glyph">☎</span>
@@ -1824,13 +2094,20 @@ function wsDevices() {
 
 /* --- Routing --- */
 function wsRouting() {
-  const routes = wsOwned('call_routes');
-  const cards = routes.map(route => {
-    const nodes = route.route?.nodes || [];
+  const owner = workspace?.customer?.id;
+  const flows = allFlowsFor(owner);
+  const labels = {
+    number: flow => flow.target,
+    extension: flow => `Extension ${flow.target}`,
+    group: flow => `${(state.groups || []).find(g => String(g.id) === String(flow.target))?.name || 'Group'} (group)`,
+  };
+  const cards = flows.map(flow => {
+    const nodes = flow.nodes || [];
+    const label = labels[flow.type](flow);
     return `<article class="ws-card">
-      <div class="ws-card-head"><span class="ws-glyph">⌘</span>
-        <div><small>Call flow</small><h4>${esc(route.phone_number)}</h4><p>${esc(route.name || 'Main call flow')}</p>
-          <div class="tags" style="margin-top:6px">${route.active ? tag('Active', 'on') : tag('Paused', 'off')}${tag(`${nodes.length} step${nodes.length === 1 ? '' : 's'}`)}</div>
+      <div class="ws-card-head"><span class="ws-glyph">${flow.type === 'group' ? '◎' : flow.type === 'extension' ? '⌁' : '⌘'}</span>
+        <div><small>${flow.type === 'number' ? 'Number call flow' : flow.type === 'extension' ? 'Extension call flow' : 'Group call flow'}</small><h4>${esc(label)}</h4><p>${esc(flow.name)}</p>
+          <div class="tags" style="margin-top:6px">${flow.active ? tag('Active', 'on') : tag('Paused', 'off')}${tag(`${nodes.length} step${nodes.length === 1 ? '' : 's'}`)}</div>
         </div>
       </div>
       <div class="ws-flow">${nodes.length ? nodes.map((node, i) => `
@@ -1840,13 +2117,20 @@ function wsRouting() {
             <small style="display:block;color:var(--text-3);font-size:11px">${esc(node.label || 'Not configured')}</small></div>
           <span class="step">${String(i + 1).padStart(2, '0')}</span>
         </div>`).join('') : '<small style="color:var(--text-3)">No steps configured for this number yet.</small>'}</div>
-      <div class="ws-card-actions"><button class="btn ghost sm" data-ws-route="${esc(route.phone_number)}">Open in flow builder</button></div>
+      <div class="ws-card-actions"><button class="btn ghost sm" data-route-target="${esc(flow.key)}">Open in flow builder</button></div>
     </article>`;
   }).join('');
-  const unconfigured = workspace.numbers.filter(n => !routes.some(r => r.phone_number === n.number));
+  const unconfigured = workspace.numbers.filter(n => !flows.some(flow => flow.key === flowKey('number', n.number)));
+  const flowsFor = type => flows.filter(flow => flow.type === type).length;
+  const defaultTarget = workspace.numbers[0] ? flowKey('number', workspace.numbers[0].number) : flows[0]?.key || '';
   return `<section class="ws-section">
-    <div class="ws-section-head"><div><h3>Call routing</h3><p>How inbound calls to this customer's numbers are handled.</p></div>
-      <button class="btn primary" data-ws-route="${esc(workspace.numbers[0]?.number || '')}">Open flow builder</button></div>
+    <div class="ws-section-head"><div><h3>Call routing</h3><p>Flows for this customer's numbers, extensions and groups.</p></div>
+      <button class="btn primary" data-route-target="${esc(defaultTarget)}">Open flow builder</button></div>
+    <div class="ws-status" style="margin-bottom:14px">
+      <span class="ws-chip"><b>${flowsFor('number')}</b><small>number flows</small></span>
+      <span class="ws-chip"><b>${flowsFor('extension')}</b><small>extension flows</small></span>
+      <span class="ws-chip"><b>${flowsFor('group')}</b><small>group flows</small></span>
+    </div>
     <div class="ws-cards">${cards || wsEmpty('No call flow configured', 'Open the flow builder to design how inbound calls are routed.', '⌘')}</div>
     ${unconfigured.length ? `<div class="notice" style="margin-top:16px"><span class="glyph">⌘</span><div><b>Numbers without a call flow</b>${unconfigured.map(n => esc(n.number)).join(', ')}</div></div>` : ''}
   </section>`;
@@ -1981,6 +2265,19 @@ function closeWorkspace() {
 }
 
 /* ============================================================ 26. Events */
+document.addEventListener('click', event => {
+  const reveal = event.target.closest('[data-reveal-extension]');
+  if (reveal) {
+    // Fill the form in place so the operator can see and change the secret.
+    api(`/admin/api/extensions/${encodeURIComponent(reveal.dataset.revealExtension)}/credentials`).then(({ credentials }) => {
+      const fields = $('modal-fields');
+      fields.querySelector('[name=sip_username]').value = credentials.sip_username;
+      fields.querySelector('[name=sip_password]').value = credentials.sip_password;
+      fields.querySelector('[name=sip_password]').type = 'text';
+      notify(`Credentials revealed · register at ${credentials.server || 'your EIP host'}:${credentials.port}`);
+    }).catch(error => notify(error.message, true));
+  }
+});
 document.addEventListener('click', async event => {
   // Grouped lists (extensions by customer, recordings/voicemails by extension)
   // collapse from their header, so long lists stay scannable.
@@ -2001,7 +2298,7 @@ document.addEventListener('click', async event => {
     closeWorkspace();
     showPage('routing');
     if (number) {
-      $('route-number').value = number;
+      renderFlow(flowKey('number', number));
       $('flow-entry-number').textContent = number;
       flowNodes = (state.call_routes || []).find(x => x.phone_number === number)?.route?.nodes || [];
       renderFlowNodes();
@@ -2051,6 +2348,7 @@ document.addEventListener('click', async event => {
   if (d.newForCustomer) {
     const [type, id] = d.newForCustomer.split(':');
     openModal(type);
+    if (type === 'extension') prefillNextExtension();
     setTimeout(() => {
       const owner = $('modal-fields').querySelector('[name=owner_user_id]');
       if (owner) { owner.value = id; owner.dispatchEvent(new Event('change')); }
@@ -2059,9 +2357,38 @@ document.addEventListener('click', async event => {
   }
   if (d.page) return showPage(d.page);
   if (d.go) { showPage(d.go); if (d.new) openModal(d.new); return; }
-  if (d.open) return openModal(d.open);
+  if (d.open) {
+    const type = d.open;
+    openModal(type);
+    if (type === 'extension') prefillNextExtension();
+    return;
+  }
 
   if (d.editExtension) return openModal('extension', state.extensions.find(x => x.extension === d.editExtension));
+  if (d.extensionCredentials) return showExtensionCredentials(d.extensionCredentials);
+  if (d.extensionFlow) {
+    showPage('routing');
+    return renderFlow(flowKey('extension', d.extensionFlow));
+  }
+  if (d.routeTarget) {
+    showPage('routing');
+    return renderFlow(d.routeTarget);
+  }
+  if (d.editGroup) return openModal('group', (state.groups || []).find(x => String(x.id) === String(d.editGroup)));
+  if (d.groupFlow) {
+    showPage('routing');
+    return renderFlow(flowKey('group', d.groupFlow));
+  }
+  if (d.deleteGroup) {
+    if (!confirm('Delete this group? Its call flow is removed too; the extensions stay.')) return;
+    try {
+      await api(`/admin/api/groups/${d.deleteGroup}`, { method: 'DELETE' });
+      notify('Group deleted');
+      await loadState();
+      renderFlow(); renderGroups();
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
   if (d.editNumber) return openModal('number', state.phone_numbers.find(x => x.id === Number(d.editNumber)));
   if (d.editProvider) return openModal('provider', state.providers.find(x => x.id === Number(d.editProvider)));
   if (d.editWebhook) return openModal('webhook', state.webhooks.find(x => x.id === Number(d.editWebhook)));
@@ -2230,17 +2557,17 @@ if (dragSurface) {
     if (type) { flowNodes.push({ type, label: 'Click to configure' }); renderFlowNodes(); }
   });
 }
-wire('route-number', 'change', () => {
-  $('flow-entry-number').textContent = $('route-number').value || 'Assign a number to begin';
-  flowNodes = (state.call_routes || []).find(x => x.phone_number === $('route-number').value)?.route?.nodes || [];
-  renderFlowNodes();
-});
+wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
 wire('save-route', 'click', async () => {
-  if (!$('route-number').value) return notify('Assign a number first', true);
+  const { type, target } = flowTargetParts($('route-target')?.value);
+  if (!type || !target) return notify('Add a number, extension or group first', true);
   if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);
   try {
-    await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ phone_number: $('route-number').value, name: 'Main call flow', route: { nodes: flowNodes }, active: true }) });
-    notify('Call flow saved');
+    const payload = type === 'number'
+      ? { target_type: 'number', phone_number: target, target, name: savedFlowFor('number', target)?.name || 'Main call flow' }
+      : { target_type: type, target, owner_user_id: flowOwnerId(), name: savedFlowFor(type, target)?.name || (type === 'group' ? 'Group call flow' : 'Extension call flow') };
+    await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, route: { nodes: flowNodes }, active: true }) });
+    notify(`Call flow saved for ${type === 'number' ? target : `${type} ${target}`}`);
     const id = workspace?.customer?.id, tab = wsTab;
     await loadState();
     if (id) await openCustomer(id, tab, true);

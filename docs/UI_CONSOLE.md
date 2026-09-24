@@ -75,6 +75,62 @@ while `quietly()`/`endQuiet()` decide whether a background repaint may animate a
 Anything the operator drives — navigation, opening the customer workspace, switching
 its tabs — calls `endQuiet()` first, so it keeps its motion.
 
+## Provisioning: assigning a number builds a working line
+
+`POST /admin/api/numbers` accepts `inbound_extension: "auto"` (what the console sends
+by default for a new number). The number is saved first, then `provision_number()`
+builds everything else in one step:
+
+| Created | Where it lives |
+| --- | --- |
+| A three-digit extension (`next_extension_number()`, 101 upwards) | `extensions`, owned by the customer |
+| Its SIP credentials (username = the extension, generated password) | `extensions.sip_password_enc`, revealed on demand |
+| The DID link, so inbound calls actually ring | `phone_numbers.inbound_extension` |
+| The default caller ID when that extension has none | `phone_numbers.default_outbound` |
+| A default flow for the number and one for the extension | `call_routes` and `routing_flows` |
+| An activity entry and a notification | `activity_history`, `notifications` |
+
+Extension numbers are the primary key and therefore unique platform-wide, so
+provisioning never hands a customer a number another customer already owns; the
+suggestion comes from `GET /admin/api/extensions/next`. The customers' own
+`POST /admin/api/extensions` behaves the same way: leave the password blank and the
+server generates one, then writes the extension's default flow. Nothing is a one-way
+door — the password is editable, and both flows are editable in the builder.
+
+`GET /admin/api/extensions/<extension>/credentials` (owner or administrator) returns
+the effective credential: if a device account is linked to the extension, that account
+is what Asterisk ends up using, so the endpoint reports it as the source.
+
+## Call flows: one builder, three kinds of target
+
+A flow can belong to a number, an extension or a group, and the builder treats them
+identically (`#route-target` groups the options by kind):
+
+* **Numbers** — stored in `call_routes`, keyed by the number, as they always were.
+* **Extensions** and **groups** — stored in `routing_flows`, keyed by
+  `(owner_user_id, target_type, target)`. They live in their own table because
+  `call_routes.phone_number` carries a legacy `UNIQUE` constraint that a second kind of
+  target cannot satisfy, and rebuilding a table that holds customer data is not worth
+  the risk.
+
+A **group** (`extension_groups`) is a named set of the customer's extensions with a
+ring timeout. A group can be the target of its own flow, and it can be chosen as the
+ring destination inside any flow: the step then carries `group_id` alongside the
+resolved `extensions`, and validation rejects a step whose destinations are not the
+group's members. Deleting a group removes its flow; deleting an extension removes its
+flow and takes it out of every group.
+
+`POST /admin/api/call-routes` takes `target_type` (`number`, `extension`, `group`) and
+dispatches to the right store call; customers can only target what they own, and
+administrators must name the customer for extension and group flows.
+
+> **What rings today.** Inbound calls are answered by the ARI worker, which rings the
+> DID's `inbound_extension` — so a provisioned line answers on its extension
+> immediately. The flows are the configured plan for each target (hours, ring
+> destinations, groups, voicemail) and are stored and validated in full, but the call
+> engine does not execute the graph step by step yet. Executing it in `start_inbound`
+> is the next step on the telephony side, not something this interface can change.
+
 ## Customer workspace (administrator)
 
 Administrators manage a customer from one place: `Open workspace` on the customers

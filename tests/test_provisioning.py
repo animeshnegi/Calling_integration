@@ -1,0 +1,424 @@
+"""Auto-provisioning: assigning a number builds a working line, and call flows
+exist per number, per extension and per group.
+
+These cover the behaviour the console promises: an administrator assigns a
+number and the customer immediately has an extension, SIP credentials, a DID
+link and default call flows, all of them editable afterwards.
+"""
+from pathlib import Path
+
+import pytest
+
+from app import create_app
+from app import admin as admin_module
+from app.config import Config
+
+
+@pytest.fixture(autouse=True)
+def fresh_login_budget():
+    """The sign-in limiter is process-wide by design; each test starts clean."""
+    admin_module._LOGIN_BUCKETS.clear()
+    yield
+    admin_module._LOGIN_BUCKETS.clear()
+
+
+class FakeAsterisk:
+    def health(self):
+        return {"system": "Asterisk Test"}
+
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None):
+        return call_id
+
+    def hangup(self, channel_id):
+        return None
+
+    def hangup_call(self, employee_channel_id, customer_channel_id):
+        return None
+
+    def continue_in_dialplan(self, channel_id, context, extension):
+        return None
+
+
+def make_app(tmp_path: Path):
+    ready = tmp_path / "ari.ready"
+    ready.touch()
+
+    class TestingConfig(Config):
+        FLASK_ENV = "testing"
+        SECRET_KEY = "test-secret-key-which-is-long-enough"
+        TELEPHONY_TOKEN = "test-token"
+        ASTERISK_ARI_URL = "http://asterisk:8088/ari"
+        ASTERISK_ARI_USER = "test-user"
+        ASTERISK_ARI_PASSWORD = "test-password"
+        ASTERISK_AMI_PASSWORD = "test-password"
+        ASTERISK_EXTENSIONS = ("101", "102")
+        DEFAULT_EXTENSION = "101"
+        SETTINGS_DB_PATH = str(tmp_path / "settings.db")
+        CALLS_DB_PATH = str(tmp_path / "calls.db")
+        ARI_READY_PATH = str(ready)
+        VOICEMAIL_PATH = str(tmp_path / "voicemail")
+        VOICEMAIL_CONTEXT = "engineerip"
+        ASTERISK_DYNAMIC_CONFIG_PATH = str(tmp_path / "pjsip.dynamic.conf")
+        ADMIN_USERNAME = "admin"
+        ADMIN_PASSWORD = "test-admin-password-1234"
+
+    app = create_app(TestingConfig)
+    app.extensions["telephony_service"].asterisk = FakeAsterisk()
+    store = app.extensions["settings_store"]
+    store.save_provider({
+        "name": "TestProvider", "server": "sip.example.com", "port": 5060,
+        "username": "user", "password": "provider-password", "transport": "udp",
+        "codecs": "ulaw,alaw", "allowed_ips": "198.51.100.10/32",
+    })
+    return app
+
+
+class Session:
+    """A signed-in client that attaches the CSRF token the API expects."""
+
+    def __init__(self, client):
+        self.client = client
+
+    @property
+    def csrf(self):
+        return self.client.get("/admin/api/state").json["csrf_token"]
+
+    def post(self, path, **kwargs):
+        return self.client.post(path, headers={"X-CSRF-Token": self.csrf}, **kwargs)
+
+    def delete(self, path, **kwargs):
+        return self.client.delete(path, headers={"X-CSRF-Token": self.csrf}, **kwargs)
+
+    def get(self, path, **kwargs):
+        return self.client.get(path, **kwargs)
+
+
+def admin_client(app):
+    client = app.test_client()
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    return Session(client)
+
+
+def customer_client(app, username="tenant"):
+    """Create a customer and sign in as them.
+
+    Built through the store rather than /signup: that endpoint is rate limited
+    per process, and tests must not spend a shared budget on fixtures.
+    """
+    store = app.extensions["settings_store"]
+    store.save_user({
+        "username": username, "password": "customer-password-1234", "role": "user",
+        "email": f"{username}@example.com", "full_name": username.title(),
+        "company_name": f"{username.title()} Inc", "job_role": "Owner", "phone": "+13025559999",
+    })
+    user_id = next(row["id"] for row in store.list_users() if row["username"] == username)
+    client = app.test_client()
+    assert client.post("/login", json={"username": username, "password": "customer-password-1234"}).status_code == 200
+    return Session(client), int(user_id)
+
+
+def test_assigning_a_number_provisions_extension_credentials_and_flows(tmp_path):
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "meridian")
+
+    response = admin.post("/admin/api/numbers", json={
+        "number": "+13025550001", "provider": "TestProvider", "description": "Meridian main line",
+        "owner_user_id": user_id, "inbound_extension": "auto", "auto_provision": True,
+        "monthly_price": 5, "billing_cycle_day": 1,
+    })
+    assert response.status_code == 200, response.json
+    provisioned = response.json["provisioned"]
+    assert provisioned is not None
+    extension = provisioned["extension"]
+    assert extension == "101"
+    assert provisioned["sip_username"] == extension
+    assert len(provisioned["sip_password"]) >= 12
+    assert provisioned["default_outbound"] is True
+    assert provisioned["flows"] == ["number", "extension"]
+
+    # The DID now rings the new extension, which is what makes the line work.
+    number = next(row for row in store.list_numbers(user_id) if row["number"] == "+13025550001")
+    assert number["inbound_extension"] == extension
+    assert number["default_outbound"] == 1
+    assert number["owner_user_id"] == user_id
+
+    # The extension belongs to the customer and holds its own credentials.
+    extension_row = next(row for row in store.list_extensions(user_id) if row["extension"] == extension)
+    assert extension_row["sip_username"] == extension
+    credentials = store.reveal_extension_credentials(extension, user_id)
+    assert credentials["sip_password"] == provisioned["sip_password"]
+    assert credentials["server"] == "sip.example.com"
+    assert credentials["port"] == 5060
+    assert credentials["numbers"] == ["+13025550001"]
+
+    # A default flow exists for the number and for the extension.
+    number_flow = next(flow for flow in store.list_call_routes(user_id) if flow["phone_number"] == "+13025550001")
+    nodes = number_flow["route"]["nodes"]
+    assert [node["type"] for node in nodes] == ["business_hours", "ring_group"]
+    assert nodes[1]["extensions"] == [extension]
+    assert all(node.get("configured") for node in nodes)
+
+    extension_flow = next(
+        flow for flow in store.list_routing_flows(user_id, target_type="extension") if flow["target"] == extension
+    )
+    assert extension_flow["route"]["nodes"][0]["extension"] == extension
+
+    # The customer can see all of it in their own state payload.
+    state = customer.get("/admin/api/state").json
+    assert state["routing_flows"][0]["target"] == extension
+    assert state["call_routes"][0]["phone_number"] == "+13025550001"
+
+
+def test_each_additional_number_gets_its_own_extension_and_flow(tmp_path):
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "northwind")
+
+    first = admin.post("/admin/api/numbers", json={
+        "number": "+13025550011", "provider": "TestProvider", "owner_user_id": user_id,
+        "inbound_extension": "auto", "auto_provision": True,
+    }).json["provisioned"]
+    second = admin.post("/admin/api/numbers", json={
+        "number": "+13025550012", "provider": "TestProvider", "owner_user_id": user_id,
+        "inbound_extension": "auto", "auto_provision": True,
+    }).json["provisioned"]
+    assert first["extension"] == "101"
+    assert second["extension"] == "102"
+    # Caller ID is per extension, so each new line becomes its own extension's
+    # default without disturbing the first one.
+    assert second["default_outbound"] is True
+    assert {row["number"]: row["default_outbound"] for row in store.list_numbers(user_id)} == {
+        "+13025550011": 1, "+13025550012": 1,
+    }
+
+    flows = {flow["target"] for flow in store.list_routing_flows(user_id, target_type="extension")}
+    assert flows == {"101", "102"}
+    numbers = store.list_numbers(user_id)
+    assert {row["number"]: row["inbound_extension"] for row in numbers} == {
+        "+13025550011": "101", "+13025550012": "102",
+    }
+
+
+def test_auto_provision_never_reuses_another_customers_extension(tmp_path):
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, first_id = customer_client(app, "alpha")
+    _, second_id = customer_client(app, "beta")
+    store.save_extension({"extension": "101", "sip_password": "alpha-secret", "active": True}, first_id)
+
+    response = admin.post("/admin/api/numbers", json={
+        "number": "+13025550021", "provider": "TestProvider", "owner_user_id": second_id,
+        "inbound_extension": "auto", "auto_provision": True,
+    })
+    assert response.json["provisioned"]["extension"] == "102"
+    assert store.get_extension_owner("101") == first_id
+
+
+def test_customer_created_extension_generates_credentials_and_a_flow(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "acme")
+
+    response = customer.post("/admin/api/extensions", json={"extension": "201", "display_name": "Sales desk"})
+    assert response.status_code == 200, response.json
+    assert response.json["created"] is True
+    credentials = response.json["credentials"]
+    assert credentials["sip_username"] == "201"
+    assert len(credentials["sip_password"]) >= 12
+
+    # Revealable later, and the password is the one that was generated.
+    revealed = customer.get("/admin/api/extensions/201/credentials")
+    assert revealed.status_code == 200
+    assert revealed.json["credentials"]["sip_password"] == credentials["sip_password"]
+
+    # A default call flow was written for it without being asked for.
+    flow = next(flow for flow in store.list_routing_flows(user_id, target_type="extension") if flow["target"] == "201")
+    assert flow["route"]["nodes"][0]["type"] == "extension"
+    assert flow["route"]["nodes"][0]["extension"] == "201"
+
+    # The customer can change the credential afterwards.
+    assert customer.post("/admin/api/extensions", json={"extension": "201", "sip_password": "chosen-password-1"}).status_code == 200
+    assert customer.get("/admin/api/extensions/201/credentials").json["credentials"]["sip_password"] == "chosen-password-1"
+
+
+def test_extension_credentials_are_scoped_to_their_owner(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, first_id = customer_client(app, "bluewave")
+    store.save_extension({"extension": "301", "sip_password": "bluewave-secret"}, first_id)
+    intruder, _ = customer_client(app, "intruder")
+
+    assert intruder.get("/admin/api/extensions/301/credentials").status_code == 404
+    assert intruder.get("/admin/api/extensions/999/credentials").status_code == 404
+    assert intruder.post("/admin/api/extensions", json={"extension": "301", "sip_password": "stolen-password"}).status_code == 400
+    assert app.extensions["settings_store"].reveal_extension_credentials("301", first_id)["sip_password"] == "bluewave-secret"
+
+
+def test_next_extension_suggestion_tracks_what_is_free(tmp_path):
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "gamma")
+    assert admin.get("/admin/api/extensions/next").json["extension"] == "101"
+    store.save_extension({"extension": "101", "sip_password": "gamma-secret"}, user_id)
+    assert admin.get("/admin/api/extensions/next").json["extension"] == "102"
+
+
+def test_groups_hold_owned_extensions_and_carry_their_own_flow(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "delta")
+    other_admin_client = app.test_client()
+    other, other_id = customer_client(app, "epsilon")
+    store.save_extension({"extension": "401", "sip_password": "delta-one"}, user_id)
+    store.save_extension({"extension": "402", "sip_password": "delta-two"}, user_id)
+    store.save_extension({"extension": "501", "sip_password": "epsilon-one"}, other_id)
+
+    response = customer.post("/admin/api/groups", json={"name": "Sales", "members": ["401", "402"], "timeout": 20})
+    assert response.status_code == 200, response.json
+    group_id = response.json["group_id"]
+    group = next(row for row in customer.get("/admin/api/state").json["groups"] if row["id"] == group_id)
+    assert group["members"] == ["401", "402"]
+    assert group["timeout"] == 20
+
+    # A member must be one of the customer's own extensions.
+    assert customer.post("/admin/api/groups", json={"name": "Bad", "members": ["501"]}).status_code == 400
+    # Names are unique per customer.
+    assert customer.post("/admin/api/groups", json={"name": "Sales", "members": ["401"]}).status_code == 400
+
+    # A group can be the ring destination of a flow, and has a flow of its own.
+    save = customer.post("/admin/api/call-routes", json={
+        "target_type": "group", "target": str(group_id), "name": "Sales flow",
+        "route": {"nodes": [
+            {"type": "ring_group", "group_id": str(group_id), "extensions": ["401", "402"], "timeout": 20,
+             "label": "Sales · 20s", "configured": True},
+            {"type": "voicemail", "mailbox": "401", "label": "Voicemail 401", "configured": True},
+        ]},
+    })
+    assert save.status_code == 200, save.json
+    flow = next(flow for flow in store.list_routing_flows(user_id, target_type="group") if flow["target"] == str(group_id))
+    assert flow["route"]["nodes"][0]["group_id"] == str(group_id)
+
+    # A flow cannot ring extensions that are not in the group it names.
+    mismatch = customer.post("/admin/api/call-routes", json={
+        "target_type": "group", "target": str(group_id),
+        "route": {"nodes": [{"type": "ring_group", "group_id": str(group_id), "extensions": ["501"], "timeout": 20}]},
+    })
+    assert mismatch.status_code == 400
+    # Nor can a customer name somebody else's group.
+    foreign = customer.post("/admin/api/call-routes", json={
+        "target_type": "group", "target": "99999",
+        "route": {"nodes": [{"type": "ring_group", "extensions": ["401"], "timeout": 20}]},
+    })
+    assert foreign.status_code == 400
+
+    # Deleting the group removes its flow but keeps the extensions.
+    assert customer.delete(f"/admin/api/groups/{group_id}").status_code == 200
+    assert store.list_routing_flows(user_id, target_type="group") == []
+    assert {row["extension"] for row in store.list_extensions(user_id)} == {"401", "402"}
+
+
+def test_deleting_an_extension_cleans_up_flows_and_groups(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "zeta")
+    store.save_extension({"extension": "601", "sip_password": "zeta-one"}, user_id)
+    store.save_extension({"extension": "602", "sip_password": "zeta-two"}, user_id)
+    group_id = customer.post("/admin/api/groups", json={"name": "Support", "members": ["601", "602"]}).json["group_id"]
+
+    assert customer.delete("/admin/api/extensions/601").status_code == 200
+    assert store.list_routing_flows(user_id, target_type="extension") and all(
+        flow["target"] != "601" for flow in store.list_routing_flows(user_id, target_type="extension")
+    )
+    group = next(row for row in store.list_groups(user_id) if row["id"] == group_id)
+    assert group["members"] == ["602"]
+
+
+def test_extension_flows_are_validated_and_tenant_isolated(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "theta")
+    _, other_id = customer_client(app, "iota")
+    store.save_extension({"extension": "701", "sip_password": "theta-secret"}, user_id)
+    store.save_extension({"extension": "801", "sip_password": "iota-secret"}, other_id)
+
+    own = customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "701",
+        "route": {"nodes": [{"type": "simultaneous", "extensions": ["701"], "timeout": 25, "configured": True}]},
+    })
+    assert own.status_code == 200
+
+    foreign_ring = customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "701",
+        "route": {"nodes": [{"type": "simultaneous", "extensions": ["801"], "timeout": 25, "configured": True}]},
+    })
+    assert foreign_ring.status_code == 400
+
+    foreign_target = customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "801",
+        "route": {"nodes": [{"type": "extension", "extension": "801", "configured": True}]},
+    })
+    assert foreign_target.status_code == 400
+
+    bad_timeout = customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "701",
+        "route": {"nodes": [{"type": "simultaneous", "extensions": ["701"], "timeout": 400}]},
+    })
+    assert bad_timeout.status_code == 400
+
+
+def test_admin_can_write_flows_and_groups_for_a_customer_from_the_workspace(tmp_path):
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "kappa")
+    store.save_extension({"extension": "901", "sip_password": "kappa-secret"}, user_id)
+
+    group = admin.post("/admin/api/groups", json={"owner_user_id": user_id, "name": "Front desk", "members": ["901"], "timeout": 30})
+    assert group.status_code == 200, group.json
+    flow = admin.post("/admin/api/call-routes", json={
+        "target_type": "extension", "owner_user_id": user_id, "target": "901",
+        "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
+    })
+    assert flow.status_code == 200, flow.json
+
+    detail = admin.get(f"/admin/api/customers/{user_id}").json
+    assert [row["target"] for row in detail["routing_flows"]] == ["901"]
+    assert [row["name"] for row in detail["groups"]] == ["Front desk"]
+
+    # An administrator must name the customer; a group cannot be created ownerless.
+    assert admin.post("/admin/api/groups", json={"name": "Orphan"}).status_code == 400
+
+
+def test_provisioning_reports_a_number_that_already_has_an_extension(tmp_path):
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "lambda")
+
+    store.save_number({"number": "+13025550031", "provider": "TestProvider", "owner_user_id": user_id, "inbound_extension": ""})
+    with pytest.raises(ValueError):
+        store.provision_number(user_id, "+13025550032")
+    first = store.provision_number(user_id, "+13025550031")
+    assert first["extension"] == "101"
+    with pytest.raises(ValueError):
+        store.provision_number(user_id, "+13025550031")
+
+
+def test_default_route_shapes_match_the_canvas(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    number_route = store.default_number_route("101", voicemail=True)
+    extension_route = store.default_extension_route("101", voicemail=True)
+    assert [node["type"] for node in number_route["nodes"]] == ["business_hours", "ring_group", "voicemail"]
+    assert [node["type"] for node in extension_route["nodes"]] == ["extension", "voicemail"]
+    # Saving what the builder produced must pass the same validation the UI does.
+    _, user_id = customer_client(app, "munich")
+    store.save_extension({"extension": "111", "sip_password": "mu-secret"}, user_id)
+    assert store.save_routing_flow(user_id, {"route": store.default_extension_route("111")}, target_type="extension", target="111")
+    with pytest.raises(ValueError):
+        store.save_routing_flow(user_id, {"route": {"nodes": [{"type": "extension", "extension": "999"}]}}, target_type="extension", target="111")
