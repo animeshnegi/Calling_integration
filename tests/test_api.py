@@ -450,3 +450,73 @@ def test_secure_customer_provisioning_upserts_without_changing_role(tmp_path):
     same_id, created = provision_customer(store, "engineerip", "billing@engineerip.example", "second-secure-password")
     assert same_id == user_id and created is False
     assert store.authenticate("engineerip", "second-secure-password")["email"] == "billing@engineerip.example"
+
+
+class FakeEndpointList:
+    """ARI endpoint inventory; proves live registration is overlaid on stored state."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def list_endpoints(self):
+        return self.rows
+
+
+def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
+    """Regression: /admin/api/device-status used to raise NameError (HTTP 500).
+
+    It resolved the caller through helpers that do not exist in app.admin, so
+    the live-registration badge was dead in both consoles.
+    """
+    client = app_client(tmp_path)
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    store = client.application.extensions["settings_store"]
+    service = client.application.extensions["telephony_service"]
+
+    def provision(username: str, extension: str, number: str, sip_username: str) -> tuple[int, int]:
+        owner_id = store.save_user({
+            "username": username, "email": f"{username}@example.com",
+            "password": f"{username}-secure-password", "role": "user",
+        })
+        store.save_extension({"extension": extension, "sip_password": f"{extension}-sip", "active": True}, owner_id)
+        store.save_number({
+            "number": number, "provider": "TestProvider", "inbound_extension": extension,
+            "owner_user_id": owner_id, "active": True,
+        })
+        account_id = store.save_sip_account({
+            "label": f"Desk phone {extension}", "sip_username": sip_username, "sip_password": f"{extension}-handset",
+            "server": "sip.example.com", "phone_number": number, "extension": extension, "active": True,
+        }, owner_id)
+        return owner_id, account_id
+
+    _, account_one = provision("device-one", "301", "+13025550301", "device301")
+    _, account_two = provision("device-two", "302", "+13025550302", "device302")
+
+    # ARI reports resources as <extension> / <sip_username> / device-<sip_username>.
+    service.asterisk = FakeEndpointList([
+        {"technology": "pjsip", "resource": "device-device301", "state": "online"},
+        {"technology": "pjsip", "resource": "device302", "state": "unavailable"},
+        {"technology": "chan_sip", "resource": "302", "state": "online"},
+    ])
+
+    admin = client.get("/admin/api/device-status")
+    assert admin.status_code == 200
+    assert {row["id"]: row["registration_status"] for row in admin.json["devices"]} == {
+        account_one: "online", account_two: "offline",
+    }
+
+    # When ARI cannot be reached the stored status is reported instead of failing.
+    service.asterisk = FakeAsterisk()
+    assert client.get("/admin/api/device-status").json["devices"] == [
+        {"id": account_one, "registration_status": "offline"},
+        {"id": account_two, "registration_status": "offline"},
+    ]
+
+    # A customer only ever sees their own device.
+    customer = client.application.test_client()
+    assert customer.post("/admin/login", json={
+        "username": "device-one", "password": "device-one-secure-password",
+    }).status_code == 200
+    scoped = customer.get("/admin/api/device-status")
+    assert scoped.status_code == 200
+    assert [row["id"] for row in scoped.json["devices"]] == [account_one]

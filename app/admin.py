@@ -1757,10 +1757,12 @@ def register_admin(app, config, on_telephony_change=None):
     @app.get("/admin/api/device-status")
     @login_required
     def admin_device_status():
-        user = _current_user()
-        accounts = store.list_sip_accounts(None if _is_admin(user) else int(user["id"]))
+        # Use the same session-derived identity as the other endpoints: an
+        # administrator sees every device, a customer only their own.
+        is_admin = session.get("admin_role") == "admin"
+        accounts = store.list_sip_accounts(None if is_admin else int(session["admin_user_id"]))
         try:
-            endpoints = service.asterisk.list_endpoints()
+            endpoints = current_app.extensions["telephony_service"].asterisk.list_endpoints()
             live = {
                 str(row.get("resource") or ""): str(row.get("state") or "offline").lower()
                 for row in endpoints if str(row.get("technology") or "").lower() == "pjsip"
