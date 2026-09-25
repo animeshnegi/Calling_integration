@@ -2164,6 +2164,18 @@ def register_admin(app, config, on_telephony_change=None):
     @app.get("/admin/login")
     def admin_login_page(): return send_from_directory(web_dir, "admin-login.html")
 
+    @app.get("/console-check")
+    @login_required
+    def console_check_page():
+        """A layout self-check that runs in the browser that uses the console.
+
+        The automated harnesses run in jsdom, which has no layout engine, so the
+        geometry of the customer workspace drawer - what stays still, what
+        scrolls, what pins - can only be measured where it is really rendered.
+        The page reads positions and sizes and shows nothing about any customer.
+        """
+        return send_from_directory(web_dir, "console-check.html")
+
     @app.get("/documentation")
     @login_required
     def documentation_page():

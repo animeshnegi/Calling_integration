@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Console layout check — EIP Telephony</title>
+<style>
+  :root{
+    --bg:#070b14;--surface:#0f1626;--surface-2:#151d31;--line:#ffffff1f;--line-strong:#ffffff33;
+    --text:#eef2ff;--text-2:#b6c0d9;--text-3:#8b93a8;--ok:#22c55e;--bad:#f43f5e;--warn:#f59e0b;
+    --acc:#6366f1;--acc-2:#a855f7;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:28px 22px 60px;background:
+      radial-gradient(1200px 600px at 12% -10%,#6366f12b,transparent 60%),
+      radial-gradient(900px 500px at 90% 0%,#a855f726,transparent 55%),var(--bg);
+    color:var(--text);font:14px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    min-height:100vh;
+  }
+  .wrap{max-width:1020px;margin:0 auto}
+  header h1{font-size:21px;letter-spacing:-.02em;margin:0 0 6px}
+  header p{margin:0;color:var(--text-2);max-width:70ch}
+  .bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:20px 0 14px}
+  .pill{
+    display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border-radius:999px;
+    border:1px solid var(--line);background:#ffffff0d;font-size:12.5px;font-weight:600;
+  }
+  .pill.ok{border-color:#22c55e59;background:#22c55e1a;color:#86efac}
+  .pill.bad{border-color:#f43f5e59;background:#f43f5e1a;color:#fda4af}
+  .pill.busy{border-color:#6366f159;background:#6366f11a;color:#c7d2fe}
+  button{
+    font:inherit;font-weight:650;color:var(--text);background:#ffffff14;border:1px solid var(--line-strong);
+    padding:8px 15px;border-radius:10px;cursor:pointer;transition:transform .15s ease,border-color .15s ease
+  }
+  button:hover{transform:translateY(-1px);border-color:var(--acc)}
+  button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  table{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  th,td{padding:9px 13px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child th,tr:last-child td{border-bottom:0}
+  th{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);font-weight:700}
+  td.result{white-space:nowrap;font-weight:700}
+  td.result.ok{color:#86efac}
+  td.result.bad{color:#fda4af}
+  td.result.info{color:#c7d2fe}
+  td.measured{font-family:var(--mono);font-size:12px;color:var(--text-2)}
+  pre{
+    margin:16px 0 0;padding:14px 16px;background:#00000059;border:1px solid var(--line);border-radius:12px;
+    font-family:var(--mono);font-size:12px;color:var(--text-2);white-space:pre-wrap;max-height:260px;overflow:auto
+  }
+  iframe{
+    width:100%;height:820px;margin-top:18px;border:1px solid var(--line-strong);border-radius:14px;
+    background:#070b14;display:block
+  }
+  .fine{color:var(--text-3);font-size:12px;margin-top:8px}
+  @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Console layout check</h1>
+    <p>
+      This runs in your browser, against the console this deployment is actually serving: it opens the
+      customer workspace in the frame below and measures what stays still and what scrolls. It reads no
+      customer data. If a line fails, the measurement next to it says which build or which rule is
+      responsible.
+    </p>
+  </header>
+
+  <div class="bar">
+    <span class="pill busy" id="status">Loading the console…</span>
+    <button type="button" id="again">Run it again</button>
+  </div>
+
+  <table>
+    <thead><tr><th>Check</th><th>Result</th><th>Measured</th></tr></thead>
+    <tbody id="results"></tbody>
+  </table>
+
+  <p class="fine" id="summary"></p>
+  <pre id="log"></pre>
+  <iframe id="frame" src="/admin" title="The console under test"></iframe>
+</div>
+
+<script>
+/* A browser-only self-check: jsdom (which the automated tests use) has no layout
+   engine, so the geometry of the drawer can only be measured where it is used.
+   Everything here reads positions and sizes; nothing is written and no customer
+   data is displayed. */
+(function () {
+  const frame = document.getElementById('frame');
+  const tbody = document.getElementById('results');
+  const log = document.getElementById('log');
+  const status = document.getElementById('status');
+  const summary = document.getElementById('summary');
+  const again = document.getElementById('again');
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const round = value => Math.round(value * 10) / 10;
+  let failures = 0;
+
+  function note(line) { log.textContent += line + '\n'; }
+  function record(name, state, detail) {
+    if (state === 'bad') failures += 1;
+    const row = document.createElement('tr');
+    row.innerHTML = `<td>${name}</td>
+      <td class="result ${state}">${state === 'ok' ? 'PASS' : state === 'bad' ? 'FAIL' : state === 'skip' ? 'SKIP' : 'INFO'}</td>
+      <td class="measured">${detail ?? ''}</td>`;
+    tbody.appendChild(row);
+    note(`${state === 'ok' ? 'PASS' : state === 'bad' ? 'FAIL' : state.toUpperCase()}  ${name}${detail ? ' — ' + detail : ''}`);
+  }
+
+  async function openWorkspace(w, d) {
+    const opener = d.querySelector('[data-open-customer]');
+    if (!opener) return 'no customer row to open';
+    opener.click();
+    for (let i = 0; i < 30; i += 1) {
+      await sleep(120);
+      if (d.getElementById('workspace')?.classList.contains('open')) return null;
+    }
+    return 'the workspace did not open';
+  }
+
+  async function measure() {
+    tbody.innerHTML = '';
+    log.textContent = '';
+    failures = 0;
+    status.className = 'pill busy';
+    status.textContent = 'Measuring…';
+
+    const w = frame.contentWindow;
+    const d = frame.contentDocument;
+    if (!w || !d) { status.className = 'pill bad'; status.textContent = 'The console frame did not load'; return; }
+
+    await sleep(1500);
+    note(`console assets: ${[...d.querySelectorAll('link[rel=stylesheet], script[src]')].map(x => x.getAttribute('href') || x.getAttribute('src')).join(', ')}`);
+
+    /* 1. Which console build is being served? */
+    const region = d.getElementById('ws-scroll');
+    const summaryBlock = d.querySelector('.ws-summary');
+    record('the console being served has the scroll region (.ws-scroll)',
+      region ? 'ok' : 'bad',
+      region ? 'present' : 'not found: this deployment is serving an older console build — redeploy the app');
+    if (!region) {
+      status.className = 'pill bad';
+      status.textContent = 'The served console is an older build';
+      return;
+    }
+    record('the account summary sits inside that region',
+      summaryBlock && region.contains(summaryBlock) ? 'ok' : 'bad',
+      summaryBlock ? (region.contains(summaryBlock) ? 'inside .ws-scroll' : 'outside .ws-scroll') : 'no .ws-summary');
+
+    const isAdmin = (() => { try { return !!w.eval('state.is_admin'); } catch (error) { return false; } })();
+    const opened = await openWorkspace(w, d);
+    record('the customer workspace opens from a customer row', opened ? 'bad' : 'ok', opened || 'workspace open');
+    if (opened) { status.className = 'pill bad'; status.textContent = 'Could not open the workspace'; return; }
+    await sleep(500);
+
+    const head = d.querySelector('.ws-head-top');
+    const tabs = d.getElementById('ws-tabs');
+    const body = d.getElementById('ws-body');
+    if (!head || !tabs || !body) {
+      record('the drawer has the identity, tab row and content it needs', 'bad',
+        `head ${!!head}, tabs ${!!tabs}, body ${!!body}`);
+      status.className = 'pill bad';
+      status.textContent = 'The drawer is missing parts of its markup';
+      return;
+    }
+
+    /* 2. Geometry, measured with the region at the top. */
+    region.scrollTop = 0;
+    await sleep(120);
+    const headTopBefore = head.getBoundingClientRect().top;
+    const regionBox = region.getBoundingClientRect();
+    const tabsBox = tabs.getBoundingClientRect();
+    const tabContentHeight = regionBox.bottom - tabsBox.bottom;
+    const scrollable = region.scrollHeight > region.clientHeight + 2;
+    record('the region below the identity is the scroller',
+      scrollable ? 'ok' : 'info',
+      `content ${round(region.scrollHeight)}px in a ${round(region.clientHeight)}px box`);
+    record('the identity block leaves its height to that region',
+      headTopBefore <= regionBox.top + 1 ? 'ok' : 'bad',
+      `head top ${round(headTopBefore)}, region top ${round(regionBox.top)}`);
+    record('the tab row sits above the tab content',
+      tabsBox.bottom <= body.getBoundingClientRect().top + 1 ? 'ok' : 'bad',
+      `tabs bottom ${round(tabsBox.bottom)}, content top ${round(body.getBoundingClientRect().top)}`);
+    record('the tab content is not its own scroller',
+      Math.abs(body.scrollHeight - body.clientHeight) <= 2 ? 'ok' : 'bad',
+      `content ${round(body.scrollHeight)}px in ${round(body.clientHeight)}px`);
+    record('the tab content gets real room below the pinned row',
+      tabContentHeight > 200 ? 'ok' : 'bad',
+      `${round(tabContentHeight)}px visible below the tab row`);
+
+    /* 3. Scroll until the tab row reaches the top of the region. */
+    const travel = Math.min(tabs.offsetTop + 140, region.scrollHeight);
+    region.scrollTop = travel;
+    await sleep(160);
+    const headTopAfter = head.getBoundingClientRect().top;
+    const pinnedBox = tabs.getBoundingClientRect();
+    const regionAfter = region.getBoundingClientRect();
+    record('the identity block does not move while scrolling',
+      Math.abs(headTopAfter - headTopBefore) <= 1 ? 'ok' : 'bad',
+      `head top ${round(headTopBefore)} → ${round(headTopAfter)} after scrolling ${round(travel)}px`);
+    record('the tab row pins to the top of the region',
+      Math.abs(pinnedBox.top - regionAfter.top) <= 3 ? 'ok' : 'bad',
+      `tabs top ${round(pinnedBox.top)}, region top ${round(regionAfter.top)}`);
+    record('the tab content still has room under the pinned row',
+      regionAfter.bottom - pinnedBox.bottom > 200 ? 'ok' : 'bad',
+      `${round(regionAfter.bottom - pinnedBox.bottom)}px visible`);
+
+    /* 4. The bottom of a tab is reachable, and nothing is hidden behind the row. */
+    region.scrollTop = region.scrollHeight;
+    await sleep(160);
+    const atBottom = region.scrollHeight - region.clientHeight - region.scrollTop <= 2;
+    const lastChild = body.lastElementChild;
+    const lastBox = lastChild ? lastChild.getBoundingClientRect() : null;
+    record('scrolling to the end exposes the last thing on the page',
+      atBottom && lastBox && lastBox.bottom <= region.getBoundingClientRect().bottom + 2 ? 'ok' : 'bad',
+      lastBox ? `last element bottom ${round(lastBox.bottom)} vs region bottom ${round(region.getBoundingClientRect().bottom)}` : 'no content');
+    record('switching a tab brings it back under the pinned row',
+      typeof w.renderWsTab === 'function' ? 'ok' : 'bad',
+      typeof w.renderWsTab === 'function' ? 'renderWsTab() available' : 'missing');
+    if (typeof w.renderWsTab === 'function') {
+      w.renderWsTab('calls');
+      await sleep(220);
+      record('and the region scrolls back to the tab row',
+        region.scrollTop <= tabs.offsetTop + 4 ? 'ok' : 'bad',
+        `scrollTop ${round(region.scrollTop)} vs tab row at ${round(tabs.offsetTop)}`);
+    }
+
+    /* 5. The platform recording switch. */
+    if (!isAdmin) {
+      record('the platform recording switch (administrator only)', 'skip', 'signed in as a customer');
+    } else {
+      const nav = d.querySelector('[data-page="settings"]');
+      if (nav) { nav.click(); await sleep(400); }
+      const toggle = d.getElementById('platform-recording');
+      const flag = (() => { try { return w.eval('state.recording_platform_enabled'); } catch (error) { return undefined; } })();
+      record('the administrator has the global recording switch',
+        toggle ? 'ok' : 'bad',
+        toggle ? 'present on Settings' : 'not found: this deployment is serving an older console build');
+      if (toggle) {
+        record('it shows what the platform is actually set to',
+          toggle.checked === !!flag ? 'ok' : 'bad',
+          `switch ${toggle.checked ? 'on' : 'off'}, state says ${flag}`);
+        record('it says which switch decides whether a call records',
+          /switch is on/.test(d.getElementById('recording-platform-help')?.textContent || '') ? 'ok' : 'bad',
+          d.getElementById('recording-platform-help')?.textContent?.slice(0, 80));
+      }
+    }
+
+    status.className = 'pill ' + (failures ? 'bad' : 'ok');
+    status.textContent = failures ? `${failures} check(s) failed` : 'Everything passed';
+    summary.textContent = failures
+      ? 'A FAIL line names what is wrong; the measured column says what was seen. If the console build is old, redeploy and run this again.'
+      : 'The drawer scrolls as asked: the identity stays, the account summary scrolls away, the tab row pins, and the tab content runs underneath it.';
+  }
+
+  let ready = false;
+  frame.addEventListener('load', async () => {
+    if (ready) return;
+    ready = true;
+    try { await measure(); }
+    catch (error) { note('measurement failed: ' + error.message); status.className = 'pill bad'; status.textContent = 'The check could not run'; }
+  });
+  again.addEventListener('click', async () => {
+    ready = false;
+    tbody.innerHTML = '';
+    log.textContent = '';
+    frame.src = '/admin?' + Date.now();
+  });
+})();
+</script>
+</body>
+</html>

@@ -348,6 +348,18 @@ check("deleting another administrator is refused",
 check("and the account is still there",
       any(row["username"] == deputy_name for row in admin.json("/admin/api/state")[1]["users"]))
 
+# --- the browser layout self-check -------------------------------------------
+status, page = admin.request("/console-check")
+check("the layout self-check is served to a signed-in operator", status == 200 and "Console layout check" in page, str(status))
+check("it measures the drawer rather than describing it",
+      "ws-scroll" in page and "pins to the top of the region" in page and "not its own scroller" in page)
+check("it also checks the platform recording switch", "platform-recording" in page)
+check("it shows nothing about any customer",
+      "Meridian" not in page and "meridian@example.com" not in page and "+13025" not in page)
+anonymous_status, anonymous_page = Client().request("/console-check")
+check("and an anonymous visitor is sent to sign in",
+      "Console layout check" not in anonymous_page and "password" in anonymous_page.lower(), str(anonymous_status))
+
 # --- the documentation page --------------------------------------------------
 status, page = admin.request("/documentation")
 check("the documentation page is served to a signed-in operator", status == 200 and "EIP Telephony" in page, str(status))

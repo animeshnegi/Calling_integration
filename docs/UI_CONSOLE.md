@@ -340,6 +340,14 @@ pages are linkable.
   credential sheet shows every value once with the platform's own registration
   address, the setup journey's bar and icons follow the data, administrators offer no
   delete action, and provisioning reveals credentials.
+* `GET /console-check` (any signed-in account) serves `web/console-check.html`: the
+  same drawer geometry measured in the browser that actually renders it, because jsdom
+  has no layout engine. It opens the console in a frame, opens a customer workspace,
+  and reports what stays still, what scrolls, what pins and how much room the tab
+  content gets, plus the state of the platform recording switch. It writes nothing and
+  shows no customer data, so it is safe to open on a production deployment - and it is
+  the first thing to look at when a console looks like an older build, since it says so
+  when `.ws-scroll` is missing.
 * `node tools/cascadecheck.js` — resolves which rule wins for a given element path
   (specificity and source order, with state and media rules kept inert) so a rule the
   console depends on cannot be silently overridden by a later one.

@@ -892,6 +892,27 @@ def test_a_generated_password_renders_into_the_asterisk_config(tmp_path):
     assert f"username={provisioned['sip_username']}" in rendered
 
 
+def test_the_layout_self_check_is_served_to_signed_in_accounts_only(tmp_path):
+    """The geometry of the drawer can only be measured in a real browser, so the
+    console ships a self-check page. It must not leak anything about a customer."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    customer, _ = customer_client(app, "meridian")
+
+    for client in (admin, customer):
+        page = client.get("/console-check")
+        assert page.status_code == 200
+        body = page.get_data(as_text=True)
+        assert "Console layout check" in body
+        assert "ws-scroll" in body and "platform-recording" in body      # it measures the real thing
+        assert "{{" not in body                                          # nothing left to render
+        # A diagnostic page, not a view of anybody's account.
+        assert "meridian" not in body.lower().replace("console layout check", "")
+
+    anonymous = make_app(tmp_path).test_client()
+    assert anonymous.get("/console-check").status_code in (302, 401)
+
+
 def test_the_platform_recording_switch_is_the_administrators_and_it_vetoes(tmp_path):
     """Round 5 removed the global controls; the administrator asked for the
     on/off switch back. It is one switch, and off means off everywhere."""

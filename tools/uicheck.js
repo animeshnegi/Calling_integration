@@ -638,6 +638,26 @@ async function main() {
   }
 
   /* ------------------------------------------------- Documentation is linked */
+  section('Browser layout self-check');
+  {
+    // The page measures real geometry, which jsdom cannot do, so this only proves
+    // it boots, reaches its measurement code and reports rather than throwing.
+    const html = fs.readFileSync(path.join(WEB, 'console-check.html'), 'utf8');
+    const dom = new JSDOM(html, { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/console-check' });
+    await settle(500);
+    const d2 = dom.window.document;
+    check('the self-check page loads its measurement script', !!d2.getElementById('frame'));
+    check('and reports through a results table',
+      !!d2.getElementById('results') && !!d2.getElementById('status'));
+    check('it names the build it is testing against',
+      /older console build/.test(html), 'reports an out-of-date deployment');
+    check('it measures what stays still, what scrolls and what pins',
+      ['head top', 'pins to the top', 'not its own scroller', 'scrolls back to the tab row']
+        .every(phrase => html.includes(phrase)));
+    check('and it measures the recording switch',
+      html.includes('platform-recording') && html.includes('global recording switch'));
+  }
+
   section('Customer workspace drawer');
   {
     const { w, d } = boot();
