@@ -219,7 +219,7 @@ status, state4 = customer.json("/admin/api/state")
 identities = {row["extension"]: row["sip_username"] for row in state4["extensions"]}
 import re as _re
 check("every extension authenticates with its generated identity",
-      all(_re.fullmatch(rf"[A-Za-z]{{6}}_{ext}", name) for ext, name in identities.items()),
+      all(_re.fullmatch(rf"[A-Z]{{6}}_{ext}", name) for ext, name in identities.items()),
       json.dumps(identities))
 check("the identity is not the bare extension number", all(names != ext for ext, names in identities.items()))
 check("editing an extension does not rename its identity",
@@ -239,13 +239,42 @@ check("a chosen SIP password is stored", status == 200 and body.get("sip_passwor
 status, body = customer.json("/admin/api/extensions/" + extensions[0] + "/credentials")
 check("and the phone would register with it", body["credentials"]["sip_password"] == "chosen-by-customer")
 status, body = customer.json("/admin/api/extensions/" + extensions[0] + "/password", "POST", {})
-check("a blank request generates a strong password", status == 200 and len(body.get("sip_password", "")) >= 12)
+generated = body.get("sip_password", "")
+check("a blank request generates a strong password",
+      status == 200 and len(generated) >= 12 and _re.search(r"[A-Z]", generated) and _re.search(r"[a-z]", generated)
+      and _re.search(r"[0-9]", generated) and _re.search(r"[^A-Za-z0-9]", generated), generated)
+check("and it is safe for the generated Asterisk configuration", not set(generated) & set(";#\n\r "), generated)
 status, detail = admin.json(f"/admin/api/customers/{customer.json('/admin/api/state')[1]['user_id']}")
 status, northwind_state = admin.json("/admin/api/state")
 check("an administrator may rotate it for any customer",
       admin.json("/admin/api/extensions/" + extensions[0] + "/password", "POST", {"password": "operator-set"})[0] == 200)
 status, body = admin.json(f"/admin/api/extensions/{extensions[0]}/credentials")
 check("the administrator sees the rotated secret", body["credentials"]["sip_password"] == "operator-set")
+
+# --- the platform's own address, set by the administrator --------------------
+status, admin_state = admin.json("/admin/api/state")
+check("the platform address is the one the administrator set",
+      admin_state["service_address"]["sip"] == "sip.engineerip.example:5060"
+      and admin_state["service_address"]["api_base"] == "https://sip.engineerip.example",
+      json.dumps(admin_state["service_address"]))
+status, body = customer.json("/admin/api/extensions/" + extensions[0] + "/credentials")
+check("a device is told to register with the platform, not the carrier",
+      body["credentials"]["server"] == "sip.engineerip.example"
+      and body["credentials"]["registration_address"] == "sip.engineerip.example:5060"
+      and body["credentials"]["managed_address"] is True, json.dumps(body["credentials"])[:200])
+status, body = customer.json("/admin/api/state")
+check("the customer's own API base is the same address",
+      body["service_address"]["api_base"] == "https://sip.engineerip.example")
+check("the customer cannot change the platform address",
+      customer.json("/admin/api/settings", "POST", {"service_host": "mine.example"})[0] in (400, 403))
+for bad in ("https://sip.engineerip.example", "10.0.0.1/sip", "sip.engineerip.example:5060"):
+    check(f"an address with a scheme, path or port is refused ({bad})",
+          admin.json("/admin/api/settings", "POST", {"service_host": bad})[0] == 400, bad)
+check("an administrator may change it to an IP address",
+      admin.json("/admin/api/settings", "POST", {"service_host": "203.0.113.10", "service_sip_port": "5080"})[0] == 200
+      and customer.json("/admin/api/extensions/" + extensions[0] + "/credentials")[1]["credentials"]["server"] == "203.0.113.10")
+check("and it is put back", admin.json("/admin/api/settings", "POST", {
+    "service_host": "sip.engineerip.example", "service_sip_port": "5060"})[0] == 200)
 
 # --- nothing deletes an administrator ---------------------------------------
 status, admin_state = admin.json("/admin/api/state")
@@ -272,7 +301,10 @@ status, page = admin.request("/documentation")
 check("the documentation page is served to a signed-in operator", status == 200 and "EIP Telephony" in page, str(status))
 check("it links back to the console", 'href="/admin"' in page)
 check("it documents the API surface", "/api/v1/calls" in page and "X-EngineerIP-Signature" in page)
-check("it explains the SIP identity format", "QwErTy_101" in page)
+check("it explains the SIP identity format", "KUDGTE_101" in page)
+check("every example names this deployment's own address",
+      "https://sip.engineerip.example/api/v1/calls" in page and "sip.engineerip.example:5060" in page
+      and "{{" not in page, page[:0])
 anonymous_status, anonymous_page = Client().request("/documentation")
 check("an anonymous visitor gets the sign-in page instead of the documentation",
       "EIP Telephony — setup" not in anonymous_page and "password" in anonymous_page.lower(),

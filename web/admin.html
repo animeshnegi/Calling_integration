@@ -333,7 +333,8 @@
       <!-- ================================================= APIS & WEBHOOKS -->
       <section class="page" id="page-webhooks">
         <div class="doc-link">
-          <span>Setup guide, REST API and webhook reference for this deployment</span>
+          <span>Setup guide, REST API and webhook reference for this deployment
+            <b>API base</b> <code id="integration-api-base">—</code></span>
           <a class="btn ghost sm" href="/documentation" target="_blank" rel="noopener">Documentation ↗</a>
         </div>
         <div class="customer-picker" id="integration-picker" data-admin-only></div>
@@ -460,6 +461,29 @@
       <!-- ========================================================== SETTINGS -->
       <section class="page" id="page-settings">
         <article class="notice"><span class="glyph">⚙</span><div><b>Nothing to configure here any more</b>Call routing defaults and recording are decisions the customer makes for their own lines: call defaults on their Numbers page, recording per extension. This page keeps only the platform's own switches below.</div></article>
+        <article class="panel">
+          <div class="panel-head">
+            <div><h2>Server address</h2><p>Where customers point their phones, and the host every API and webhook example is built from</p></div>
+            <span class="tag info" id="service-address-state">Not set</span>
+          </div>
+          <div class="panel-body">
+            <form id="service-address-form" class="field-row">
+              <label class="field">Server IP address or subdomain
+                <input id="service-host" name="service_host" placeholder="sip.your-domain.com or 203.0.113.10" autocomplete="off" spellcheck="false">
+                <small>No scheme and no path. This is the address a phone registers with, not the carrier trunk the platform dials out through.</small>
+              </label>
+              <label class="field">SIP port
+                <input id="service-sip-port" name="service_sip_port" type="number" min="1" max="65535" placeholder="5060">
+                <small>Usually 5060. Change it only if your SIP listener runs elsewhere.</small>
+              </label>
+              <div class="field-actions">
+                <button class="btn primary" type="submit">Save address</button>
+                <button class="btn ghost" type="button" id="service-address-reset">Clear</button>
+              </div>
+            </form>
+            <div id="service-address-preview" class="rows"></div>
+          </div>
+        </article>
         <article class="panel">
           <div class="panel-head"><div><h2>Platform policy</h2><p>Operating rules that apply to every account</p></div></div>
           <div class="panel-body">

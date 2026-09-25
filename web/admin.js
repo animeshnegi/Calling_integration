@@ -530,6 +530,7 @@ function renderAll() {
   renderBilling();
   renderSelects();
   renderSettings();
+  renderServiceAddress();
   renderCallDefaults();
   renderSystemBoard();
   if (state.is_admin) loadSystem();
@@ -1062,6 +1063,39 @@ function renderSelects() {
 /* The customer's own call defaults: which extension an API call without one
    uses, and where a number with no valid destination lands. Both selects are
    that customer's extensions, because an extension belongs to one customer. */
+/* The address customers register with, and the base every API and webhook
+   example is built from. It belongs to the platform, so only an administrator
+   may change it; both consoles read it from the state payload. */
+function renderServiceAddress() {
+  const service = state.service_address || {};
+  const configured = state.is_admin ? String((state.settings || {}).service_host || '') : '';
+  const host = $('service-host');
+  if (host && document.activeElement !== host) host.value = configured;
+  const port = $('service-sip-port');
+  if (port && document.activeElement !== port) port.value = service.port || 5060;
+  const stateTag = $('service-address-state');
+  if (stateTag) {
+    stateTag.textContent = service.configured ? 'Set by the platform' : (service.host ? 'Using this console\'s address' : 'Not set');
+    stateTag.className = `tag ${service.configured ? 'on' : 'warn'}`;
+  }
+  paint('integration-api-base', service.api_base ? `<code>${esc(service.api_base)}/api/v1</code>` : 'not set yet', true);
+
+  const preview = $('service-address-preview');
+  if (!preview) return;
+  const rows = [
+    ['Devices register with', service.sip ? `<code>${esc(service.sip)}</code>` : 'no address yet', '⇄'],
+    ['API base', service.api_base ? `<code>${esc(service.api_base)}/api/v1</code>` : 'no address yet', '⌘'],
+    ['Documentation', service.api_base
+      ? `<a href="/documentation" target="_blank" rel="noopener">${esc(service.api_base)}/documentation</a> — every example uses this address`
+      : 'the page falls back to the address in your browser bar', '▤'],
+  ];
+  paint('service-address-preview', rows.map(([title, value, glyph]) => `
+    <div class="row">
+      <span class="row-icon">${glyph}</span>
+      <div><h3>${esc(title)}</h3><p>${value}</p></div>
+    </div>`).join(''), true);
+}
+
 function renderCallDefaults() {
   const form = $('call-defaults-form');
   if (!form) return;
@@ -1612,14 +1646,20 @@ function groupMemberOptions(item) {
    to paste into a softphone, and the password rotatable without leaving it. */
 let credentialSheet = null;   // { extension, credentials, rotating }
 
+/* Where a phone registers, in one value: "sip.example.com:5060 · UDP". */
+function registrationAddress(c) {
+  if (!c.server) return 'Ask EIP for your registration host';
+  return `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}`;
+}
+
 /* What a person actually types into a phone, in the order they type it. */
 function credentialLines(c) {
   return [
     `Extension: ${c.extension}`,
     `SIP username: ${c.sip_username}`,
     `SIP password: ${c.sip_password}`,
-    `Registration server: ${c.server || 'ask EIP for your registration host'}`,
-    `Port: ${c.port} (${String(c.transport || 'udp').toUpperCase()})`,
+    `Registration server: ${c.server ? `${c.server}:${c.port}` : 'ask EIP for your registration host'}`,
+    `Transport: ${String(c.transport || 'udp').toUpperCase()}`,
     `Number: ${(c.numbers || []).join(', ') || 'none assigned yet'}`,
   ].join('\n');
 }
@@ -1631,8 +1671,7 @@ function credentialSheetBody({ credentials: c, rotating }) {
   const rows = [
     ['SIP username', c.sip_username, true],
     ['SIP password', c.sip_password, true],
-    ['Registration server', c.server || 'Ask EIP for your registration host', true],
-    ['Port · transport', `${c.port} · ${String(c.transport || 'udp').toUpperCase()}`, true],
+    ['Registration server', c.server ? `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}` : 'Ask EIP for your registration host', true],
     ['Numbers', (c.numbers || []).join(', ') || 'None assigned yet', false],
     ['Password comes from', source, false],
   ];
@@ -1640,7 +1679,7 @@ function credentialSheetBody({ credentials: c, rotating }) {
     <div class="cred-identity">
       <span class="ws-glyph">${esc(c.extension)}</span>
       <div><b>${esc(c.display_name || `Extension ${c.extension}`)}</b>
-        <small>Register a phone or softphone with these ${rows.filter(row => row[2]).length} values</small></div>
+        <small>Register a phone or softphone with these ${rows.filter(row => row[2]).length} values${c.managed_address ? '' : ' — this is the console\'s own address, ask EIP for the public one'}</small></div>
       <span class="tag ${c.active ? 'on' : 'off'}">${c.active ? 'Active' : 'Disabled'}</span>
     </div>
     <table class="cred-table">
@@ -1651,7 +1690,7 @@ function credentialSheetBody({ credentials: c, rotating }) {
         </tr>`).join('')}</tbody>
     </table>
     <div class="cred-actions">
-      <button class="btn primary sm" type="button" data-cred-copy-all>Copy all for the phone</button>
+      <button class="btn primary sm" type="button" data-cred-copy-all>Copy everything</button>
       <button class="btn ghost sm" type="button" data-cred-rotate="${esc(c.extension)}" aria-expanded="${rotating ? 'true' : 'false'}">${rotating ? 'Cancel' : 'Change password'}</button>
       <small>Anyone with these can place calls as this extension.</small>
     </div>
@@ -1824,7 +1863,7 @@ const templates = {
       </div>
       <div class="field-row">
         <label class="field">SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Required'}"></label>
-        <label class="field">Server<input name="server" required value="${esc(item?.server || location.hostname)}"></label>
+        <label class="field">Server<input name="server" required value="${esc(item?.server || (state.service_address || {}).host || location.hostname)}"></label>
       </div>
       <div class="field-row">
         <label class="field">Port<input name="port" type="number" value="${item?.port || 5060}"></label>
@@ -3031,6 +3070,25 @@ wire('call-defaults-form', 'submit', async event => {
       outbound: val('default-extension'), fallback: val('inbound-fallback'),
     }) });
     notify('Call defaults saved');
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+});
+/* The platform's own address, not the carrier trunk: an administrator sets it
+   once and every SIP sheet, API base and documentation example follows. */
+wire('service-address-form', 'submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
+      service_host: val('service-host').trim(), service_sip_port: val('service-sip-port').trim() || '5060',
+    }) });
+    notify('Server address saved');
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+});
+wire('service-address-reset', 'click', async () => {
+  try {
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_sip_port: '5060' }) });
+    notify('Server address cleared — the console address is used');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });

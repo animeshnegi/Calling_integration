@@ -137,23 +137,42 @@ suggestion comes from `GET /admin/api/extensions/next`. The customers' own
 server generates one, then writes the extension's default flow.
 
 The SIP username is the identity the device authenticates with, so the platform owns
-it: it is six random letters, an underscore and the extension (`kqzvhd_101`), unique
-platform-wide through `idx_extensions_sip_username`. `canonical_sip_username()` keeps
-a value already in that shape and mints a fresh one otherwise, so `save_extension()`
-ignores whatever a caller sends and an edit never renames a registered phone; both
-console forms show it read-only. `normalise_sip_usernames()` rewrites rows stored in
-the old bare-extension format, in `extensions` and in every linked
-`customer_sip_accounts` row, so an existing deployment converges on the same shape on
-start-up. A device account linked to an extension inherits its identity - an account
-may not take a username that is an extension number, nor one another account already
-uses. The two default flows stay editable in the builder.
+it: it is six random upper-case letters, an underscore and the extension
+(`KUDGTE_101`), unique platform-wide through `idx_extensions_sip_username`.
+`canonical_sip_username()` keeps a value already in that shape - a row minted before
+the letters became upper case still counts, because renaming an identity would stop
+the phone holding it from registering - and mints a fresh one otherwise, so
+`save_extension()` ignores whatever a caller sends and an edit never renames a
+registered phone; both console forms show it read-only. `normalise_sip_usernames()`
+rewrites rows stored in the old bare-extension format, in `extensions` and in every
+linked `customer_sip_accounts` row, so an existing deployment converges on the same
+shape on start-up. A device account linked to an extension inherits its identity - an
+account may not take a username that is an extension number, nor one another account
+already uses. The two default flows stay editable in the builder.
+
+`generate_sip_password()` produces the secret a phone is configured with: upper case,
+lower case, digits and symbols, always at least one of each, 16 characters by default
+and never fewer than 12. `0/O` and `1/l/I` are left out so a password cannot be
+misread, and `;`, `#` and whitespace are never generated because the generated
+Asterisk configuration rejects a value containing them.
 
 `GET /admin/api/extensions/<extension>/credentials` (owner or administrator) returns
 the effective credential: if a device account is linked to the extension, that account
 is what Asterisk ends up using, so the endpoint reports it as the source. The console
-shows all of it at once in a credential sheet - the identity, one row per value with
-its own Copy button, a copy-everything block for the phone, and the numbers and
-password source for reference - so nobody has to scroll or hunt for a field.
+shows all of it at once in a credential sheet - the identity, five tight rows with a
+Copy button on each value, a copy-everything block for the phone, and the numbers and
+password source for reference - so nobody has to scroll or hunt for a field. The
+registration value is one string, `host:port · TRANSPORT`, ready to type.
+
+The address in that sheet is the platform's own, not the carrier trunk it dials out
+through. `POST /admin/api/settings` (administrator only) stores `service_host` - an IP
+address or a subdomain, refused if it carries a scheme, a path or a port - and
+`service_sip_port`. `service_address()` resolves what to show: the stored address
+first, the host the console is being read from otherwise, and the carrier's server
+only while neither exists, so a deployment that has never been configured still shows
+something a phone can use. The same resolution feeds `service_address` in
+`/admin/api/state` for both consoles, the `<server>` field a new device account starts
+from, and the API base printed at the top of APIs & Webhooks.
 
 `POST /admin/api/extensions/<extension>/password` (owner or administrator) rotates
 that same effective credential: send a password to set one, or a blank body to have
@@ -163,8 +182,10 @@ owner's activity feed.
 
 `GET /documentation` (any signed-in account) serves `web/documentation.html`: the
 setup, REST API and webhook reference for this deployment, linked from the top of
-APIs & Webhooks and from the sidebar. It is a static page - it reads no customer data -
-and it links back to the console.
+APIs & Webhooks (which also prints the API base) and from the sidebar. It reads no
+customer data - the only thing rendered into it is the service address, substituted
+for `{{API_BASE}}` and `{{SIP_HOST}}`, so every example on the page names this
+deployment rather than a placeholder - and it links back to the console.
 
 ## Call flows: one builder, three kinds of target
 
@@ -288,9 +309,9 @@ pages are linkable.
   and asserts the promises above: refreshes that paint nothing, only customers dial,
   customer-first pickers, the flow builder's administrator mode, the system board, the
   the SIP identity cannot be renamed, the
-  credential sheet shows every value once, the setup journey's bar and icons follow
-  the data, administrators offer no delete action, and provisioning reveals
-  credentials.
+  credential sheet shows every value once with the platform's own registration
+  address, the setup journey's bar and icons follow the data, administrators offer no
+  delete action, and provisioning reveals credentials.
 * `node tools/cascadecheck.js` — resolves which rule wins for a given element path
   (specificity and source order, with state and media rules kept inert) so a rule the
   console depends on cannot be silently overridden by a later one.

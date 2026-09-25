@@ -848,6 +848,116 @@ def test_the_effective_password_is_the_one_that_rotates(tmp_path):
     assert store.set_extension_password("101", "admin-reset", None)["password"] == "admin-reset"
 
 
+def test_the_generated_identity_and_password_have_the_documented_shape(tmp_path):
+    """The username is six letters and the extension; the password is strong.
+
+    Both are generated, never typed, so the shape is a promise the platform makes
+    to whoever reads them off the credential sheet and keys them into a phone.
+    """
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    usernames = set()
+    for extension in ("101", "102", "201", "301"):
+        username = store.generate_sip_username(extension)
+        assert re.fullmatch(rf"[A-Z]{{6}}_{extension}", username), username
+        usernames.add(username)
+    assert len(usernames) == 4                                               # the letters are random too
+    assert len({store.generate_sip_username("101").split("_")[0] for _ in range(40)}) > 30
+
+    for _ in range(40):
+        secret = store.generate_sip_password()
+        assert len(secret) >= 12
+        assert re.search(r"[A-Z]", secret) and re.search(r"[a-z]", secret)
+        assert re.search(r"[0-9]", secret) and re.search(r"[^A-Za-z0-9]", secret)
+        # The generated Asterisk configuration rejects these characters outright.
+        assert not set(secret) & set(";#\n\r ")
+    assert len({store.generate_sip_password() for _ in range(20)}) == 20
+    assert len(store.generate_sip_password(24)) == 24
+    assert len(store.generate_sip_password(4)) == 12            # never shorter than the floor
+
+
+def test_a_generated_password_renders_into_the_asterisk_config(tmp_path):
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    provisioned = admin.post("/admin/api/numbers", json={
+        "number": "+13025550009", "provider": "TestProvider", "owner_user_id": user_id,
+        "inbound_extension": "auto", "auto_provision": True,
+    }).json["provisioned"]
+    from app.telephony_config import TelephonyConfigSync
+
+    rendered = TelephonyConfigSync(store, None, tmp_path / "pjsip.conf").render_pjsip()
+    assert f"password={provisioned['sip_password']}" in rendered
+    assert f"username={provisioned['sip_username']}" in rendered
+
+
+def test_the_registration_address_is_the_platforms_own_not_the_carriers(tmp_path):
+    """A device registers with this deployment, so the administrator's address is
+    what the credential sheet shows - not the carrier trunk the platform dials."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")            # extension 101
+
+    # Before anything is configured the carrier is what the platform used to say.
+    assert store.reveal_extension_credentials("101", user_id)["server"] == "sip.example.com"
+
+    saved = admin.post("/admin/api/settings", json={"service_host": "pbx.meridian-voice.test", "service_sip_port": "5080"})
+    assert saved.status_code == 200, saved.json
+    for client in (admin, customer):
+        credentials = client.get("/admin/api/extensions/101/credentials").json["credentials"]
+        assert credentials["server"] == "pbx.meridian-voice.test"
+        assert credentials["port"] == 5080
+        assert credentials["registration_address"] == "pbx.meridian-voice.test:5080"
+        assert credentials["api_base"] == "https://pbx.meridian-voice.test"
+        assert credentials["managed_address"] is True
+
+    # The state payload carries the same address to both consoles.
+    assert customer.get("/admin/api/state").json["service_address"]["sip"] == "pbx.meridian-voice.test:5080"
+
+    # An IP address is just as valid as a subdomain.
+    assert admin.post("/admin/api/settings", json={"service_host": "203.0.113.10"}).status_code == 200
+    assert customer.get("/admin/api/extensions/101/credentials").json["credentials"]["server"] == "203.0.113.10"
+
+    # A scheme, a path or a port is a mistake that would break every phone at once.
+    for bad in ("https://pbx.test", "pbx.test/sip", "pbx.test:5060", "pbx test", "pbx..test"):
+        refused = admin.post("/admin/api/settings", json={"service_host": bad})
+        assert refused.status_code == 400, (bad, refused.json)
+    assert admin.post("/admin/api/settings", json={"service_sip_port": "70000"}).status_code == 400
+
+    # Only the platform's administrators own this address.
+    refused = customer.post("/admin/api/settings", json={"service_host": "customer.example"})
+    assert refused.status_code in (400, 403)
+
+    # Clearing it falls back to the host the console is being read from.
+    assert admin.post("/admin/api/settings", json={"service_host": ""}).status_code == 200
+    fallback = customer.get("/admin/api/extensions/101/credentials").json["credentials"]
+    assert fallback["server"] == "localhost" and fallback["managed_address"] is False
+
+
+def test_the_documentation_page_names_this_deployment(tmp_path):
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    _, user_id = customer_client(app, "meridian")
+    page = admin.get("/documentation")
+    assert page.status_code == 200
+    assert b"{{API_BASE}}" not in page.data and b"{{SIP_HOST}}" not in page.data   # filled in
+    assert b"https://localhost/api/v1/calls" in page.data
+
+    admin.post("/admin/api/settings", json={"service_host": "voice.acme.test"})
+    page = admin.get("/documentation").data.decode()
+    assert "https://voice.acme.test/api/v1/calls" in page
+    assert "voice.acme.test:5060" in page
+    assert "KUDGTE_101" in page
+    assert 'href="/admin"' in page
+
+    # It stays behind the sign-in wall.
+    anonymous = make_app(tmp_path).test_client()
+    assert anonymous.get("/documentation").status_code in (302, 401)
+
+
 def test_the_password_endpoint_rotates_the_credential_a_phone_uses(tmp_path):
     """The console's "change password" acts on the credential Asterisk reads."""
     app = make_app(tmp_path)

@@ -170,7 +170,7 @@ async function main() {
         '/admin/api/extensions/101/credentials': {
           credentials: {
             extension: '101', display_name: 'Reception', active: true,
-            sip_username: 'QwErTy_101', sip_password: 'hanA3x-secret',
+            sip_username: 'KUDGTE_101', sip_password: 'hanA3x-secret',
             server: 'sip.ipcomms.net', port: 5060, transport: 'udp',
             registration: 'extension', device_label: '', numbers: ['+13025550001'],
             voicemail_enabled: false,
@@ -183,16 +183,24 @@ async function main() {
     await settle(260);
     const sheet = d.querySelector('#modal-fields .cred-sheet');
     check('the credentials open as one sheet', !!sheet);
-    check('the sheet is a table, not a column of fields', d.querySelectorAll('#modal-fields .cred-table tr').length >= 5,
-      `${d.querySelectorAll('#modal-fields .cred-table tr').length} rows`);
+    const rows = d.querySelectorAll('#modal-fields .cred-table tr');
+    check('the sheet is a table, not a column of fields', rows.length >= 5, `${rows.length} rows`);
+    check('the rows are kept tight so nothing has to be scrolled', rows.length <= 6, `${rows.length} rows`);
+    check('the registration address is one value with its port and transport',
+      /sip\.ipcomms\.net:5060 · UDP/.test(d.getElementById('modal-fields').textContent),
+      (d.getElementById('modal-fields').textContent.match(/sip\.ipcomms\.net[^ ]*/) || ['none'])[0]);
+    check('the whole set is copied with one button',
+      d.querySelector('#modal-fields [data-cred-copy-all]').textContent.trim() === 'Copy everything',
+      d.querySelector('#modal-fields [data-cred-copy-all]').textContent.trim());
     const labels = [...d.querySelectorAll('#modal-fields .cred-table th')].map(x => x.textContent);
     check('it states the SIP username in the new format',
-      d.getElementById('modal-fields').textContent.includes('QwErTy_101'), labels.join(', '));
+      d.getElementById('modal-fields').textContent.includes('KUDGTE_101'), labels.join(', '));
     check('it states the password, server and number',
       ['hanA3x-secret', 'sip.ipcomms.net', '+13025550001'].every(value => d.getElementById('modal-fields').textContent.includes(value)));
     const copies = [...d.querySelectorAll('#modal-fields [data-copy-value]')].map(x => x.dataset.copyValue);
     check('every value that goes into a phone has its own copy button',
-      copies.length >= 4 && copies.includes('QwErTy_101'), copies.join(' | '));
+      copies.length === 3 && copies.includes('KUDGTE_101') && copies.includes('sip.ipcomms.net:5060 · UDP'),
+      copies.join(' | '));
     check('one button copies the whole setup', !!d.querySelector('#modal-fields [data-cred-copy-all]'));
     check('changing the password starts hidden', d.querySelector('#modal-fields .cred-rotate').hidden === true);
     d.querySelector('#modal-fields [data-cred-rotate]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
@@ -204,6 +212,13 @@ async function main() {
     const passwordRows = [...d.querySelectorAll('#modal-fields .cred-table th')]
       .filter(cell => cell.textContent.trim() === 'SIP password');
     check('the password appears once, as a row in the table', passwordRows.length === 1, `${passwordRows.length} rows`);
+
+    // The set a person types into a phone, in the order they type it.
+    const copied = w.eval('credentialLines(credentialSheet.credentials)');
+    check('copying everything gives every value the phone needs',
+      ['Extension: 101', 'SIP username: KUDGTE_101', 'SIP password: hanA3x-secret',
+        'Registration server: sip.ipcomms.net:5060', 'Transport: UDP', 'Number: +13025550001']
+        .every(line => copied.includes(line)), JSON.stringify(copied));
     w.eval('closeModal()');
 
     // Saving a password the customer chose posts it, and the sheet shows the result.
@@ -214,7 +229,7 @@ async function main() {
           return () => ({
             credentials: {
               extension: '101', display_name: 'Reception', active: true,
-              sip_username: 'QwErTy_101', sip_password: call++ ? 'customer-picked-1' : 'old-secret',
+              sip_username: 'KUDGTE_101', sip_password: call++ ? 'customer-picked-1' : 'old-secret',
               server: 'sip.ipcomms.net', port: 5060, transport: 'udp',
               registration: 'extension', device_label: '', numbers: [],
             },
@@ -623,6 +638,32 @@ async function main() {
   }
 
   /* ------------------------------------------------- Documentation is linked */
+  section('Server address');
+  {
+    const { w, d, seen } = boot({ isAdmin: true, routes: { '/admin/api/settings': () => ({ ok: true }) } });
+    await settle(340);
+    check('the address every device registers with is one administrator setting',
+      !!d.getElementById('service-host') && !!d.getElementById('service-sip-port'));
+    check('it is filled from what the platform stored',
+      d.getElementById('service-host').value === 'sip.engineerip.example'
+      && d.getElementById('service-sip-port').value === '5060',
+      `${d.getElementById('service-host').value}:${d.getElementById('service-sip-port').value}`);
+    const preview = d.getElementById('service-address-preview').textContent;
+    check('the panel shows the SIP, API and documentation links built from it',
+      preview.includes('sip.engineerip.example:5060') && preview.includes('https://sip.engineerip.example/api/v1')
+      && preview.includes('/documentation'), preview.replace(/\s+/g, ' ').slice(0, 160));
+    check('and says the address is the platform\'s own', d.getElementById('service-address-state').textContent === 'Set by the platform',
+      d.getElementById('service-address-state').textContent);
+    d.getElementById('service-host').value = '203.0.113.10';
+    d.getElementById('service-sip-port').value = '5080';
+    d.getElementById('service-address-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(260);
+    const posted = seen.filter(x => x.url === '/admin/api/settings' && x.method === 'POST').pop();
+    const sent = posted ? JSON.parse(posted.body) : {};
+    check('saving posts the address and port',
+      sent.service_host === '203.0.113.10' && sent.service_sip_port === '5080', JSON.stringify(sent));
+  }
+
   section('Documentation link');
   {
     const { w, d } = boot();
@@ -642,6 +683,9 @@ async function main() {
     customer.w.eval("showPage('webhooks')");
     await settle(220);
     check('the customer sees the link too', !!customer.d.querySelector('#page-webhooks .doc-link a'));
+    check('and the API base this deployment answers on',
+      (customer.d.getElementById('integration-api-base').textContent || '').includes('sip.engineerip.example/api/v1'),
+      customer.d.getElementById('integration-api-base').textContent);
   }
 
   /* ------------------------------------------------------- customer console */

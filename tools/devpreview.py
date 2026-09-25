@@ -56,6 +56,9 @@ def seed(store):
     ready = DATA / "ari.ready"
     ready.touch()
     store.ensure_bootstrap_admin(ADMIN_USERNAME, ADMIN_PASSWORD)
+    # The address customers register with and the API examples are built from:
+    # an administrator sets it in Settings -> Server address.
+    store.set_settings({"service_host": "sip.engineerip.example", "service_sip_port": "5060"})
     store.save_provider({
         "name": "IPComms", "server": "sip.ipcomms.net", "port": 5060,
         "username": "eip-preview", "password": "provider-preview-secret", "transport": "udp",

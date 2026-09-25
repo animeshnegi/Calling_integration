@@ -1449,33 +1449,59 @@ a.nav-item{
 /* ==========================================================================
    33b. Device credential sheet
    ========================================================================== */
-.cred-sheet{display:grid;gap:14px}
-.cred-identity{display:flex;align-items:center;gap:12px}
-.cred-identity .ws-glyph{flex:none;font-size:12.5px}
-.cred-identity b{display:block;font-size:14px;font-weight:730;letter-spacing:-.02em}
-.cred-identity small{display:block;font-size:11.5px;color:var(--text-3);margin-top:2px}
+/* Everything a phone needs in one table: five short rows, one copy button each,
+   and the whole set in a single click. Rows are deliberately close together so
+   the sheet never needs scrolling. */
+.cred-sheet{display:grid;gap:10px}
+.cred-identity{display:flex;align-items:center;gap:10px}
+.cred-identity .ws-glyph{flex:none;font-size:12px}
+.cred-identity b{display:block;font-size:13.5px;font-weight:730;letter-spacing:-.02em}
+.cred-identity small{display:block;font-size:11px;color:var(--text-3);margin-top:1px}
 .cred-identity .tag{margin-left:auto}
 .cred-table{
   width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;
   border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;background:var(--surface-2);
 }
-.cred-table th,.cred-table td{padding:9px 12px;text-align:left;vertical-align:middle;border-bottom:1px solid var(--line)}
+.cred-table th,.cred-table td{padding:5px 9px;text-align:left;vertical-align:middle;border-bottom:1px solid var(--line)}
 .cred-table tr:last-child th,.cred-table tr:last-child td{border-bottom:0}
-.cred-table th{width:34%;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3)}
+.cred-table tbody tr:hover{background:#8b93a814}
+.cred-table th{width:30%;font-size:10.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--text-3)}
 .cred-table code{
   font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);
   font-size:12.5px;color:var(--text);word-break:break-all;
 }
 .cred-table .cred-copy{width:1%;white-space:nowrap;text-align:right}
-.cred-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cred-table .btn.sm{padding:3px 9px;font-size:11px}
+.cred-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .cred-actions small{font-size:11px;color:var(--text-3);margin-left:auto}
 .cred-rotate{
-  display:grid;gap:11px;padding:13px 14px;border-radius:var(--r-md);
+  display:grid;gap:9px;padding:10px 11px;border-radius:var(--r-md);
   border:1px solid var(--line);background:var(--surface-2);
 }
 .cred-rotate .field{margin:0}
-.cred-rotate-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.cred-rotate-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .cred-rotate-actions small{font-size:11px;color:var(--text-3)}
+
+/* The address a customer registers with, printed at the top of APIs & Webhooks
+   so the console, the SIP sheet and the documentation all name one host. */
+.doc-link code{
+  font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);
+  font-size:11.5px;color:var(--text);background:#8b93a81f;border:1px solid var(--line);
+  border-radius:var(--r-sm);padding:1px 6px;margin-left:5px;
+}
+.doc-link b{font-weight:700;color:var(--text-2)}
+
+/* The administrator's server address: a two-field form with its own actions,
+   then the links that are built from whatever is stored. */
+#service-address-form{grid-template-columns:1fr 190px;align-items:start}
+#service-address-form .field-actions{
+  grid-column:1 / -1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+}
+#service-address-preview{margin-top:14px}
+#service-address-preview code{
+  font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);
+  font-size:12px;color:var(--text);
+}
 
 /* ==========================================================================
    34. Call-flow studio

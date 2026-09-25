@@ -493,16 +493,18 @@ class SettingsStore:
         return (match or (numbers[0] if numbers else None) or {}).get("number", "")
 
 
-    # Six letters, an underscore, the extension: the identity a device
-    # authenticates with. The letters are random so a username cannot be guessed
-    # from an extension, and the suffix keeps it recognisable in Asterisk and in
-    # the log.
+    # Six letters, an underscore, the extension (`KUDGTE_101`): the identity a
+    # device authenticates with. The letters are random so a username cannot be
+    # guessed from an extension, and the suffix keeps it recognisable in Asterisk
+    # and in the log. A row minted before the letters became upper case is still
+    # accepted as canonical: renaming an identity would stop the phone that has
+    # it from registering until somebody reconfigured it.
     SIP_USERNAME_RE = re.compile(r"^[A-Za-z]{6}_\d{3}$")
 
     @classmethod
     def generate_sip_username(cls, extension: str) -> str:
-        letters = string.ascii_letters
-        stem = "".join(secrets.choice(letters) for _ in range(6))
+        """`KUDGTE_101` - six random upper-case letters and the extension."""
+        stem = "".join(secrets.choice(string.ascii_uppercase) for _ in range(6))
         return f"{stem}_{str(extension).strip()}"
 
     @classmethod
@@ -542,9 +544,26 @@ class SettingsStore:
             if owned:
                 db.close()
 
-    def generate_sip_password(self, length: int = 16) -> str:
-        alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        return "".join(secrets.choice(alphabet) for _ in range(max(12, int(length))))
+    # A person reads this off the credential sheet and types it into a phone, so
+    # every class is present and the characters that get misread (`0/O`, `1/l/I`)
+    # are left out. `;`, `#` and whitespace are never generated either: the
+    # generated Asterisk configuration rejects a value containing them.
+    SIP_PASSWORD_CLASSES = (
+        "ABCDEFGHJKLMNPQRSTUVWXYZ",
+        "abcdefghijkmnopqrstuvwxyz",
+        "23456789",
+        "!@$%^&*()-_=+?",
+    )
+
+    @classmethod
+    def generate_sip_password(cls, length: int = 16) -> str:
+        """A strong secret: upper case, lower case, digits and symbols."""
+        length = max(12, int(length))
+        secret = [secrets.choice(chars) for chars in cls.SIP_PASSWORD_CLASSES]
+        pool = "".join(cls.SIP_PASSWORD_CLASSES)
+        secret += [secrets.choice(pool) for _ in range(length - len(secret))]
+        secrets.SystemRandom().shuffle(secret)
+        return "".join(secret)
 
     def next_extension_number(self, owner_user_id: int | None = None) -> str:
         """Lowest free three-digit extension.
@@ -564,7 +583,43 @@ class SettingsStore:
                 return str(candidate)
         raise ValueError("No free extension numbers remain")
 
-    def reveal_extension_credentials(self, extension, owner_user_id: int | None = None):
+    # The address customers point their devices at, and the base their API and
+    # webhook examples are built from: this platform's own server, never the
+    # carrier trunk it dials out through. An administrator sets it once, as an IP
+    # address or a subdomain.
+    SERVICE_HOST_RE = re.compile(
+        r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+    )
+
+    def service_address(self, fallback_host: str = "") -> dict:
+        """Where this deployment answers, and the links built from it.
+
+        An administrator's `service_host` setting wins. Without one the host the
+        console is being read from is used, so even an unconfigured deployment
+        shows an address a customer can type into a phone instead of the
+        carrier's trunk address.
+        """
+        settings = self.get_settings()
+        host = str(settings.get("service_host") or "").strip()
+        configured = bool(host)
+        if not host:
+            host = str(fallback_host or "").strip()
+        try:
+            port = int(settings.get("service_sip_port") or 5060)
+        except (TypeError, ValueError):
+            port = 5060
+        if not 1 <= port <= 65535:
+            port = 5060
+        return {
+            "host": host,
+            "port": port,
+            "configured": configured,
+            "sip": f"{host}:{port}" if host else "",
+            "api_base": f"https://{host}" if host else "",
+        }
+
+    def reveal_extension_credentials(self, extension, owner_user_id: int | None = None, fallback_host: str = ""):
         """The SIP credentials a device registers with, plus where to register.
 
         A device account linked to the extension overrides the extension's own
@@ -585,8 +640,15 @@ class SettingsStore:
              if str(item.get("extension") or "") == row["extension"] and item["active"]),
             None,
         )
+        # A phone registers with this platform, so the platform's own address is
+        # the server that belongs in the sheet. A device account's server and then
+        # the carrier's are only used while no address has been set, so an
+        # existing deployment keeps answering with what it answered before.
+        service = self.service_address(fallback_host)
         provider = None
-        if device:
+        if service["host"]:
+            server = service["host"]
+        elif device:
             server = device["server"]
         else:
             provider = self.get_provider(next((item["provider"] for item in numbers if item["provider"]), None)) or self.get_provider()
@@ -598,12 +660,17 @@ class SettingsStore:
             "sip_username": device["sip_username"] if device else (row["sip_username"] or row["extension"]),
             "sip_password": (device or {}).get("sip_password") or (self.decrypt(row["sip_password_enc"]) if row["sip_password_enc"] else ""),
             "server": server or "",
-            "port": int((device or provider or {}).get("port") or 5060),
+            "port": int(service["port"] if service["host"] else ((device or provider or {}).get("port") or 5060)),
             "transport": (device or provider or {}).get("transport") or "udp",
             "registration": "device" if device else "extension",
             "device_label": (device or {}).get("label", ""),
             "numbers": [item["number"] for item in numbers],
             "voicemail_enabled": bool(row["voicemail_enabled"]),
+            # Carried along so the sheet can offer the whole "register here" value
+            # in one piece, and point at the API base, without a second request.
+            "registration_address": f"{server}:{int(service['port'] if service['host'] else ((device or provider or {}).get('port') or 5060))}" if server else "",
+            "api_base": service["api_base"],
+            "managed_address": service["configured"],
         }
 
     def set_extension_recording(self, extension: str, enabled: bool):
@@ -1813,6 +1880,8 @@ class SettingsStore:
             "default_extension",
             "inbound_fallback_extension",
             "webrtc_enabled",
+            "service_host",
+            "service_sip_port",
         }
         for key, value in values.items():
             if key not in allowed:
@@ -1833,6 +1902,20 @@ class SettingsStore:
                     raise ValueError("Recording retention must be between 1 and 3650 days")
                 if key == "recording_max_duration_seconds" and not 0 <= number <= 86400:
                     raise ValueError("Maximum recording duration must be between 0 and 86400 seconds")
+            if key == "service_host":
+                # An address a device registers with: no scheme, no path, no port
+                # - the port has its own setting, and a typo here breaks every
+                # phone at once.
+                text = text.strip()
+                if text and not self.SERVICE_HOST_RE.match(text):
+                    raise ValueError("Service address must be a hostname or an IP address, without a scheme, path or port")
+            if key == "service_sip_port":
+                try:
+                    port = int(text)
+                except ValueError as exc:
+                    raise ValueError("Invalid SIP port") from exc
+                if not 1 <= port <= 65535:
+                    raise ValueError("SIP port must be between 1 and 65535")
             if key in {"default_extension", "inbound_fallback_extension"}:
                 if not text.isdigit() or not 100 <= int(text) <= 999:
                     raise ValueError(f"Invalid extension for {key}")
@@ -2057,10 +2140,18 @@ def register_admin(app, config, on_telephony_change=None):
         """The setup and API reference that the console links to.
 
         Signed-in only: it describes the integration surface of this deployment,
-        so it is not something an anonymous visitor needs to read. The page itself
-        is static - no customer data is rendered into it.
+        so it is not something an anonymous visitor needs to read. The page holds
+        no customer data; the only thing rendered into it is the service address
+        an administrator configured, so every example names this deployment
+        rather than a placeholder.
         """
-        return send_from_directory(web_dir, "documentation.html")
+        page_file = Path(web_dir) / "documentation.html"
+        page = page_file.read_text(encoding="utf-8")
+        service = store.service_address(request.host.split(":")[0] if request.host else "")
+        api_base = service["api_base"] or str(request.host_url).rstrip("/")
+        sip_host = service["sip"] or (request.host or "")
+        page = page.replace("{{API_BASE}}", api_base).replace("{{SIP_HOST}}", sip_host)
+        return Response(page, mimetype="text/html")
 
     @app.post("/login")
     @app.post("/admin/login")
@@ -2157,6 +2248,10 @@ def register_admin(app, config, on_telephony_change=None):
                 "old": sum(row["folder"] == "old" for row in voicemail_messages), "urgent": sum(row["folder"] == "urgent" for row in voicemail_messages),
             },
             "settings": store.get_settings() if is_admin else {},
+            # Where customers register and what the API examples are built from.
+            # The administrator sees the stored value; everybody else sees the
+            # address their own devices should use.
+            "service_address": store.service_address(request.host.split(":")[0] if request.host else ""),
             "call_defaults": store.customer_call_defaults(user_id) if not is_admin else {},
         })
 
@@ -2328,7 +2423,9 @@ def register_admin(app, config, on_telephony_change=None):
     def admin_extension_credentials(extension):
         try:
             owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
-            return jsonify({"credentials": store.reveal_extension_credentials(extension, owner)})
+            return jsonify({"credentials": store.reveal_extension_credentials(
+                extension, owner, request.host.split(":")[0] if request.host else "",
+            )})
         except ValueError as exc: return jsonify({"error": str(exc)}), 404
 
     @app.get("/admin/api/extensions/next")
@@ -2664,6 +2761,7 @@ def register_admin(app, config, on_telephony_change=None):
                 "recording_enabled", "recording_format", "recording_retention_days", "recording_announcement",
                 "recording_announcement_media", "recording_beep", "recording_max_duration_seconds",
                 "default_extension", "inbound_fallback_extension", "webrtc_enabled",
+                "service_host", "service_sip_port",
             }
             store.set_settings({k: data[k] for k in data if k in allowed})
             apply_change(); return jsonify({"ok": True})

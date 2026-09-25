@@ -95,6 +95,10 @@ async function main() {
     `${d.getElementById('page-dashboard').firstElementChild.id}\n${text(d.getElementById('system-board'))}`);
 
   await page(w, d, 'settings');
+  show('ADMIN · Settings — the address every device and link is built from',
+    `host: ${d.getElementById('service-host')?.value} port: ${d.getElementById('service-sip-port')?.value}`
+    + ` (${text(d.getElementById('service-address-state'))})\n`
+    + `${text(d.getElementById('service-address-preview'))}`);
   show('ADMIN · Settings — what is left of the old platform controls',
     text(d.getElementById('page-settings')).slice(0, 900));
   const editable = ['rec-enabled', 'rec-format', 'rec-retention', 'default-extension', 'inbound-fallback']
@@ -130,7 +134,7 @@ async function main() {
 
   await page(w, d, 'webhooks');
   const docLink = d.querySelector('#page-webhooks .doc-link a');
-  show('ADMIN · APIs & Webhooks — the documentation link on top',
+  show('ADMIN · APIs & Webhooks — the documentation link and API base on top',
     `href: ${docLink?.getAttribute('href')} target: ${docLink?.getAttribute('target')}\n${text(d.querySelector('#page-webhooks .doc-link'))}`);
   show('ADMIN · APIs & Webhooks — whose keys, and what he may do',
     `picker: ${text(d.getElementById('integration-picker')).slice(0, 200)}\nkeys: ${text(d.getElementById('api-key-list')).slice(0, 220)}\nwebhooks: ${text(d.getElementById('webhook-list')).slice(0, 220)}\ncreate buttons: ${[...d.querySelectorAll('[data-open="apikey"],[data-open="webhook"]')].map(x => `${x.dataset.open}:hidden=${x.hidden}`).join(' ')}`);
@@ -146,6 +150,10 @@ async function main() {
   const cust = boot();
   cust.w.__csrf = custState.payload.csrf_token;
   await settle(700);
+  await page(cust.w, cust.d, 'webhooks');
+  show('CUSTOMER · APIs & Webhooks — where the documentation is, and on what address',
+    `${text(cust.d.querySelector('#page-webhooks .doc-link'))}`);
+
   await page(cust.w, cust.d, 'numbers');
   show('CUSTOMER · Numbers — their own call defaults',
     `${text(cust.d.getElementById('call-defaults-form'))}\nform hidden=${cust.d.getElementById('call-defaults-form').hidden}`);
@@ -159,6 +167,18 @@ async function main() {
     + `fill width: ${fill?.style.getPropertyValue('--p')} (computed ${cust.w.getComputedStyle(fill).width})\n`
     + `ticks: ${ticks.map(t => t.textContent.trim()).join(' ')}\n`
     + `steps: ${text(cust.d.querySelector('#customer-journey .journey-steps'))}`);
+
+  await page(cust.w, cust.d, 'sipaccounts');
+  const customerCred = cust.d.querySelector('#extension-credential-list [data-extension-credentials]');
+  if (customerCred) {
+    cust.w.eval(`showExtensionCredentials('${customerCred.dataset.extensionCredentials}')`);
+    await settle(600);
+    show('CUSTOMER · the credential sheet a customer copies from',
+      `rows: ${cust.d.querySelectorAll('#modal-fields .cred-table tr').length}`
+      + ` · copy-all: ${cust.d.querySelector('#modal-fields [data-cred-copy-all]')?.textContent.trim()}\n`
+      + `${cust.w.eval('credentialLines(credentialSheet.credentials)')}`);
+    cust.w.eval('closeModal()');
+  }
 
   await page(cust.w, cust.d, 'routing');
   show('CUSTOMER · Call flows',

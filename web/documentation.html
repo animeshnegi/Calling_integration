@@ -73,6 +73,10 @@
   td code{white-space:nowrap}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
   .box{border:1px solid var(--line);border-radius:14px;padding:14px 16px;background:#141b3173}
+  .box.deploy{display:grid;gap:4px;margin:18px 0 0;background:linear-gradient(140deg,#6366f11a,transparent 70%)}
+  .box.deploy b{font-size:13px}
+  .box.deploy small{color:var(--text-2);font-size:12px}
+  .box.deploy code{color:var(--text)}
   .box b{display:block;font-size:13px;margin-bottom:4px}
   .box small{color:var(--text-3);font-size:12px}
   .note{border-left:3px solid var(--acc-1);padding:10px 14px;border-radius:0 12px 12px 0;background:#6366f114;color:var(--text-2);font-size:13px}
@@ -102,6 +106,12 @@
     the REST API, and the signed webhooks we send back. The same document is linked from
     <b>APIs &amp; Webhooks</b> in the console, so it travels with the product rather than living in a repository.
   </p>
+
+  <div class="box deploy">
+    <b>This deployment</b>
+    <small>API base <code>{{API_BASE}}</code> — every path on this page is relative to it.</small>
+    <small>Devices register with <code>{{SIP_HOST}}</code>.</small>
+  </div>
 
   <nav class="toc">
     <a href="#start">1 · Getting started</a>
@@ -182,7 +192,7 @@ Authorization: Bearer eip_&lt;secret&gt;</pre>
       completed request returns the original call with <code>"idempotent_replay": true</code>; a duplicate that is still
       in flight returns <code>409</code>. This is what stops a network retry from placing a second paid call.</p>
     <pre><span class="c"># start a call and keep the identifier</span>
-curl -sS -X POST https://&lt;your-host&gt;/api/v1/calls \\
+curl -sS -X POST {{API_BASE}}/api/v1/calls \\
   -H "Authorization: Bearer $EIP_KEY" \\
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: $(uuidgen)" \\
@@ -291,19 +301,21 @@ ok = hmac.compare_digest(expected, signature)</pre>
 
   <section id="devices">
     <h2><span class="step">8</span>Register a device (SIP)</h2>
-    <p>In <b>Devices &amp; SIP → Credentials</b> you will find the values below. The sheet can copy them one by one or as
-      a single block for the phone.</p>
+    <p>In <b>Devices &amp; SIP → Credentials</b> you will find the values below, in one table. Each value has its own
+      <b>Copy</b> button and <b>Copy everything</b> puts the whole set on the clipboard for the phone.</p>
     <table>
       <thead><tr><th>Value</th><th>What it looks like</th></tr></thead>
       <tbody>
-        <tr><td>SIP username</td><td>Six random letters, an underscore and the extension — for example <code>QwErTy_101</code>. The platform generates it, keeps it unique across the whole platform, and it cannot be edited: it <i>is</i> the device's identity.</td></tr>
-        <tr><td>SIP password</td><td>A generated secret, rotatable from the same sheet. A linked device account's password is what actually authenticates, so rotating changes that one.</td></tr>
-        <tr><td>Registration server</td><td>The carrier or platform SIP host, with port and transport (UDP, TCP or TLS).</td></tr>
+        <tr><td>SIP username</td><td>Six random upper-case letters, an underscore and the extension — for example <code>KUDGTE_101</code>. The platform generates it, keeps it unique across the whole platform, and it cannot be edited: it <i>is</i> the device's identity.</td></tr>
+        <tr><td>SIP password</td><td>A generated secret with upper case, lower case, digits and symbols, rotatable from the same sheet with <b>Change password</b>. A linked device account's password is what actually authenticates, so rotating changes that one.</td></tr>
+        <tr><td>Registration server</td><td><code>{{SIP_HOST}}</code> — this deployment's own address, with the port and transport (UDP, TCP or TLS). An administrator sets it once under <b>Settings → Server address</b>, as an IP address or a subdomain, and the same address builds the API and webhook URLs on this page.</td></tr>
         <tr><td>Number</td><td>The DID the extension answers, so you can confirm the right line rings.</td></tr>
       </tbody>
     </table>
     <div class="note">A device that is already registered keeps its session until it registers again: change the password
       on the phone after rotating it here.</div>
+    <div class="note">Registration server, API base and webhook URLs all come from the one address in
+      <b>Settings → Server address</b>, so changing it once changes every link a customer is given.</div>
   </section>
 
   <section id="errors">

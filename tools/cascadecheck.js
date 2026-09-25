@@ -188,8 +188,16 @@ function check(label, ok, detail) {
   const cell = [element('body'), element('div', 'cred-sheet'), element('table', 'cred-table'),
     element('td', 'cred-copy'), element('button', 'btn', 'ghost', 'sm')];
   const padding = winners(cell, 'padding').filter(rule => !rule.inert).pop();
-  check('the copy button is a button, not a stretched cell', padding && /^7px/.test(padding.value),
+  // The compact button lives in the sheet's own rule; the generic .btn.sm rule
+  // must not win, or the copy buttons would stretch the rows apart again.
+  check('the copy button is compacted by the sheet, not stretched by a cell',
+    padding && /^3px 9px$/.test(padding.value) && /cred/.test(padding.selector),
     padding ? `${padding.selector} -> ${padding.value}` : 'none');
+  const row = [element('body'), element('div', 'cred-sheet'), element('table', 'cred-table'),
+    element('td', 'cred-copy')];
+  const rowPadding = winners(row, 'padding').filter(rule => !rule.inert).pop();
+  check('rows sit close together', rowPadding && /^5px 9px$/.test(rowPadding.value),
+    rowPadding ? `${rowPadding.selector} -> ${rowPadding.value}` : 'none');
   const code = [element('body'), element('div', 'cred-sheet'), element('table', 'cred-table'),
     element('td'), element('code')];
   const font = winners(code, 'font-family').filter(rule => !rule.inert).pop();
