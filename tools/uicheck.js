@@ -398,6 +398,25 @@ async function main() {
     const adminEmpty = [...d.querySelectorAll('#api-key-list .empty .btn')].length;
     check('no create shortcut is offered to the administrator', adminEmpty === 0);
 
+    // Managing what exists: the administrator can rename a key and narrow its
+    // scopes, but the secret is never editable.
+    d.querySelector('#integration-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await settle(200);
+    const editButton = d.querySelector('#api-key-list [data-edit-apikey]');
+    check('the administrator can open a customer key for editing', !!editButton);
+    editButton.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await settle(220);
+    check('the editor is not a create form', /Edit key/.test(d.getElementById('modal-title').textContent),
+      d.getElementById('modal-title').textContent);
+    check('it shows the key\'s current name',
+      d.querySelector('#modal-fields [name=name]').value === 'Meridian CRM',
+      d.querySelector('#modal-fields [name=name]').value);
+    check('and its current scopes',
+      [...d.querySelectorAll('#modal-fields [name=scopes] option')].filter(o => o.selected).map(o => o.value).join(',') === 'calls:read,calls:write',
+      [...d.querySelectorAll('#modal-fields [name=scopes] option')].filter(o => o.selected).map(o => o.value).join(','));
+    check('the secret cannot be edited here', !d.querySelector('#modal-fields #created-api-key'));
+    w.eval("closeModal()");
+
     const customer = boot({ isAdmin: false, state: customerState });
     await settle(340);
     customer.w.eval("showPage('webhooks')");

@@ -98,6 +98,75 @@ status, body = admin.json("/admin/api/state")
 check("the administrator still sees the customer's keys",
       any(row.get("name") for row in body.get("api_keys", [])), str(len(body.get("api_keys", []))))
 
+# --- a customer creates their own extension, the way the console does --------
+status, cust_state = customer.json("/admin/api/state")
+# Put the main line back the way the platform generates it, so this check can
+# rerun against a preview that earlier runs have already edited.
+devices = sorted(row["extension"] for row in cust_state["extensions"] if row["active"])
+status, body = customer.json("/admin/api/call-routes", "POST", {
+    "target_type": "number", "phone_number": "+13025550001", "target": "+13025550001",
+    "route": {"nodes": [{"type": "ring_group", "extensions": devices, "timeout": 25,
+                         "label": f"Ring {len(devices)} devices for 25s", "configured": True}]},
+})
+check("the customer can set their main line to ring every device", status == 200, f"{status} {str(body)[:90]}")
+existing = {row["extension"] for row in cust_state["extensions"]}
+made = "150"
+while made in existing:
+    made = str(int(made) + 1)
+status, body = customer.json("/admin/api/extensions", "POST", {
+    "extension": made, "display_name": f"Support handset {made}", "active": True,
+})
+check("a customer can add a device of their own", status == 200, f"{status} {str(body)[:90]}")
+status, cust_state = customer.json("/admin/api/state")
+fresh = next((row for row in cust_state["extensions"] if row["extension"] == made), None)
+check("it gets SIP credentials automatically", bool(fresh) and bool(fresh.get("sip_username")), json.dumps(fresh)[:120] if fresh else "missing")
+flows = [row for row in cust_state["routing_flows"] if row["target"] == made]
+check("and a default call flow of its own", bool(flows), ",".join(row["target"] for row in cust_state["routing_flows"]))
+if flows:
+    check("the default flow rings that device",
+          [node["type"] for node in flows[0]["route"]["nodes"]] == ["extension"]
+          and flows[0]["route"]["nodes"][0]["extension"] == made,
+          json.dumps(flows[0]["route"])[:140])
+
+# --- the main line now rings the handset the customer added ------------------
+primary = next(row for row in cust_state["call_routes"] if row["phone_number"] == "+13025550001")
+ring = primary["route"]["nodes"][0]
+check("the primary number rings it too", made in ring.get("extensions", []),
+      f"rings {ring.get('extensions')}")
+
+# --- and the administrator can see it, which is what he could not do before --
+status, detail = admin.json(f"/admin/api/customers/{cust_state['user_id']}")
+admin_flows = {row["target"] for row in detail["routing_flows"]}
+check("the administrator sees the flow for the customer's own extension", made in admin_flows,
+      ",".join(sorted(admin_flows)))
+admin_number_flow = next((row for row in detail["call_routes"] if row["phone_number"] == "+13025550001"), None)
+check("and the number's flow, with the new device on it",
+      bool(admin_number_flow) and made in admin_number_flow["route"]["nodes"][0].get("extensions", []),
+      json.dumps(admin_number_flow["route"])[:160] if admin_number_flow else "missing")
+
+# --- the administrator edits that same flow, for the customer ---------------
+targets = [row["extension"] for row in detail["extensions"]]
+status, body = admin.json("/admin/api/call-routes", "POST", {
+    "target_type": "extension", "target": made,
+    "route": {"nodes": [{"type": "extension", "extension": made, "label": f"Ring {made}", "configured": True},
+                        {"type": "voicemail", "mailbox": made, "label": f"Mailbox {made}", "configured": True}]},
+})
+check("the administrator can rewrite that flow", status == 200, f"{status} {str(body)[:90]}")
+status, detail = admin.json(f"/admin/api/customers/{cust_state['user_id']}")
+rewritten = next((row for row in detail["routing_flows"] if row["target"] == made), None)
+check("and the customer's copy changes with it",
+      bool(rewritten) and [node["type"] for node in rewritten["route"]["nodes"]] == ["extension", "voicemail"],
+      json.dumps(rewritten["route"])[:140] if rewritten else "missing")
+
+# --- the customer's own view of the same thing ------------------------------
+status, cust_state = customer.json("/admin/api/state")
+mine = next((row for row in cust_state["routing_flows"] if row["target"] == made), None)
+check("the customer sees the administrator's change", bool(mine) and len(mine["route"]["nodes"]) == 2)
+
+# --- clean up the probe device ---------------------------------------------
+status, body = admin.json(f"/admin/api/extensions/{made}", "DELETE")
+check("the administrator can remove the device again", status == 200, f"{status} {str(body)[:90]}")
+
 # --- the administrator edits a customer's call flows -------------------------
 meridian = next(c for c in state["customers"] if c["username"] == "meridian")
 numbers = [row for row in state["phone_numbers"] if row["owner_user_id"] == meridian["id"]]

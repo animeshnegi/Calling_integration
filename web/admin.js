@@ -858,7 +858,10 @@ function renderApiKeys() {
         ${tag(x.scopes === '*' ? 'Full access' : x.scopes, 'info')}
         ${tag(`Last used ${x.last_used_at ? fmtDate(x.last_used_at) : 'never'}`)}
       </div>
-      <div class="row-actions"><button class="btn danger sm" data-revoke-key="${x.id}">Revoke</button></div>
+      <div class="row-actions">
+        <button class="btn ghost sm" data-edit-apikey="${x.id}">Edit</button>
+        <button class="btn danger sm" data-revoke-key="${x.id}">Revoke</button>
+      </div>
     </div>`).join('') || empty(state.is_admin ? 'This customer has no API keys' : 'No API keys',
       state.is_admin ? 'Sign in as the customer to create one; you can revoke what they own here.'
         : 'Create a scoped key so your own software can call the EIP API.', '⌘', '',
@@ -1789,19 +1792,21 @@ const templates = {
         <small>Select only the events this integration needs.</small></label>
       <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Endpoint is active</label>`,
   }),
-  apikey: () => ({
-    title: 'Create API key',
-    subtitle: 'The secret is displayed exactly once, immediately after creation',
-    fields: `<label class="field">Integration name<input name="name" required placeholder="Production CRM"></label>
+  apikey: item => ({
+    title: item ? `Edit key ${item.name}` : 'Create API key',
+    subtitle: item
+      ? 'Change what this key is called or what it may do. Its secret is not affected.'
+      : 'The secret is displayed exactly once, immediately after creation',
+    fields: `<label class="field">Integration name<input name="name" required placeholder="Production CRM" value="${esc(item?.name || '')}"></label>
       <label class="field">Scopes<select name="scopes" multiple size="8">
-        <option value="calls:read">Read calls</option>
-        <option value="calls:write">Create / update calls</option>
-        <option value="config:read">Read extensions and numbers</option>
-        <option value="recordings:read">Read recordings</option>
-        <option value="voicemail:read">Read voicemail</option>
-        <option value="voicemail:write">Manage voicemail</option>
-        <option value="webhooks:manage">Manage webhooks</option>
-        <option value="*">Full access</option>
+        <option value="calls:read" ${(item?.scopes || '').split(',').includes('calls:read') ? 'selected' : ''}>Read calls</option>
+        <option value="calls:write" ${(item?.scopes || '').split(',').includes('calls:write') ? 'selected' : ''}>Create / update calls</option>
+        <option value="config:read" ${(item?.scopes || '').split(',').includes('config:read') ? 'selected' : ''}>Read extensions and numbers</option>
+        <option value="recordings:read" ${(item?.scopes || '').split(',').includes('recordings:read') ? 'selected' : ''}>Read recordings</option>
+        <option value="voicemail:read" ${(item?.scopes || '').split(',').includes('voicemail:read') ? 'selected' : ''}>Read voicemail</option>
+        <option value="voicemail:write" ${(item?.scopes || '').split(',').includes('voicemail:write') ? 'selected' : ''}>Manage voicemail</option>
+        <option value="webhooks:manage" ${(item?.scopes || '').split(',').includes('webhooks:manage') ? 'selected' : ''}>Manage webhooks</option>
+        <option value="*" ${(item?.scopes || '').split(',').includes('*') ? 'selected' : ''}>Full access</option>
       </select><small>Use Ctrl/Cmd to select multiple. Prefer only calls:read, calls:write and config:read for a normal CRM.</small></label>`,
   }),
   user: item => ({
@@ -1946,13 +1951,16 @@ async function saveModal(event) {
   event.target.querySelectorAll('input[type=checkbox]').forEach(x => (data[x.name] = x.checked));
   if (modalType === 'apikey') data.scopes = [...event.target.querySelector('[name=scopes]').selectedOptions].map(x => x.value).join(',');
   if (modalType === 'webhook') data.events = [...event.target.querySelector('[name=events]').selectedOptions].map(x => x.value).join(',');
-  if (['webhook', 'user', 'group'].includes(modalType) && editing) data.id = editing.id;
+  if (['webhook', 'user', 'group', 'apikey'].includes(modalType) && editing) data.id = editing.id;
   if (modalType === 'sipaccount' && editing) data.id = editing.id;
   if (modalType === 'group') data.members = [...event.target.querySelector('[name=members]').selectedOptions].map(x => x.value);
   if (modalType === 'group' && state.is_admin && !data.owner_user_id) data.owner_user_id = String(routingOwner() || '');
   try {
     const collection = { number: 'numbers', webhook: 'webhooks', apikey: 'api-keys', sipaccount: 'sip-accounts' }[modalType] || `${modalType}s`;
-    const result = await api(`/admin/api/${collection}`, { method: 'POST', body: JSON.stringify(data) });
+    // An existing record is updated at its own address; only a new one is created
+    // on the collection.
+    const url = modalType === 'apikey' && editing ? `/admin/api/api-keys/${editing.id}` : `/admin/api/${collection}`;
+    const result = await api(url, { method: 'POST', body: JSON.stringify(data) });
 
     if (modalType === 'number' && pendingFulfilRequest) {
       await api(`/admin/api/requests/${pendingFulfilRequest}/resolve`, { method: 'POST', body: JSON.stringify({ status: 'fulfilled', admin_note: `Number ${data.number} assigned` }) });
@@ -1989,6 +1997,12 @@ async function saveModal(event) {
           <article class="notice"><span class="glyph">⌘</span><div><b>Call flow included</b>Extension ${esc(result.extension)} already has a default flow. Open the flow builder and choose it to customise how it rings.</div></article>`,
       });
       notify(`Extension ${result.extension} created`);
+      return;
+    }
+    if (modalType === 'apikey' && editing) {
+      closeModal();
+      await loadState();
+      notify(`Key ${data.name} updated`);
       return;
     }
     if (modalType === 'apikey') {
@@ -2716,6 +2730,7 @@ document.addEventListener('click', async event => {
   if (d.editNumber) return openModal('number', state.phone_numbers.find(x => x.id === Number(d.editNumber)));
   if (d.editProvider) return openModal('provider', state.providers.find(x => x.id === Number(d.editProvider)));
   if (d.editWebhook) return openModal('webhook', state.webhooks.find(x => x.id === Number(d.editWebhook)));
+  if (d.editApikey) return openModal('apikey', state.api_keys.find(x => x.id === Number(d.editApikey)));
   if (d.editUser) return openModal('user', state.users.find(x => x.id === Number(d.editUser)));
   if (d.wsEditCustomer) return openModal('user', workspace?.customer);
 

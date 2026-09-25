@@ -1479,6 +1479,22 @@ class SettingsStore:
             cursor = db.execute("INSERT INTO api_keys(name,prefix,key_hash,scopes,owner_user_id) VALUES(?,?,?,?,?)", (name, token[:12], digest, ",".join(items), owner_user_id))
         return cursor.lastrowid, token
 
+    def update_api_key(self, key_id: int, data: dict, owner_user_id: int | None = None):
+        """Rename a key or narrow its scopes. The secret is a hash and is never
+        rewritten: to change what a key can do, this edits the grant, and to stop
+        it, the key is revoked."""
+        name = self._validate_config_value(str(data.get("name", "")).strip(), "API key name", 80)
+        allowed = {"*", "calls:read", "calls:write", "recordings:read", "voicemail:read", "voicemail:write", "config:read", "webhooks:manage"}
+        items = list(dict.fromkeys(item.strip() for item in str(data.get("scopes", "*")).split(",") if item.strip()))
+        if not items or any(item not in allowed for item in items) or ("*" in items and len(items) != 1):
+            raise ValueError("Invalid API key scopes")
+        with self._connect() as db:
+            where = " WHERE id=?" + (" AND owner_user_id=?" if owner_user_id is not None else "")
+            params = (int(key_id), int(owner_user_id)) if owner_user_id is not None else (int(key_id),)
+            cursor = db.execute(f"UPDATE api_keys SET name=?,scopes=?{where}", (name, ",".join(items), *params))
+            if cursor.rowcount == 0:
+                raise ValueError("API key not found")
+
     def revoke_api_key(self, key_id: int, owner_user_id: int | None = None):
         with self._connect() as db:
             if owner_user_id is None:
@@ -2435,11 +2451,22 @@ def register_admin(app, config, on_telephony_change=None):
     @app.post("/admin/api/webhooks")
     @login_required
     def admin_webhook():
-        if session.get("admin_role") == "admin":
-            return jsonify({"error": "webhooks are created by the customer who owns them"}), 403
+        """Customers create their endpoints; an administrator manages the ones that
+        exist - including editing them - because a broken endpoint is a call he
+        cannot deliver."""
         try:
+            data = request.get_json(silent=True) or {}
+            if session.get("admin_role") == "admin":
+                given = str(data.get("id") or "").strip()
+                existing = next((row for row in store.list_webhooks() if str(row["id"]) == given), None) if given else None
+                if not existing:
+                    return jsonify({"error": "webhooks are created by the customer who owns them"}), 403
+                # The endpoint's own owner decides the record; the request cannot
+                # move a customer's endpoint to somebody else.
+                result = store.save_webhook({**data, "id": existing["id"]}, existing["owner_user_id"])
+                return jsonify({"ok": True, "webhook_id": result})
             owner = int(session["admin_user_id"])
-            result = store.save_webhook(request.get_json(silent=True) or {}, owner)
+            result = store.save_webhook(data, owner)
             return jsonify({"ok": True, "webhook_id": result})
         except INPUT_DB_ERRORS as exc:
             return jsonify({"error": str(exc)}), 400
@@ -2733,6 +2760,21 @@ def register_admin(app, config, on_telephony_change=None):
             store.add_activity(owner, int(session["admin_user_id"]), "api_key.created", "api_key", key_id, f"API key {data.get('name')} generated")
             return jsonify({"ok": True, "key_id": key_id, "token": token}), 201
         except (ValueError, sqlite3.IntegrityError, MySQLIntegrityError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/admin/api/api-keys/<int:key_id>")
+    @login_required
+    def admin_update_api_key(key_id):
+        try:
+            data = request.get_json(silent=True) or {}
+            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            store.update_api_key(key_id, data, owner)
+            key = next((row for row in store.list_api_keys(owner_user_id=owner) if row["id"] == key_id), None)
+            if key:
+                store.add_activity(key["owner_user_id"], int(session["admin_user_id"]), "api_key.updated",
+                                   "api_key", key_id, f"API key {key['name']} updated")
+            return jsonify({"ok": True})
+        except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
 
     @app.delete("/admin/api/api-keys/<int:key_id>")

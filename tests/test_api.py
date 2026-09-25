@@ -438,6 +438,86 @@ def test_public_signup_and_customer_resources_are_tenant_isolated(tmp_path):
     assert store.authenticate_api_key(key.json["token"]) is None
 
 
+def test_administrators_manage_customer_integrations_without_creating_them(tmp_path):
+    """The customer owns their keys and endpoints; the administrator keeps the ones
+    they created working, and cannot fabricate a credential in their name."""
+    from app import admin as admin_module
+    admin_module._LOGIN_BUCKETS.clear()   # the sign-in rate limit is per-process and per-IP
+    client = app_client(tmp_path)
+    store = client.application.extensions["settings_store"]
+    for username in ("customer-one", "customer-two"):
+        store.save_user({
+            "username": username, "password": "a-secure-customer-password", "role": "user",
+            "email": f"{username}@example.test", "full_name": username.title(),
+            "company_name": f"{username.title()} Ltd", "job_role": "Owner", "phone": "+13025559999",
+        })
+    admin = client.application.test_client()
+    assert admin.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    admin_state = admin.get("/admin/api/state").json
+    admin_headers = {"X-CSRF-Token": admin_state["csrf_token"]}
+
+    customer = client.application.test_client()
+    assert customer.post("/admin/login", json={"username": "customer-one", "password": "a-secure-customer-password"}).status_code == 200
+
+    # Nobody creates on the customer's behalf.
+    assert admin.post("/admin/api/api-keys", json={"name": "Operator key", "scopes": "*"},
+                      headers=admin_headers).status_code == 403
+    assert admin.post("/admin/api/webhooks", json={"name": "Operator hook", "url": "https://ops.example/hook"},
+                      headers=admin_headers).status_code == 403
+
+    # The customer's own integration, created the ordinary way.
+    customer_state = customer.get("/admin/api/state").json
+    customer_headers = {"X-CSRF-Token": customer_state["csrf_token"]}
+    created = customer.post("/admin/api/api-keys", json={"name": "Customer CRM", "scopes": "calls:read"},
+                            headers=customer_headers)
+    assert created.status_code == 201
+    token = created.json["token"]
+    key_id = created.json["key_id"]
+    hook = customer.post("/admin/api/webhooks", json={
+        "name": "Customer CRM", "url": "https://crm.example/hooks/calls", "events": "call.started", "token": "shared-secret",
+    }, headers=customer_headers)
+    assert hook.status_code == 200
+    hook_id = hook.json["webhook_id"]
+
+    # The administrator may narrow the key's scopes and rename it; the secret is
+    # untouched by either.
+    assert admin.post(f"/admin/api/api-keys/{key_id}", json={"name": "Customer CRM (read only)", "scopes": "calls:read"},
+                      headers=admin_headers).status_code == 200
+    listed = next(row for row in store.list_api_keys() if row["id"] == key_id)
+    assert listed["name"] == "Customer CRM (read only)" and listed["scopes"] == "calls:read"
+    assert store.authenticate_api_key(token) is not None
+
+    # And may edit the endpoint itself: a broken delivery target is a broken call flow.
+    assert admin.post("/admin/api/webhooks", json={
+        "id": hook_id, "name": "Customer CRM", "url": "https://crm.example/hooks/telephony",
+        "events": "call.started,call.completed", "active": True,
+    }, headers=admin_headers).status_code == 200
+    endpoint = store.list_webhooks(include_tokens=True)[0]
+    assert endpoint["url"] == "https://crm.example/hooks/telephony"
+    assert endpoint["events"] == "call.started,call.completed"
+    assert endpoint["token"] == "shared-secret"      # editing the URL does not drop the signature
+
+    # Still no creation, however the request is dressed up.
+    assert admin.post("/admin/api/webhooks", json={"id": 9999, "name": "Nowhere", "url": "https://x.example/h"},
+                      headers=admin_headers).status_code == 403
+    assert admin.post("/admin/api/api-keys", json={"name": "Operator key", "scopes": "*"},
+                      headers=admin_headers).status_code == 403
+
+    # A customer only ever touches their own key.
+    other = client.application.test_client()
+    assert other.post("/admin/login", json={"username": "customer-two", "password": "a-secure-customer-password"}).status_code == 200
+    other_state = other.get("/admin/api/state").json
+    other_id = other_state["user_id"]
+    other_headers = {"X-CSRF-Token": other_state["csrf_token"]}
+    assert other.post(f"/admin/api/api-keys/{key_id}", json={"name": "Stolen", "scopes": "*"},
+                      headers=other_headers).status_code == 400
+    assert admin.post("/admin/api/webhooks", json={
+        "id": hook_id, "name": "Customer CRM", "url": "https://crm.example/hooks/telephony",
+        "events": "*", "owner_user_id": other_id,
+    }, headers=admin_headers).status_code == 200
+    assert store.list_webhooks()[0]["owner_user_id"] == customer_state["user_id"]   # ownership never moves
+
+
 def test_secure_customer_provisioning_upserts_without_changing_role(tmp_path):
     from app.admin import SettingsStore
     from app.manage_customer import provision_customer
