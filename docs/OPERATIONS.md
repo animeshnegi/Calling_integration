@@ -109,8 +109,8 @@ The responsive console uses a sidebar with dedicated Dashboard, Extensions, Phon
 - extension voicemail enablement/PINs plus mailbox-grouped playback, read, urgent, and delete management;
 - SendGrid voicemail attachments configured only by the main administrator;
 - additional admin-panel users with extension-scoped calls, recordings and voicemail;
-- default outbound and inbound fallback extension selection;
-- global and per-extension recording policy;
+- per-customer default outbound and inbound fallback extension, set by the customer on their Numbers page;
+- per-extension recording: each device opts in on its own switch, with no global policy;
 - multiple CRM webhook endpoints, event filters, bearer tokens, and delivery tests;
 - dashboard health, call totals, answer rate, resource counts and recent activity.
 

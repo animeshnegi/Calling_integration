@@ -125,21 +125,26 @@ def test_database_webhook_is_queued_and_retried_by_worker(tmp_path, monkeypatch)
     assert all(row["status"] == "delivered" for row in settings.list_webhook_deliveries())
 
 
-def test_recording_requires_both_global_and_extension_opt_in(tmp_path):
+def test_recording_follows_the_extension_that_records(tmp_path):
+    """The customer's per-extension switch decides. No platform-wide veto."""
     service, _, _ = make_service(tmp_path)
 
     class Settings:
-        def __init__(self, global_enabled, extension_enabled):
-            self.global_enabled = global_enabled
+        def __init__(self, extension_enabled, extension_active=1):
             self.extension_enabled = extension_enabled
+            self.extension_active = extension_active
         def get_settings(self):
-            return {"recording_enabled": str(self.global_enabled).lower()}
+            # A deployment that switched recording off platform-wide before the
+            # control belonged to the customer must not override their choice now.
+            return {"recording_enabled": "false"}
         def list_extensions(self):
-            return [{"extension": "101", "active": 1, "recording_enabled": int(self.extension_enabled)}]
+            return [{"extension": "101", "active": self.extension_active,
+                     "recording_enabled": int(self.extension_enabled)}]
 
-    service.settings_store = Settings(False, True)
-    assert service._recording_settings("101")["enabled"] is False
-    service.settings_store = Settings(True, False)
-    assert service._recording_settings("101")["enabled"] is False
-    service.settings_store = Settings(True, True)
+    service.settings_store = Settings(True)
     assert service._recording_settings("101")["enabled"] is True
+    service.settings_store = Settings(False)
+    assert service._recording_settings("101")["enabled"] is False
+    service.settings_store = Settings(True, extension_active=0)
+    assert service._recording_settings("101")["enabled"] is False
+    assert service._recording_settings("999")["enabled"] is False   # unknown extension

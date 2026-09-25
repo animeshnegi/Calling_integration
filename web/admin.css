@@ -1567,6 +1567,68 @@ body.theme-dark .journey-step.done{color:var(--tone-ok);border-color:#22c55e59;b
 }
 
 /* ==========================================================================
+   37. Customer-first lists and the live system board
+   Two components added when provisioning moved to the customer: the picker an
+   administrator uses to choose whose numbers, devices or integrations to read,
+   and the board that reports what the platform is doing right now.
+   ========================================================================== */
+.customer-picker{
+  display:flex;gap:10px;overflow-x:auto;padding:4px 2px 12px;margin-bottom:4px;
+  scrollbar-gutter:stable;
+}
+.customer-chip{
+  display:flex;align-items:center;gap:10px;flex:none;padding:9px 15px 9px 10px;
+  border-radius:var(--r-lg);border:1px solid var(--line);background:var(--surface-2);
+  color:var(--text);font:inherit;text-align:left;cursor:pointer;
+  transition:transform var(--t-fast),border-color var(--t-fast),background var(--t-fast);
+}
+.customer-chip:hover{transform:translateY(-2px);border-color:var(--line-strong)}
+.customer-chip.active{border-color:var(--acc-1);background:var(--surface-3);box-shadow:var(--shadow-sm)}
+.customer-chip .avatar{
+  width:32px;height:32px;flex:none;border-radius:10px;display:grid;place-items:center;
+  font-size:13px;font-weight:800;color:#fff;background:linear-gradient(140deg,var(--fill-1),var(--fill-2));
+}
+.customer-chip .copy b{display:block;font-size:12.5px;font-weight:750}
+.customer-chip .copy small{display:block;font-size:10.5px;color:var(--text-3);margin-top:1px}
+.picker-empty{font-size:12px;color:var(--text-3);margin:0}
+
+.system-board{
+  padding:16px 18px 18px;margin-bottom:16px;border-radius:var(--r-xl);
+  border:1px solid var(--line);background:var(--surface-1);box-shadow:var(--shadow-sm);
+}
+.board-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.board-head > div{display:flex;align-items:center;gap:9px}
+.board-head b{font-size:13px;letter-spacing:-.01em}
+.board-head small{font-size:11px;color:var(--text-3)}
+.board-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:12px}
+.board-tile{
+  display:flex;align-items:center;gap:11px;padding:12px 13px;border-radius:var(--r-lg);
+  background:var(--surface-2);border:1px solid var(--line);
+}
+.board-tile .glyph{
+  width:34px;height:34px;flex:none;border-radius:11px;display:grid;place-items:center;
+  font-size:15px;color:#fff;background:linear-gradient(140deg,var(--fill-1),var(--fill-2));
+}
+.board-tile p{min-width:0}
+.board-tile small{display:block;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3)}
+.board-tile b{display:block;font-size:21px;font-weight:800;letter-spacing:-.03em;line-height:1.15}
+.board-tile i{display:block;font-size:10.5px;font-style:normal;color:var(--text-3);margin-top:1px}
+.board-load{display:grid;gap:8px;margin-top:14px}
+.load-row{display:flex;align-items:center;gap:11px}
+.load-row span{width:74px;flex:none;font-size:11px;font-weight:700;color:var(--text-3)}
+.load-row b{width:118px;flex:none;text-align:right;font-size:11.5px;font-weight:700}
+.load-bar{flex:1;height:7px;border-radius:var(--r-pill);background:var(--surface-3);overflow:hidden}
+.load-bar i{
+  display:block;height:100%;width:2%;border-radius:var(--r-pill);
+  background:linear-gradient(90deg,var(--fill-1),var(--fill-2));transition:width var(--t-fast);
+}
+@media(max-width:640px){
+  .board-tiles{grid-template-columns:repeat(auto-fit,minmax(132px,1fr))}
+  .load-row span{width:56px}
+  .load-row b{width:96px}
+}
+
+/* ==========================================================================
    36. Reduced motion
    Every animation added by the polish pass is neutralised here: entrances
    resolve instantly, looping ambience stops, and hover motion is dropped.
@@ -1580,7 +1642,8 @@ body.theme-dark .journey-step.done{color:var(--tone-ok);border-color:#22c55e59;b
     scroll-behavior:auto!important;
   }
   .page.entering > *,.ws-card,.ws-section,.stat,.empty,.flow-node,
-  .skeleton,.glass-card{animation:none!important}
+  .skeleton,.glass-card,.board-tile,.customer-chip{animation:none!important}
+  .load-bar i{transition:none}
   .empty-icon,.canvas-empty .glyph,.journey-step.current,.device.online i,
   .aurora b,.ws-avatar::after,.ws-head::before{animation:none!important}
   .panel.sheen::after,.ws-card::after,.ws-quick button::after{display:none}

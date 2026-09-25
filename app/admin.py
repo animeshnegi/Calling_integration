@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import ipaddress
+import json
 import os
 import re
 import secrets
@@ -12,7 +13,7 @@ import sqlite3
 import time
 import uuid
 from calendar import monthrange
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from collections import defaultdict, deque
 from functools import wraps
 from pathlib import Path
@@ -572,11 +573,8 @@ class SettingsStore:
                 raise ValueError("Extension not found")
             if db.execute("SELECT 1 FROM phone_numbers WHERE inbound_extension=?", (extension,)).fetchone():
                 raise ValueError("Cannot delete an extension used by an inbound DID")
-            if db.execute(
-                "SELECT 1 FROM settings WHERE `key` IN ('default_extension','inbound_fallback_extension') AND value=?",
-                (extension,),
-            ).fetchone():
-                raise ValueError("Cannot delete a default or inbound fallback extension; change Call settings first")
+            if self.extension_is_a_call_default(extension):
+                raise ValueError("Cannot delete an extension used as a call default; change Call defaults first")
             result = db.execute("DELETE FROM extensions WHERE extension=?", (extension,))
             if result.rowcount == 0:
                 raise ValueError("Extension not found")
@@ -1094,6 +1092,9 @@ class SettingsStore:
             nodes.append({"type": "voicemail", "mailbox": extension, "label": f"Voicemail {extension}", "configured": True})
         return {"nodes": nodes}
 
+    def extension_voicemail_enabled(self, extension: str) -> bool:
+        return any(row["extension"] == str(extension) and row.get("voicemail_enabled") for row in self.list_extensions())
+
     def ensure_extension_flow(self, owner_user_id: int, extension: str, voicemail: bool = False) -> bool:
         """Write the default flow for an extension that does not have one yet."""
         owner_user_id, extension = int(owner_user_id), str(extension)
@@ -1158,16 +1159,16 @@ class SettingsStore:
         if not has_default:
             self.set_default_outbound_number(extension, number)
 
-        settings = self.get_settings()
-        voicemail = extension in {str(settings.get("default_extension", "")), str(settings.get("inbound_fallback_extension", ""))}
         # The line rings the device it was provisioned for. A customer's main line
         # additionally picks up every device they add later (sync_primary_flows),
         # while a number tied to one extension keeps ringing only that extension.
+        # Nothing else is added: no answer means the call ends, which is the
+        # default the customer starts from and can extend in the builder.
         self.save_call_route(owner_user_id, {
             "phone_number": number, "name": "Main call flow" if self.primary_number(owner_user_id) in ("", number) else "Number call flow",
-            "route": self.default_number_route([extension], voicemail=extension if voicemail else ""), "active": True,
+            "route": self.default_number_route([extension]), "active": True,
         })
-        self.ensure_extension_flow(owner_user_id, extension, voicemail=voicemail)
+        self.ensure_extension_flow(owner_user_id, extension, voicemail=self.extension_voicemail_enabled(extension))
 
         self.add_activity(
             owner_user_id, actor_user_id or owner_user_id, "number.provisioned", "phone_number", number,
@@ -1181,7 +1182,7 @@ class SettingsStore:
             "sip_password": password,
             "device_linked": bool(device),
             "default_outbound": not has_default,
-            "voicemail": voicemail,
+            "voicemail": self.extension_voicemail_enabled(extension),
             "flows": ["number", "extension"],
         }
 
@@ -1725,6 +1726,81 @@ class SettingsStore:
                     (str(key), str(value)),
                 )
 
+    # ------------------------------------------------ per-customer call defaults
+    # Where a customer's calls go when nothing more specific is chosen: which
+    # extension an API request without one uses, and where a DID that has no
+    # valid destination lands. Both are the customer's own decision, and both are
+    # per customer because an extension belongs to exactly one customer - a
+    # single platform-wide value could only ever be right for one of them.
+    CALL_DEFAULTS_KEY = "call_defaults"
+
+    def customer_call_defaults(self, owner_user_id: int) -> dict:
+        """The stored choice, or the customer's first active device as a default."""
+        owner_user_id = int(owner_user_id)
+        try:
+            stored = json.loads(self.get_settings().get(self.CALL_DEFAULTS_KEY) or "{}")
+        except (TypeError, ValueError):
+            stored = {}
+        entry = stored.get(str(owner_user_id)) or {}
+        active = [row["extension"] for row in self.list_extensions(owner_user_id) if row["active"]]
+
+        def pick(value) -> str:
+            value = str(value or "").strip()
+            return value if value in active else (active[0] if active else "")
+
+        return {"outbound": pick(entry.get("outbound")), "fallback": pick(entry.get("fallback"))}
+
+    def set_customer_call_defaults(self, owner_user_id: int, outbound: str, fallback: str) -> dict:
+        owner_user_id = int(owner_user_id)
+        owned = {row["extension"] for row in self.list_extensions(owner_user_id) if row["active"]}
+        for label, value in (("Default outbound extension", outbound), ("Inbound fallback extension", fallback)):
+            value = str(value or "").strip()
+            if value and value not in owned:
+                raise ValueError(f"{label} must be one of your active extensions")
+        with self._connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE `key`=?", (self.CALL_DEFAULTS_KEY,)).fetchone()
+        try:
+            stored = json.loads(row["value"]) if row else {}
+        except (TypeError, ValueError):
+            stored = {}
+        if not isinstance(stored, dict):
+            stored = {}
+        stored[str(owner_user_id)] = {"outbound": str(outbound or "").strip(), "fallback": str(fallback or "").strip()}
+        # Written directly rather than through set_settings: this is one JSON
+        # document for every customer, and it is not an administrative setting.
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+                (self.CALL_DEFAULTS_KEY, json.dumps(stored, sort_keys=True)),
+            )
+        return self.customer_call_defaults(owner_user_id)
+
+    def call_default_for(self, field: str, owner_user_id: int | None) -> str:
+        """The effective default, falling back to the legacy platform-wide value."""
+        if owner_user_id is not None:
+            value = self.customer_call_defaults(int(owner_user_id)).get(field, "")
+            if value:
+                return value
+        legacy = str(self.get_settings().get("default_extension" if field == "outbound" else "inbound_fallback_extension", "")).strip()
+        if legacy and any(row["extension"] == legacy and row["active"] for row in self.list_extensions()):
+            return legacy
+        return ""
+
+    def extension_is_a_call_default(self, extension: str) -> bool:
+        """Is any customer relying on this extension as their outbound or fallback?"""
+        extension = str(extension)
+        try:
+            stored = json.loads(self.get_settings().get(self.CALL_DEFAULTS_KEY) or "{}")
+        except (TypeError, ValueError):
+            stored = {}
+        if any(str(entry.get(field) or "") == extension for entry in stored.values() if isinstance(entry, dict) for field in ("outbound", "fallback")):
+            return True
+        with self._connect() as db:
+            return bool(db.execute(
+                "SELECT 1 FROM settings WHERE `key` IN ('default_extension','inbound_fallback_extension') AND value=?",
+                (extension,),
+            ).fetchone())
+
     def decrypt(self, ciphertext):
         from cryptography.fernet import Fernet
         key = base64.urlsafe_b64encode(hashlib.sha256(self.secret_key).digest())
@@ -1738,6 +1814,31 @@ class SettingsStore:
 
 def register_admin(app, config, on_telephony_change=None):
     store = SettingsStore(config.DATABASE_URI or config.SETTINGS_DB_PATH, config.SECRET_KEY)
+
+    def flow_owner(data: dict, target_type: str, target: str, phone_number: str = "") -> int:
+        """Whose call flow a request is about.
+
+        A customer session is always that customer. An administrator session
+        names the customer through the flow's own target - the number, extension
+        or group decides - and falls back to the customer selected in the
+        workspace, so a flow can never be written across customers."""
+        if session.get("admin_role") != "admin":
+            return int(session["admin_user_id"])
+        if target_type == "number":
+            number = str(phone_number or target or "").strip()
+            owner = next((row["owner_user_id"] for row in store.list_numbers() if row["number"] == number), None)
+        elif target_type == "extension":
+            owner = next((row["owner_user_id"] for row in store.list_extensions() if str(row["extension"]) == str(target)), None)
+        else:
+            group = store.get_group(target)
+            owner = group["owner_user_id"] if group else None
+        if owner:
+            return int(owner)
+        chosen = data.get("owner_user_id")
+        if str(chosen or "").strip().isdigit():
+            return int(chosen)
+        raise ValueError("Choose the customer this call flow belongs to")
+
     store.ensure_bootstrap_admin(config.ADMIN_USERNAME, config.ADMIN_PASSWORD)
     store.bootstrap_telephony(config)
     app.extensions["settings_store"] = store
@@ -1922,8 +2023,128 @@ def register_admin(app, config, on_telephony_change=None):
                 "total": len(voicemail_messages), "new": sum(row["folder"] == "inbox" for row in voicemail_messages),
                 "old": sum(row["folder"] == "old" for row in voicemail_messages), "urgent": sum(row["folder"] == "urgent" for row in voicemail_messages),
             },
-            "settings": store.get_settings() if is_admin else {
-                "recording_enabled": store.get_settings().get("recording_enabled", "false")
+            "settings": store.get_settings() if is_admin else {},
+            "call_defaults": store.customer_call_defaults(user_id) if not is_admin else {},
+        })
+
+    @app.get("/admin/api/call-defaults")
+    @login_required
+    def admin_call_defaults():
+        """Where this account's calls go when nothing more specific is chosen."""
+        if session.get("admin_role") == "admin":
+            requested = str(request.args.get("customer_id") or "")
+            if not requested.isdigit():
+                return jsonify({"error": "choose a customer"}), 400
+            customer_id = int(requested)
+            if not store.get_user(customer_id):
+                return jsonify({"error": "customer not found"}), 404
+        else:
+            customer_id = int(session["admin_user_id"])
+        return jsonify({
+            "call_defaults": store.customer_call_defaults(customer_id),
+            "extensions": [row["extension"] for row in store.list_extensions(customer_id) if row["active"]],
+        })
+
+    @app.post("/admin/api/call-defaults")
+    @login_required
+    def admin_save_call_defaults():
+        """The customer decides where their own calls land, not the platform."""
+        if session.get("admin_role") == "admin":
+            return jsonify({"error": "call defaults belong to the customer"}), 403
+        try:
+            data = request.get_json(silent=True) or {}
+            saved = store.set_customer_call_defaults(
+                int(session["admin_user_id"]),
+                str(data.get("outbound") or ""), str(data.get("fallback") or ""),
+            )
+            apply_change()
+            return jsonify({"ok": True, "call_defaults": saved})
+        except (ValueError, TypeError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.get("/admin/api/system")
+    @admin_required
+    def admin_system():
+        """What the platform is doing right now: calls, load and recording work.
+
+        Everything here is measured, never estimated. Asterisk is asked for its
+        live channels and endpoints, the call store for what is in progress, and
+        the host for its load and memory. Anything unreachable reports zero
+        rather than guessing.
+        """
+        service = current_app.extensions["telephony_service"]
+        calls = service.store.all()
+        in_progress = [call for call in calls if call.status in {"initiated", "ringing", "answered", "dialing_customer"}]
+        today = datetime.now(timezone.utc).date().isoformat()
+        by_start = [call for call in calls if str(call.started_at or "").startswith(today)]
+
+        def moment(value):
+            try:
+                return datetime.fromisoformat(str(value))
+            except (TypeError, ValueError):
+                return None
+
+        # Peak concurrency today: the most calls overlapping at any instant.
+        events = []
+        for call in by_start:
+            started, ended = moment(call.started_at), moment(call.ended_at)
+            if not started:
+                continue
+            events.append((started, 1))
+            events.append((ended or datetime.now(timezone.utc), -1))
+        peak, live = 0, 0
+        for _, delta in sorted(events, key=lambda item: (item[0], -item[1])):
+            live += delta
+            peak = max(peak, live)
+
+        try:
+            channels = service.asterisk.list_channels() or []
+        except Exception:
+            channels = []
+        try:
+            endpoints = [row for row in (service.asterisk.list_endpoints() or [])
+                         if str(row.get("technology") or "").lower() == "pjsip"]
+        except Exception:
+            endpoints = []
+        online = sum(1 for row in endpoints if str(row.get("state") or "").lower() in {"online", "available"})
+
+        cpu_count = os.cpu_count() or 1
+        try:
+            load1, load5, load15 = os.getloadavg()
+        except OSError:
+            load1 = load5 = load15 = 0.0
+        memory_total = memory_available = 0
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("MemTotal:"):
+                        memory_total = int(line.split()[1]) * 1024
+                    elif line.startswith("MemAvailable:"):
+                        memory_available = int(line.split()[1]) * 1024
+        except OSError:
+            pass
+
+        running = [call for call in calls if call.recording_status == "recording"]
+        return jsonify({
+            "calls": {
+                "in_progress": len(in_progress),
+                "ringing": sum(1 for call in in_progress if call.status == "ringing"),
+                "connected": sum(1 for call in in_progress if call.status == "answered"),
+                "peak_today": peak,
+                "today": len(by_start),
+                "answered_today": sum(1 for call in by_start if call.answered),
+            },
+            "channels": {"active": len(channels)},
+            "devices": {"online": online, "total": len(endpoints)},
+            "recordings": {
+                "in_progress": len(running),
+                "today": sum(1 for call in by_start if call.recording_name),
+            },
+            "host": {
+                "load_1": round(load1, 2), "load_5": round(load5, 2), "load_15": round(load15, 2),
+                "cpu_count": cpu_count, "load_pct": min(100, round((load1 / cpu_count) * 100)),
+                "memory_total": memory_total, "memory_available": memory_available,
+                "memory_pct": round(((memory_total - memory_available) / memory_total) * 100) if memory_total else 0,
             },
         })
 
@@ -2214,8 +2435,10 @@ def register_admin(app, config, on_telephony_change=None):
     @app.post("/admin/api/webhooks")
     @login_required
     def admin_webhook():
+        if session.get("admin_role") == "admin":
+            return jsonify({"error": "webhooks are created by the customer who owns them"}), 403
         try:
-            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            owner = int(session["admin_user_id"])
             result = store.save_webhook(request.get_json(silent=True) or {}, owner)
             return jsonify({"ok": True, "webhook_id": result})
         except INPUT_DB_ERRORS as exc:
@@ -2292,9 +2515,14 @@ def register_admin(app, config, on_telephony_change=None):
         try:
             data = request.get_json(silent=True) or {}
             if session.get("admin_role") == "admin":
-                # Groups route the customer's own calls, so the customer builds them.
-                return jsonify({"error": "ring groups are managed by the customer"}), 403
-            owner = int(session["admin_user_id"])
+                # The administrator builds groups for the customer whose flow
+                # they are editing; the workspace names that customer.
+                chosen = str(data.get("owner_user_id") or "").strip()
+                owner = int(chosen) if chosen.isdigit() else None
+                if not owner:
+                    return jsonify({"error": "Choose the customer this group belongs to"}), 400
+            else:
+                owner = int(session["admin_user_id"])
             data = {**data, "owner_user_id": owner}
             group_id = store.save_group(data, owner)
             store.add_activity(owner, int(session["admin_user_id"]), "group.saved", "extension_group", group_id, f"Group {data.get('name')} saved")
@@ -2304,10 +2532,8 @@ def register_admin(app, config, on_telephony_change=None):
     @app.delete("/admin/api/groups/<int:group_id>")
     @login_required
     def customer_group_delete(group_id):
-        if session.get("admin_role") == "admin":
-            return jsonify({"error": "ring groups are managed by the customer"}), 403
         try:
-            owner = int(session["admin_user_id"])
+            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
             group = store.get_group(group_id, owner)
             store.delete_group(group_id, owner)
             if group:
@@ -2424,21 +2650,16 @@ def register_admin(app, config, on_telephony_change=None):
             data = request.get_json(silent=True) or {}
             target_type = str(data.get("target_type") or "number").strip().lower()
             target = str(data.get("target") or "").strip()
-            if session.get("admin_role") == "admin":
-                # How a line answers is the customer's decision. An administrator
-                # provisions devices and numbers, and reads the flows that result.
-                return jsonify({"error": "call flows are designed by the customer"}), 403
-            owner = int(session["admin_user_id"])
+            owner = flow_owner(data, target_type, target, data.get("phone_number"))
             if target_type == "number":
                 route_id = store.save_call_route(owner, data)
                 label = data.get("phone_number")
             else:
                 route_id = store.save_routing_flow(owner, data, target_type=target_type, target=target or None)
                 label = f"{target_type} {target}"
-            if target_type != "number":
-                store.add_activity(owner, int(session["admin_user_id"]), "route.saved", "routing_flow", route_id, f"Call flow for {label} updated")
-            else:
-                store.add_activity(owner, int(session["admin_user_id"]), "route.saved", "call_route", route_id, f"Call flow for {label} updated")
+            who = "operator" if session.get("admin_role") == "admin" else "customer"
+            kind = "call_route" if target_type == "number" else "routing_flow"
+            store.add_activity(owner, int(session["admin_user_id"]), "route.saved", kind, route_id, f"Call flow for {label} updated by the {who}")
             return jsonify({"ok": True, "route_id": route_id})
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
@@ -2448,10 +2669,8 @@ def register_admin(app, config, on_telephony_change=None):
     def delete_customer_call_route(route_id):
         """Removes an extension or group flow so it can be rebuilt from the
         default; number flows keep their own endpoint behaviour."""
-        if session.get("admin_role") == "admin":
-            return jsonify({"error": "call flows are designed by the customer"}), 403
         try:
-            owner = int(session["admin_user_id"])
+            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
             store.delete_routing_flow(route_id, owner)
             apply_change(); return jsonify({"ok": True})
         except ValueError as exc: return jsonify({"error": str(exc)}), 404
@@ -2505,9 +2724,11 @@ def register_admin(app, config, on_telephony_change=None):
     @app.post("/admin/api/api-keys")
     @login_required
     def admin_create_api_key():
+        if session.get("admin_role") == "admin":
+            return jsonify({"error": "API keys are created by the customer who owns them"}), 403
         try:
             data = request.get_json(silent=True) or {}
-            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            owner = int(session["admin_user_id"])
             key_id, token = store.create_api_key(str(data.get("name", "")), str(data.get("scopes", "*")), owner)
             store.add_activity(owner, int(session["admin_user_id"]), "api_key.created", "api_key", key_id, f"API key {data.get('name')} generated")
             return jsonify({"ok": True, "key_id": key_id, "token": token}), 201

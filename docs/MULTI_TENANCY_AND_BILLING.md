@@ -32,7 +32,7 @@ Existing resources from an older installation remain platform-owned until an adm
 
 ## API keys
 
-Each customer can create scoped API keys. The full secret appears once in a dedicated copy panel and only its prefix and hash are retained. Deleting a key permanently invalidates it. A customer key can query or control only resources owned by that customer.
+Each customer can create scoped API keys; the administrator can read, test and revoke what a customer created, but never create one for them (`POST /admin/api/api-keys` and `/admin/api/webhooks` answer 403 for an administrator session, and the console offers no create action there). The full secret appears once in a dedicated copy panel and only its prefix and hash are retained. Deleting a key permanently invalidates it. A customer key can query or control only resources owned by that customer.
 
 ## Number billing
 

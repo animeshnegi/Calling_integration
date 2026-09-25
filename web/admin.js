@@ -426,6 +426,68 @@ async function refreshDeviceStatus() {
   } catch { /* health polling already surfaces connectivity problems */ }
 }
 
+/* ---------------------------------------------- 7b. Render: system board */
+/* What the platform is doing right now. The shell is written once and its
+   numbers are then updated in place, so a poll that moves a counter never
+   rebuilds the board under the operator's eyes. */
+const SYSTEM_TILES = [
+  ['calls-now', '☎', 'Calls in progress', 'ringing · connected'],
+  ['calls-peak', '⚡', 'Peak at once today', 'most simultaneous'],
+  ['calls-today', '◷', 'Calls today', 'of which answered'],
+  ['devices-online', '◈', 'Devices registered', 'of total endpoints'],
+  ['channels', '⇄', 'Asterisk channels', 'live media paths'],
+  ['recordings', '◉', 'Recordings running', 'recorded today'],
+];
+
+function renderSystemBoard() {
+  const host = $('system-board');
+  if (!host || !state.is_admin) return;
+  paint('system-board', `
+    <div class="board-head">
+      <div><span class="live-dot"></span><b>System activity</b><small id="system-updated">Measuring…</small></div>
+      <button class="btn ghost sm" id="system-refresh">Refresh</button>
+    </div>
+    <div class="board-tiles">${SYSTEM_TILES.map(([key, glyph, label, hint]) => `
+      <div class="board-tile"><span class="glyph">${glyph}</span>
+        <p><small>${esc(label)}</small><b id="system-${key}">—</b><i id="system-${key}-hint">${esc(hint)}</i></p>
+      </div>`).join('')}
+    </div>
+    <div class="board-load">
+      <div class="load-row"><span>CPU load</span><div class="load-bar"><i id="system-cpu-bar"></i></div><b id="system-cpu">—</b></div>
+      <div class="load-row"><span>Memory</span><div class="load-bar"><i id="system-mem-bar"></i></div><b id="system-mem">—</b></div>
+    </div>`, !host.innerHTML);
+  $('system-refresh')?.addEventListener('click', () => loadSystem());
+}
+
+function updateSystemBoard(data) {
+  if (!data) return;
+  const put = (id, value) => { const node = $(id); if (node && node.textContent !== String(value)) node.textContent = String(value); };
+  const calls = data.calls || {}, host = data.host || {};
+  put('system-calls-now', calls.in_progress ?? 0);
+  $('system-calls-now-hint').textContent = `${calls.ringing || 0} ringing · ${calls.connected || 0} connected`;
+  put('system-calls-peak', calls.peak_today ?? 0);
+  put('system-calls-today', calls.today ?? 0);
+  $('system-calls-today-hint').textContent = `${calls.answered_today || 0} answered`;
+  put('system-devices-online', data.devices?.online ?? 0);
+  $('system-devices-online-hint').textContent = `of ${data.devices?.total ?? 0} endpoints`;
+  put('system-channels', data.channels?.active ?? 0);
+  put('system-recordings', data.recordings?.in_progress ?? 0);
+  $('system-recordings-hint').textContent = `${data.recordings?.today || 0} recorded today`;
+  const bar = (id, pct) => { const node = $(id); if (node) node.style.width = `${Math.max(2, Math.min(100, pct || 0))}%`; };
+  bar('system-cpu-bar', host.load_pct);
+  bar('system-mem-bar', host.memory_pct);
+  put('system-cpu', `${host.load_1 ?? 0} / ${host.cpu_count || 1} core${(host.cpu_count || 1) === 1 ? '' : 's'}`);
+  put('system-mem', `${host.memory_pct || 0}%`);
+  put('system-updated', `updated ${new Date().toLocaleTimeString()}`);
+}
+
+async function loadSystem() {
+  if (!state.is_admin || !$('system-board')) return;
+  try {
+    updateSystemBoard(await api('/admin/api/system'));
+  } catch { /* the health poll already reports connectivity */ }
+}
+
 /* ------------------------------------------------------- 8. Render: shell */
 function renderAll() {
   const summary = state.call_summary || {};
@@ -448,6 +510,11 @@ function renderAll() {
   setBadge($('notification-badge'), (state.notifications || []).filter(n => !n.read_at).length);
 
   if (!state.is_admin) renderCustomerStatus();
+  // Resolve whose numbers, devices and integrations are on screen *before* the
+  // lists render, so the first paint already belongs to the chosen customer.
+  renderNumberOwnerPicker();
+  renderSipOwnerPicker();
+  renderIntegrationOwnerPicker();
   renderExtensions();
   renderNumbers();
   renderProviders();
@@ -463,6 +530,9 @@ function renderAll() {
   renderBilling();
   renderSelects();
   renderSettings();
+  renderCallDefaults();
+  renderSystemBoard();
+  if (state.is_admin) loadSystem();
   renderEmailSettings();
   renderRoutingOwner();
   renderFlow();
@@ -470,10 +540,9 @@ function renderAll() {
   const myExtension = state.extensions.find(x => x.extension === state.assigned_extension);
   $('profile-recording-form').hidden = !myExtension;
   $('profile-recording').checked = !!myExtension?.recording_enabled;
-  const globalRecording = truth(state.settings?.recording_enabled);
-  $('profile-recording-help').textContent = globalRecording
-    ? 'Global recording is enabled; you can opt your extension in or out.'
-    : 'The administrator has switched recording off for everyone; your preference is still saved for later.';
+  $('profile-recording-help').textContent = myExtension?.recording_enabled
+    ? 'Calls on this extension are recorded. Switch it off to stop recording this device.'
+    : 'Recording is off for this extension. Switch it on to record calls on this device.';
   $('profile-email').value = state.email || '';
   markStagger();
 }
@@ -564,9 +633,76 @@ function renderExtensions() {
 }
 
 /* ----------------------------------------------------- 11. Render: numbers */
+/* The two lists an administrator most often reads one customer at a time. The
+   choice lives here, not in the DOM, so a refresh keeps it. */
+let numberOwner = null, sipOwner = null;
+
+function ownerChoices() {
+  return [...(state.customers || [])].sort((left, right) =>
+    (left.company_name || left.username).localeCompare(right.company_name || right.username));
+}
+
+/* Nothing is selected until the operator (or the data) picks: with one customer
+   there is no choice to make, and with none the page is simply empty. */
+function resolvePickedOwner(current, rows) {
+  const choices = ownerChoices();
+  if (!choices.length) return null;
+  if (current !== null && choices.some(c => c.id === current)) return current;
+  const withRows = choices.find(c => rows(c.id));
+  return (withRows || choices[0]).id;
+}
+
+function renderOwnerPicker(hostId, selected, counts, onPick) {
+  const host = $(hostId);
+  if (!host) return;
+  const choices = ownerChoices();
+  host.innerHTML = choices.map(customer => {
+    const picked = customer.id === selected;
+    const count = counts(customer.id);
+    return `<button type="button" class="customer-chip ${picked ? 'active' : ''}" data-owner="${customer.id}" aria-pressed="${picked}">
+      <span class="avatar">${esc((customer.company_name || customer.username || 'C')[0].toUpperCase())}</span>
+      <span class="copy"><b>${esc(customer.company_name || customer.username)}</b><small>${esc(count)}</small></span>
+    </button>`;
+  }).join('') || '<p class="picker-empty">No customers yet. Add one to assign numbers and devices.</p>';
+  host.querySelectorAll('[data-owner]').forEach(button => {
+    button.addEventListener('click', () => onPick(Number(button.dataset.owner)));
+  });
+}
+
+function renderNumberOwnerPicker() {
+  if (!state.is_admin) return;
+  const rows = id => (state.phone_numbers || []).filter(x => x.owner_user_id === id).length;
+  numberOwner = resolvePickedOwner(numberOwner, rows);
+  renderOwnerPicker('number-picker', numberOwner, id => {
+    const count = rows(id);
+    return `${count} number${count === 1 ? '' : 's'}`;
+  }, id => {
+    numberOwner = id;
+    renderNumbers();
+    renderNumberOwnerPicker();
+  });
+}
+
+function renderSipOwnerPicker() {
+  if (!state.is_admin) return;
+  const devices = id => (state.sip_accounts || []).filter(x => x.owner_user_id === id).length;
+  const extensions = id => (state.extensions || []).filter(x => x.owner_user_id === id).length;
+  sipOwner = resolvePickedOwner(sipOwner, devices);
+  renderOwnerPicker('sip-picker', sipOwner, id =>
+    `${extensions(id)} extension${extensions(id) === 1 ? '' : 's'} · ${devices(id)} device${devices(id) === 1 ? '' : 's'}`,
+    id => {
+      sipOwner = id;
+      renderSipAccounts();
+      renderSipOwnerPicker();
+    });
+}
+
 function renderNumbers() {
   const query = val('number-search').toLowerCase();
-  const rows = state.phone_numbers.filter(x => `${x.number} ${x.provider} ${x.description} ${x.inbound_extension}`.toLowerCase().includes(query));
+  const owner = state.is_admin ? numberOwner : null;
+  const rows = state.phone_numbers
+    .filter(x => !state.is_admin || x.owner_user_id === owner)
+    .filter(x => `${x.number} ${x.provider} ${x.description} ${x.inbound_extension}`.toLowerCase().includes(query));
   $('number-count').textContent = `${rows.length} number${rows.length === 1 ? '' : 's'}`;
   paint('number-list', rows.map(x => {
     const owner = state.users.find(u => u.id === x.owner_user_id);
@@ -587,6 +723,7 @@ function renderNumbers() {
         </div>
       </div>
       <div class="row-actions">
+        ${x.inbound_extension ? `<button class="btn ghost sm" data-number-flow="${esc(x.number)}">Call flow</button>` : ''}
         ${state.is_admin
           ? `<button class="btn ghost sm" data-edit-number="${x.id}">Manage</button><button class="btn danger sm" data-delete-number="${x.id}">Delete</button>`
           : (x.active && !x.default_outbound && x.inbound_extension
@@ -630,8 +767,9 @@ function renderExtensionCredentials() {
   const host = $('extension-credential-list');
   if (!host) return;
   const query = val('sip-search').toLowerCase();
+  const owner = state.is_admin ? sipOwner : null;
   const numbers = extension => (state.phone_numbers || []).filter(x => x.inbound_extension === extension).map(x => x.number);
-  const rows = (state.extensions || []).filter(x => x.active).filter(x =>
+  const rows = (state.extensions || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x => x.active).filter(x =>
     `${x.extension} ${x.display_name || ''} ${x.sip_username || ''} ${numbers(x.extension).join(' ')}`.toLowerCase().includes(query));
   $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
   host.innerHTML = rows.map(x => {
@@ -653,7 +791,8 @@ function renderExtensionCredentials() {
 
 function renderSipAccounts() {
   const query = val('sip-search').toLowerCase();
-  const rows = (state.sip_accounts || []).filter(x =>
+  const owner = state.is_admin ? sipOwner : null;
+  const rows = (state.sip_accounts || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x =>
     `${x.label} ${x.sip_username} ${x.extension || ''} ${x.phone_number || ''}`.toLowerCase().includes(query));
   $('sip-count').textContent = `${rows.length} account${rows.length === 1 ? '' : 's'}`;
   paint('sip-account-list', rows.map((x, i) => {
@@ -683,8 +822,34 @@ function renderSipAccounts() {
 }
 
 /* ------------------------------------------------- 14. Render: API & hooks */
+/* Integrations belong to the customer who runs them. An administrator selects an
+   account and manages what is there; creating one is the customer's action. */
+let integrationOwner = null;
+
+function renderIntegrationOwnerPicker() {
+  const keys = id => (state.api_keys || []).filter(x => x.owner_user_id === id).length;
+  const hooks = id => (state.webhooks || []).filter(x => x.owner_user_id === id).length;
+  integrationOwner = resolvePickedOwner(integrationOwner, id => keys(id) || hooks(id));
+  renderOwnerPicker('integration-picker', integrationOwner, id =>
+    `${keys(id)} key${keys(id) === 1 ? '' : 's'} · ${hooks(id)} endpoint${hooks(id) === 1 ? '' : 's'}`,
+    id => {
+      integrationOwner = id;
+      renderApiKeys();
+      renderWebhooks();
+      renderDeliveries();
+      renderIntegrationOwnerPicker();
+    });
+}
+
+function ownedIntegrations(rows) {
+  if (!state.is_admin) return rows;
+  // Ownerless rows predate customer-owned integrations; keep them reachable
+  // rather than losing sight of a live key.
+  return rows.filter(row => row.owner_user_id === integrationOwner || !row.owner_user_id);
+}
+
 function renderApiKeys() {
-  paint('api-key-list', (state.api_keys || []).map(x => `
+  paint('api-key-list', ownedIntegrations(state.api_keys || []).map(x => `
     <div class="row">
       <span class="row-icon">⌘</span>
       <div><h3>${esc(x.name)}</h3><p><code>${esc(x.prefix)}…</code> · created ${esc(fmtDay(x.created_at))}</p></div>
@@ -694,13 +859,15 @@ function renderApiKeys() {
         ${tag(`Last used ${x.last_used_at ? fmtDate(x.last_used_at) : 'never'}`)}
       </div>
       <div class="row-actions"><button class="btn danger sm" data-revoke-key="${x.id}">Revoke</button></div>
-    </div>`).join('') || empty('No API keys', 'Create a scoped key so your own software can call the EIP API.', '⌘', '',
-      emptyAction('Create API key', 'data-open="apikey"', true)));
+    </div>`).join('') || empty(state.is_admin ? 'This customer has no API keys' : 'No API keys',
+      state.is_admin ? 'Sign in as the customer to create one; you can revoke what they own here.'
+        : 'Create a scoped key so your own software can call the EIP API.', '⌘', '',
+      state.is_admin ? '' : emptyAction('Create API key', 'data-open="apikey"', true)));
   markStagger();
 }
 
 function renderWebhooks() {
-  paint('webhook-list', state.webhooks.map(x => `
+  paint('webhook-list', ownedIntegrations(state.webhooks || []).map(x => `
     <div class="row">
       <span class="row-icon">◇</span>
       <div><h3>${esc(x.name)}</h3><p>${esc(x.url)}</p></div>
@@ -714,13 +881,18 @@ function renderWebhooks() {
         <button class="btn ghost sm" data-edit-webhook="${x.id}">Edit</button>
         <button class="btn danger sm" data-delete-webhook="${x.id}">Delete</button>
       </div>
-    </div>`).join('') || empty('No webhook endpoints', 'Add an endpoint to push call events to your CRM.', '◇', '',
-      emptyAction('Add webhook', 'data-open="webhook"', true)));
+    </div>`).join('') || empty(state.is_admin ? 'This customer has no endpoints' : 'No webhook endpoints',
+      state.is_admin ? 'Sign in as the customer to add one; you can manage what they own here.'
+        : 'Add an endpoint to push call events to your CRM.', '◇', '',
+      state.is_admin ? '' : emptyAction('Add webhook', 'data-open="webhook"', true)));
   markStagger();
 }
 
 function renderDeliveries() {
-  const rows = state.webhook_deliveries || [];
+  const mine = state.is_admin
+    ? new Set(ownedIntegrations(state.webhooks || []).map(hook => hook.id))
+    : null;
+  const rows = (state.webhook_deliveries || []).filter(x => !mine || mine.has(x.endpoint_id));
   $('delivery-count').textContent = `${rows.length} deliver${rows.length === 1 ? 'y' : 'ies'}`;
   paint('webhook-delivery-list', rows.length ? `
     <table class="data"><thead><tr><th>Event</th><th>Endpoint</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Last error</th></tr></thead>
@@ -875,22 +1047,43 @@ function renderSelects() {
   paint('recording-extension', allExtensions);
   paint('voicemail-extension', `<option value="">All mailboxes</option>${state.extensions
     .filter(x => x.voicemail_enabled).map(x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}`);
-  paint('default-extension', optionList());
-  paint('inbound-fallback', optionList());
 }
 
+/* The customer's own call defaults: which extension an API call without one
+   uses, and where a number with no valid destination lands. Both selects are
+   that customer's extensions, because an extension belongs to one customer. */
+function renderCallDefaults() {
+  const form = $('call-defaults-form');
+  if (!form) return;
+  const options = state.extensions.filter(x => x.active);
+  const defaults = state.call_defaults || {};
+  const list = selected => `<option value="">First available extension</option>` + options
+    .map(x => `<option value="${esc(x.extension)}" ${String(selected) === String(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`).join('');
+  paint('default-extension', list(defaults.outbound));
+  paint('inbound-fallback', list(defaults.fallback));
+  $('call-defaults-count').textContent = `${options.length} extension${options.length === 1 ? '' : 's'}`;
+}
+
+/* What remains on the platform settings page: facts, not controls. Recording and
+   call defaults were moved to the customer who owns the extensions, so the page
+   says where they went and reports what is configured. */
 function renderSettings() {
-  const s = state.settings || {};
-  const first = state.extensions.find(x => x.active)?.extension || '';
-  $('default-extension').value = s.default_extension || first;
-  $('inbound-fallback').value = s.inbound_fallback_extension || s.default_extension || first;
-  $('rec-enabled').checked = truth(s.recording_enabled);
-  $('rec-format').value = s.recording_format || 'wav';
-  $('rec-retention').value = s.recording_retention_days || 90;
-  $('rec-max').value = s.recording_max_duration_seconds || 0;
-  $('rec-announcement').checked = truth(s.recording_announcement);
-  $('rec-media').value = s.recording_announcement_media || '';
-  $('rec-beep').checked = truth(s.recording_beep);
+  const rows = [
+    ['Recording', 'Each extension records only when its own switch is on. The customer turns it on per device under Extensions.', '◉'],
+    ['Call defaults', "Each customer chooses the extension an API call uses and where an unmatched number lands, on their Numbers page.", '☎'],
+  ];
+  const legacy = state.settings || {};
+  const legacyDefaults = [legacy.default_extension, legacy.inbound_fallback_extension].filter(Boolean);
+  if (legacyDefaults.length) {
+    rows.push(['Legacy platform defaults', `${legacyDefaults.join(', ')} — still honoured where a customer has not chosen their own.`, '⚑']);
+  }
+  const email = state.email_config || {};
+  rows.push(['Voicemail email delivery', email.enabled ? `Enabled as ${esc(email.from_email || 'configured sender')}` : 'Disabled. Configure it under Email Delivery.', '✉']);
+  paint('platform-policy', rows.map(([title, copy, glyph]) => `
+    <div class="row">
+      <span class="row-icon">${glyph}</span>
+      <div><h3>${esc(title)}</h3><p>${copy}</p></div>
+    </div>`).join(''));
   markStagger();
 }
 
@@ -1128,8 +1321,14 @@ function renderRoutingOwner(preferred) {
   if (!state.is_admin) { select.hidden = true; select.innerHTML = ''; return; }
   const customers = (state.customers || []).length ? state.customers : (state.users || []).filter(u => u.role === 'user');
   // Prefer what the operator chose, then the customer whose workspace is open,
-  // then whoever the picker was already showing.
-  const prior = String(preferred ?? select.value ?? workspace?.customer?.id ?? '');
+  // then the one the routing page was already showing. Failing all three, land
+  // on a customer that actually has something to route: an empty page reads as
+  // a missing flow, and the flows are the reason the page exists.
+  const hasWork = id => (state.phone_numbers || []).some(x => x.owner_user_id === id)
+    || (state.extensions || []).some(x => x.owner_user_id === id)
+    || (state.groups || []).some(x => x.owner_user_id === id);
+  const fallback = customers.find(c => hasWork(c.id)) || customers[0];
+  const prior = String(preferred ?? select.value ?? workspace?.customer?.id ?? fallback?.id ?? '');
   select.innerHTML = customers.map(c => `<option value="${c.id}">${esc(c.company_name || c.username)}</option>`).join('')
     || '<option value="">No customers yet</option>';
   if (customers.some(c => String(c.id) === prior)) select.value = prior;
@@ -1193,6 +1392,11 @@ function renderFlow(preferred) {
   const { type, target } = flowTargetParts(key);
   const saved = key ? savedFlowFor(type, target) : null;
   flowNodes = saved?.route?.nodes ? saved.route.nodes.map(node => ({ ...node })) : [];
+  const save = $('save-route');
+  if (save) {
+    save.disabled = !canDesignFlows();
+    save.title = canDesignFlows() ? '' : flowDesignHint();
+  }
   const entry = $('flow-entry-number');
   if (entry) entry.textContent = key ? (select.selectedOptions[0]?.textContent || key) : 'Add a number, extension or group to begin';
   renderFlowNodes();
@@ -1201,7 +1405,8 @@ function renderFlow(preferred) {
 function renderGroups() {
   const host = $('group-list');
   if (!host) return;
-  const groups = state.groups || [];
+  const owner = state.is_admin ? routingOwner() : null;
+  const groups = (state.groups || []).filter(group => !state.is_admin || owner === null || group.owner_user_id === owner);
   const rows = groups.map(group => {
     const active = flowTargetParts($('route-target')?.value).type === 'group'
       && String(flowTargetParts($('route-target')?.value).target) === String(group.id);
@@ -1217,7 +1422,13 @@ function renderGroups() {
       </div>
     </div>`;
   }).join('');
-  host.innerHTML = rows || empty('No groups yet', 'A group rings its members together and can carry its own call flow.', '◎');
+  host.innerHTML = rows || empty(
+    state.is_admin && owner === null ? 'Choose a customer' : 'No groups yet',
+    state.is_admin && owner === null
+      ? 'Pick the customer whose groups you want to see or change.'
+      : 'A group rings its members together and can carry its own call flow.',
+    '◎',
+  );
 }
 
 /* Ring steps can target a saved group; picking one fills in its members. */
@@ -1252,9 +1463,30 @@ function flowExtensionOptions(selected = []) {
   return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
 }
 
+/* What a freshly added step should already contain. A ring step on a number
+   starts with every device the customer owns, which is how their main line
+   behaves: add an extension and its phone joins the ring. An extension step
+   rings that device; a group step rings its members. */
+function flowStepDefaults(node) {
+  if (!['simultaneous', 'sequential', 'ring_group'].includes(node?.type)) return node;
+  if ((node.extensions || []).length) return node;
+  const { type, target } = flowTargetParts($('route-target')?.value);
+  const owner = flowOwnerId();
+  const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || !owner || x.owner_user_id === owner));
+  if (type === 'number') return { ...node, extensions: mine.map(x => x.extension) };
+  if (type === 'extension') return { ...node, extensions: [target] };
+  const group = (state.groups || []).find(x => String(x.id) === String(target));
+  if (type === 'group' && group) return { ...node, extensions: [...group.members] };
+  return node;
+}
+
 function openFlowConfig(index) {
   flowConfigIndex = index;
-  const node = flowNodes[index];
+  const node = flowStepDefaults(flowNodes[index]);
+  if (node && node !== flowNodes[index]) {
+    flowNodes[index] = node;
+    renderFlowNodes();
+  }
   if (!node) return;
   const common = `<label class="field">Step label<input name="label" maxlength="80" value="${esc(node.label === 'Click to configure' ? '' : node.label || '')}"></label>`;
   let fields = '';
@@ -1455,7 +1687,7 @@ const templates = {
         ? `<span>Credentials are created automatically. The username never changes; the password is yours to set.</span><button class="btn ghost sm" type="button" data-reveal-extension="${esc(item.extension)}">Reveal credentials</button>`
         : '<span>A SIP password is generated for this extension, and it gets a default call flow straight away.</span>'}</div>
       <label class="check" style="margin-bottom:13px"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Active and allowed to make calls</label>
-      <label class="check" style="margin-bottom:13px"><input name="recording_enabled" type="checkbox" ${item?.recording_enabled ? 'checked' : ''}> Allow recording when global recording is enabled</label>
+      <label class="check" style="margin-bottom:13px"><input name="recording_enabled" type="checkbox" ${item?.recording_enabled ? 'checked' : ''}> Record calls on this device</label>
       <div class="field-row">
         <label class="check"><input name="voicemail_enabled" type="checkbox" ${item?.voicemail_enabled ? 'checked' : ''}> Enable voicemail</label>
         <label class="field">Voicemail PIN<input name="voicemail_pin" type="password" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="${item ? 'Leave blank to keep existing' : '4 to 10 digits'}"></label>
@@ -1675,6 +1907,20 @@ function openModal(type, item = null) {
     owner?.addEventListener('change', update);
     update();
   }
+  if (modalType === 'group' && state.is_admin) {
+    // The members a group can ring are the chosen customer's extensions.
+    const owner = $('modal-fields').querySelector('[name=owner_user_id]');
+    const members = $('modal-fields').querySelector('[name=members]');
+    if (owner && members && !editing) {
+      const fill = () => {
+        members.innerHTML = state.extensions
+          .filter(x => x.active && String(x.owner_user_id ?? '') === String(owner.value))
+          .map(x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+      };
+      owner.addEventListener('change', fill);
+      fill();
+    }
+  }
   setTimeout(() => $('modal-fields').querySelector('input,select')?.focus(), 80);
 }
 
@@ -1703,6 +1949,7 @@ async function saveModal(event) {
   if (['webhook', 'user', 'group'].includes(modalType) && editing) data.id = editing.id;
   if (modalType === 'sipaccount' && editing) data.id = editing.id;
   if (modalType === 'group') data.members = [...event.target.querySelector('[name=members]').selectedOptions].map(x => x.value);
+  if (modalType === 'group' && state.is_admin && !data.owner_user_id) data.owner_user_id = String(routingOwner() || '');
   try {
     const collection = { number: 'numbers', webhook: 'webhooks', apikey: 'api-keys', sipaccount: 'sip-accounts' }[modalType] || `${modalType}s`;
     const result = await api(`/admin/api/${collection}`, { method: 'POST', body: JSON.stringify(data) });
@@ -1908,7 +2155,7 @@ function renderWsHeader() {
     ['extension', 'Add extension', '⌁', 'data-open="extension"'],
     ['sipaccount', 'Add device', '◈', 'data-open="sipaccount"'],
     ['number', 'Assign number', '☎', 'data-open="number"'],
-    ['routing', state.is_admin ? 'View call flows' : 'Open call flow', '⌘', `data-ws-goto="routing"`],
+    ['routing', state.is_admin ? 'Edit call flows' : 'Open call flow', '⌘', `data-ws-goto="routing"`],
     ['customer', 'Edit customer', '✎', 'data-ws-edit-customer="1"'],
   ].map(([, label, glyph, attr]) => `<button type="button" ${attr}><span class="glyph">${glyph}</span>${label}</button>`).join(''));
 
@@ -2190,15 +2437,15 @@ function wsRouting() {
             <small style="display:block;color:var(--text-3);font-size:11px">${esc(node.label || 'Not configured')}</small></div>
           <span class="step">${String(i + 1).padStart(2, '0')}</span>
         </div>`).join('') : '<small style="color:var(--text-3)">No steps configured for this number yet.</small>'}</div>
-      <div class="ws-card-actions"><button class="btn ghost sm" data-route-target="${esc(flow.key)}">${state.is_admin ? 'View this flow' : 'Open in flow builder'}</button></div>
+      <div class="ws-card-actions"><button class="btn ghost sm" data-route-target="${esc(flow.key)}">${state.is_admin ? 'Edit this flow' : 'Open in flow builder'}</button></div>
     </article>`;
   }).join('');
   const unconfigured = workspace.numbers.filter(n => !flows.some(flow => flow.key === flowKey('number', n.number)));
   const flowsFor = type => flows.filter(flow => flow.type === type).length;
   const defaultTarget = workspace.numbers[0] ? flowKey('number', workspace.numbers[0].number) : flows[0]?.key || '';
   return `<section class="ws-section">
-    <div class="ws-section-head"><div><h3>Call routing</h3><p>${state.is_admin ? "The customer's flows, as their callers experience them." : "Flows for this customer's numbers, extensions and groups."}</p></div>
-      <button class="btn primary" data-route-target="${esc(defaultTarget)}">${state.is_admin ? 'View call flows' : 'Open flow builder'}</button></div>
+    <div class="ws-section-head"><div><h3>Call routing</h3><p>${state.is_admin ? "Edit the customer's flows; callers reach them exactly as shown." : "Flows for this customer's numbers, extensions and groups."}</p></div>
+      <button class="btn primary" data-route-target="${esc(defaultTarget)}">${state.is_admin ? 'Edit call flows' : 'Open flow builder'}</button></div>
     <div class="ws-status" style="margin-bottom:14px">
       <span class="ws-chip"><b>${flowsFor('number')}</b><small>number flows</small></span>
       <span class="ws-chip"><b>${flowsFor('extension')}</b><small>extension flows</small></span>
@@ -2443,6 +2690,10 @@ document.addEventListener('click', async event => {
     showPage('routing');
     return focusRouteTarget(flowKey('extension', d.extensionFlow));
   }
+  if (d.numberFlow) {
+    showPage('routing');
+    return focusRouteTarget(flowKey('number', d.numberFlow));
+  }
   if (d.routeTarget) {
     showPage('routing');
     return focusRouteTarget(d.routeTarget);
@@ -2608,9 +2859,11 @@ wire('flow-nodes', 'drop', event => {
 });
 const dragSurface = $('flow-canvas');
 const dragging = (el, on) => el?.classList.toggle('dragging', on);
-/* Editing a flow is the customer's job. An administrator reads it (and still
-   provisions the devices and numbers it rings); they cannot add steps. */
-const canDesignFlows = () => !state.is_admin;
+/* A flow belongs to one customer, so designing one always happens inside a
+   customer: the signed-in customer is that customer, an administrator picks one
+   in the owner selector first. */
+const canDesignFlows = () => !state.is_admin || routingOwner() !== null;
+const flowDesignHint = () => 'Choose a customer above to design their call flows';
 document.querySelectorAll('[data-node-type]').forEach(button => {
   button.addEventListener('dragstart', event => {
     if (!canDesignFlows()) return;
@@ -2619,7 +2872,7 @@ document.querySelectorAll('[data-node-type]').forEach(button => {
   });
   button.addEventListener('dragend', () => dragging(button, false));
   button.onclick = () => {
-    if (!canDesignFlows()) return notify('Call flows are designed by the customer', true);
+    if (!canDesignFlows()) return notify(flowDesignHint(), true);
     flowNodes.push({ type: button.dataset.nodeType, label: 'Click to configure' });
     renderFlowNodes();
   };
@@ -2642,13 +2895,13 @@ if (dragSurface) {
 wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
 wire('route-owner', 'change', () => { renderRouteTargets(); renderFlow(); renderGroups(); });
 wire('save-route', 'click', async () => {
-  if (!canDesignFlows()) return notify('Call flows are designed by the customer', true);
+  if (!canDesignFlows()) return notify(flowDesignHint(), true);
   const { type, target } = flowTargetParts($('route-target')?.value);
   if (!type || !target) return notify('Add a number, extension or group first', true);
   if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);
   try {
     const payload = type === 'number'
-      ? { target_type: 'number', phone_number: target, target, name: savedFlowFor('number', target)?.name || 'Main call flow' }
+      ? { target_type: 'number', phone_number: target, target, owner_user_id: flowOwnerId(), name: savedFlowFor('number', target)?.name || 'Main call flow' }
       : { target_type: type, target, owner_user_id: flowOwnerId(), name: savedFlowFor(type, target)?.name || (type === 'group' ? 'Group call flow' : 'Extension call flow') };
     await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, route: { nodes: flowNodes }, active: true }) });
     notify(`Call flow saved for ${type === 'number' ? target : `${type} ${target}`}`);
@@ -2659,17 +2912,15 @@ wire('save-route', 'click', async () => {
 });
 
 /* ------------------------------------------------------------- 28. Forms */
-wire('settings-form', 'submit', async event => {
+/* The customer's own call defaults. An administrator never writes these: the
+   endpoint refuses them, and the form is customer-only markup. */
+wire('call-defaults-form', 'submit', async event => {
   event.preventDefault();
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
-      default_extension: val('default-extension'), inbound_fallback_extension: val('inbound-fallback'),
-      recording_enabled: $('rec-enabled').checked, recording_format: val('rec-format'),
-      recording_retention_days: val('rec-retention'), recording_max_duration_seconds: val('rec-max'),
-      recording_announcement: $('rec-announcement').checked, recording_announcement_media: val('rec-media'),
-      recording_beep: $('rec-beep').checked,
+    await api('/admin/api/call-defaults', { method: 'POST', body: JSON.stringify({
+      outbound: val('default-extension'), fallback: val('inbound-fallback'),
     }) });
-    notify('Call settings saved');
+    notify('Call defaults saved');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
@@ -2734,3 +2985,7 @@ setInterval(() => {
   loadState();
 }, 15000);
 setInterval(() => { if (!document.hidden) refreshDeviceStatus(); }, 8000);
+// Live platform activity for an administrator: calls in flight, load and the
+// recording work in progress. Small and in-place, so it never competes with the
+// console for attention or repaints.
+setInterval(() => { if (!document.hidden) loadSystem(); }, 5000);

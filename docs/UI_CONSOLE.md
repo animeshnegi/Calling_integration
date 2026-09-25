@@ -25,17 +25,24 @@ customer runs their own line.**
 
 | An administrator | A customer |
 | --- | --- |
-| Adds customers, assigns numbers, provisions devices | Designs how their calls route |
+| Adds customers, assigns numbers, provisions devices | Chooses the extension an API call uses and where an unmatched number lands |
 | Reveals extension credentials when handing over a device | Places and receives calls, reads voicemail and recordings |
-| Sees call history read-only | Owns extensions, ring groups and every call flow |
+| Edits a customer's call flows for them, one customer at a time | Owns extensions, ring groups and every call flow |
+| Sees call history read-only | Switches recording on per device |
 
-Nothing in the administrator's console dials or designs. `POST /admin/api/calls`
-answers 403 for an administrator, and so do the flow endpoints (`call-routes`,
-`groups`): `canDesignFlows()` in `web/admin.js` hides the palette, the save button,
-the remove control and dragging, and the API refuses the same writes independently.
-What remains is what the job needs - the routing page becomes a read-only view of the
-customer's journey (`View call flows`), and provisioning still builds the default
-flows on the customer's behalf. A customer-created group or flow is theirs to change.
+Nothing in the administrator's console dials. `POST /admin/api/calls` answers 403 for
+an administrator, and an administrator cannot create the customer's API keys or
+webhooks (`403`): those belong to the customer, and the administrator manages what
+already exists.
+
+Call flows are different: the administrator may edit a customer's flows, because a
+customer's line is the administrator's job to keep answering. The builder stays
+customer-scoped - `POST /admin/api/call-routes` resolves the owner from the *target*
+(a number, extension or group), so naming another customer in the request cannot move
+a flow across tenants, and writing under an unknown target is refused. In the console,
+`canDesignFlows()` unlocks the palette, the save button, remove controls and dragging
+only once a customer is chosen in the routing owner selector; without one, the page
+says so rather than offering a dead control.
 
 ## Two experiences, one shell
 
@@ -161,15 +168,74 @@ group's members. Deleting a group removes its flow; deleting an extension remove
 flow and takes it out of every group.
 
 `POST /admin/api/call-routes` takes `target_type` (`number`, `extension`, `group`) and
-dispatches to the right store call; customers can only target what they own, and
-administrators must name the customer for extension and group flows.
+dispatches to the right store call. Customers can only target what they own; an
+administrator's request resolves the owner from the target itself (falling back to the
+customer named in `owner_user_id`), so a flow cannot be written across customers.
 
-> **What rings today.** Inbound calls are answered by the ARI worker, which rings the
-> DID's `inbound_extension` — so a provisioned line answers on its extension
-> immediately. The flows are the configured plan for each target (hours, ring
-> destinations, groups, voicemail) and are stored and validated in full, but the call
-> engine does not execute the graph step by step yet. Executing it in `start_inbound`
-> is the next step on the telephony side, not something this interface can change.
+A fresh ring step arrives pre-filled with what that target rings by default
+(`flowStepDefaults()`): every device of the customer for a number, that device for an
+extension, the members for a group. The main line therefore keeps the "rings everyone"
+behaviour as the customer adds phones, and removing one is easier than finding it.
+
+> **What rings today.** Inbound calls are answered by the ARI worker through
+> `inbound_plan()`, the same planner the builder validates against: the customer's main
+> line rings every active device they own, a number tied to one extension rings just
+> that extension, and a flow that ends in voicemail falls back to the mailbox. Answer
+> connects the caller, no answer ends the call (or takes the message). A step the
+> customer adds - hours, groups, a second ring stage - is stored and validated, and the
+> primary/extension/voicemail shape above is executed today.
+
+## Customer-first pages: numbers, devices, integrations
+
+Three pages answer "whose?" before "what?":
+
+* **Numbers** — `#number-picker` lists every customer with how many numbers they hold.
+  Choosing one scopes `#number-list` to them; each row links to the flow that answers
+  that number (`data-number-flow` opens the builder on it).
+* **Devices & SIP** — `#sip-picker` lists extensions and devices per customer, and the
+  extension-credential list follows the choice.
+* **Integrations** — `#integration-picker` scopes API keys, webhooks and deliveries.
+  The customer keeps the create buttons; the administrator sees the same records with
+  manage actions only.
+
+The choice lives in `numberOwner`/`sipOwner`/`integrationOwner`, not in the DOM, so a
+refresh keeps the page where it was. `resolvePickedOwner()` keeps a valid selection and
+otherwise falls back to the first customer that actually has rows, so a page never
+opens on an empty customer by accident.
+
+## Routing defaults belong to the customer
+
+`settings.call_defaults` is a per-customer map (`{user_id: {outbound, fallback}}`):
+
+* `GET /admin/api/call-defaults` — the customer reads their own; an administrator must
+  name `?customer_id=`, otherwise `400` (unknown customer: `404`).
+* `POST /admin/api/call-defaults` — the customer saves `{outbound, fallback}` from
+  **Numbers → Call defaults**; an administrator gets `403` ("call defaults belong to
+  the customer").
+* Resolution order when nothing is chosen: the customer's stored defaults, then the
+  legacy platform `default_extension`/`inbound_fallback_extension`, then their first
+  active extension.
+
+Recording is per device for the same reason: `extensions.recording_enabled` on each
+extension decides, there is no global policy panel, and a platform-level
+`recording_enabled` no longer vetoes a device that opted in.
+
+## Live system board (administrator)
+
+`#system-board` sits at the top of the administrator's Overview and is refreshed from
+`GET /admin/api/system` every five seconds by `loadSystem()`:
+
+| Tile | Source |
+| --- | --- |
+| Calls in progress | live calls with `ringing` and `connected` split out |
+| Peak at once today | highest simultaneous count from today's call events |
+| Calls today / answered | today's totals |
+| Devices registered | PJSIP endpoints that are online, out of the total |
+| Asterisk channels | active channels |
+| Recordings running | calls currently in `recording` state, plus today's count |
+| Host load | load average as a percentage of CPU count, and memory use |
+
+The tiles are updated in place (`textContent`), so polling never repaints the page.
 
 ## Customer workspace (administrator)
 
@@ -195,9 +261,15 @@ pages are linkable.
 
 * `PYTHONPATH=. .venv/bin/python -m pytest -q` — the API/settings suites (the console
   shares those endpoints, so this must stay green).
+* `.venv/bin/python tools/livecheck.py` — logs into a running preview as the
+  administrator and as a customer and asserts the promises above over HTTP: the system
+  board answers, call defaults belong to the customer (administrator `400`/`403`), the
+  administrator cannot create keys or webhooks but can edit a customer's flows and
+  build their groups, a spoofed owner cannot move a flow, and recording is per device.
 * `node tools/uicheck.js` — boots the real console in jsdom against captured fixtures
   and asserts the promises above: refreshes that paint nothing, only customers dial,
-  only customers design flows, the SIP username is fixed, provisioning reveals
+  customer-first pickers, the flow builder's administrator mode, the system board, the
+  SIP username is fixed, provisioning reveals
   credentials.
 * `node tools/contrastcheck.js` — audits every text colour in `admin.css` against its
   own skin's surfaces, so the light and dark themes both stay legible.

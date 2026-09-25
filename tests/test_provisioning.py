@@ -431,43 +431,69 @@ def test_a_device_account_cannot_take_an_extension_identity(tmp_path):
         }, other_id)
 
 
-def test_administrators_design_no_call_flows(tmp_path):
-    """An administrator manages customers; the customer designs how calls route."""
+def test_administrators_edit_a_customers_call_flows(tmp_path):
+    """An administrator answers the phone for their customers: they can rewrite a
+    customer's flows, but a flow always stays inside the customer that owns it."""
     app = make_app(tmp_path)
     admin = admin_client(app)
     store = app.extensions["settings_store"]
     customer, user_id = customer_client(app, "kappa")
+    other, other_id = customer_client(app, "lambda")
     store.save_extension({"extension": "901", "sip_password": "kappa-secret"}, user_id)
+    store.save_extension({"extension": "902", "sip_password": "lambda-secret"}, other_id)
     assign_number(store, user_id, "+13025550001")
+    assign_number(store, other_id, "+13025550002")
 
-    refused = admin.post("/admin/api/call-routes", json={
+    # The administrator re-routes the customer's number to that customer's extension.
+    number_flow = admin.post("/admin/api/call-routes", json={
         "target_type": "number", "phone_number": "+13025550001",
         "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
     })
-    assert refused.status_code == 403, refused.json
-    assert admin.post("/admin/api/call-routes", json={
+    assert number_flow.status_code == 200, number_flow.json
+    extension_flow = admin.post("/admin/api/call-routes", json={
         "target_type": "extension", "owner_user_id": user_id, "target": "901",
         "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
-    }).status_code == 403
-    assert admin.post("/admin/api/groups", json={"owner_user_id": user_id, "name": "Front desk", "members": ["901"]}).status_code == 403
-
-    # The customer, on the same endpoints, does everything the administrator may not.
-    group = customer.post("/admin/api/groups", json={"name": "Front desk", "members": ["901"], "timeout": 30})
+    })
+    assert extension_flow.status_code == 200, extension_flow.json
+    group = admin.post("/admin/api/groups", json={
+        "owner_user_id": user_id, "name": "Front desk", "members": ["901"], "timeout": 30,
+    })
     assert group.status_code == 200, group.json
+    assert admin.post("/admin/api/call-routes", json={
+        "target_type": "group", "owner_user_id": user_id, "target": str(group.json["group_id"]),
+        "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
+    }).status_code == 200
+
+    # The work landed on the customer the flow belongs to, not on the operator.
+    kappa = admin.get(f"/admin/api/customers/{user_id}").json
+    assert {row["extension"] for row in kappa["extensions"]} == {"101", "901"}   # 101 came with the number
+    assert {row["target"] for row in kappa["routing_flows"]} >= {"901", str(group.json["group_id"])}
+    assert [row["name"] for row in kappa["groups"]] == ["Front desk"]
+    lambda_ = admin.get(f"/admin/api/customers/{other_id}").json
+    untouched = {row["target"] for row in lambda_["routing_flows"]}
+    assert "901" not in untouched and "902" in untouched   # 102 came with their own number
+    assert {row["phone_number"] for row in lambda_["call_routes"]} == {"+13025550002"}
+    assert lambda_["groups"] == []
+
+    # Naming somebody else's customer cannot move a flow: the target decides who
+    # owns it, so this write lands on 901's own customer, never on the customer
+    # the request tried to name.
+    assert admin.post("/admin/api/call-routes", json={
+        "target_type": "extension", "owner_user_id": other_id, "target": "901",
+        "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
+    }).status_code == 200
+    assert {row["target"] for row in admin.get(f"/admin/api/customers/{other_id}").json["routing_flows"]} == untouched
+    assert admin.post("/admin/api/groups", json={"name": "Nowhere", "members": ["902"]}).status_code == 400
+
+    # The customer keeps the same rights over their own flows.
     assert customer.post("/admin/api/call-routes", json={
         "target_type": "extension", "target": "901",
         "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
     }).status_code == 200
-    assert customer.post("/admin/api/call-routes", json={
+    assert other.post("/admin/api/call-routes", json={
         "target_type": "number", "phone_number": "+13025550001", "target": "+13025550001",
         "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
-    }).status_code == 200
-
-    # What the administrator still owns: the customer they provisioned, readable.
-    detail = admin.get(f"/admin/api/customers/{user_id}").json
-    assert {row["extension"] for row in detail["extensions"]} == {"101", "901"}   # 101 came with the number
-    assert "901" in {row["target"] for row in detail["routing_flows"]}   # 101's own flow came too
-    assert [row["name"] for row in detail["groups"]] == ["Front desk"]
+    }).status_code == 400   # not their number
 
 
 def test_provisioning_reports_a_number_that_already_has_an_extension(tmp_path):

@@ -84,6 +84,7 @@
     <div class="content">
       <!-- ============================================================ OVERVIEW -->
       <section class="page active" id="page-dashboard">
+        <section class="system-board" id="system-board" data-admin-only aria-label="Live platform activity"></section>
         <div class="stat-grid" data-customer-only>
           <article class="stat tone-info"><div class="stat-top"><span class="stat-icon">☎</span><span class="stat-label">Total calls</span></div><div class="stat-value" id="stat-total">0</div><div class="stat-note">All time</div></article>
           <article class="stat tone-ok"><div class="stat-top"><span class="stat-icon">✓</span><span class="stat-label">Answered</span></div><div class="stat-value" id="stat-answered">0</div><div class="stat-note" id="answer-rate">0% answer rate</div></article>
@@ -187,12 +188,23 @@
 
       <!-- ============================================================= NUMBERS -->
       <section class="page" id="page-numbers">
+        <div class="customer-picker" id="number-picker" data-admin-only></div>
         <div class="toolbar">
           <div class="search"><span>⌕</span><input id="number-search" placeholder="Search number, owner or extension"></div>
           <span class="spacer"></span>
           <button class="btn primary" data-open="number" data-admin-only>＋ Add phone number</button>
         </div>
         <article class="notice"><span class="glyph">☎</span><div><b>Number ownership</b>Each number is assigned to one extension. Outbound calls present that number, and customer callbacks ring only its assigned employee.</div></article>
+        <form class="panel" id="call-defaults-form" data-customer-only>
+          <div class="panel-head"><div><h2>Call defaults</h2><p>Where your calls go when nothing more specific is chosen</p></div><span class="count" id="call-defaults-count">0 extensions</span></div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label class="field">Default outbound extension<select id="default-extension"></select><small>Used when an API request omits the extension.</small></label>
+              <label class="field">Inbound fallback extension<select id="inbound-fallback"></select><small>Used when one of your numbers has no valid destination.</small></label>
+            </div>
+            <div class="btn-row" style="margin-top:14px"><button class="btn primary" type="submit">Save call defaults</button></div>
+          </div>
+        </form>
         <article class="panel">
           <div class="panel-head"><div><h2>Phone numbers &amp; DIDs</h2><p>Assignment, status and outbound caller ID</p></div><span class="count" id="number-count">0 numbers</span></div>
           <div class="panel-body flush"><div id="number-list" class="rows"></div></div>
@@ -201,6 +213,7 @@
 
       <!-- ==================================================== DEVICES & SIP -->
       <section class="page" id="page-sipaccounts">
+        <div class="customer-picker" id="sip-picker" data-admin-only></div>
         <div class="toolbar">
           <div class="search"><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
           <span class="spacer"></span>
@@ -220,15 +233,15 @@
       <!-- ============================================================ ROUTING -->
       <section class="page" id="page-routing">
         <div class="flow-toolbar sheen">
-          <div><h2>Call flows</h2><p data-customer-only>One builder for every target: save a flow to a number, an extension or a group.</p><p data-admin-only>Read-only view. The customer designs how their own lines answer.</p></div>
+          <div><h2>Call flows</h2><p data-customer-only>One builder for every target: save a flow to a number, an extension or a group.</p><p data-admin-only>Edit a customer's flows exactly as their callers meet them: choose the customer, then the number, extension or group.</p></div>
           <div class="tools">
             <select id="route-owner" aria-label="Customer" data-admin-only></select>
             <select id="route-target" aria-label="Call flow target"></select>
-            <button class="btn primary" id="save-route" data-customer-only>Save flow</button>
+            <button class="btn primary" id="save-route">Save flow</button>
           </div>
         </div>
         <div class="flow-layout">
-          <aside class="panel palette" data-customer-only>
+          <aside class="panel palette">
             <div class="title"><span>FLOW BLOCKS</span><h3>Build the caller journey</h3><p>Drag a block onto the canvas, or click to append it.</p></div>
             <button draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>Open and closed schedules</small></span></button>
             <button draggable="true" data-node-type="simultaneous"><b class="tile tile-ring">⇉</b><span class="copy"><b>Simultaneous ring</b><small>Reach everyone at once</small></span></button>
@@ -244,7 +257,7 @@
             <div class="canvas-empty">
               <div class="glyph">⌘</div>
               <h4>Design how this line answers</h4>
-              <p data-customer-only>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
+              <p>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
               <p data-admin-only>This is the journey the customer has built for this number. Provision their devices and numbers here; they decide how a call is answered.</p>
               <ol data-customer-only>
                 <li>Choose a number, extension or group</li>
@@ -258,7 +271,7 @@
             <div class="flow-drop" data-customer-only><b>＋</b><span>Drop the next routing block here</span></div>
           </section>
         </div>
-        <aside class="panel palette groups-panel" data-customer-only>
+        <aside class="panel palette groups-panel">
           <div class="title"><span>RING GROUPS</span><h3>Teams and departments</h3>
             <p>A group rings its members together and can carry its own call flow: choose it as the target above, or as a ring destination inside any flow.</p>
             <button class="btn primary" data-open="group">＋ Add group</button></div>
@@ -318,15 +331,16 @@
 
       <!-- ================================================= APIS & WEBHOOKS -->
       <section class="page" id="page-webhooks">
-        <article class="notice secure"><span class="glyph">◇</span><div><b>Integrations</b>API keys authenticate your own software against the EIP API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own.</div></article>
+        <div class="customer-picker" id="integration-picker" data-admin-only></div>
+        <article class="notice secure"><span class="glyph">◇</span><div><b>Integrations</b><span data-customer-only>API keys authenticate your own software against the EIP API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own.</span><span data-admin-only>Choose a customer to inspect the keys and webhooks their software uses. These credentials belong to them, so creating one is their action, not the platform's.</span></div></article>
 
         <div class="grid cols-2">
           <article class="panel">
-            <div class="panel-head"><div><h2>API keys</h2><p>Scoped credentials for your applications</p></div><button class="btn primary sm" data-open="apikey">＋ Create key</button></div>
+            <div class="panel-head"><div><h2>API keys</h2><p>Scoped credentials for your applications</p></div><button class="btn primary sm" data-open="apikey" data-customer-only>＋ Create key</button></div>
             <div class="panel-body flush"><div id="api-key-list" class="rows"></div></div>
           </article>
           <article class="panel">
-            <div class="panel-head"><div><h2>Webhook endpoints</h2><p>Send selected call events to your CRM or service</p></div><button class="btn primary sm" data-open="webhook">＋ Add endpoint</button></div>
+            <div class="panel-head"><div><h2>Webhook endpoints</h2><p>Send selected call events to your CRM or service</p></div><button class="btn primary sm" data-open="webhook" data-customer-only>＋ Add endpoint</button></div>
             <div class="panel-body flush"><div id="webhook-list" class="rows"></div></div>
           </article>
         </div>
@@ -440,30 +454,13 @@
 
       <!-- ========================================================== SETTINGS -->
       <section class="page" id="page-settings">
-        <form class="panel" id="settings-form">
-          <div class="panel-head"><div><h2>Call routing defaults</h2><p>Used by API calls and unmatched inbound calls</p></div></div>
+        <article class="notice"><span class="glyph">⚙</span><div><b>Nothing to configure here any more</b>Call routing defaults and recording are decisions the customer makes for their own lines: call defaults on their Numbers page, recording per extension. This page keeps only the platform's own switches below.</div></article>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Platform policy</h2><p>Operating rules that apply to every account</p></div></div>
           <div class="panel-body">
-            <div class="field-row">
-              <label class="field">Default outbound extension<select id="default-extension"></select><small>Used when an API request omits the extension.</small></label>
-              <label class="field">Inbound fallback extension<select id="inbound-fallback"></select><small>Used when a DID has no valid destination.</small></label>
-            </div>
+            <div id="platform-policy" class="rows"></div>
           </div>
-          <div class="panel-head" style="border-top:1px solid var(--line)"><div><h2>Recording policy</h2><p>Global controls; individual extensions can opt out</p></div></div>
-          <div class="panel-body">
-            <label class="switch"><span class="switch-copy"><b>Master recording switch</b><small>Off by default. While off, no administrator or user extension can record calls.</small></span><input id="rec-enabled" type="checkbox"><i class="track"></i></label>
-            <div class="field-row" style="margin-top:16px">
-              <label class="field">Audio format<select id="rec-format"><option value="wav">WAV — recommended</option><option value="wav49">WAV49</option><option value="gsm">GSM</option><option value="slin16">Signed linear 16 kHz</option></select></label>
-              <label class="field">Retention days<input id="rec-retention" type="number" min="1" max="3650"></label>
-            </div>
-            <div class="field-row">
-              <label class="field">Maximum duration (seconds)<input id="rec-max" type="number" min="0" max="86400"><small>Use 0 for unlimited.</small></label>
-              <label class="field">Announcement media URI<input id="rec-media" placeholder="sound:your-recording-notice"></label>
-            </div>
-            <label class="switch"><span class="switch-copy"><b>Play recording announcement</b><small>Play the configured media when recording begins.</small></span><input id="rec-announcement" type="checkbox"><i class="track"></i></label>
-            <label class="switch"><span class="switch-copy"><b>Recording beep</b><small>Play an audible beep at recording start.</small></span><input id="rec-beep" type="checkbox"><i class="track"></i></label>
-            <div class="btn-row" style="margin-top:16px"><button class="btn primary" type="submit">Save call settings</button></div>
-          </div>
-        </form>
+        </article>
       </section>
     </div>
   </main>
