@@ -36,7 +36,7 @@ The **Call history** page includes **New outbound call**. The user enters an E.1
 1. Asterisk rings the employee's assigned extension.
 2. Only after the employee answers, Asterisk originates the customer leg.
 3. The selected assigned DID is sent as caller ID using ARI `callerId`, P-Asserted-Identity and Remote-Party-ID support.
-4. Both legs are bridged and recording policy applies.
+4. Both legs are bridged and the recording setting of the extension that records applies.
 
 A non-admin user's requested extension is ignored and replaced by the extension stored on their account. A requested caller ID must be active and assigned to that same extension. Calls are rejected if no callback number is assigned.
 

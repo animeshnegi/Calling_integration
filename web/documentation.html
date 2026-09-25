@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EIP Telephony — API &amp; setup documentation</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+  :root{
+    color-scheme: dark;
+    --bg:#070b18; --bg-2:#0c1224; --surface:#141b31; --surface-2:#1a2238; --line:#26304b; --line-strong:#38425f;
+    --text:#eef1f8; --text-2:#c3cbdc; --text-3:#8f99b1;
+    --acc-1:#6366f1; --acc-2:#8b5cf6; --acc-3:#22d3ee; --ok:#34d399; --warn:#fbbf24; --bad:#fb7185;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:
+      radial-gradient(1200px 600px at 12% -8%,#6366f12b,transparent 60%),
+      radial-gradient(900px 520px at 96% 4%,#8b5cf629,transparent 62%),
+      linear-gradient(160deg,var(--bg),var(--bg-2));
+    color:var(--text);font:15px/1.62 system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
+    -webkit-font-smoothing:antialiased;min-height:100vh;
+  }
+  a{color:#a5b4fc;text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.88em;background:#8b93a81f;border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+  .wrap{max-width:1080px;margin:0 auto;padding:34px 22px 90px}
+  header.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:26px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand .mark{
+    width:40px;height:40px;border-radius:13px;display:grid;place-items:center;font-weight:800;color:#fff;
+    background:linear-gradient(140deg,var(--acc-1),var(--acc-2));box-shadow:0 12px 30px #6366f14d;
+  }
+  .brand b{display:block;font-size:15px;letter-spacing:-.02em}
+  .brand small{display:block;font-size:11.5px;color:var(--text-3)}
+  .top .spacer{flex:1}
+  .btn{
+    display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:11px;font-size:12.5px;font-weight:650;
+    border:1px solid var(--line-strong);background:#8b93a81f;color:var(--text);cursor:pointer;
+  }
+  .btn.primary{border-color:transparent;color:#fff;background:linear-gradient(140deg,var(--acc-1),var(--acc-2))}
+  .btn:hover{transform:translateY(-1px)}
+  .lede{font-size:14.5px;color:var(--text-2);max-width:78ch;margin:0 0 22px}
+  nav.toc{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin:0 0 30px;padding:16px;
+    border-radius:18px;border:1px solid var(--line);background:#141b3173;backdrop-filter:blur(10px);
+  }
+  nav.toc a{font-size:12.5px;font-weight:600;color:var(--text-2)}
+  nav.toc a:hover{color:var(--text)}
+  section{margin:0 0 34px;scroll-margin-top:20px}
+  h2{font-size:19px;letter-spacing:-.025em;margin:0 0 6px}
+  h2 .step{
+    display:inline-grid;place-items:center;width:24px;height:24px;margin-right:9px;border-radius:8px;font-size:12px;
+    background:#8b93a826;border:1px solid var(--line);color:var(--text-2);vertical-align:2px;
+  }
+  h3{font-size:14.5px;letter-spacing:-.015em;margin:20px 0 6px}
+  p{margin:8px 0;color:var(--text-2)}
+  ul{margin:8px 0;padding-left:20px;color:var(--text-2)}
+  li{margin:4px 0}
+  .card{border:1px solid var(--line);border-radius:16px;background:#141b3173;pad:0;overflow:hidden}
+  pre{
+    margin:12px 0;padding:14px 16px;border-radius:13px;border:1px solid var(--line);background:#0a0f1f;
+    font-family:var(--mono);font-size:12.5px;line-height:1.6;overflow-x:auto;color:#d7deee;
+  }
+  pre .c{color:#7f8aa3}
+  pre .k{color:#c4b5fd}
+  pre .s{color:#6ee7b7}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;border:1px solid var(--line);border-radius:13px;overflow:hidden}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);background:#8b93a814}
+  td code{white-space:nowrap}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+  .box{border:1px solid var(--line);border-radius:14px;padding:14px 16px;background:#141b3173}
+  .box.deploy{display:grid;gap:4px;margin:18px 0 0;background:linear-gradient(140deg,#6366f11a,transparent 70%)}
+  .box.deploy b{font-size:13px}
+  .box.deploy small{color:var(--text-2);font-size:12px}
+  .box.deploy code{color:var(--text)}
+  .box b{display:block;font-size:13px;margin-bottom:4px}
+  .box small{color:var(--text-3);font-size:12px}
+  .note{border-left:3px solid var(--acc-1);padding:10px 14px;border-radius:0 12px 12px 0;background:#6366f114;color:var(--text-2);font-size:13px}
+  .warn{border-left-color:var(--warn);background:#fbbf2414}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid var(--line);background:#8b93a81f}
+  .pill.get{color:#7dd3fc;border-color:#38bdf84d}
+  .pill.post{color:#86efac;border-color:#22c55e4d}
+  .pill.del{color:#fda4af;border-color:#f43f5e4d}
+  footer{margin-top:44px;padding-top:20px;border-top:1px solid var(--line);color:var(--text-3);font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
+  @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <span class="mark">◈</span>
+      <span><b>EIP Telephony — setup &amp; API documentation</b><small>Everything needed to connect a CRM or configure a device</small></span>
+    </div>
+    <span class="spacer"></span>
+    <a class="btn primary" href="/admin">Open the console →</a>
+    <a class="btn" href="/admin#webhooks">API keys &amp; webhooks</a>
+  </header>
+
+  <p class="lede">
+    This is the reference for connecting your own software to EIP Telephony. It covers the console steps,
+    the REST API, and the signed webhooks we send back. The same document is linked from
+    <b>APIs &amp; Webhooks</b> in the console, so it travels with the product rather than living in a repository.
+  </p>
+
+  <div class="box deploy">
+    <b>This deployment</b>
+    <small>API base <code>{{API_BASE}}</code> — every path on this page is relative to it.</small>
+    <small>Devices register with <code>{{SIP_HOST}}</code>.</small>
+  </div>
+
+  <nav class="toc">
+    <a href="#start">1 · Getting started</a>
+    <a href="#auth">2 · Authentication &amp; scopes</a>
+    <a href="#calls">3 · Place and track a call</a>
+    <a href="#read">4 · Read your own configuration</a>
+    <a href="#recordings">5 · Recordings &amp; voicemail</a>
+    <a href="#webhooks">6 · Webhooks &amp; signatures</a>
+    <a href="#events">7 · Event reference</a>
+    <a href="#devices">8 · Register a device (SIP)</a>
+    <a href="#errors">9 · Errors &amp; limits</a>
+  </nav>
+
+  <section id="start">
+    <h2><span class="step">1</span>Getting started</h2>
+    <p>Four steps take you from an empty account to a working integration.</p>
+    <ol>
+      <li>An administrator assigns a phone number to you. The platform creates an extension, its SIP credentials, the DID link and default call flows in one step.</li>
+      <li>Open <b>Devices &amp; SIP</b>, press <b>Credentials</b> on the extension, and enter the values into a phone or softphone.</li>
+      <li>Decide how calls are answered in <b>Call flows</b>: the main line rings every device; a number tied to one extension rings only that extension.</li>
+      <li>Create an API key in <b>APIs &amp; Webhooks</b> and point a webhook endpoint at your CRM.</li>
+    </ol>
+    <div class="grid">
+      <div class="box"><b>Programmatic access</b><small>Create a key with the scopes your software needs, copy it once, and store it in your CRM's secret store. It is shown a single time.</small></div>
+      <div class="box"><b>Event feedback</b><small>Add an endpoint URL, subscribe to the events you care about, and verify the signature on every delivery.</small></div>
+    </div>
+  </section>
+
+  <section id="auth">
+    <h2><span class="step">2</span>Authentication &amp; scopes</h2>
+    <p>Every call to <code>/api/v1/*</code> carries a bearer credential:</p>
+    <pre><span class="c"># a scoped API key (preferred)</span>
+Authorization: Bearer eip_&lt;secret&gt;</pre>
+    <p>
+      Keys are generated with cryptographic randomness, stored only as a SHA-256 hash, list their creation time and
+      last use, and can be revoked at any moment. A revoked key stops working immediately. Endpoints answer
+      <code>401</code> for a missing or invalid credential and <code>403</code> when the key lacks the scope.
+    </p>
+    <table>
+      <thead><tr><th>Scope</th><th>Allows</th></tr></thead>
+      <tbody>
+        <tr><td><code>calls:read</code></td><td>List, read and export calls, and read call analytics.</td></tr>
+        <tr><td><code>calls:write</code></td><td>Start an outbound call, hang up, or set a disposition.</td></tr>
+        <tr><td><code>config:read</code></td><td>Read your extensions and assigned numbers.</td></tr>
+        <tr><td><code>recordings:read</code></td><td>List recordings and stream finalized audio.</td></tr>
+        <tr><td><code>voicemail:read</code></td><td>Read mailbox messages and their metadata.</td></tr>
+        <tr><td><code>voicemail:write</code></td><td>Mark messages read, urgent, or delete them.</td></tr>
+        <tr><td><code>webhooks:manage</code></td><td>Create, edit, test and delete webhook endpoints through the API.</td></tr>
+        <tr><td><code>*</code></td><td>Full access. Use it only for trusted administrative tooling.</td></tr>
+      </tbody>
+    </table>
+    <div class="note warn">
+      A key authenticates a <b>server</b>. Never put it in browser JavaScript, a mobile app, or a public HTML audio
+      element: your backend should call us and proxy what the browser needs.
+    </div>
+  </section>
+
+  <section id="calls">
+    <h2><span class="step">3</span>Place and track a call</h2>
+    <h3><span class="pill post">POST</span> <code>/api/v1/calls</code></h3>
+    <pre>{
+  "contact_id": "582",
+  "member_id": "37",
+  "extension": "101",
+  "phone": "+16235551234",
+  "caller_id_number": "+13025550101"
+}</pre>
+    <p>
+      <code>phone</code> must be in E.164 form. <code>extension</code> is one of your active extensions and defaults to
+      the customer's default outbound extension. <code>caller_id_number</code> is optional, and when supplied must be a
+      number assigned to that extension; otherwise the extension's default number is used.
+    </p>
+    <p>
+      The call is <b>employee-first</b>: the extension rings, and only when it answers does the platform dial the
+      customer and bridge the two legs. No answer means the customer is never called.
+    </p>
+    <p>Send a unique <code>Idempotency-Key</code> header (8–128 safe characters) for every user click or job. A replay of a
+      completed request returns the original call with <code>"idempotent_replay": true</code>; a duplicate that is still
+      in flight returns <code>409</code>. This is what stops a network retry from placing a second paid call.</p>
+    <pre><span class="c"># start a call and keep the identifier</span>
+curl -sS -X POST {{API_BASE}}/api/v1/calls \\
+  -H "Authorization: Bearer $EIP_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: $(uuidgen)" \\
+  -d '{"phone":"+16235551234","extension":"101"}'</pre>
+    <h3>Following one call</h3>
+    <table>
+      <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/calls/&lt;call_id&gt;</code></td><td>Current state of one call.</td></tr>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/calls</code></td><td>Search and page through call history.</td></tr>
+        <tr><td><span class="pill post">POST</span> <code>/api/v1/calls/&lt;call_id&gt;/hangup</code></td><td>End an active call.</td></tr>
+        <tr><td><span class="pill post">POST</span> <code>/api/v1/calls/&lt;call_id&gt;/disposition</code></td><td>Store your CRM outcome and notes.</td></tr>
+      </tbody>
+    </table>
+    <p>Treat <code>call_id</code> as the stable identifier and make your own processing idempotent on it.</p>
+  </section>
+
+  <section id="read">
+    <h2><span class="step">4</span>Read your own configuration</h2>
+    <table>
+      <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/extensions</code></td><td>Active extension numbers and the default outbound extension.</td></tr>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/numbers</code></td><td>Assigned DIDs with their extension, active state and default caller ID. Never returns carrier credentials.</td></tr>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/numbers?extension=101</code></td><td>The same, filtered to one extension.</td></tr>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/providers</code></td><td>Empty for a customer key: carrier configuration is platform-only.</td></tr>
+        <tr><td><span class="pill get">GET</span> <code>/health</code></td><td>Whether the telephony engine and its event worker are ready. No authentication.</td></tr>
+      </tbody>
+    </table>
+    <p>Read <code>/api/v1/numbers</code> before presenting caller-ID choices, so a user can only pick a number they own.</p>
+  </section>
+
+  <section id="recordings">
+    <h2><span class="step">5</span>Recordings &amp; voicemail</h2>
+    <p>
+      Recording is decided per device: an extension records while its own switch is on, in
+      <b>Extensions → Edit</b>. There is no global policy to fight with.
+    </p>
+    <table>
+      <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/recordings</code></td><td>Calls that have recording metadata.</td></tr>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/recordings/&lt;call_id&gt;/file</code></td><td>Streams a finalized recording. Supports <code>Range</code> requests for seeking.</td></tr>
+        <tr><td><span class="pill get">GET</span> <code>/api/v1/voicemails</code></td><td>Messages grouped by extension.</td></tr>
+        <tr><td><span class="pill post">POST</span> <code>/api/v1/voicemails/&lt;id&gt;/read</code></td><td>Mark a message read or urgent, or delete it.</td></tr>
+      </tbody>
+    </table>
+    <p>A recording is only available once its status is <code>finalized</code>; anything else answers <code>404</code>.
+       Proxy audio through your backend so the key never reaches a browser.</p>
+  </section>
+
+  <section id="webhooks">
+    <h2><span class="step">6</span>Webhooks &amp; signatures</h2>
+    <p>
+      Add an endpoint in <b>APIs &amp; Webhooks → Add endpoint</b> with the secret your service expects. Every delivery
+      carries the secret as a bearer token and as an HMAC signature of the exact bytes sent:
+    </p>
+    <pre>POST /your-endpoint HTTP/1.1
+Authorization: Bearer &lt;your webhook secret&gt;
+X-EngineerIP-Delivery: 8f1c…-unique-id
+X-EngineerIP-Timestamp: 1758554400
+X-EngineerIP-Signature: sha256=&lt;hex&gt;
+
+{"event":"call.completed","data":{ … }}</pre>
+    <p>Verify it like this — the raw body, before any JSON parsing:</p>
+    <pre><span class="c">// Node</span>
+const expected = crypto
+  .createHmac(<span class="s">'sha256'</span>, secret)
+  .update(timestamp + <span class="s">'.'</span> + rawBody)
+  .digest(<span class="s">'hex'</span>);
+const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+
+<span class="c"># Python</span>
+expected = hmac.new(secret.encode(), <span class="s">f"{timestamp}."</span>.encode() + raw_body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(expected, signature)</pre>
+    <ul>
+      <li>Reject a timestamp older than five minutes, and treat <code>X-EngineerIP-Delivery</code> as a unique idempotency key.</li>
+      <li>Answer <code>2xx</code> only once the event is stored durably; anything else is retried from the delivery outbox.</li>
+      <li>The <b>delivery history</b> table in the console shows attempts, the last error and the terminal state, so a failing endpoint is visible rather than silent.</li>
+      <li>Use HTTPS outside a private network and allowlist our source address where your platform supports it.</li>
+    </ul>
+  </section>
+
+  <section id="events">
+    <h2><span class="step">7</span>Event reference</h2>
+    <p>Subscribe to everything with <code>*</code>, or list the events you handle. Each payload contains the call object
+      shown in <b>Webhook delivery history</b>: <code>call_id</code>, direction, extension, <code>phone</code>, caller ID,
+      status, timestamps, duration and recording state.</p>
+    <table>
+      <thead><tr><th>Event</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>call.started</code></td><td>A call was created, inbound or outbound.</td></tr>
+        <tr><td><code>call.employee_ringing</code></td><td>The extension is ringing.</td></tr>
+        <tr><td><code>call.employee_answered</code></td><td>The extension picked up; the customer leg is next.</td></tr>
+        <tr><td><code>call.customer_dialing</code></td><td>We are dialling the customer.</td></tr>
+        <tr><td><code>call.bridged</code> / <code>call.answered</code></td><td>Both legs are connected and talking.</td></tr>
+        <tr><td><code>call.recording_started</code> · <code>call.recording_finished</code> · <code>call.recording_failed</code></td><td>Recording lifecycle for the devices that record.</td></tr>
+        <tr><td><code>call.completed</code></td><td>The call ended; the payload carries the final duration and status.</td></tr>
+        <tr><td><code>call.failed</code></td><td>The call could not be completed; the payload explains why.</td></tr>
+        <tr><td><code>call.hangup_requested</code> · <code>call.disposition</code></td><td>Your own hangup or outcome, echoed back as state.</td></tr>
+      </tbody>
+    </table>
+    <p>Use <code>answered</code> for reach/connect reporting and <code>duration_seconds</code> for talk time. Do not
+      derive a second duration engine in your CRM: the lifecycle events are the factual record.</p>
+  </section>
+
+  <section id="devices">
+    <h2><span class="step">8</span>Register a device (SIP)</h2>
+    <p>In <b>Devices &amp; SIP → Credentials</b> you will find the values below, in one table. Each value has its own
+      <b>Copy</b> button and <b>Copy everything</b> puts the whole set on the clipboard for the phone.</p>
+    <table>
+      <thead><tr><th>Value</th><th>What it looks like</th></tr></thead>
+      <tbody>
+        <tr><td>SIP username</td><td>Six random upper-case letters, an underscore and the extension — for example <code>KUDGTE_101</code>. The platform generates it, keeps it unique across the whole platform, and it cannot be edited: it <i>is</i> the device's identity.</td></tr>
+        <tr><td>SIP password</td><td>A generated secret with upper case, lower case, digits and symbols, rotatable from the same sheet with <b>Change password</b>. A linked device account's password is what actually authenticates, so rotating changes that one.</td></tr>
+        <tr><td>Registration server</td><td><code>{{SIP_HOST}}</code> — this deployment's own address, with the port and transport (UDP, TCP or TLS). An administrator sets it once under <b>Settings → Server address</b>, as an IP address or a subdomain, and the same address builds the API and webhook URLs on this page.</td></tr>
+        <tr><td>Number</td><td>The DID the extension answers, so you can confirm the right line rings.</td></tr>
+      </tbody>
+    </table>
+    <div class="note">A device that is already registered keeps its session until it registers again: change the password
+      on the phone after rotating it here.</div>
+    <div class="note">Registration server, API base and webhook URLs all come from the one address in
+      <b>Settings → Server address</b>, so changing it once changes every link a customer is given.</div>
+  </section>
+
+  <section id="errors">
+    <h2><span class="step">9</span>Errors &amp; limits</h2>
+    <table>
+      <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>400</code></td><td>Invalid JSON, phone number, extension, or disposition data.</td></tr>
+        <tr><td><code>401</code></td><td>Missing, invalid, or revoked credential.</td></tr>
+        <tr><td><code>403</code></td><td>The key lacks the scope for this endpoint.</td></tr>
+        <tr><td><code>404</code></td><td>Unknown resource, or an endpoint that is disabled.</td></tr>
+        <tr><td><code>409</code></td><td>Duplicate request while the first is still in flight.</td></tr>
+        <tr><td><code>429</code></td><td>Rate limit reached — back off and retry the same idempotency key.</td></tr>
+        <tr><td><code>502</code> / <code>503</code></td><td>The telephony engine is unavailable; the call was not placed.</td></tr>
+      </tbody>
+    </table>
+    <ul>
+      <li>Request bodies are limited to 64 KiB.</li>
+      <li>Request limits are enforced per client: a general authenticated limit, and a stricter one for starting calls.</li>
+      <li>Phone numbers are validated as E.164 before they reach the switch.</li>
+      <li>Internal engine errors are logged server-side and never echoed to clients.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>EIP Telephony Control — setup &amp; API documentation</span>
+    <a href="/admin">Open the console</a>
+    <a href="/admin#webhooks">API keys &amp; webhooks</a>
+    <a href="/login">Sign in</a>
+  </footer>
+</div>
+</body>
+</html>

@@ -56,11 +56,13 @@ def test_voicemail_mailbox_and_routes_are_rendered(tmp_path: Path):
     assert "owned by extension 101" in dialplan
 
 
-def test_recording_defaults_off_globally_and_per_extension(tmp_path: Path):
+def test_recording_defaults_to_allowed_globally_and_off_per_extension(tmp_path: Path):
+    """The platform switch allows recording; every device still starts opted out,
+    so nothing is recorded until a customer switches their own device on."""
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
-    assert store.get_settings()["recording_enabled"] == "false"
+    assert store.recording_platform_enabled() is True
     assert store.list_extensions()[0]["recording_enabled"] == 0
-    store.set_settings({"recording_enabled": "true"})
+    store.set_settings({"recording_enabled": "false"})
     reopened = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
-    assert reopened.get_settings()["recording_enabled"] == "true"
+    assert reopened.recording_platform_enabled() is False

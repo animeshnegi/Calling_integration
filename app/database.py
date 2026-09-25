@@ -95,6 +95,16 @@ call_routes = Table("call_routes", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("owner_user_id", BigInteger, nullable=False),
     Column("phone_number", String(16), unique=True, nullable=False), Column("name", String(120), nullable=False, server_default="Main call flow"),
     Column("route_json", Text, nullable=False), Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
+extension_groups = Table("extension_groups", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True), Column("owner_user_id", BigInteger, nullable=False),
+    Column("name", String(80), nullable=False), Column("members", Text, nullable=False),
+    Column("timeout", Integer, nullable=False, server_default="25"), Column("active", Integer, nullable=False, server_default="1"),
+    *_timestamps())
+routing_flows = Table("routing_flows", metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True), Column("owner_user_id", BigInteger, nullable=False),
+    Column("target_type", String(20), nullable=False, server_default="extension"), Column("target", String(64), nullable=False),
+    Column("name", String(120), nullable=False, server_default="Call flow"), Column("route_json", Text, nullable=False),
+    Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
 activity_history = Table("activity_history", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("owner_user_id", BigInteger),
     Column("actor_user_id", BigInteger), Column("action", String(80), nullable=False), Column("resource_type", String(40), nullable=False),
@@ -110,7 +120,8 @@ calls = Table("calls", metadata,
     Column("provider", String(80)), Column("direction", String(20), nullable=False), Column("status", String(40), nullable=False),
     Column("answered", Integer, nullable=False, server_default="0"), Column("started_at", String(40), nullable=False),
     Column("answered_at", String(40)), Column("ended_at", String(40)), Column("duration_seconds", Integer, nullable=False, server_default="0"),
-    Column("employee_channel_id", String(255)), Column("customer_channel_id", String(255)), Column("bridge_id", String(255)),
+    Column("employee_channel_id", String(255)), Column("employee_channel_ids", Text, nullable=False, server_default=""),
+    Column("customer_channel_id", String(255)), Column("bridge_id", String(255)),
     Column("recording_name", String(255)), Column("recording_format", String(20)), Column("recording_status", String(40)),
     Column("recording_path", Text), Column("disposition", String(80)), Column("notes", Text))
 Index("idx_calls_employee_channel", calls.c.employee_channel_id)

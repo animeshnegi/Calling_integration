@@ -76,8 +76,13 @@ class AsteriskClient:
         )
         return call_id
 
-    def create_inbound_employee_leg(self, call_id: str, extension: str, customer_channel_id: str) -> str:
-        employee_channel = f"{call_id}-employee"
+    def create_inbound_employee_leg(self, call_id: str, extension: str, customer_channel_id: str, index: int = 0) -> str:
+        """Ring one device for an inbound call.
+
+        A main line rings several devices at once, so each leg gets its own
+        channel id: the first keeps the historical name and the rest are numbered.
+        """
+        employee_channel = f"{call_id}-employee" if int(index) <= 0 else f"{call_id}-employee-{int(index)}"
         self._request(
             "POST", "/channels",
             params={

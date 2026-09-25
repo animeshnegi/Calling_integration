@@ -95,7 +95,7 @@ Calling_integration/
 
 Open `/` for the public EIP Telephony Control landing, $5-per-number pricing, signup, and customer login. See [`docs/MULTI_TENANCY_AND_BILLING.md`](docs/MULTI_TENANCY_AND_BILLING.md) for resource ownership, carrier provisioning, tenant isolation, invoices, number discontinuation, and the secure `engineerip` customer provisioning command.
 
-Open `/admin` through the recommended HTTPS reverse proxy to use the responsive telephony control center. Its sidebar separates Dashboard, Extensions, Phone Numbers, SIP Providers, Call History, extension-grouped Recordings, CRM Webhooks, Call Settings, and Security. Administrators can add multiple DIDs, assign each number to one active extension, select per-extension outbound caller IDs, create/revoke scoped CRM API keys, search call history, play finalized recordings, manage extension voicemail inboxes, configure SendGrid attachment delivery, create extension-scoped users, set default/fallback extensions, and configure signed CRM webhooks without editing Asterisk files manually. Customer callbacks to a known DID ring only its owning extension; see [`docs/NUMBER_OWNERSHIP.md`](docs/NUMBER_OWNERSHIP.md). For the endpoint scope matrix, HMAC verification, durable webhook flow and production checklist, see [`docs/CRM_SECURITY_AUDIT.md`](docs/CRM_SECURITY_AUDIT.md). Voicemail can be enabled per extension with a private numeric PIN; users dial `*97` from their registered phone to enter their mailbox. See [`docs/EMAIL_AND_USERS.md`](docs/EMAIL_AND_USERS.md) for SendGrid and role-based access.
+Open `/admin` through the recommended HTTPS reverse proxy to use the responsive telephony control center. Its sidebar separates Dashboard, Extensions, Phone Numbers, SIP Providers, Call History, extension-grouped Recordings, CRM Webhooks, Call Settings, and Security. Administrators can add multiple DIDs, assign each number to one active extension, select per-extension outbound caller IDs, manage the scoped CRM API keys and signed CRM webhooks a customer created (an administrator never creates one for them), search call history, play finalized recordings, manage extension voicemail inboxes, configure SendGrid attachment delivery, create extension-scoped users, and edit a customer's call flows. Default outbound and inbound fallback extensions belong to the customer, who sets them on their Numbers page; recording is switched per device. Customer callbacks to a known DID ring only its owning extension; see [`docs/NUMBER_OWNERSHIP.md`](docs/NUMBER_OWNERSHIP.md). A signed-in account can open `/documentation` for the setup, REST API and webhook reference of this deployment, linked from the top of APIs & Webhooks; each extension registers with a generated SIP identity (`KUDGTE_101`), shown with the rest of its credentials in one copyable sheet. Devices register with the address an administrator stores under **Settings -> Server address** (an IP address or a subdomain), which also builds the API base and the examples on the documentation page. For the endpoint scope matrix, HMAC verification, durable webhook flow and production checklist, see [`docs/CRM_SECURITY_AUDIT.md`](docs/CRM_SECURITY_AUDIT.md). Voicemail can be enabled per extension with a private numeric PIN; users dial `*97` from their registered phone to enter their mailbox. See [`docs/EMAIL_AND_USERS.md`](docs/EMAIL_AND_USERS.md) for SendGrid and role-based access.
 
 ## Multiple extensions
 
@@ -170,7 +170,7 @@ Provider inbound traffic is matched using explicit IP/CIDR allowlists rendered a
 
 ## Recording
 
-Call recording is **off by default** globally and for every new extension. The administrator controls a master switch; when it is off, no administrator or user preference can start a recording. When the master switch is on, each assigned extension user can opt their own extension in or out from the Security page, and administrators can manage every extension's preference.
+Call recording is the customer's decision, per extension, and the administrator holds one **platform switch** that can stop it everywhere (Settings → Call recording). A new extension always starts with its own switch **off**, so nothing is recorded until someone opts that device in; the platform switch is a veto on top of that, never the reason a recording starts. A device records while both switches are on: the customer's for that extension, and the platform's. Turning the platform switch off stops recording immediately and keeps every customer's own choice for when it goes back on.
 
 Recordings are stored by Asterisk in the persistent recording volume. The Flask/API containers do not mount the recording volume. Retention is enforced by the ARI worker through the private Asterisk recordings API. Finalized recordings can be listed and securely streamed with the bearer-authenticated recording API, or played in the authenticated admin console; the underlying volume is never published.
 
@@ -220,7 +220,8 @@ For a normal local build, before deployment:
 
 ```bash
 cp .env.example .env
-# edit .env with real secrets, public address, extension passwords and provider details
+# edit .env: secrets, public address and the RTP range. Carrier credentials and
+# extensions are configured in the console (/admin), not in the environment.
 
 docker compose config
 docker compose build --no-cache
@@ -240,11 +241,11 @@ Use strong unique values for:
 
 - `SECRET_KEY`
 - `TELEPHONY_TOKEN`
-- `CRM_WEBHOOK_TOKEN`
+- `ADMIN_PASSWORD` (first-run administrator; change it in the console)
 - `ASTERISK_ARI_PASSWORD`
 - `ASTERISK_AMI_PASSWORD`
-- `EXTENSION_<number>_PASSWORD` for every configured SIP extension
-- `IPCOMMS_SIP_PASSWORD`
+- `CRM_WEBHOOK_TOKEN`, if a CRM endpoint is configured
+- the SIP passwords the console generates per extension, once handed to a device
 
 Rotate any credentials that were previously exposed in logs, screenshots, source code, or chat history.
 

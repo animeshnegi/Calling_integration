@@ -2,167 +2,576 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
   <title>EIP Telephony Control</title>
   <link rel="stylesheet" href="/admin-assets/admin.css">
 </head>
 <body class="theme-loading">
-<div class="app-shell">
+  <script>
+    /* Applies the remembered skin before the first paint so a reload never
+       flashes the other theme. The role decides the default on a first visit,
+       once the state payload names it. */
+    (function () {
+      try {
+        var role = localStorage.getItem('eip-console-role');
+        var skin = localStorage.getItem('eip-console-theme' + (role ? ':' + role : ''));
+        if (skin === 'light' || skin === 'dark') document.body.classList.add('theme-' + skin);
+      } catch (e) { /* storage unavailable: keep the role default */ }
+    })();
+  </script>
+<!-- Ambient gradient field; purely decorative. -->
+<div class="aurora" aria-hidden="true"><b></b><b></b><b></b></div>
+
+<div class="shell">
   <aside class="sidebar" id="sidebar">
-    <div class="brand"><span class="brand-mark">E</span><div><strong>EIP Telephony</strong><small>Control</small></div></div>
-    <nav id="nav">
-      <p>TELEPHONY</p>
-      <button class="nav-item active" data-page="users" data-admin-only><span>♙</span>Customers</button>
-      <button class="nav-item" data-page="dashboard"><span>⌂</span>Overview</button>
-      <button class="nav-item" data-page="numbers"><span>☎</span>Numbers</button>
-      <button class="nav-item" data-page="sipaccounts"><span>◈</span>SIP Accounts</button>
-      <button class="nav-item" data-page="extensions" data-customer-only><span>⌁</span>Extensions</button>
-      <button class="nav-item" data-page="routing" data-customer-only><span>⌘</span>Call Routing</button>
-      <button class="nav-item" data-page="calls" data-customer-only><span>◷</span>Calls</button>
-      <button class="nav-item" data-page="recordings" data-customer-only><span>◉</span>Recordings</button>
-      <button class="nav-item" data-page="billing"><span>▣</span>Payments</button>
-      <button class="nav-item" data-page="webhooks" data-customer-only><span>◇</span>APIs & Webhooks</button>
-      <p data-admin-only>PLATFORM</p>
-      <button class="nav-item" data-page="requests" data-admin-only><span>↗</span>Pending Requests <b class="nav-badge" id="request-badge">0</b></button>
-      <button class="nav-item" data-page="activity" data-admin-only><span>◌</span>Activity History</button>
-      <button class="nav-item" data-page="providers" data-admin-only><span>⇄</span>Carrier Providers</button>
-      <button class="nav-item" data-page="email" data-admin-only><span>✉</span>Email Delivery</button>
-      <button class="nav-item" data-page="settings" data-admin-only><span>⚙</span>Platform Settings</button>
-      <button class="nav-item" data-page="notifications"><span>●</span>Notifications <b class="nav-badge" id="notification-badge">0</b></button>
-      <button class="nav-item" data-page="security"><span>♢</span>Security</button>
+    <div class="brand">
+      <span class="brand-mark">E</span>
+      <div class="brand-copy"><strong>EIP Telephony</strong><small>Control</small></div>
+    </div>
+
+    <nav class="nav" id="nav" aria-label="Primary">
+      <p class="nav-group" data-admin-only>Workspace</p>
+      <button class="nav-item active" data-page="users" data-admin-only><span class="glyph">◍</span>Customers</button>
+      <button class="nav-item" data-page="dashboard"><span class="glyph">◎</span>Overview</button>
+
+      <p class="nav-group">Telephony</p>
+      <button class="nav-item" data-page="numbers"><span class="glyph">☎</span>Numbers</button>
+      <button class="nav-item" data-page="sipaccounts"><span class="glyph">◈</span>Devices &amp; SIP</button>
+      <button class="nav-item" data-page="extensions"><span class="glyph">⌁</span>Extensions</button>
+      <button class="nav-item" data-page="routing"><span class="glyph">⌘</span>Call Routing</button>
+      <button class="nav-item" data-page="calls"><span class="glyph">◷</span>Calls</button>
+      <button class="nav-item" data-page="recordings"><span class="glyph">◉</span>Recordings</button>
+      <button class="nav-item" data-page="voicemails"><span class="glyph">✉</span>Voicemail</button>
+
+      <p class="nav-group">Account</p>
+      <button class="nav-item" data-page="billing"><span class="glyph">▣</span>Billing</button>
+      <button class="nav-item" data-page="webhooks"><span class="glyph">◇</span>APIs &amp; Webhooks</button>
+      <a class="nav-item" href="/documentation" target="_blank" rel="noopener"><span class="glyph">▤</span>Documentation</a>
+      <button class="nav-item" data-page="notifications"><span class="glyph">●</span>Notifications <b class="nav-badge" id="notification-badge" hidden>0</b></button>
+      <button class="nav-item" data-page="security"><span class="glyph">♢</span>Security</button>
+
+      <p class="nav-group" data-admin-only>Platform</p>
+      <button class="nav-item" data-page="requests" data-admin-only><span class="glyph">↗</span>Requests <b class="nav-badge" id="request-badge" hidden>0</b></button>
+      <button class="nav-item" data-page="activity" data-admin-only><span class="glyph">◌</span>Activity</button>
+      <button class="nav-item" data-page="providers" data-admin-only><span class="glyph">⇄</span>Carrier Providers</button>
+      <button class="nav-item" data-page="email" data-admin-only><span class="glyph">✎</span>Email Delivery</button>
+      <button class="nav-item" data-page="settings" data-admin-only><span class="glyph">⚙</span>Platform Settings</button>
     </nav>
-    <div class="sidebar-user"><div class="avatar" id="avatar">A</div><div><strong id="who">Admin</strong><small id="role">Administrator</small></div><button title="Sign out" id="logout">↪</button></div>
+
+    <div class="sidebar-foot">
+      <div class="who">
+        <div class="avatar" id="avatar">A</div>
+        <div class="who-copy"><strong id="who">Admin</strong><small id="role">Administrator</small></div>
+        <button class="icon-btn" id="logout" title="Sign out" aria-label="Sign out">⏻</button>
+      </div>
+    </div>
   </aside>
 
   <main class="main">
-    <header class="topbar"><button class="menu-button" id="menu">☰</button><div><h1 id="page-title">Dashboard</h1><p id="page-subtitle">Your telephony system at a glance</p></div><div class="health" id="health"><i></i><span>Checking system…</span></div></header>
+    <header class="topbar" id="topbar">
+      <button class="icon-btn menu-btn" id="menu" aria-label="Open navigation">☰</button>
+      <div class="page-head"><h1 id="page-title">Overview</h1><p id="page-subtitle">Your telephony environment at a glance</p></div>
+      <div class="topbar-tools">
+        <div class="health" id="health"><i></i><span>Checking system…</span></div>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false">
+          <span class="knob" aria-hidden="true"></span>
+          <span class="glyph" id="theme-glyph" aria-hidden="true">☾</span>
+          <span class="label" id="theme-label">Dark</span>
+        </button>
+      </div>
+    </header>
 
     <div class="content">
+      <!-- ============================================================ OVERVIEW -->
       <section class="page active" id="page-dashboard">
+        <section class="system-board" id="system-board" data-admin-only aria-label="Live platform activity"></section>
         <div class="stat-grid" data-customer-only>
-          <article class="stat"><span class="stat-icon blue">☎</span><div><small>Total calls</small><strong id="stat-total">0</strong><em>All time</em></div></article>
-          <article class="stat"><span class="stat-icon green">✓</span><div><small>Answered</small><strong id="stat-answered">0</strong><em id="answer-rate">0% answer rate</em></div></article>
-          <article class="stat"><span class="stat-icon red">!</span><div><small>Failed</small><strong id="stat-failed">0</strong><em>Needs attention</em></div></article>
-          <article class="stat"><span class="stat-icon purple">◉</span><div><small>Recordings</small><strong id="stat-recordings">0</strong><em>Available to play</em></div></article>
-          <article class="stat"><span class="stat-icon blue">✉</span><div><small>New voicemail</small><strong id="stat-voicemails">0</strong><em>Waiting to be heard</em></div></article>
+          <article class="stat tone-info"><div class="stat-top"><span class="stat-icon">☎</span><span class="stat-label">Total calls</span></div><div class="stat-value" id="stat-total">0</div><div class="stat-note">All time</div></article>
+          <article class="stat tone-ok"><div class="stat-top"><span class="stat-icon">✓</span><span class="stat-label">Answered</span></div><div class="stat-value" id="stat-answered">0</div><div class="stat-note" id="answer-rate">0% answer rate</div></article>
+          <article class="stat tone-bad"><div class="stat-top"><span class="stat-icon">!</span><span class="stat-label">Failed</span></div><div class="stat-value" id="stat-failed">0</div><div class="stat-note">Needs attention</div></article>
+          <article class="stat tone-violet"><div class="stat-top"><span class="stat-icon">◉</span><span class="stat-label">Recordings</span></div><div class="stat-value" id="stat-recordings">0</div><div class="stat-note">Available to play</div></article>
+          <article class="stat tone-info"><div class="stat-top"><span class="stat-icon">✉</span><span class="stat-label">New voicemail</span></div><div class="stat-value" id="stat-voicemails">0</div><div class="stat-note">Waiting to be heard</div></article>
         </div>
-        <div class="analytics-grid" data-customer-only>
-          <article class="panel analytics-card"><div class="panel-head"><div><h2>14-day call volume</h2><p>Answered calls compared with total attempts</p></div><span class="count" id="analytics-period">Last 14 days</span></div><div class="trend-chart" id="call-trend"><div class="skeleton"></div></div></article>
-          <article class="panel analytics-card"><div class="panel-head"><div><h2>Service performance</h2><p>Operational metrics across your environment</p></div></div><div class="metric-list"><div><span>Answer rate</span><strong id="metric-answer-rate">0%</strong></div><div><span>Missed inbound</span><strong id="metric-missed">0</strong></div><div><span>Average answered duration</span><strong id="metric-duration">0s</strong></div><div><span>Inbound / outbound</span><strong id="metric-direction">0 / 0</strong></div></div></article>
+
+        <div class="ws-status" id="customer-status" data-customer-only style="margin-top:16px"></div>
+
+        <div class="grid split-analytics" data-customer-only style="margin-top:16px">
+          <article class="panel feature sheen">
+            <div class="panel-head"><div><h2>14-day call volume</h2><p>Answered calls compared with total attempts</p></div><span class="count" id="analytics-period">Last 14 days</span></div>
+            <div class="panel-body"><div class="chart" id="call-trend"><div class="skeleton" style="height:150px"></div></div></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><h2>Service performance</h2><p>Operational metrics across your environment</p></div></div>
+            <div class="panel-body flush"><div class="metric-rows">
+              <div><span>Answer rate</span><strong id="metric-answer-rate">0%</strong></div>
+              <div><span>Missed inbound</span><strong id="metric-missed">0</strong></div>
+              <div><span>Average answered duration</span><strong id="metric-duration">0s</strong></div>
+              <div><span>Inbound / outbound</span><strong id="metric-direction">0 / 0</strong></div>
+            </div></div>
+          </article>
         </div>
-        <article class="onboarding panel" data-customer-only><div class="panel-head"><div><h2>Your setup journey</h2><p>Complete each step to launch your phone system.</p></div><button class="button primary" id="request-number">Request a number</button></div><div class="journey" id="customer-journey"><span class="done">✓ Signup</span><i></i><span data-step="request">2 Request Number</span><i></i><span data-step="number">3 Number Assigned</span><i></i><span data-step="sip">4 SIP Credentials</span><i></i><span data-step="extensions">5 Extensions</span><i></i><span data-step="routing">6 Call Routing</span><i></i><span data-step="api">7 APIs</span></div></article>
-        <article class="panel customer-request-panel" data-customer-only><div class="panel-head"><div><h2>My administrative requests</h2><p>Track number provisioning and administrator responses.</p></div><span class="count" id="my-request-count">0 requests</span></div><div id="my-request-list" class="request-tracker"></div></article>
-        <div class="panel-grid dashboard-grid" data-admin-only>
-          <article class="panel"><div class="panel-head"><div><h2>Quick actions</h2><p>Common configuration tasks</p></div></div><div class="quick-grid">
-            <button data-go="users" data-new="user"><b>＋</b><span>Add customer<small>Create customer access</small></span></button>
-            <button data-go="numbers" data-new="number"><b>＋</b><span>Assign phone number<small>Provision a customer DID</small></span></button>
-            <button data-go="sipaccounts" data-new="sipaccount"><b>＋</b><span>Assign SIP account<small>Provision secure service</small></span></button>
-            <button data-go="providers" data-new="provider"><b>＋</b><span>Add SIP provider<small>Connect your carrier</small></span></button>
-          </div></article>
-          <article class="panel"><div class="panel-head"><div><h2>System configuration</h2><p>Current active resources</p></div></div><div class="system-list"><div><span>Active customers</span><strong id="dash-customers">0</strong></div><div><span>Assigned phone numbers</span><strong id="dash-numbers">0</strong></div><div><span>Customer SIP accounts</span><strong id="dash-sipaccounts">0</strong></div><div><span>SIP providers</span><strong id="dash-providers">0</strong></div></div></article>
+
+        <section class="hero sheen" data-customer-only style="margin-top:16px">
+          <h2>Your setup journey</h2>
+          <p>Complete each step to get your phone system fully live. Progress is saved automatically.</p>
+          <div class="journey" id="customer-journey"></div>
+          <div class="hero-actions"><button class="btn primary" id="request-number">Request a number</button></div>
+        </section>
+
+        <div class="grid cols-2" data-admin-only>
+          <article class="panel">
+            <div class="panel-head"><div><h2>Quick actions</h2><p>Common provisioning tasks</p></div></div>
+            <div class="panel-body"><div class="grid cols-2">
+              <button class="ws-metric" data-go="users" data-new="user"><span class="glyph">＋</span><p><small>Add customer</small><b style="font-size:13px">Create access</b></p></button>
+              <button class="ws-metric" data-go="numbers" data-new="number"><span class="glyph">＋</span><p><small>Assign number</small><b style="font-size:13px">Provision a DID</b></p></button>
+              <button class="ws-metric" data-go="sipaccounts" data-new="sipaccount"><span class="glyph">＋</span><p><small>SIP service</small><b style="font-size:13px">Add a device</b></p></button>
+              <button class="ws-metric" data-go="providers" data-new="provider"><span class="glyph">＋</span><p><small>Carrier</small><b style="font-size:13px">Add provider</b></p></button>
+            </div></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><h2>Platform totals</h2><p>Active resources across every customer</p></div></div>
+            <div class="panel-body flush"><div class="metric-rows">
+              <div><span>Active customers</span><strong id="dash-customers">0</strong></div>
+              <div><span>Assigned phone numbers</span><strong id="dash-numbers">0</strong></div>
+              <div><span>Customer SIP devices</span><strong id="dash-sipaccounts">0</strong></div>
+              <div><span>Carrier providers</span><strong id="dash-providers">0</strong></div>
+            </div></div>
+          </article>
         </div>
-        <article class="panel" data-customer-only><div class="panel-head"><div><h2>Recent calls</h2><p>Latest activity across all extensions</p></div><button class="button ghost" data-go="calls">View all</button></div><div id="recent-calls" class="table-wrap"></div></article>
+
+        <article class="panel" data-admin-only style="margin-top:16px">
+          <div class="panel-head"><div><h2>Recent call activity</h2><p>Latest calls across every customer</p></div><button class="btn ghost sm" data-go="calls">Open call history</button></div>
+          <div class="panel-body flush"><div id="recent-calls" class="table-wrap"></div></div>
+        </article>
+
+        <article class="panel sheen" data-customer-only style="margin-top:16px">
+          <div class="panel-head"><div><h2>My requests</h2><p>Track number provisioning and administrator responses</p></div><span class="count" id="my-request-count">0 requests</span></div>
+          <div class="panel-body flush"><div id="my-request-list" class="timeline"></div></div>
+        </article>
+
+        <article class="panel" data-customer-only style="margin-top:16px">
+          <div class="panel-head"><div><h2>Recent calls</h2><p>Latest activity across your extensions</p></div><button class="btn ghost sm" data-go="calls">View all</button></div>
+          <div class="panel-body flush"><div id="recent-calls-customer" class="table-wrap"></div></div>
+        </article>
       </section>
 
-      <section class="page" id="page-extensions">
-        <div class="page-actions"><div class="search"><span>⌕</span><input id="extension-search" placeholder="Search extension or employee"></div><button class="button primary" data-open="extension">＋ Add extension</button></div>
-        <article class="panel"><div class="panel-head"><div><h2>Extensions</h2><p>SIP users, availability and per-extension recording policy</p></div><span class="count" id="extension-count">0 extensions</span></div><div id="extension-list" class="card-list"></div></article>
-      </section>
-
-      <section class="page" id="page-numbers">
-        <div class="page-actions"><div class="search"><span>⌕</span><input id="number-search" placeholder="Search number, owner or extension"></div><button class="button primary" data-open="number" data-admin-only>＋ Add phone number</button></div>
-        <article class="info-banner"><b>Number ownership</b><span>Assign each DID to one extension. Outbound calls present that number, and customer callbacks ring only its assigned employee—not every extension.</span></article>
-        <article class="panel"><div class="panel-head"><div><h2>Phone numbers & DIDs</h2><p>Manage inbound numbers and destinations</p></div><span class="count" id="number-count">0 numbers</span></div><div id="number-list" class="card-list"></div></article>
-      </section>
-
-      <section class="page" id="page-providers">
-        <div class="page-actions" data-admin-only><div></div><button class="button primary" data-open="provider">＋ Add SIP provider</button></div>
-        <article class="panel"><div class="panel-head"><div><h2>SIP providers</h2><p>Carrier registration, codecs and trusted inbound networks</p></div></div><div id="provider-list" class="card-list"></div></article>
-      </section>
-
-      <section class="page" id="page-calls">
-        <div class="page-actions"><div><span class="count">Outbound calls ring your extension first</span></div><div class="action-cluster"><a class="button ghost" href="/admin/api/calls/export.csv" download>Export CSV</a><button class="button primary" data-open="call">＋ New outbound call</button></div></div>
-        <div class="filterbar"><div class="search"><span>⌕</span><input id="call-search" placeholder="Search phone, call ID, contact or member"></div><select id="call-extension"><option value="">All extensions</option></select><select id="call-status"><option value="">All statuses</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="answered">Answered</option><option value="ringing">Ringing</option></select><button class="button ghost" id="refresh-calls">Refresh</button></div>
-        <article class="panel"><div class="panel-head"><div><h2>Call history</h2><p>Outbound lifecycle, CRM references and duration</p></div><span class="count" id="call-count">0 calls</span></div><div id="call-list" class="table-wrap"></div><div class="pager" id="call-pager"></div></article>
-      </section>
-
-      <section class="page" id="page-recordings">
-        <div class="filterbar"><div class="search"><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div><select id="recording-customer" data-admin-only><option value="">All customers</option></select><select id="recording-extension"><option value="">All extensions</option></select><input id="recording-from" type="date" title="From date"><input id="recording-to" type="date" title="To date"><a class="button ghost" href="/admin/api/calls/export.csv?recordings=true" download>Export CSV</a><button class="button ghost" id="refresh-recordings">Refresh</button></div>
-        <article class="panel"><div class="panel-head"><div><h2>Recordings by extension</h2><p>Secure playback grouped by employee extension</p></div><span class="count" id="recording-count">0 recordings</span></div><div id="recording-list" class="recording-groups"></div><div class="pager" id="recording-pager"></div></article>
-      </section>
-
-      <section class="page" id="page-voicemails">
-        <div class="filterbar"><div class="search"><span>⌕</span><input id="voicemail-search" placeholder="Search caller or message"></div><select id="voicemail-extension"><option value="">All mailboxes</option></select><select id="voicemail-folder"><option value="">All folders</option><option value="inbox">New</option><option value="old">Read</option><option value="urgent">Urgent</option></select><button class="button ghost" id="refresh-voicemails">Refresh</button></div>
-        <article class="panel"><div class="panel-head"><div><h2>Extension voicemails</h2><p>Listen, mark as read, and delete mailbox messages</p></div><span class="count" id="voicemail-count">0 messages</span></div><div id="voicemail-list" class="recording-groups"></div></article>
-      </section>
-
-      <section class="page" id="page-webhooks">
-        <div class="page-actions"><div></div><button class="button primary" data-open="webhook">＋ Add webhook</button></div>
-        <article class="panel"><div class="panel-head"><div><h2>CRM webhooks</h2><p>Send selected call events to your CRM or other services</p></div></div><div id="webhook-list" class="card-list"></div></article>
-        <article class="panel" style="margin-top:16px"><div class="panel-head"><div><h2>API keys</h2><p>Generate scoped credentials for your applications</p></div><button class="button primary" data-open="apikey">＋ Create API key</button></div><div id="api-key-list" class="card-list"></div></article>
-        <article class="panel" style="margin-top:16px"><div class="panel-head"><div><h2>Recent webhook deliveries</h2><p>Persistent outbox attempts, success and terminal errors</p></div></div><div id="webhook-delivery-list" class="table-wrap"></div></article>
-      </section>
-
-      <section class="page" id="page-sipaccounts">
-        <div class="page-actions"><div class="live-legend"><i></i> Live registration status</div><button class="button primary" data-open="sipaccount" data-admin-only>＋ Assign SIP account</button></div>
-        <article class="panel"><div class="panel-head"><div><h2>SIP accounts & devices</h2><p>Customer ownership, registration, number and extension mapping</p></div><span class="count" id="sip-count">0 accounts</span></div><div id="sip-account-list" class="glass-grid"></div></article>
-      </section>
-
-      <section class="page" id="page-routing">
-        <article class="flow-toolbar panel"><div><h2>Visual Call Flow Builder</h2><p>Build the incoming journey, then save it to your assigned number.</p></div><div><select id="route-number"></select><button class="button primary" id="save-route">Save flow</button></div></article>
-        <div class="flow-layout"><aside class="panel flow-palette"><div class="palette-title"><span>FLOW BLOCKS</span><h3>Build the caller journey</h3><p>Drag a block onto the canvas or click to add.</p></div><button draggable="true" data-node-type="business_hours"><b class="node-glyph hours">◷</b><span>Business hours<small>Open and closed schedules</small></span></button><button draggable="true" data-node-type="simultaneous"><b class="node-glyph ring">⇉</b><span>Simultaneous ring<small>Reach everyone at once</small></span></button><button draggable="true" data-node-type="sequential"><b class="node-glyph sequence">⇢</b><span>Sequential ring<small>Try agents in order</small></span></button><button draggable="true" data-node-type="ring_group"><b class="node-glyph group">◎</b><span>Ring group<small>Route to a department</small></span></button><button draggable="true" data-node-type="extension"><b class="node-glyph extension">⌁</b><span>Extension<small>Send to one teammate</small></span></button><button draggable="true" data-node-type="voicemail"><b class="node-glyph voicemail">✉</b><span>Voicemail<small>Capture unanswered calls</small></span></button><button draggable="true" data-node-type="forward"><b class="node-glyph forward">↗</b><span>Forward number<small>Route outside the system</small></span></button></aside><section class="panel flow-canvas" id="flow-canvas"><div class="canvas-orb orb-one"></div><div class="canvas-orb orb-two"></div><div class="canvas-status"><span><i></i> LIVE CALL PATH</span><small>Drag nodes to reorder · click to configure</small></div><div class="flow-node incoming configured" data-fixed><div class="flow-node-icon">☎</div><div><b>Incoming call</b><small id="flow-entry-number">Your assigned number</small></div><span class="node-step">START</span></div><div id="flow-nodes"></div><div class="flow-drop-hint"><b>＋</b><span>Drop the next routing block here</span></div></section></div>
-      </section>
-
-      <section class="page" id="page-requests">
-        <article class="panel"><div class="panel-head"><div><h2>Pending customer requests</h2><p>Approve, reject, or jump directly to number assignment</p></div><span class="pulse-badge" id="request-count">0 pending</span></div><div id="request-list" class="card-list"></div></article>
-      </section>
-
-      <section class="page" id="page-activity">
-        <article class="panel"><div class="panel-head"><div><h2>Platform activity history</h2><p>Number assignments, SIP changes, extensions, access and API generation</p></div></div><div id="activity-list" class="timeline"></div></article>
-      </section>
-
-      <section class="page" id="page-notifications">
-        <article class="panel"><div class="panel-head"><div><h2>Notifications</h2><p>Assignments, devices, missed calls, billing and integration alerts</p></div><button class="button ghost" id="read-all-notifications">Mark all read</button></div><div id="notification-list" class="card-list"></div></article>
-      </section>
-
-      <section class="page" id="page-settings">
-        <form class="panel form-panel" id="settings-form"><div class="panel-head"><div><h2>Call routing</h2><p>Defaults used by API calls and unmatched inbound calls</p></div></div><div class="form-grid"><label>Default outbound extension<select id="default-extension"></select><small>Used when an API request omits extension.</small></label><label>Inbound fallback extension<select id="inbound-fallback"></select><small>Used when a DID has no valid destination.</small></label></div><hr><div class="panel-head"><div><h2>Recording policy</h2><p>Global controls; individual extensions can opt out</p></div></div><label class="switch-row"><span><b>Master recording switch for the entire system</b><small>Off by default. When off, no administrator or user extension can record calls.</small></span><input id="rec-enabled" type="checkbox"><i></i></label><div class="form-grid"><label>Audio format<select id="rec-format"><option value="wav">WAV — recommended</option><option value="wav49">WAV49</option><option value="gsm">GSM</option><option value="slin16">Signed linear 16 kHz</option></select></label><label>Retention days<input id="rec-retention" type="number" min="1" max="3650"></label><label>Maximum duration in seconds<input id="rec-max" type="number" min="0" max="86400"><small>Use 0 for unlimited.</small></label><label>Announcement media URI<input id="rec-media" placeholder="sound:your-recording-notice"></label></div><label class="switch-row"><span><b>Play recording announcement</b><small>Play the configured media when recording begins.</small></span><input id="rec-announcement" type="checkbox"><i></i></label><label class="switch-row"><span><b>Recording beep</b><small>Play an audible beep at recording start.</small></span><input id="rec-beep" type="checkbox"><i></i></label><div class="form-actions"><button class="button primary" type="submit">Save call settings</button></div></form>
-      </section>
-
+      <!-- =========================================================== CUSTOMERS -->
       <section class="page" id="page-users">
-        <div class="page-actions"><div class="search"><span>⌕</span><input id="customer-search" placeholder="Search company, contact, email or phone"></div><button class="button primary" data-open="user">＋ Add customer</button></div>
-        <article class="panel"><div class="panel-head"><div><h2>Customer accounts</h2><p>Create customer login accounts, then assign numbers and SIP-backed extensions separately</p></div></div><div id="user-list" class="card-list"></div></article>
-        <article class="panel" style="margin-top:16px"><div class="panel-head"><div><h2>Platform administrators</h2><p>Separate privileged accounts; customers are never given this role</p></div><button class="button ghost" data-open="platformadmin">＋ Add administrator</button></div><div id="platform-admin-list" class="card-list"></div></article>
+        <div class="toolbar">
+          <div class="search"><span>⌕</span><input id="customer-search" placeholder="Search company, contact, email or phone"></div>
+          <span class="spacer"></span>
+          <button class="btn primary" data-open="user">＋ Add customer</button>
+        </div>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Customer accounts</h2><p>Open a customer to manage their numbers, devices, routing, calls, billing and integrations in one place</p></div><span class="count" id="customer-count">0 customers</span></div>
+          <div class="panel-body flush"><div id="user-list" class="cards"></div></div>
+        </article>
+        <article class="panel" style="margin-top:16px">
+          <div class="panel-head"><div><h2>Platform administrators</h2><p>Privileged accounts; customers are never given this role</p></div><button class="btn ghost sm" data-open="platformadmin">＋ Add administrator</button></div>
+          <div class="panel-body flush"><div id="platform-admin-list" class="rows"></div></div>
+        </article>
       </section>
 
-      <section class="page" id="page-email">
-        <form class="panel form-panel" id="email-form"><div class="panel-head"><div><h2>SendGrid voicemail delivery</h2><p>The API key is encrypted and can only be configured by an administrator</p></div></div><label class="switch-row"><span><b>Enable voicemail email</b><small>Send each new voicemail as an email attachment.</small></span><input id="email-enabled" type="checkbox"><i></i></label><div class="form-grid"><label>SendGrid API key<input id="sendgrid-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><small id="sendgrid-key-status">No key configured</small></label><label>Verified sender email<input id="sendgrid-from" type="email" placeholder="voicemail@example.com"></label><label>Sender name<input id="sendgrid-name" maxlength="120" placeholder="EIP Telephony Voicemail"></label><label>Test recipient<input id="sendgrid-test" type="email" placeholder="admin@example.com"><button class="button ghost" type="button" id="test-email">Send test email</button></label></div><div class="form-actions"><button class="button primary" type="submit">Save email configuration</button></div></form>
-        <article class="panel" style="margin-top:16px"><div class="panel-head"><div><h2>Recent email deliveries</h2><p>Latest SendGrid attempts and errors</p></div></div><div id="email-delivery-list" class="table-wrap"></div></article>
+      <!-- ========================================================== EXTENSIONS -->
+      <section class="page" id="page-extensions">
+        <div class="toolbar">
+          <div class="search"><span>⌕</span><input id="extension-search" placeholder="Search extension or employee"></div>
+          <span class="spacer"></span>
+          <button class="btn primary" data-open="extension">＋ Add extension</button>
+        </div>
+        <div class="notice"><span class="glyph">⌁</span><div><b>Extensions are the technical layer behind a device</b>Each extension maps one employee or department to a SIP identity. Customers normally manage the devices and credentials that connect to it.</div></div>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Extensions</h2><p>Internal destinations, availability and per-extension policies</p></div><span class="count" id="extension-count">0 extensions</span></div>
+          <div class="panel-body flush"><div id="extension-list" class="rows"></div></div>
+        </article>
       </section>
 
+      <!-- ============================================================= NUMBERS -->
+      <section class="page" id="page-numbers">
+        <div class="customer-picker" id="number-picker" data-admin-only></div>
+        <div class="toolbar">
+          <div class="search"><span>⌕</span><input id="number-search" placeholder="Search number, owner or extension"></div>
+          <span class="spacer"></span>
+          <button class="btn primary" data-open="number" data-admin-only>＋ Add phone number</button>
+        </div>
+        <article class="notice"><span class="glyph">☎</span><div><b>Number ownership</b>Each number is assigned to one extension. Outbound calls present that number, and customer callbacks ring only its assigned employee.</div></article>
+        <form class="panel" id="call-defaults-form" data-customer-only>
+          <div class="panel-head"><div><h2>Call defaults</h2><p>Where your calls go when nothing more specific is chosen</p></div><span class="count" id="call-defaults-count">0 extensions</span></div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label class="field">Default outbound extension<select id="default-extension"></select><small>Used when an API request omits the extension.</small></label>
+              <label class="field">Inbound fallback extension<select id="inbound-fallback"></select><small>Used when one of your numbers has no valid destination.</small></label>
+            </div>
+            <div class="btn-row" style="margin-top:14px"><button class="btn primary" type="submit">Save call defaults</button></div>
+          </div>
+        </form>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Phone numbers &amp; DIDs</h2><p>Assignment, status and outbound caller ID</p></div><span class="count" id="number-count">0 numbers</span></div>
+          <div class="panel-body flush"><div id="number-list" class="rows"></div></div>
+        </article>
+      </section>
 
+      <!-- ==================================================== DEVICES & SIP -->
+      <section class="page" id="page-sipaccounts">
+        <div class="customer-picker" id="sip-picker" data-admin-only></div>
+        <div class="toolbar">
+          <div class="search"><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
+          <span class="spacer"></span>
+          <button class="btn primary" data-open="sipaccount" data-admin-only>＋ Assign SIP service</button>
+        </div>
+        <article class="notice"><span class="glyph">◈</span><div><b>Connected devices</b>Each SIP account is the credential set a physical phone, softphone or device uses to register. Share credentials only with the person using that device.</div></article>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Extension credentials</h2><p>The username and password each extension registers with</p></div><span class="count" id="extension-credential-count">0 extensions</span></div>
+          <div class="panel-body flush"><div id="extension-credential-list" class="rows"></div></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Devices &amp; SIP accounts</h2><p>Ownership, registration, number and extension mapping</p></div><span class="count" id="sip-count">0 accounts</span></div>
+          <div class="panel-body flush"><div id="sip-account-list" class="cards"></div></div>
+        </article>
+      </section>
+
+      <!-- ============================================================ ROUTING -->
+      <section class="page" id="page-routing">
+        <div class="flow-toolbar sheen">
+          <div><h2>Call flows</h2><p data-customer-only>One builder for every target: save a flow to a number, an extension or a group.</p><p data-admin-only>Edit a customer's flows exactly as their callers meet them: choose the customer, then the number, extension or group.</p></div>
+          <div class="tools">
+            <select id="route-owner" aria-label="Customer" data-admin-only></select>
+            <select id="route-target" aria-label="Call flow target"></select>
+            <button class="btn primary" id="save-route">Save flow</button>
+          </div>
+        </div>
+        <div class="flow-layout">
+          <aside class="panel palette">
+            <div class="title"><span>FLOW BLOCKS</span><h3>Build the caller journey</h3><p>Drag a block onto the canvas, or click to append it.</p></div>
+            <button draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>Open and closed schedules</small></span></button>
+            <button draggable="true" data-node-type="simultaneous"><b class="tile tile-ring">⇉</b><span class="copy"><b>Simultaneous ring</b><small>Reach everyone at once</small></span></button>
+            <button draggable="true" data-node-type="sequential"><b class="tile tile-seq">⇢</b><span class="copy"><b>Sequential ring</b><small>Try agents in order</small></span></button>
+            <button draggable="true" data-node-type="ring_group"><b class="tile tile-group">◎</b><span class="copy"><b>Ring group</b><small>Route to a department</small></span></button>
+            <button draggable="true" data-node-type="extension"><b class="tile tile-ext">⌁</b><span class="copy"><b>Extension</b><small>Send to one teammate</small></span></button>
+            <button draggable="true" data-node-type="voicemail"><b class="tile tile-vm">✉</b><span class="copy"><b>Voicemail</b><small>Capture unanswered calls</small></span></button>
+            <button draggable="true" data-node-type="forward"><b class="tile tile-fwd">↗</b><span class="copy"><b>Forward number</b><small>Route outside the system</small></span></button>
+          </aside>
+          <section class="panel canvas" id="flow-canvas">
+            <div class="canvas-orb a"></div><div class="canvas-orb b"></div>
+            <div class="canvas-status"><span><span class="live-dot"></span> LIVE CALL PATH</span><small data-customer-only>Drag nodes to reorder · click to configure</small><small data-admin-only>What the customer's callers hear</small></div>
+            <div class="canvas-empty">
+              <div class="glyph">⌘</div>
+              <h4>Design how this line answers</h4>
+              <p>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
+              <p data-admin-only>This is the journey the customer has built for this number. Provision their devices and numbers here; they decide how a call is answered.</p>
+              <ol data-customer-only>
+                <li>Choose a number, extension or group</li>
+                <li>Add routing blocks</li>
+                <li>Configure each step</li>
+                <li>Save the flow</li>
+              </ol>
+            </div>
+            <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Your assigned number</small></div><span class="step">START</span></div>
+            <div id="flow-nodes"></div>
+            <div class="flow-drop" data-customer-only><b>＋</b><span>Drop the next routing block here</span></div>
+          </section>
+        </div>
+        <aside class="panel palette groups-panel">
+          <div class="title"><span>RING GROUPS</span><h3>Teams and departments</h3>
+            <p>A group rings its members together and can carry its own call flow: choose it as the target above, or as a ring destination inside any flow.</p>
+            <button class="btn primary" data-open="group">＋ Add group</button></div>
+          <div id="group-list" class="rows"></div>
+        </aside>
+      </section>
+
+      <!-- ============================================================== CALLS -->
+      <section class="page" id="page-calls">
+        <div class="toolbar">
+          <div class="search"><span>⌕</span><input id="call-search" placeholder="Search phone, call ID, contact or member"></div>
+          <select id="call-extension"><option value="">All extensions</option></select>
+          <select id="call-status"><option value="">All statuses</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="answered">Answered</option><option value="ringing">Ringing</option></select>
+          <span class="spacer"></span>
+          <button class="btn ghost sm" id="refresh-calls">Refresh</button>
+          <a class="btn ghost sm" href="/admin/api/calls/export.csv" download>Export CSV</a>
+          <button class="btn primary" data-open="call" data-customer-only>＋ New call</button>
+        </div>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Call history</h2><p>Outbound lifecycle, CRM references and duration</p></div><span class="count" id="call-count">0 calls</span></div>
+          <div class="panel-body flush"><div id="call-list" class="table-wrap"></div><div class="pager" id="call-pager"></div></div>
+        </article>
+      </section>
+
+      <!-- ========================================================= RECORDINGS -->
+      <section class="page" id="page-recordings">
+        <div class="toolbar">
+          <div class="search"><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div>
+          <select id="recording-customer" data-admin-only><option value="">All customers</option></select>
+          <select id="recording-extension"><option value="">All extensions</option></select>
+          <input id="recording-from" type="date" title="From date" style="width:auto">
+          <input id="recording-to" type="date" title="To date" style="width:auto">
+          <span class="spacer"></span>
+          <button class="btn ghost sm" id="refresh-recordings">Refresh</button>
+          <a class="btn ghost sm" href="/admin/api/calls/export.csv?recordings=true" download>Export CSV</a>
+        </div>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Recordings by extension</h2><p>Secure playback grouped by employee extension</p></div><span class="count" id="recording-count">0 recordings</span></div>
+          <div class="panel-body flush"><div id="recording-list" class="rows"></div><div class="pager" id="recording-pager"></div></div>
+        </article>
+      </section>
+
+      <!-- =========================================================== VOICEMAIL -->
+      <section class="page" id="page-voicemails">
+        <div class="toolbar">
+          <div class="search"><span>⌕</span><input id="voicemail-search" placeholder="Search caller or mailbox"></div>
+          <select id="voicemail-extension"><option value="">All mailboxes</option></select>
+          <select id="voicemail-folder"><option value="">All folders</option><option value="inbox">New</option><option value="old">Read</option><option value="urgent">Urgent</option></select>
+          <span class="spacer"></span>
+          <button class="btn ghost sm" id="refresh-voicemails">Refresh</button>
+        </div>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Voicemail</h2><p>Listen to messages, mark them read, or delete them</p></div><span class="count" id="voicemail-count">0 messages</span></div>
+          <div class="panel-body flush"><div id="voicemail-list" class="rows"></div></div>
+        </article>
+      </section>
+
+      <!-- ================================================= APIS & WEBHOOKS -->
+      <section class="page" id="page-webhooks">
+        <div class="doc-link">
+          <span>Setup guide, REST API and webhook reference for this deployment
+            <b>API base</b> <code id="integration-api-base">—</code></span>
+          <a class="btn ghost sm" href="/documentation" target="_blank" rel="noopener">Documentation ↗</a>
+        </div>
+        <div class="customer-picker" id="integration-picker" data-admin-only></div>
+        <article class="notice secure"><span class="glyph">◇</span><div><b>Integrations</b><span data-customer-only>API keys authenticate your own software against the EIP API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own.</span><span data-admin-only>Choose a customer to inspect the keys and webhooks their software uses. These credentials belong to them, so creating one is their action, not the platform's.</span></div></article>
+
+        <div class="grid cols-2">
+          <article class="panel">
+            <div class="panel-head"><div><h2>API keys</h2><p>Scoped credentials for your applications</p></div><button class="btn primary sm" data-open="apikey" data-customer-only>＋ Create key</button></div>
+            <div class="panel-body flush"><div id="api-key-list" class="rows"></div></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><h2>Webhook endpoints</h2><p>Send selected call events to your CRM or service</p></div><button class="btn primary sm" data-open="webhook" data-customer-only>＋ Add endpoint</button></div>
+            <div class="panel-body flush"><div id="webhook-list" class="rows"></div></div>
+          </article>
+        </div>
+
+        <article class="panel" style="margin-top:16px">
+          <div class="panel-head"><div><h2>Webhook delivery history</h2><p>Persistent outbox attempts, retries and terminal errors</p></div><span class="count" id="delivery-count">0 deliveries</span></div>
+          <div class="panel-body flush"><div id="webhook-delivery-list" class="table-wrap"></div></div>
+        </article>
+      </section>
+
+      <!-- ============================================================ BILLING -->
       <section class="page" id="page-billing">
-        <article class="info-banner"><b>$5 per number / month</b><span>Every assigned number includes extensions, calls, voicemail, recordings, API keys and CRM webhooks. Payments are handled externally; invoices are available here.</span></article>
-        <article class="panel"><div class="panel-head"><div><h2>Subscriptions</h2><p>Monthly number billing, renewal cycles and scheduled discontinuation</p></div></div><div id="subscription-list" class="card-list"></div></article>
-        <article class="panel" style="margin-top:16px"><div class="panel-head"><div><h2>Invoices</h2><p>Invoice-only billing records</p></div></div><div id="invoice-list" class="table-wrap"></div></article>
+        <div class="notice"><span class="glyph">▣</span><div><b>$5 per number / month</b>Every assigned number includes extensions, calls, voicemail, recordings, API keys and CRM webhooks. Payments are collected externally; invoices are recorded here.</div></div>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Subscriptions</h2><p>Monthly number billing, renewal cycles and scheduled discontinuation</p></div></div>
+          <div class="panel-body flush"><div id="subscription-list" class="rows"></div></div>
+        </article>
+        <article class="panel" style="margin-top:16px">
+          <div class="panel-head"><div><h2>Invoices</h2><p>Invoice history and payment status</p></div></div>
+          <div class="panel-body flush"><div id="invoice-list" class="table-wrap"></div></div>
+        </article>
       </section>
 
-      <section class="page" id="page-security">
-        <form class="panel form-panel narrow" id="profile-recording-form"><div class="panel-head"><div><h2>My call recording</h2><p>Your preference only applies while the administrator's global recording switch is enabled</p></div></div><label class="switch-row"><span><b>Allow recording for my extension</b><small id="profile-recording-help">Recording is off by default.</small></span><input id="profile-recording" type="checkbox"><i></i></label><div class="form-actions"><button class="button primary" type="submit">Save recording preference</button></div></form>
-        <form class="panel form-panel narrow" id="profile-email-form"><div class="panel-head"><div><h2>My voicemail email</h2><p>Messages for your assigned extension are sent here</p></div></div><label>Email address<input id="profile-email" type="email" placeholder="you@example.com"></label><div class="form-actions"><button class="button primary" type="submit">Save email address</button></div></form>
+      <!-- ====================================================== NOTIFICATIONS -->
+      <section class="page" id="page-notifications">
+        <article class="panel">
+          <div class="panel-head"><div><h2>Notifications</h2><p>Assignments, devices, missed calls, billing and integration alerts</p></div><button class="btn ghost sm" id="read-all-notifications">Mark all read</button></div>
+          <div class="panel-body flush"><div id="notification-list" class="rows"></div></div>
+        </article>
+      </section>
 
-        <form class="panel form-panel narrow" id="password-form"><div class="panel-head"><div><h2>Account password</h2><p>Use a unique password with at least 14 characters</p></div></div><label>New password<input id="new-password" type="password" minlength="14" maxlength="256" autocomplete="new-password" required></label><label>Confirm new password<input id="confirm-password" type="password" minlength="14" maxlength="256" autocomplete="new-password" required></label><div class="form-actions"><button class="button primary" type="submit">Change password</button></div></form>
-        <article class="security-note"><b>Security boundary</b><p>ARI and AMI remain private. Recordings stream through authenticated routes and SIP/webhook secrets are encrypted. Keep this panel behind HTTPS, VPN, or a trusted reverse proxy.</p></article>
+      <!-- =========================================================== SECURITY -->
+      <section class="page" id="page-security">
+        <div class="grid cols-2">
+          <form class="panel" id="profile-recording-form">
+            <div class="panel-head"><div><h2>My call recording</h2><p>Applies only while the administrator's global recording switch is enabled</p></div></div>
+            <div class="panel-body">
+              <label class="switch"><span class="switch-copy"><b>Allow recording for my extension</b><small id="profile-recording-help">Recording is off by default.</small></span><input id="profile-recording" type="checkbox"><i class="track"></i></label>
+              <div class="btn-row" style="margin-top:14px"><button class="btn primary" type="submit">Save preference</button></div>
+            </div>
+          </form>
+          <form class="panel" id="profile-email-form">
+            <div class="panel-head"><div><h2>My voicemail email</h2><p>Messages for your assigned extension are sent here</p></div></div>
+            <div class="panel-body">
+              <label class="field">Email address<input id="profile-email" type="email" placeholder="you@example.com"></label>
+              <div class="btn-row"><button class="btn primary" type="submit">Save email address</button></div>
+            </div>
+          </form>
+        </div>
+        <form class="panel" id="password-form" style="margin-top:16px">
+          <div class="panel-head"><div><h2>Account password</h2><p>Use a unique password with at least 14 characters</p></div></div>
+          <div class="panel-body">
+            <div class="field-row">
+              <label class="field">New password<input id="new-password" type="password" minlength="14" maxlength="256" autocomplete="new-password" required></label>
+              <label class="field">Confirm new password<input id="confirm-password" type="password" minlength="14" maxlength="256" autocomplete="new-password" required></label>
+            </div>
+            <div class="btn-row"><button class="btn primary" type="submit">Change password</button></div>
+          </div>
+        </form>
+        <article class="notice secure" style="margin-top:16px"><span class="glyph">⚿</span><div><b>Security boundary</b>ARI and AMI remain private. Recordings stream through authenticated routes, and SIP and webhook secrets are encrypted at rest. Keep this panel behind HTTPS, a VPN, or a trusted reverse proxy.</div></article>
+      </section>
+
+      <!-- =========================================================== REQUESTS -->
+      <section class="page" id="page-requests">
+        <article class="panel">
+          <div class="panel-head"><div><h2>Customer requests</h2><p>Approve, reject, or jump straight to number assignment</p></div><span class="count" id="request-count">0 pending</span></div>
+          <div class="panel-body flush"><div id="request-list" class="rows"></div></div>
+        </article>
+      </section>
+
+      <!-- =========================================================== ACTIVITY -->
+      <section class="page" id="page-activity">
+        <article class="panel">
+          <div class="panel-head"><div><h2>Platform activity</h2><p>Number assignments, SIP changes, extensions, access and API generation</p></div></div>
+          <div class="panel-body"><div id="activity-list" class="timeline"></div></div>
+        </article>
+      </section>
+
+      <!-- ========================================================= PROVIDERS -->
+      <section class="page" id="page-providers">
+        <article class="notice warn"><span class="glyph">⇄</span><div><b>Administrator-only carrier configuration</b>Provider credentials, gateways and trusted inbound networks are never exposed to customers. Customers only ever see their own device SIP details.</div></article>
+        <div class="toolbar" data-admin-only><span class="spacer"></span><button class="btn primary" data-open="provider">＋ Add SIP provider</button></div>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Carrier providers</h2><p>Registration, codecs and trusted inbound networks</p></div></div>
+          <div class="panel-body flush"><div id="provider-list" class="rows"></div></div>
+        </article>
+      </section>
+
+      <!-- ============================================================= EMAIL -->
+      <section class="page" id="page-email">
+        <form class="panel" id="email-form">
+          <div class="panel-head"><div><h2>SendGrid voicemail delivery</h2><p>The API key is encrypted and can only be configured by an administrator</p></div></div>
+          <div class="panel-body">
+            <label class="switch"><span class="switch-copy"><b>Enable voicemail email</b><small>Send each new voicemail as an email attachment.</small></span><input id="email-enabled" type="checkbox"><i class="track"></i></label>
+            <div class="field-row" style="margin-top:16px">
+              <label class="field">SendGrid API key<input id="sendgrid-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><small id="sendgrid-key-status">No key configured</small></label>
+              <label class="field">Verified sender email<input id="sendgrid-from" type="email" placeholder="voicemail@example.com"></label>
+            </div>
+            <div class="field-row">
+              <label class="field">Sender name<input id="sendgrid-name" maxlength="120" placeholder="EIP Telephony Voicemail"></label>
+              <label class="field">Test recipient<input id="sendgrid-test" type="email" placeholder="admin@example.com"></label>
+            </div>
+            <div class="btn-row"><button class="btn primary" type="submit">Save email configuration</button><button class="btn ghost" type="button" id="test-email">Send test email</button></div>
+          </div>
+        </form>
+        <article class="panel" style="margin-top:16px">
+          <div class="panel-head"><div><h2>Recent email deliveries</h2><p>Latest SendGrid attempts and errors</p></div></div>
+          <div class="panel-body flush"><div id="email-delivery-list" class="table-wrap"></div></div>
+        </article>
+      </section>
+
+      <!-- ========================================================== SETTINGS -->
+      <section class="page" id="page-settings">
+        <article class="notice"><span class="glyph">⚙</span><div><b>Nothing to configure here any more</b>Call routing defaults and recording are decisions the customer makes for their own lines: call defaults on their Numbers page, recording per extension. This page keeps only the platform's own switches below.</div></article>
+        <article class="panel" data-admin-only>
+          <div class="panel-head">
+            <div><h2>Call recording</h2><p>The platform switch: off stops recording everywhere, whatever a customer set</p></div>
+            <span class="tag" id="recording-platform-state">Off</span>
+          </div>
+          <div class="panel-body">
+            <label class="switch">
+              <span class="switch-copy"><b>Allow call recording on this platform</b>
+                <small id="recording-platform-help">Loading the current setting…</small></span>
+              <input id="platform-recording" type="checkbox" aria-describedby="recording-platform-help"><i class="track"></i>
+            </label>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <div><h2>Server address</h2><p>Where customers point their phones, and the host every API and webhook example is built from</p></div>
+            <span class="tag info" id="service-address-state">Not set</span>
+          </div>
+          <div class="panel-body">
+            <form id="service-address-form" class="field-row">
+              <label class="field">Server IP address or subdomain
+                <input id="service-host" name="service_host" placeholder="sip.your-domain.com or 203.0.113.10" autocomplete="off" spellcheck="false">
+                <small>No scheme and no path. This is the address a phone registers with, not the carrier trunk the platform dials out through.</small>
+              </label>
+              <label class="field">SIP port
+                <input id="service-sip-port" name="service_sip_port" type="number" min="1" max="65535" placeholder="5060">
+                <small>Usually 5060. Change it only if your SIP listener runs elsewhere.</small>
+              </label>
+              <div class="field-actions">
+                <button class="btn primary" type="submit">Save address</button>
+                <button class="btn ghost" type="button" id="service-address-reset">Clear</button>
+              </div>
+            </form>
+            <div id="service-address-preview" class="rows"></div>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Platform policy</h2><p>Operating rules that apply to every account</p></div></div>
+          <div class="panel-body">
+            <div id="platform-policy" class="rows"></div>
+          </div>
+        </article>
       </section>
     </div>
   </main>
 </div>
-<div class="modal" id="flow-config-modal" aria-hidden="true"><div class="modal-card"><form id="flow-config-form"><div class="modal-head"><div><h2 id="flow-config-title">Configure routing node</h2><p>Set the destination and timing for this step.</p></div><button type="button" class="icon-button" id="flow-config-close">×</button></div><div class="modal-body" id="flow-config-fields"></div><div class="modal-actions"><button type="button" class="button ghost" id="flow-config-cancel">Cancel</button><button type="submit" class="button primary">Apply node</button></div></form></div></div>
 
-<aside class="detail-drawer customer-command-modal" id="customer-drawer" role="dialog" aria-modal="true" aria-labelledby="customer-drawer-title" aria-hidden="true"><header class="command-header"><div class="command-avatar" id="customer-command-avatar">C</div><div class="command-identity"><small>CUSTOMER COMMAND CENTER</small><h2 id="customer-drawer-title">Customer</h2><p id="customer-drawer-meta"></p><div class="command-status" id="customer-command-status"><i></i> Active customer</div></div><button class="icon-button command-close" id="customer-drawer-close" aria-label="Close customer panel">×</button></header><div class="drawer-metrics" id="customer-drawer-metrics"></div><nav class="drawer-tabs" id="customer-drawer-tabs" aria-label="Customer details"><button class="active" data-customer-tab="access">Access & profile</button><button data-customer-tab="numbers">Assigned numbers</button><button data-customer-tab="sip">SIP service</button><button data-customer-tab="payments">Payments</button><button data-customer-tab="activity">Activity</button></nav><div id="customer-drawer-content" class="drawer-content"></div></aside>
+<!-- ============================================== CUSTOMER WORKSPACE DRAWER -->
 <div class="scrim" id="scrim"></div>
-<div class="modal" id="modal" aria-hidden="true"><div class="modal-card"><header><div><h2 id="modal-title">Add item</h2><p id="modal-subtitle"></p></div><button class="icon-button" id="modal-close">×</button></header><form id="modal-form"><div id="modal-fields"></div><footer><button type="button" class="button ghost" id="modal-cancel">Cancel</button><button type="submit" class="button primary" id="modal-save">Save</button></footer></form></div></div>
-<div class="toast" id="toast"><span id="toast-icon">✓</span><span id="toast-text"></span></div>
+<aside class="workspace" id="workspace" role="dialog" aria-modal="true" aria-labelledby="ws-title" aria-hidden="true">
+  <header class="ws-head">
+    <div class="ws-head-top">
+      <div class="ws-avatar" id="ws-avatar">C</div>
+      <div class="ws-id">
+        <small>Customer workspace</small>
+        <h2 id="ws-title">Customer</h2>
+        <p id="ws-meta"></p>
+        <div class="ws-flags" id="ws-flags"></div>
+      </div>
+      <button class="icon-btn ws-close" id="ws-close" aria-label="Close customer workspace">✕</button>
+    </div>
+  </header>
+  <!-- Everything below the identity scrolls in one region. The tab row sticks to
+       the top of it, so switching a tab keeps its content in view underneath. -->
+  <div class="ws-scroll" id="ws-scroll">
+    <div class="ws-summary">
+      <div class="ws-status" id="ws-status"></div>
+      <div class="ws-metrics" id="ws-metrics"></div>
+      <div class="ws-quick" id="ws-quick"></div>
+      <div class="ws-recent" id="ws-recent"></div>
+    </div>
+    <nav class="ws-tabs" id="ws-tabs" aria-label="Customer resources"></nav>
+    <div class="ws-body" id="ws-body"></div>
+  </div>
+</aside>
+
+<!-- ================================================================== MODAL -->
+<div class="modal" id="modal" aria-hidden="true">
+  <div class="modal-card" id="modal-card">
+    <header class="modal-head">
+      <div style="flex:1"><h2 id="modal-title">Add item</h2><p id="modal-subtitle"></p></div>
+      <button class="icon-btn" id="modal-close" aria-label="Close">✕</button>
+    </header>
+    <form id="modal-form" style="display:flex;flex-direction:column;min-height:0;flex:1">
+      <div class="modal-body" id="modal-fields"></div>
+      <footer class="modal-foot">
+        <button type="button" class="btn ghost" id="modal-cancel">Cancel</button>
+        <button type="submit" class="btn primary" id="modal-save">Save</button>
+      </footer>
+    </form>
+  </div>
+</div>
+
+<!-- ============================================== FLOW NODE CONFIG MODAL -->
+<div class="modal" id="flow-config-modal" aria-hidden="true">
+  <div class="modal-card">
+    <header class="modal-head">
+      <div style="flex:1"><h2 id="flow-config-title">Configure routing node</h2><p>Set the destination and timing for this step.</p></div>
+      <button type="button" class="icon-btn" id="flow-config-close" aria-label="Close">✕</button>
+    </header>
+    <form id="flow-config-form" style="display:flex;flex-direction:column;min-height:0;flex:1">
+      <div class="modal-body" id="flow-config-fields"></div>
+      <footer class="modal-foot">
+        <button type="button" class="btn ghost" id="flow-config-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Apply node</button>
+      </footer>
+    </form>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="true"></div>
 <script src="/admin-assets/admin.js" defer></script>
 </body>
 </html>

@@ -1,96 +1,3232 @@
-const $=id=>document.getElementById(id);
-const esc=value=>String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const truth=value=>['true','1','yes','on'].includes(String(value).toLowerCase());
-let csrf='',state={extensions:[],phone_numbers:[],providers:[],webhooks:[],webhook_deliveries:[],users:[],customers:[],sip_accounts:[],requests:[],activity:[],notifications:[],call_routes:[],api_keys:[],settings:{},email_config:{},call_summary:{}},modalType='',editing=null,callOffset=0,recordingOffset=0,currentPage='dashboard',currentCustomer=null,flowNodes=[],flowConfigIndex=-1,pendingFulfillRequest=null;
-const pageMeta={dashboard:['Overview','Your telephony environment at a glance'],extensions:['Extensions','Departments and internal destinations grouped by customer'],numbers:['Numbers','Ownership, SIP mapping, extension and live status'],sipaccounts:['SIP Accounts','Credentials, devices and live registration'],routing:['Call Routing','Design the incoming call journey visually'],providers:['Carrier Providers','Platform carrier connections'],calls:['Calls','Inbound and outbound activity across extensions'],recordings:['Recordings','Search and play secure call audio'],voicemails:['Voicemails','Manage messages organized by mailbox'],webhooks:['APIs & Webhooks','Keys, event endpoints and delivery health'],requests:['Pending Requests','Approve customer provisioning requests'],activity:['Activity History','Important platform and customer actions'],notifications:['Notifications','Assignments, devices, payments and alerts'],settings:['Platform Settings','Global routing and recording policy'],users:['Customers','Manage complete customer telephony environments'],email:['Email Delivery','Configure SendGrid voicemail attachments'],billing:['Payments','Cycles, next payments and invoice history'],security:['Security','Protect account access']};
+/* ============================================================================
+   EIP Telephony Control — console application
+   One shared bundle serves two deliberately different experiences:
+     administrator (dark control room)  and  customer (light business view).
+   Role differences come from body.theme-* plus [data-admin-only] /
+   [data-customer-only]; the API contract is identical for both.
+   ========================================================================= */
+'use strict';
 
-async function api(path,options={}){const headers={...(options.headers||{})};if(options.body)headers['Content-Type']='application/json';if(csrf&&options.method&&!['GET','HEAD'].includes(options.method))headers['X-CSRF-Token']=csrf;const response=await fetch(path,{...options,headers});let data={};try{data=await response.json()}catch{}if(response.status===401){location='/admin/login';throw Error('Login required')}if(data.csrf_token)csrf=data.csrf_token;if(!response.ok)throw Error(data.error||`Request failed (${response.status})`);return data}
-function notify(message,error=false){$('toast-text').textContent=message;$('toast-icon').textContent=error?'!':'✓';$('toast').classList.toggle('error',error);$('toast').classList.add('show');clearTimeout(notify.timer);notify.timer=setTimeout(()=>$('toast').classList.remove('show'),3000)}
-function empty(title,text){return `<div class="empty"><b>${esc(title)}</b>${esc(text)}</div>`}
-function badge(value){return `<span class="status ${esc(value)}">${esc(String(value||'unknown').replaceAll('_',' '))}</span>`}
-function formatDate(value){if(!value)return '—';const date=new Date(value);return Number.isNaN(date.valueOf())?value:date.toLocaleString()}
-function formatDuration(seconds){seconds=Number(seconds||0);if(seconds<60)return `${seconds}s`;return `${Math.floor(seconds/60)}m ${seconds%60}s`}
-function extensionName(number){const item=state.extensions.find(x=>x.extension===number);return item?.display_name||`Extension ${number}`}
+/* ----------------------------------------------------------- 1. Utilities */
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const truth = v => ['true','1','yes','on'].includes(String(v).toLowerCase());
+const val = id => ($(id)?.value ?? '').trim();
+const fmtNum = n => Number(n || 0).toLocaleString('en-US');
+const groupBy = (rows, key) => rows.reduce((out, row) => { const k = key(row); (out[k] ??= []).push(row); return out; }, {});
 
-function showPage(name){const adminHidden=['extensions','routing','calls','recordings','webhooks'],customerHidden=['providers','settings','users','email','requests','activity'];if(state.is_admin&&adminHidden.includes(name))name='users';if(!state.is_admin&&customerHidden.includes(name))name='dashboard';document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id===`page-${name}`));document.querySelectorAll('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.page===name));$('page-title').textContent=pageMeta[name][0];$('page-subtitle').textContent=pageMeta[name][1];history.replaceState(null,'',`#${name}`);$('sidebar').classList.remove('open');$('scrim').classList.remove('open');if(name==='calls')loadCalls();if(name==='recordings')loadRecordings();if(name==='voicemails')loadVoicemails()}
+function fmtDate(value, withTime = true) {
+  if (!value) return '—';
+  const d = new Date(String(value).replace(' ', 'T'));
+  if (Number.isNaN(d.valueOf())) return String(value);
+  return withTime
+    ? d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function fmtDay(value) {
+  if (!value) return '—';
+  const d = new Date(String(value).replace(' ', 'T'));
+  return Number.isNaN(d.valueOf()) ? String(value) : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function fmtDuration(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds || 0)));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+function money(cents) { return `$${(Number(cents || 0) / 100).toFixed(2)}`; }
 
-async function refreshDeviceStatus(){try{const data=await api('/admin/api/device-status');const live=new Map(data.devices.map(x=>[x.id,x.registration_status]));state.sip_accounts.forEach(x=>{if(live.has(x.id))x.registration_status=live.get(x.id)});if(currentPage==='sipaccounts')renderSipAccounts();if(currentCustomer&&$('customer-drawer').classList.contains('open'))renderCustomerTab($('customer-drawer-tabs').querySelector('.active')?.dataset.customerTab||'access')}catch(error){/* Health polling reports connectivity without interrupting the operator. */}}
-async function loadAnalytics(){try{const data=await api('/admin/api/analytics');$('metric-answer-rate').textContent=`${data.answer_rate}%`;$('metric-missed').textContent=data.missed;$('metric-duration').textContent=formatDuration(data.average_duration_seconds);$('metric-direction').textContent=`${data.inbound} / ${data.outbound}`;const max=Math.max(1,...data.daily.map(x=>x.total));$('call-trend').innerHTML=data.daily.map((day,index)=>`<div class="trend-day" title="${day.date}: ${day.answered} answered of ${day.total}"><i style="height:${Math.max(2,day.total/max*100)}%"></i><b style="height:${Math.max(2,day.answered/max*100)}%"></b>${index%2===0?`<small>${day.date.slice(5)}</small>`:''}</div>`).join('')}catch(error){$('call-trend').innerHTML=empty('Analytics unavailable','Call metrics will retry automatically.')}}
-async function loadState(){try{state=await api('/admin/api/state');csrf=state.csrf_token;document.body.classList.toggle('admin-theme',state.is_admin);document.body.classList.toggle('customer-theme',!state.is_admin);document.body.classList.remove('theme-loading');$('who').textContent=state.username;$('role').textContent=state.is_admin?'Platform administrator':'Customer account';$('avatar').textContent=(state.username||'A')[0].toUpperCase();document.querySelectorAll('[data-admin-only]').forEach(element=>element.hidden=!state.is_admin);document.querySelectorAll('[data-customer-only]').forEach(element=>element.hidden=state.is_admin);const requested=location.hash.slice(1);if(!state.is_admin&&['providers','settings','users','email','requests','activity'].includes(requested))showPage('dashboard');renderAll();checkHealth();loadRecent();loadAnalytics()}catch(error){notify(error.message,true)}}
-function renderAll(){const summary=state.call_summary||{};$('stat-total').textContent=summary.total||0;$('stat-answered').textContent=summary.answered||0;$('stat-failed').textContent=summary.failed||0;$('stat-recordings').textContent=summary.recordings||0;$('stat-voicemails').textContent=state.voicemail_summary?.new||0;$('answer-rate').textContent=`${summary.total?Math.round(summary.answered/summary.total*100):0}% answer rate`;
- const activeExt=state.extensions.filter(x=>x.active),activeNum=state.phone_numbers.filter(x=>x.active),activeProviders=state.providers.filter(x=>x.active);$('dash-customers').textContent=(state.customers||[]).filter(x=>x.active).length;$('dash-numbers').textContent=activeNum.length;$('dash-sipaccounts').textContent=(state.sip_accounts||[]).filter(x=>x.active).length;$('dash-providers').textContent=activeProviders.length;renderExtensions();renderNumbers();renderProviders();renderWebhooks();renderUsers();renderApiKeys();renderSipAccounts();renderRequests();renderMyRequests();renderActivity();renderNotifications();renderFlow();renderBilling();renderSelects();renderSettings();renderEmailSettings();$('request-badge').textContent=state.pending_request_count||0;$('request-badge').hidden=!state.pending_request_count;const unread=(state.notifications||[]).filter(x=>!x.read_at).length;$('notification-badge').textContent=unread;$('notification-badge').hidden=!unread;$('profile-email').value=state.email||'';const myExtension=state.extensions.find(x=>x.extension===state.assigned_extension);$('profile-recording-form').hidden=!myExtension;$('profile-recording').checked=!!myExtension?.recording_enabled;const globalRecording=truth(state.settings?.recording_enabled);$('profile-recording').disabled=false;$('profile-recording-help').textContent=globalRecording?'Global recording is enabled; you can opt your extension in or out.':'The administrator has switched recording off for everyone; your preference will still be saved for later.'}
-async function checkHealth(){try{const response=await fetch('/health');const data=await response.json();$('health').classList.toggle('bad',!response.ok);$('health').querySelector('span').textContent=response.ok?'System operational':(data.error||'System unavailable')}catch{$('health').classList.add('bad');$('health').querySelector('span').textContent='System unavailable'}}
+let searchTimer;
+function debounce(fn, delay = 300) { clearTimeout(searchTimer); searchTimer = setTimeout(fn, delay); }
 
-function renderExtensions(){const q=$('extension-search').value.toLowerCase();const rows=state.extensions.filter(x=>`${x.extension} ${x.display_name} ${x.sip_username}`.toLowerCase().includes(q));$('extension-count').textContent=`${rows.length} extension${rows.length===1?'':'s'}`;const card=x=>`<div class="resource"><div class="resource-icon">${esc(x.extension)}</div><div><h3>${esc(x.display_name||`Extension ${x.extension}`)}</h3><p>SIP username: ${esc(x.sip_username)}</p></div><div class="tags"><span class="tag ${x.active?'on':'off'}">${x.active?'Active':'Disabled'}</span><span class="tag ${x.recording_enabled?'on':'off'}">Recording ${x.recording_enabled?'allowed':'off'}</span><span class="tag ${x.voicemail_enabled?'on':'off'}">Voicemail ${x.voicemail_enabled?'on':'off'}</span></div><div class="resource-actions"><button class="button ghost" data-edit-extension="${x.extension}">Edit</button><button class="button danger" data-delete-extension="${x.extension}">Delete</button></div></div>`;if(state.is_admin){const groups=rows.reduce((out,x)=>{const owner=(state.users||[]).find(u=>u.id===x.owner_user_id),name=owner?.company_name||owner?.username||'Platform / unassigned';(out[name]??=[]).push(x);return out},{});$('extension-list').innerHTML=Object.entries(groups).map(([name,items])=>`<section class="recording-group"><header><h3>${esc(name)}</h3><span class="count">${items.length} extensions</span></header>${items.map(card).join('')}</section>`).join('')||empty('No extensions found','Open a customer to create an extension.')}else $('extension-list').innerHTML=rows.map(card).join('')||empty('No extensions found','Create departments such as Sales, Support or Operations.')}
-function renderNumbers(){const q=$('number-search').value.toLowerCase();const rows=state.phone_numbers.filter(x=>`${x.number} ${x.provider} ${x.description} ${x.inbound_extension}`.toLowerCase().includes(q));$('number-count').textContent=`${rows.length} number${rows.length===1?'':'s'}`;$('number-list').innerHTML=rows.map(x=>{const owner=(state.users||[]).find(u=>u.id===x.owner_user_id),sip=(state.sip_accounts||[]).find(s=>s.phone_number===x.number);return `<div class="resource"><div class="resource-icon">☎</div><div><h3>${esc(x.number)}</h3><p>${esc(owner?.company_name||owner?.username||'Platform unassigned')}</p></div><div><p><b>${state.is_admin?esc(sip?.label||'No SIP account'):'Carrier managed by EIP'}</b> · Ext ${esc(x.inbound_extension||'—')}</p><div class="tags"><span class="tag ${x.active?'on':'off'}">${x.active?'Active':'Disabled'}</span><span class="tag">$${((x.monthly_price_cents||500)/100).toFixed(2)}/month</span>${x.default_outbound?'<span class="tag on">Default outbound</span>':''}</div></div><div class="resource-actions">${state.is_admin?`<button class="button ghost" data-edit-number="${x.id}">Manage</button><button class="button danger" data-delete-number="${x.id}">Delete</button>`:(!x.default_outbound?`<button class="button primary" data-default-number="${x.id}">Use for outbound</button>`:'')}</div></div>`}).join('')||empty('No phone numbers',state.is_admin?'Assign a number from a customer command center.':'Request a number to begin.')}
-function renderProviders(){$('provider-list').innerHTML=state.providers.map(x=>`<div class="resource"><div class="resource-icon">⇄</div><div><h3>${esc(x.name)}</h3><p>${esc(x.server)}:${x.port} · ${esc(x.transport.toUpperCase())}</p></div><div><p>Username: ${esc(x.username)}</p><div class="tags"><span class="tag">${esc(x.codecs)}</span><span class="tag">${esc(x.allowed_ips)}</span></div></div><div class="resource-actions"><span class="tag ${x.active?'on':'off'}">${x.active?'Active':'Disabled'}</span><button class="button ghost" data-edit-provider="${x.id}">Edit</button><button class="button danger" data-delete-provider="${x.id}">Delete</button></div></div>`).join('')||empty('No SIP providers','Add a carrier before assigning phone numbers.')}
-function renderWebhooks(){$('webhook-list').innerHTML=state.webhooks.map(x=>`<div class="resource"><div class="resource-icon">◇</div><div><h3>${esc(x.name)}</h3><p>${esc(x.url)}</p></div><div><p>Events: ${esc(x.events)}</p><div class="tags"><span class="tag">Token ${x.has_token?'configured':'not set'}</span><span class="tag ${x.active?'on':'off'}">${x.active?'Active':'Disabled'}</span></div></div><div class="resource-actions"><button class="button ghost" data-test-webhook="${x.id}">Test</button><button class="button ghost" data-edit-webhook="${x.id}">Edit</button><button class="button danger" data-delete-webhook="${x.id}">Delete</button></div></div>`).join('')||empty('No database webhooks','Add a webhook to send call events to your CRM.');const deliveries=state.webhook_deliveries||[];$('webhook-delivery-list').innerHTML=deliveries.length?`<table class="data-table"><thead><tr><th>Event</th><th>Delivery ID</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead><tbody>${deliveries.map(x=>`<tr><td>${esc(x.event)}</td><td>${esc(x.id)}</td><td>${badge(x.status)}</td><td>${x.attempts}</td><td>${esc(formatDate(x.updated_at))}</td><td>${esc(x.last_error||'—')}</td></tr>`).join('')}</tbody></table>`:empty('No deliveries','Lifecycle events will appear after calls begin.')}
-function renderUsers(){const q=($('customer-search')?.value||'').trim().toLowerCase(),customers=(state.customers||[]).filter(x=>`${x.company_name} ${x.full_name} ${x.username} ${x.email} ${x.phone}`.toLowerCase().includes(q));$('user-list').innerHTML=customers.map(x=>`<div class="glass-card customer-card"><div class="resource"><div class="resource-icon">${esc((x.company_name||x.username)[0].toUpperCase())}</div><div><h3>${esc(x.company_name||x.username)}</h3><p>${esc(x.full_name||x.username)} · ${esc(x.email)}</p></div><div class="tags"><span class="tag ${x.active?'on':'off'}">${x.active?'Active':'Disabled'}</span><span class="tag">☎ ${x.number_count} numbers</span><span class="tag">◈ ${x.sip_count} SIP</span><span class="tag">⌁ ${x.extension_count} extensions</span><span class="tag ${x.payment_status==='current'?'on':'off'}">${esc(x.payment_status)}</span></div><div class="resource-actions"><button class="button primary" data-open-customer="${x.id}">Open customer</button></div></div></div>`).join('')||empty('No customers','Create a customer or wait for a signup.');$('platform-admin-list').innerHTML=(state.users||[]).filter(x=>x.role==='admin').map(x=>`<div class="resource"><div class="resource-icon">${esc(x.username[0].toUpperCase())}</div><div><h3>${esc(x.username)}</h3><p>${esc(x.email)}</p></div><span class="tag ${x.active?'on':'off'}">${x.active?'Active':'Disabled'}</span><div class="resource-actions"><button class="button danger" data-delete-user="${x.id}">Delete</button></div></div>`).join('')||empty('No additional administrators','The bootstrap administrator remains active.')}
-function renderApiKeys(){$('api-key-list').innerHTML=(state.api_keys||[]).map(x=>`<div class="resource"><div class="resource-icon">⌘</div><div><h3>${esc(x.name)}</h3><p><code>${esc(x.prefix)}…</code> · Created ${esc(formatDate(x.created_at))}</p></div><div><p>Scopes: ${esc(x.scopes)}</p><div class="tags"><span class="tag on">Active</span><span class="tag">Last used: ${esc(formatDate(x.last_used_at))}</span></div></div><div class="resource-actions"><button class="button danger" data-revoke-key="${x.id}">Delete key</button></div></div>`).join('')||empty('No integration keys','Create a scoped key for your CRM.')}
-function renderBilling(){const numbers=state.phone_numbers||[];$('subscription-list').innerHTML=numbers.map(x=>`<div class="resource"><div class="resource-icon">$</div><div><h3>${esc(x.number)}</h3><p>${esc(x.description||'EIP phone number')}</p></div><div class="tags"><span class="tag on">$${((x.monthly_price_cents||500)/100).toFixed(2)}/month</span><span class="tag">Renews day ${x.billing_cycle_day||1}</span>${x.discontinue_at?`<span class="tag off">Ends ${esc(x.discontinue_at)}</span>`:''}</div>${!state.is_admin&&!x.discontinue_at?`<div class="resource-actions"><button class="button danger" data-discontinue-number="${esc(x.number)}">Discontinue at renewal</button></div>`:''}</div>`).join('')||empty('No active subscriptions','An administrator will assign phone numbers to your account.');const invoices=state.invoices||[];$('invoice-list').innerHTML=invoices.length?`<table class="data-table"><thead><tr><th>Invoice</th><th>Number</th><th>Period</th><th>Amount</th><th>Status</th><th>Due</th><th>Action</th></tr></thead><tbody>${invoices.map(x=>`<tr><td>#${x.id}</td><td>${esc(x.number)}</td><td>${esc(x.period_start)} — ${esc(x.period_end)}</td><td>$${(x.amount_cents/100).toFixed(2)}</td><td>${badge(x.status)}</td><td>${esc(x.due_at)}</td><td>${state.is_admin&&x.status==='open'?`<button class="button ghost" data-paid-invoice="${x.id}">Mark paid</button>`:'—'}</td></tr>`).join('')}</tbody></table>`:empty('No invoices','Invoices will appear after a number is assigned and billed.')}
-function renderSipAccounts(){const rows=state.sip_accounts||[];$('sip-count').textContent=`${rows.length} account${rows.length===1?'':'s'}`;$('sip-account-list').innerHTML=rows.map(x=>{const owner=(state.users||[]).find(u=>u.id===x.owner_user_id);return `<article class="glass-card"><div class="panel-head"><div><h3>${esc(x.label)}</h3><p>${esc(owner?.company_name||owner?.username||'My account')}</p></div><span class="device-status ${x.registration_status==='online'?'online':''}"><i></i>${esc(x.registration_status)}</span></div><p><b>${esc(x.sip_username)}</b> @ ${esc(x.server)}:${x.port}</p><div class="tags"><span class="tag">${esc(x.phone_number||'No number')}</span><span class="tag">Ext ${esc(x.extension||'—')}</span><span class="tag">${esc(x.transport.toUpperCase())}</span></div><div class="resource-actions" style="margin-top:14px"><button class="button ghost" data-show-credentials="${x.id}">Credentials</button>${state.is_admin?`<button class="button ghost" data-edit-sip="${x.id}">Edit</button><button class="button danger" data-delete-sip="${x.id}">Delete</button>`:''}</div></article>`}).join('')||empty('No SIP accounts','An administrator can assign a secure SIP account to a customer.')}
-function renderRequests(){const rows=state.requests||[],pending=rows.filter(x=>x.status==='pending');$('request-count').textContent=`${pending.length} pending`;$('request-list').innerHTML=rows.map(x=>`<div class="resource"><div class="resource-icon">↗</div><div><h3>${esc(x.company_name||x.username)} · ${esc(x.request_type)}</h3><p>${esc(x.details)}</p></div><div><span class="tag ${x.status==='approved'?'on':x.status==='rejected'?'off':''}">${esc(x.status)}</span><p>${esc(formatDate(x.created_at))}</p></div><div class="resource-actions">${x.status==='pending'?`<button class="button primary" data-resolve-request="${x.id}:approved">Approve</button><button class="button ghost" data-assign-request="${x.id}:${x.user_id}">Assign number</button><button class="button danger" data-resolve-request="${x.id}:rejected">Reject</button>`:''}</div></div>`).join('')||empty('No requests','Customer number and access requests will appear here.')}
-function renderMyRequests(){const host=$('my-request-list');if(!host)return;const rows=state.requests||[],pendingNumber=rows.some(x=>x.request_type==='number'&&x.status==='pending'),button=$('request-number');$('my-request-count').textContent=`${rows.length} request${rows.length===1?'':'s'}`;button.disabled=pendingNumber;button.textContent=pendingNumber?'Number request pending':state.phone_numbers.length?'Request another number':'Request a number';host.innerHTML=rows.slice(0,5).map(x=>`<div class="request-track-item status-${esc(x.status)}"><div class="request-track-icon">${x.status==='fulfilled'||x.status==='approved'?'✓':x.status==='rejected'?'×':'◷'}</div><div><b>${esc(x.request_type.replaceAll('_',' '))}</b><p>${esc(x.details)}</p>${x.admin_note?`<small>Administrator: ${esc(x.admin_note)}</small>`:''}</div><div><span class="tag ${['approved','fulfilled'].includes(x.status)?'on':x.status==='rejected'?'off':''}">${esc(x.status)}</span><small>${esc(formatDate(x.created_at))}</small></div></div>`).join('')||empty('No requests yet','Request a phone number and its progress will appear here.');const steps={request:rows.some(x=>x.request_type==='number'),number:state.phone_numbers.length,sip:state.sip_accounts.length,extensions:state.extensions.length,routing:state.call_routes.length,api:state.api_keys.length};Object.entries(steps).forEach(([step,done])=>document.querySelector(`[data-step="${step}"]`)?.classList.toggle('done',!!done))}
-function renderActivity(){$('activity-list').innerHTML=(state.activity||[]).map(x=>`<div class="timeline-item"><b>${esc(x.description)}</b><p>${esc(x.action)} · ${esc(x.resource_type)}</p><small>${esc(formatDate(x.created_at))}</small></div>`).join('')||empty('No activity yet','Important platform changes will be recorded here.')}
-function renderNotifications(){const rows=state.notifications||[];$('notification-list').innerHTML=rows.map(x=>`<div class="resource"><div class="resource-icon">${x.read_at?'○':'●'}</div><div><h3>${esc(x.title)}</h3><p>${esc(x.message)}</p></div><small>${esc(formatDate(x.created_at))}</small><div class="resource-actions">${!x.read_at?`<button class="button ghost" data-read-notification="${x.id}">Mark read</button>`:''}</div></div>`).join('')||empty('You are all caught up','New assignments and service events will appear here.')}
-function renderFlow(){const select=$('route-number');if(!select)return;const prior=select.value;select.innerHTML=(state.phone_numbers||[]).map(x=>`<option value="${esc(x.number)}">${esc(x.number)} — ${esc(x.description||'Main')}</option>`).join('');select.value=prior||select.options[0]?.value||'';$('flow-entry-number').textContent=select.value||'Assign a number to begin';const saved=(state.call_routes||[]).find(x=>x.phone_number===select.value);flowNodes=saved?.route?.nodes||flowNodes;renderFlowNodes()}
-function renderFlowNodes(){const host=$('flow-nodes');if(!host)return;const icons={business_hours:'◷',simultaneous:'⇉',sequential:'⇢',ring_group:'◎',extension:'⌁',voicemail:'✉',forward:'↗'};host.innerHTML=flowNodes.map((node,index)=>`<div class="flow-node type-${esc(node.type)} ${node.configured?'configured':''}" draggable="true" data-flow-index="${index}"><div class="flow-node-icon">${icons[node.type]||'◇'}</div><div class="flow-node-copy"><b>${esc(String(node.type).replaceAll('_',' '))}</b><small>${esc(node.label||'Click to configure this step')}</small></div><span class="node-step">${String(index+1).padStart(2,'0')}</span><button class="remove-node" data-remove-node="${index}" aria-label="Remove node">×</button></div>`).join('');$('flow-canvas').classList.toggle('has-nodes',flowNodes.length>0)}
-function flowExtensionOptions(selected=[]){const values=Array.isArray(selected)?selected:[selected],number=(state.phone_numbers||[]).find(x=>x.number===$('route-number').value),available=state.is_admin&&number?.owner_user_id?state.extensions.filter(x=>x.owner_user_id===number.owner_user_id):state.extensions;return available.map(x=>`<option value="${esc(x.extension)}" ${values.includes(x.extension)?'selected':''}>${esc(x.extension)} — ${esc(x.display_name||'Extension')}</option>`).join('')}
-function openFlowConfig(index){flowConfigIndex=index;const node=flowNodes[index];if(!node)return;const common=`<label>Step label<input name="label" maxlength="80" value="${esc(node.label==='Click to configure'?'':node.label||'')}"></label>`;let fields='';if(node.type==='business_hours')fields=`<div class="form-grid"><label>Open time<input type="time" name="start" value="${esc(node.start||'09:00')}" required></label><label>Close time<input type="time" name="end" value="${esc(node.end||'17:00')}" required></label></div><label>Business days<select name="days" multiple size="7">${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((day,i)=>`<option value="${i+1}" ${(node.days||[1,2,3,4,5]).includes(i+1)?'selected':''}>${day}</option>`).join('')}</select><small>Use Ctrl/Cmd to select multiple days.</small></label>`;else if(['simultaneous','sequential','ring_group'].includes(node.type))fields=`<label>Ring destinations<select name="extensions" multiple size="6" required>${flowExtensionOptions(node.extensions||[])}</select><small>Select at least one extension.</small></label><label>Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout||25}" required></label>`;else if(node.type==='extension')fields=`<label>Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension||'')}</select></label>`;else if(node.type==='voicemail')fields=`<label>Voicemail mailbox<select name="mailbox" required><option value="">Choose mailbox</option>${flowExtensionOptions(node.mailbox||'')}</select></label>`;else if(node.type==='forward')fields=`<label>Forward to E.164 number<input name="phone" type="tel" pattern="\\+[1-9][0-9]{7,14}" placeholder="+13025550123" value="${esc(node.phone||'')}" required></label><label>Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout||25}" required></label>`;$('flow-config-title').textContent=`Configure ${node.type.replaceAll('_',' ')}`;$('flow-config-fields').innerHTML=common+fields;$('flow-config-modal').classList.add('open');$('flow-config-modal').setAttribute('aria-hidden','false')}
-function closeFlowConfig(){$('flow-config-modal').classList.remove('open');$('flow-config-modal').setAttribute('aria-hidden','true');flowConfigIndex=-1}
-function saveFlowConfig(event){event.preventDefault();const node=flowNodes[flowConfigIndex],form=new FormData(event.target);if(!node)return closeFlowConfig();node.label=String(form.get('label')||'').trim();if(node.type==='business_hours'){node.start=form.get('start');node.end=form.get('end');node.days=form.getAll('days').map(Number);if(!node.days.length)return notify('Select at least one business day',true);node.label=node.label||`${node.start}–${node.end} · ${node.days.length} days`}else if(['simultaneous','sequential','ring_group'].includes(node.type)){node.extensions=form.getAll('extensions');node.timeout=Number(form.get('timeout'));if(!node.extensions.length)return notify('Select at least one extension',true);node.label=node.label||`${node.extensions.join(', ')} · ${node.timeout}s`}else if(node.type==='extension'){node.extension=form.get('extension');node.label=node.label||`Extension ${node.extension}`}else if(node.type==='voicemail'){node.mailbox=form.get('mailbox');node.label=node.label||`Mailbox ${node.mailbox}`}else if(node.type==='forward'){node.phone=form.get('phone');node.timeout=Number(form.get('timeout'));node.label=node.label||`${node.phone} · ${node.timeout}s`}node.configured=true;renderFlowNodes();closeFlowConfig();notify('Routing step configured')}
-function waveform(){return `<span class="waveform">${Array.from({length:32},(_,i)=>`<i style="height:${8+(i*13%30)}px"></i>`).join('')}</span>`}
-function renderEmailSettings(){const config=state.email_config||{};$('email-enabled').checked=!!config.enabled;$('sendgrid-from').value=config.from_email||'';$('sendgrid-name').value=config.from_name||'EIP Telephony Voicemail';$('sendgrid-key-status').textContent=config.has_api_key?'API key configured — leave blank to keep it':'No API key configured';const rows=state.email_deliveries||[];$('email-delivery-list').innerHTML=rows.length?`<table class="data-table"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${badge(x.status)}</td><td>${x.attempts}</td><td>${esc(formatDate(x.updated_at))}</td><td>${esc(x.last_error||'—')}</td></tr>`).join('')}</tbody></table>`:empty('No delivery attempts','New voicemail email attempts will appear here.')}
-function optionList(includeEmpty=false){return `${includeEmpty?'<option value="">Use fallback extension</option>':''}${state.extensions.filter(x=>x.active).map(x=>`<option value="${x.extension}">${esc(x.extension)} — ${esc(x.display_name||'Unnamed')}</option>`).join('')}`}
-function renderSelects(){$('recording-customer').innerHTML='<option value="">All customers</option>'+(state.customers||[]).map(x=>`<option value="${x.id}">${esc(x.company_name||x.username)}</option>`).join('');const all=`<option value="">All extensions</option>${optionList()}`;$('call-extension').innerHTML=all;$('recording-extension').innerHTML=all;$('voicemail-extension').innerHTML=`<option value="">All mailboxes</option>${state.extensions.filter(x=>x.active&&x.voicemail_enabled).map(x=>`<option value="${x.extension}">${esc(x.extension)} — ${esc(x.display_name||'Unnamed')}</option>`).join('')}`;$('default-extension').innerHTML=optionList();$('inbound-fallback').innerHTML=optionList()}
-function renderSettings(){const s=state.settings||{},first=state.extensions.find(x=>x.active)?.extension||'';$('default-extension').value=s.default_extension||first;$('inbound-fallback').value=s.inbound_fallback_extension||s.default_extension||first;$('rec-enabled').checked=truth(s.recording_enabled);$('rec-format').value=s.recording_format||'wav';$('rec-retention').value=s.recording_retention_days||90;$('rec-max').value=s.recording_max_duration_seconds||0;$('rec-announcement').checked=truth(s.recording_announcement);$('rec-media').value=s.recording_announcement_media||'';$('rec-beep').checked=truth(s.recording_beep)}
+/* Animated number transitions for statistics. */
+function countTo(el, target) {
+  if (!el) return;
+  const to = Number(target || 0), from = Number(el.dataset.count || 0);
+  el.dataset.count = String(to);
+  if (from === to || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    el.textContent = fmtNum(to);
+    return;
+  }
+  const start = performance.now(), span = 620;
+  const step = now => {
+    const p = Math.min(1, (now - start) / span);
+    el.textContent = fmtNum(Math.round(from + (to - from) * (1 - Math.pow(1 - p, 3))));
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
 
-function callTable(calls,compact=false){if(!calls.length)return empty('No calls found','Calls will appear here after activity begins.');return `<table class="data-table"><thead><tr><th>Caller / destination</th><th>Direction</th><th>Assigned number</th><th>Extension</th><th>Status</th><th>Started</th><th>Duration</th>${compact?'':'<th>Recording / reference</th>'}</tr></thead><tbody>${calls.map(x=>`<tr><td class="primary-cell">${esc(x.phone)}<span class="secondary-cell">${esc(x.provider||'EIP network')}</span></td><td><span class="tag ${x.direction==='inbound'?'on':''}">${esc(x.direction||'outbound')}</span></td><td>${esc(x.caller_id_number||'—')}</td><td>${esc(x.extension)}<span class="secondary-cell">${esc(extensionName(x.extension))}</span></td><td>${badge(x.status)}</td><td>${esc(formatDate(x.started_at))}</td><td>${formatDuration(x.duration_seconds)}</td>${compact?'':`<td>${x.recording_status==='finalized'?'<span class="tag on">Available</span>':'<span class="tag">None</span>'}<span class="secondary-cell">${esc(x.contact_id||x.call_id||'—')}</span></td>`}</tr>`).join('')}</tbody></table>`}
-async function loadRecent(){try{const data=await api('/admin/api/calls?limit=6');$('recent-calls').innerHTML=callTable(data.calls,true)}catch(error){notify(error.message,true)}}
-async function loadCalls(){const params=new URLSearchParams({limit:'50',offset:String(callOffset)});if($('call-extension').value)params.set('extension',$('call-extension').value);if($('call-status').value)params.set('status',$('call-status').value);if($('call-search').value.trim())params.set('q',$('call-search').value.trim());try{const data=await api(`/admin/api/calls?${params}`);$('call-count').textContent=`${data.total} call${data.total===1?'':'s'}`;$('call-list').innerHTML=callTable(data.calls);renderPager('call-pager',data.total,callOffset,value=>{callOffset=value;loadCalls()})}catch(error){notify(error.message,true)}}
-async function loadRecordings(){const params=new URLSearchParams({limit:'50',offset:String(recordingOffset),recordings:'true'});if($('recording-extension').value)params.set('extension',$('recording-extension').value);if($('recording-search').value.trim())params.set('q',$('recording-search').value.trim());try{const data=await api(`/admin/api/calls?${params}`);const customerId=Number($('recording-customer').value||0),from=$('recording-from').value,to=$('recording-to').value,owned=customerId?new Set(state.extensions.filter(x=>x.owner_user_id===customerId).map(x=>x.extension)):null;data.calls=data.calls.filter(x=>(!owned||owned.has(x.extension))&&(!from||x.started_at.slice(0,10)>=from)&&(!to||x.started_at.slice(0,10)<=to));$('recording-count').textContent=`${data.calls.length} recording${data.calls.length===1?'':'s'}`;const groups=Object.groupBy?Object.groupBy(data.calls,x=>x.extension):data.calls.reduce((a,x)=>((a[x.extension]??=[]).push(x),a),{});$('recording-list').innerHTML=Object.entries(groups).map(([ext,calls])=>`<section class="recording-group"><header><h3>Extension ${esc(ext)} · ${esc(extensionName(ext))}</h3><span class="count">${calls.length} recording${calls.length===1?'':'s'}</span></header>${calls.map(x=>`<div class="recording-row"><p><b>${esc(x.phone)}</b><small>${esc(formatDate(x.started_at))} · ${x.duration_seconds||0}s</small></p><p>${badge(x.recording_status)}<small>Call ${esc(x.call_id)}</small></p>${x.recording_status==='finalized'?`<div>${waveform()}<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio><a class="button ghost" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a></div>`:'<small>Audio is not available until recording finalization.</small>'}</div>`).join('')}</section>`).join('')||empty('No recordings found','Try another extension or complete a recorded call.');renderPager('recording-pager',data.total,recordingOffset,value=>{recordingOffset=value;loadRecordings()})}catch(error){notify(error.message,true)}}
-async function loadVoicemails(){const params=new URLSearchParams();if($('voicemail-extension').value)params.set('extension',$('voicemail-extension').value);if($('voicemail-folder').value)params.set('folder',$('voicemail-folder').value);try{const data=await api(`/admin/api/voicemails?${params}`),query=$('voicemail-search').value.toLowerCase();const messages=data.voicemails.filter(x=>`${x.caller_id} ${x.message} ${x.mailbox}`.toLowerCase().includes(query));$('voicemail-count').textContent=`${messages.length} message${messages.length===1?'':'s'}`;const groups=messages.reduce((result,item)=>((result[item.mailbox]??=[]).push(item),result),{});$('voicemail-list').innerHTML=Object.entries(groups).map(([mailbox,items])=>`<section class="recording-group"><header><h3>Mailbox ${esc(mailbox)} · ${esc(extensionName(mailbox))}</h3><span class="count">${items.filter(x=>x.folder==='inbox').length} new</span></header>${items.map(x=>`<div class="recording-row voicemail-row"><p><b>${esc(x.caller_id)}</b><small>${esc(formatDate(x.received_at))} · ${x.duration_seconds}s · ${esc(x.folder)}</small></p><audio controls preload="none" src="/admin/api/voicemails/${x.mailbox}/${x.folder}/${x.message}/file"></audio><div class="resource-actions">${x.folder==='inbox'?`<button class="button ghost" data-read-voicemail="${x.mailbox}:${x.folder}:${x.message}">Mark read</button>`:''}<button class="button danger" data-delete-voicemail="${x.mailbox}:${x.folder}:${x.message}">Delete</button></div></div>`).join('')}</section>`).join('')||empty('No voicemail messages','Enable voicemail on an extension and unanswered callers can leave messages.')}catch(error){notify(error.message,true)}}
-async function voicemailAction(action,value){const [mailbox,folder,message]=value.split(':'),suffix=action==='read'?'/read':'';if(action==='delete'&&!confirm('Delete this voicemail permanently?'))return;try{await api(`/admin/api/voicemails/${mailbox}/${folder}/${message}${suffix}`,{method:action==='read'?'POST':'DELETE'});notify(action==='read'?'Voicemail marked as read':'Voicemail deleted');await loadVoicemails();await loadState()}catch(error){notify(error.message,true)}}
-function renderPager(id,total,offset,callback){const target=$(id);target.innerHTML='';if(total<=50)return;const previous=document.createElement('button'),next=document.createElement('button');previous.className=next.className='button ghost';previous.textContent='Previous';next.textContent='Next';previous.disabled=offset===0;next.disabled=offset+50>=total;previous.onclick=()=>callback(Math.max(0,offset-50));next.onclick=()=>callback(offset+50);target.append(previous,next)}
-
-const templates={
- call:item=>({title:'New outbound call',subtitle:'Your phone rings first. The customer sees the selected callback number.',fields:`<label>Customer phone number<input name="phone" type="tel" placeholder="+919876543210" required></label><div class="field-row"><label>Extension<select name="extension" ${state.is_admin?'':'disabled'}>${state.extensions.filter(x=>x.active).map(x=>`<option value="${x.extension}">${x.extension} — ${esc(x.display_name||'Unnamed')}</option>`).join('')}</select></label><label>Callback / caller ID<select name="caller_id_number"><option value="">Use default assigned number</option>${state.phone_numbers.filter(x=>x.active).map(x=>`<option value="${esc(x.number)}" ${x.default_outbound?'selected':''}>${esc(x.number)} — ${esc(x.description||'')}</option>`).join('')}</select></label></div><div class="field-row"><label>CRM contact ID (optional)<input name="contact_id"></label><label>CRM member ID (optional)<input name="member_id"></label></div>`}),
- extension:item=>({title:item?'Edit extension':'Add extension',subtitle:'Configure a customer SIP account and recording policy',fields:`${state.is_admin?`<label>Customer account<select name="owner_user_id"><option value="">Platform / administrator</option>${state.users.filter(x=>x.role==='user'&&x.active).map(x=>`<option value="${x.id}" ${item?.owner_user_id===x.id?'selected':''}>${esc(x.username)} — ${esc(x.email)}</option>`).join('')}</select><small>The customer will be able to manage this extension.</small></label>`:''}<div class="field-row"><label>Extension<input name="extension" inputmode="numeric" maxlength="3" ${item?'readonly':''} placeholder="102" required value="${esc(item?.extension||'')}"></label><label>Employee / display name<input name="display_name" maxlength="120" placeholder="Sales desk" value="${esc(item?.display_name||'')}"></label></div><div class="field-row"><label>SIP username<input name="sip_username" maxlength="80" placeholder="Defaults to extension" value="${esc(item?.sip_username||'')}"></label><label>SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item?'Leave blank to keep existing':'Required'}"></label></div><label class="check"><input name="active" type="checkbox" ${item&&!item.active?'':'checked'}> Active and allowed to make calls</label><label class="check"><input name="recording_enabled" type="checkbox" ${item?.recording_enabled?'checked':''}> Allow recording for this extension when global recording is enabled</label><div class="field-row"><label class="check"><input name="voicemail_enabled" type="checkbox" ${item?.voicemail_enabled?'checked':''}> Enable voicemail</label><label>Voicemail PIN<input name="voicemail_pin" type="password" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="${item?'Leave blank to keep existing':'4 to 10 digits'}"></label></div><label>Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(item?.voicemail_email||'')}"><small>New messages are sent here when SendGrid is enabled.</small></label><label class="check"><input name="webrtc_enabled" type="checkbox" ${item?.webrtc_enabled?'checked':''}> WebRTC enabled</label>`}),
- number:item=>({title:item?'Edit phone number':'Assign phone number',subtitle:'Administrators assign the carrier, customer, routing and monthly billing',fields:`<label>Customer account<select name="owner_user_id"><option value="">Platform / administrator</option>${state.users.filter(x=>x.role==='user'&&x.active).map(x=>`<option value="${x.id}" ${item?.owner_user_id===x.id?'selected':''}>${esc(x.username)} — ${esc(x.email)}</option>`).join('')}</select></label><label>Phone number in E.164 format<input name="number" type="tel" ${item?'readonly':''} placeholder="+13025551234" required value="${esc(item?.number||'')}"></label><div class="field-row"><label>SIP provider<select name="provider" required><option value="">Select provider</option>${state.providers.filter(x=>x.active).map(x=>`<option value="${esc(x.name)}" ${item?.provider===x.name?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label><label>Inbound extension<select name="inbound_extension"><option value="">Choose after creating an extension</option>${state.extensions.filter(x=>x.active&&(x.owner_user_id??'')===(item?.owner_user_id??'')).map(x=>`<option value="${x.extension}" ${item?.inbound_extension===x.extension?'selected':''}>${x.extension} — ${esc(x.display_name||'Unnamed')}</option>`).join('')}</select></label></div><label>Description<input name="description" maxlength="160" placeholder="Customer primary number" value="${esc(item?.description||'')}"></label><div class="field-row"><label>Monthly price (USD)<input name="monthly_price" type="number" min="0" step="0.01" value="${((item?.monthly_price_cents??500)/100).toFixed(2)}"></label><label>Billing cycle day<input name="billing_cycle_day" type="number" min="1" max="28" value="${item?.billing_cycle_day||1}"></label></div><div class="field-row"><label>Billing start<input name="billing_start" type="date" value="${esc(item?.billing_start||'')}"></label><label>Discontinue on<input name="discontinue_at" type="date" value="${esc(item?.discontinue_at||'')}"><small>Leave blank to keep active.</small></label></div><label class="check"><input name="default_outbound" type="checkbox" ${item?.default_outbound?'checked':''}> Default outbound caller ID for this extension</label><label class="check"><input name="active" type="checkbox" ${item&&!item.active?'':'checked'}> Number is active</label>`}),
- sipaccount:item=>({title:item?'Edit SIP account':'Assign SIP account',subtitle:'Secure credentials and device mapping for a customer',fields:`<label>Customer<select name="owner_user_id" required>${(state.users||[]).filter(x=>x.role==='user'&&x.active).map(x=>`<option value="${x.id}" ${item?.owner_user_id===x.id?'selected':''}>${esc(x.company_name||x.username)}</option>`).join('')}</select></label><div class="field-row"><label>Label<input name="label" required value="${esc(item?.label||'Primary softphone')}"></label><label>SIP username<input name="sip_username" required value="${esc(item?.sip_username||'')}"></label></div><div class="field-row"><label>SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item?'Leave blank to keep existing':'Required'}"></label><label>Server<input name="server" required value="${esc(item?.server||location.hostname)}"></label></div><div class="field-row"><label>Port<input name="port" type="number" value="${item?.port||5060}"></label><label>Transport<select name="transport"><option value="udp">UDP</option><option value="tcp" ${item?.transport==='tcp'?'selected':''}>TCP</option><option value="tls" ${item?.transport==='tls'?'selected':''}>TLS</option></select></label></div><div class="field-row"><label>Assigned number<select name="phone_number"><option value="">None</option>${state.phone_numbers.map(x=>`<option value="${esc(x.number)}" ${item?.phone_number===x.number?'selected':''}>${esc(x.number)}</option>`).join('')}</select></label><label>Extension<select name="extension"><option value="">None</option>${state.extensions.map(x=>`<option value="${x.extension}" ${item?.extension===x.extension?'selected':''}>${x.extension} — ${esc(x.display_name)}</option>`).join('')}</select></label></div><label class="check"><input name="active" type="checkbox" ${item&&!item.active?'':'checked'}> SIP account active</label>`}),
- provider:item=>({title:item?'Edit SIP provider':'Add SIP provider',subtitle:'Use the exact credentials and source networks supplied by your carrier',fields:`<label>Provider name<input name="name" maxlength="80" placeholder="IPComms" ${item?'readonly':''} required value="${esc(item?.name||'')}"></label><div class="field-row"><label>SIP server<input name="server" placeholder="sip.example.com" required value="${esc(item?.server||'')}"></label><label>Port<input name="port" type="number" min="1" max="65535" required value="${item?.port||5060}"></label></div><div class="field-row"><label>Username<input name="username" required value="${esc(item?.username||'')}"></label><label>Password<input name="password" type="password" autocomplete="new-password" placeholder="${item?'Leave blank to keep existing':'Required'}"></label></div><div class="field-row"><label>Transport<select name="transport"><option value="udp" ${item?.transport!=='tcp'?'selected':''}>UDP</option><option value="tcp" ${item?.transport==='tcp'?'selected':''}>TCP</option></select></label><label>Codecs<input name="codecs" value="${esc(item?.codecs||'ulaw,alaw')}" required></label></div><label>Allowed provider IPs / CIDRs<input name="allowed_ips" placeholder="203.0.113.10/32,203.0.113.0/24" required value="${esc(item?.allowed_ips||'')}"><small>Required. Only these networks may identify as this provider.</small></label><label class="check"><input name="active" type="checkbox" ${item&&!item.active?'':'checked'}> Provider is active</label>`}),
- webhook:item=>({title:item?'Edit webhook':'Add webhook',subtitle:'Deliver authenticated call lifecycle events to a CRM',fields:`<label>Name<input name="name" maxlength="80" placeholder="Production CRM" required value="${esc(item?.name||'')}"></label><label>Endpoint URL<input name="url" type="url" maxlength="1000" placeholder="https://crm.example.com/api/telephony/events" required value="${esc(item?.url||'')}"></label><label>Bearer token<input name="token" type="password" autocomplete="new-password" placeholder="${item?'Leave blank to keep existing':'Optional shared secret'}"></label><label>Events<select name="events" multiple size="7" required>${['*','call.started','call.ringing','call.answered','call.completed','call.failed','call.voicemail'].map(event=>`<option value="${event}" ${(item?.events||'*').split(',').includes(event)?'selected':''}>${event==='*'?'All call events':event}</option>`).join('')}</select><small>Select only the events this integration needs.</small></label><label class="check"><input name="active" type="checkbox" ${item&&!item.active?'':'checked'}> Webhook is active</label>`}),
- apikey:item=>({title:'Create API key',subtitle:'The secret is displayed once after creation',fields:`<label>Integration name<input name="name" required placeholder="Production CRM"></label><label>Scopes<select name="scopes" multiple size="8"><option value="calls:read">Read calls</option><option value="calls:write">Create/update calls</option><option value="config:read">Read extensions and numbers</option><option value="recordings:read">Read recordings</option><option value="voicemail:read">Read voicemail</option><option value="voicemail:write">Manage voicemail</option><option value="webhooks:manage">Manage webhooks</option><option value="*">Full access</option></select><small>Use Ctrl/Cmd to select multiple. Prefer only calls:read, calls:write and config:read for a normal CRM.</small></label>`}),
- user:item=>({title:item?'Edit customer':'Add customer',subtitle:'Customer login details; numbers and SIP resources are assigned separately',fields:`<div class="field-row"><label>Name<input name="full_name" required value="${esc(item?.full_name||'')}"></label><label>Company<input name="company_name" required value="${esc(item?.company_name||'')}"></label></div><div class="field-row"><label>Role<input name="job_role" required value="${esc(item?.job_role||'')}"></label><label>Phone<input name="phone" type="tel" required value="${esc(item?.phone||'')}"></label></div><div class="field-row"><label>Username<input name="username" required value="${esc(item?.username||'')}"></label><label>Email<input name="email" type="email" required value="${esc(item?.email||'')}"></label></div><label>Password<input name="password" type="password" autocomplete="new-password" placeholder="${item?'Leave blank to keep existing':'Minimum 14 characters'}"></label><label class="check"><input name="active" type="checkbox" ${item&&!item.active?'':'checked'}> Customer can sign in</label>`}),
- request:item=>({title:'Request a phone number',subtitle:'Tell the administrator what number your business needs',fields:`<label>Request type<select name="request_type"><option value="number">New phone number</option><option value="routing">Routing assistance</option><option value="billing">Billing question</option><option value="access">Access support</option></select></label><label>Requirements<textarea name="details" rows="5" maxlength="2000" required placeholder="Preferred country, area code, local or toll-free number, and intended use"></textarea><small>Include the area code or region and any timing requirements.</small></label>`}),
- platformadmin:item=>({title:'Add platform administrator',subtitle:'Privileged account with access to all customers and carrier settings',fields:`<div class="field-row"><label>Username<input name="username" required></label><label>Email<input name="email" type="email" required></label></div><label>Password<input name="password" type="password" minlength="14" autocomplete="new-password" required></label>`})
+/* --------------------------------------------------------------- 2. State */
+let csrf = '';
+let state = {
+  extensions: [], phone_numbers: [], providers: [], webhooks: [], webhook_deliveries: [],
+  users: [], customers: [], sip_accounts: [], requests: [], activity: [], notifications: [],
+  call_routes: [], routing_flows: [], groups: [], api_keys: [], invoices: [],
+  email_deliveries: [], settings: {}, email_config: {},
+  call_summary: {}, voicemail_summary: {}, is_admin: false,
 };
-function openModal(type,item=null){modalType=type;editing=item;const template=templates[type](item);$('modal-title').textContent=template.title;$('modal-subtitle').textContent=template.subtitle;$('modal-fields').innerHTML=template.fields;$('modal-save').textContent=item?'Save changes':'Add';$('modal').classList.add('open');$('modal').setAttribute('aria-hidden','false');if(type==='call'){const extension=$('modal-fields').querySelector('[name=extension]'),number=$('modal-fields').querySelector('[name=caller_id_number]');const update=()=>{[...number.options].forEach((option,index)=>{if(index)option.hidden=state.phone_numbers.find(x=>x.number===option.value)?.inbound_extension!==extension.value});const preferred=[...number.options].find(option=>!option.hidden&&state.phone_numbers.find(x=>x.number===option.value)?.default_outbound);number.value=preferred?.value||''};extension?.addEventListener('change',update);update()}if(type==='number'){const owner=$('modal-fields').querySelector('[name=owner_user_id]'),extension=$('modal-fields').querySelector('[name=inbound_extension]');owner?.addEventListener('change',()=>{const value=owner.value;extension.innerHTML='<option value="">Choose an extension</option>'+state.extensions.filter(x=>String(x.owner_user_id??'')===value&&x.active).map(x=>`<option value="${x.extension}">${esc(x.extension)} — ${esc(x.display_name||'Unnamed')}</option>`).join('')})}if(type==='sipaccount'){const owner=$('modal-fields').querySelector('[name=owner_user_id]'),number=$('modal-fields').querySelector('[name=phone_number]'),extension=$('modal-fields').querySelector('[name=extension]');const update=()=>{const id=Number(owner.value);number.innerHTML='<option value="">None</option>'+state.phone_numbers.filter(x=>x.owner_user_id===id).map(x=>`<option value="${esc(x.number)}" ${item?.phone_number===x.number?'selected':''}>${esc(x.number)}</option>`).join('');extension.innerHTML='<option value="">None</option>'+state.extensions.filter(x=>x.owner_user_id===id).map(x=>`<option value="${x.extension}" ${item?.extension===x.extension?'selected':''}>${x.extension} — ${esc(x.display_name||'Extension')}</option>`).join('')};owner.addEventListener('change',update);update()}setTimeout(()=>$('modal-fields').querySelector('input,select')?.focus(),50)}
-function closeModal(){$('modal').classList.remove('open');$('modal').setAttribute('aria-hidden','true');$('modal-form').reset();$('modal-save').hidden=false;editing=null;pendingFulfillRequest=null}
-function showApiKey(token){modalType='secret';$('modal-title').textContent='API key created';$('modal-subtitle').textContent='Copy and store this credential now. For security, it cannot be shown again.';$('modal-fields').innerHTML=`<article class="info-banner"><b>New EIP API key</b><span>Use this as a Bearer token. Never place it in browser code or public repositories.</span></article><label>Secret key<div class="field-row"><input id="created-api-key" readonly value="${esc(token)}"><button class="button primary" type="button" data-copy-secret>Copy key</button></div></label>`;$('modal-save').hidden=true;$('modal').classList.add('open');$('modal').setAttribute('aria-hidden','false')}
-async function saveModal(event){event.preventDefault();const data=Object.fromEntries(new FormData(event.target));event.target.querySelectorAll('input[type=checkbox]').forEach(x=>data[x.name]=x.checked);if(modalType==='apikey')data.scopes=[...event.target.querySelector('[name=scopes]').selectedOptions].map(x=>x.value).join(',');if(modalType==='webhook')data.events=[...event.target.querySelector('[name=events]').selectedOptions].map(x=>x.value).join(',');if(['webhook','user'].includes(modalType)&&editing)data.id=editing.id;try{const path=modalType==='number'?'numbers':modalType==='webhook'?'webhooks':modalType==='apikey'?'api-keys':modalType==='sipaccount'?'sip-accounts':modalType+'s';const result=await api(`/admin/api/${path}`,{method:'POST',body:JSON.stringify(data)});if(modalType==='number'&&pendingFulfillRequest){await api(`/admin/api/requests/${pendingFulfillRequest}/resolve`,{method:'POST',body:JSON.stringify({status:'fulfilled',admin_note:`Number ${data.number} assigned`})});pendingFulfillRequest=null}if(modalType==='apikey'){closeModal();await loadState();showApiKey(result.token);notify('API key created');return}notify(modalType==='call'?'Outbound call started':`${templates[modalType](editing).title.replace('Edit','').trim()} saved`);const refreshCustomerId=$('customer-drawer').classList.contains('open')?currentCustomer?.customer?.id:null;closeModal();await loadState();if(refreshCustomerId)await openCustomer(refreshCustomerId);if(modalType==='call')loadCalls()}catch(error){notify(error.message,true)}}
-async function remove(type,id,label){if(!confirm(`Delete ${label}? This cannot be undone.`))return;try{const path=type==='number'?`/admin/api/numbers/${encodeURIComponent(label)}`:`/admin/api/${type}s/${id}`;await api(path,{method:'DELETE'});notify(`${type[0].toUpperCase()+type.slice(1)} deleted`);await loadState()}catch(error){notify(error.message,true)}}
+let modalType = '', editing = null, callOffset = 0, recordingOffset = 0;
+let currentPage = 'dashboard', workspace = null, wsTab = 'overview';
+let flowNodes = [], flowConfigIndex = -1, pendingFulfilRequest = null;
 
-async function openCustomer(customerId){try{currentCustomer=await api(`/admin/api/customers/${customerId}`);const c=currentCustomer.customer;$('customer-drawer-title').textContent=c.company_name||c.username;$('customer-drawer-meta').textContent=`${c.full_name||c.username} · ${c.email}`;$('customer-command-avatar').textContent=(c.company_name||c.full_name||c.username||'C')[0].toUpperCase();$('customer-command-status').classList.toggle('inactive',!c.active);$('customer-command-status').innerHTML=`<i></i> ${c.active?'Active customer':'Access disabled'}`;const openInvoices=currentCustomer.invoices.filter(x=>x.status==='open').length,pending=currentCustomer.requests.filter(x=>x.status==='pending').length;$('customer-drawer-metrics').innerHTML=`<div><span class="metric-glyph">☎</span><p><small>Assigned numbers</small><b>${currentCustomer.numbers.length}</b></p></div><div><span class="metric-glyph">◈</span><p><small>SIP services</small><b>${currentCustomer.sip_accounts.length}</b></p></div><div><span class="metric-glyph">▣</span><p><small>Open invoices</small><b>${openInvoices}</b></p></div><div><span class="metric-glyph">↗</span><p><small>Pending requests</small><b>${pending}</b></p></div>`;renderCustomerTab('access');$('customer-drawer').classList.add('open');$('customer-drawer').setAttribute('aria-hidden','false');$('scrim').classList.add('open');setTimeout(()=>$('customer-drawer-close').focus(),100)}catch(error){notify(error.message,true)}}
-function detailField(label,value,wide=false){return `<div class="detail-field ${wide?'wide':''}"><small>${esc(label)}</small><strong>${esc(value||'—')}</strong></div>`}
-function renderCustomerTab(tab){if(!currentCustomer)return;document.querySelectorAll('[data-customer-tab]').forEach(x=>x.classList.toggle('active',x.dataset.customerTab===tab));const c=currentCustomer.customer,content=$('customer-drawer-content');const access=`<section class="command-section"><div class="section-heading"><div><small>IDENTITY & ACCESS</small><h3>Customer profile</h3><p>Login identity and primary business contact information.</p></div><button class="button primary" data-edit-user="${c.id}">Edit customer</button></div><div class="detail-field-grid">${detailField('Full name',c.full_name)}${detailField('Company name',c.company_name)}${detailField('Business role',c.job_role)}${detailField('Phone number',c.phone)}${detailField('Login username',c.username)}${detailField('Email address',c.email)}${detailField('Account access',c.active?'Active — can sign in':'Disabled — sign-in blocked',true)}</div></section>`;
-const numbers=`<section class="command-section"><div class="section-heading"><div><small>ADMINISTRATOR PROVISIONING</small><h3>Assigned phone numbers</h3><p>Numbers are provisioned here. Routing is managed by the customer.</p></div><button class="button primary" data-new-for-customer="number:${c.id}">＋ Assign number</button></div><div class="command-card-grid">${currentCustomer.numbers.map(x=>{const sip=currentCustomer.sip_accounts.find(account=>account.phone_number===x.number);return `<article class="command-resource-card"><div class="resource-card-head"><span class="resource-symbol">☎</span><div><small>PHONE NUMBER</small><h4>${esc(x.number)}</h4></div><span class="tag ${x.active?'on':'off'}">${x.active?'Active':'Disabled'}</span></div><div class="detail-field-grid compact">${detailField('Description',x.description||'Customer number')}${detailField('SIP service',sip?.label||'Not linked')}${detailField('Inbound extension',x.inbound_extension||'Customer will configure')}${detailField('Monthly rate',`$${((x.monthly_price_cents||500)/100).toFixed(2)}`)}${detailField('Billing cycle',`Day ${x.billing_cycle_day||1}`)}${detailField('Next status',x.discontinue_at?`Ends ${x.discontinue_at}`:'Continuing')}</div></article>`}).join('')||empty('No numbers assigned','Assign the customer’s first phone number to begin provisioning.')}</div></section>`;
-const sip=`<section class="command-section"><div class="section-heading"><div><small>ADMINISTRATOR PROVISIONING</small><h3>SIP service and credentials</h3><p>Assign secure SIP access. The customer can view credentials and manage devices.</p></div><button class="button primary" data-new-for-customer="sipaccount:${c.id}">＋ Assign SIP service</button></div><div class="command-card-grid">${currentCustomer.sip_accounts.map(x=>`<article class="command-resource-card"><div class="resource-card-head"><span class="resource-symbol">◈</span><div><small>SIP ACCOUNT</small><h4>${esc(x.label)}</h4></div><span class="device-status ${x.registration_status==='online'?'online':''}"><i></i>${esc(x.registration_status)}</span></div><div class="detail-field-grid compact">${detailField('SIP username',x.sip_username)}${detailField('Server',`${x.server}:${x.port}`)}${detailField('Transport',String(x.transport).toUpperCase())}${detailField('Assigned number',x.phone_number||'Not linked')}${detailField('Extension',x.extension||'Customer will configure')}${detailField('Credential status',x.has_password?'Securely stored':'Password required')}</div><div class="resource-actions"><button class="button ghost" data-show-credentials="${x.id}">View credentials</button><button class="button ghost" data-edit-sip="${x.id}">Edit service</button></div></article>`).join('')||empty('No SIP service assigned','Assign SIP credentials after provisioning a number.')}</div></section>`;
-const payments=`<section class="command-section"><div class="section-heading"><div><small>EXTERNAL BILLING</small><h3>Invoices and payment status</h3><p>Payments are collected externally; update invoice status after confirmation.</p></div></div><div class="command-card-grid">${currentCustomer.invoices.map(x=>`<article class="command-resource-card invoice-card"><div class="resource-card-head"><span class="resource-symbol">▣</span><div><small>INVOICE #${x.id}</small><h4>$${(x.amount_cents/100).toFixed(2)}</h4></div><span class="tag ${x.status==='paid'?'on':x.status==='void'?'off':''}">${esc(x.status)}</span></div><div class="detail-field-grid compact">${detailField('Phone number',x.number)}${detailField('Service period',`${x.period_start} – ${x.period_end}`)}${detailField('Due date',x.due_at)}${detailField('Paid at',x.paid_at||'Not paid')}</div>${x.status==='open'?`<button class="button primary" data-paid-invoice="${x.id}">Mark paid</button>`:''}</article>`).join('')||empty('No invoices','Invoices appear automatically for assigned numbers.')}</div></section>`;
-const activity=`<section class="command-section"><div class="section-heading"><div><small>AUDIT HISTORY</small><h3>Customer activity</h3><p>Provisioning, access and integration changes.</p></div></div><div class="command-timeline">${currentCustomer.activity.map(x=>`<div class="timeline-item"><b>${esc(x.description)}</b><p>${esc(x.action.replaceAll('.',' '))} · ${esc(x.resource_type)}</p><small>${esc(formatDate(x.created_at))}</small></div>`).join('')||empty('No activity yet','Customer and administrator changes will be recorded here.')}</div></section>`;content.innerHTML=({access,numbers,sip,payments,activity})[tab]||access}
-function closeCustomer(){$('customer-drawer').classList.remove('open');$('customer-drawer').setAttribute('aria-hidden','true');$('scrim').classList.remove('open');currentCustomer=null}
-async function showCredentials(id){try{const data=await api(`/admin/api/sip-accounts/${id}/credentials`),x=data.sip_account;modalType='credentials';$('modal-title').textContent='Number & SIP Credentials';$('modal-subtitle').textContent='Store these securely and use them in your softphone.';$('modal-fields').innerHTML=`<div class="credential-grid">${[['Number',x.phone_number],['SIP username',x.sip_username],['Password',x.sip_password],['Server',x.server],['Port',x.port],['Transport',x.transport],['Extension',x.extension]].map(([label,value])=>`<label>${label}<div class="field-row"><input ${label==='Password'?'type="password" data-secret':''} readonly value="${esc(value||'—')}">${label==='Password'?'<button type="button" class="button ghost" data-toggle-secret>Show</button>':''}<button type="button" class="button ghost" data-copy-value="${esc(value||'')}">Copy</button></div></label>`).join('')}</div>`;$('modal-save').hidden=true;$('modal').classList.add('open')}catch(error){notify(error.message,true)}}
-let searchTimer;function debounce(fn){clearTimeout(searchTimer);searchTimer=setTimeout(fn,300)}
-document.addEventListener('click',async event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.openCustomer)openCustomer(Number(button.dataset.openCustomer));if(button.dataset.customerTab)renderCustomerTab(button.dataset.customerTab);if(button.dataset.showCredentials)showCredentials(Number(button.dataset.showCredentials));if(button.dataset.editSip)openModal('sipaccount',state.sip_accounts.find(x=>x.id===Number(button.dataset.editSip)));if(button.dataset.deleteSip&&confirm('Delete this SIP account and revoke its credentials?')){try{await api(`/admin/api/sip-accounts/${button.dataset.deleteSip}`,{method:'DELETE'});notify('SIP account deleted');await loadState()}catch(error){notify(error.message,true)}}if(button.dataset.toggleSecret!==undefined){const input=button.parentElement.querySelector('[data-secret]');input.type=input.type==='password'?'text':'password';button.textContent=input.type==='password'?'Show':'Hide'}if(button.dataset.copyValue!==undefined){navigator.clipboard.writeText(button.dataset.copyValue);notify('Copied securely')}if(button.dataset.removeNode!==undefined){flowNodes.splice(Number(button.dataset.removeNode),1);renderFlowNodes()}if(button.dataset.readNotification){try{await api(`/admin/api/notifications/${button.dataset.readNotification}/read`,{method:'POST'});await loadState()}catch(error){notify(error.message,true)}}if(button.dataset.resolveRequest){const [id,status]=button.dataset.resolveRequest.split(':');try{await api(`/admin/api/requests/${id}/resolve`,{method:'POST',body:JSON.stringify({status,admin_note:`Request ${status} by administrator`})});notify(`Request ${status}`);await loadState()}catch(error){notify(error.message,true)}}if(button.dataset.assignRequest){const [requestId,userId]=button.dataset.assignRequest.split(':');pendingFulfillRequest=requestId;showPage('numbers');openModal('number');setTimeout(()=>{$('modal-fields').querySelector('[name=owner_user_id]').value=userId},0)}if(button.dataset.newForCustomer){const [type,id]=button.dataset.newForCustomer.split(':');openModal(type);setTimeout(()=>{const owner=$('modal-fields').querySelector('[name=owner_user_id]');if(owner){owner.value=id;owner.dispatchEvent(new Event('change'))}},0)}if(button.dataset.page)showPage(button.dataset.page);if(button.dataset.go){showPage(button.dataset.go);if(button.dataset.new)openModal(button.dataset.new)}if(button.dataset.open)openModal(button.dataset.open);if(button.dataset.editExtension)openModal('extension',state.extensions.find(x=>x.extension===button.dataset.editExtension));if(button.dataset.editNumber)openModal('number',state.phone_numbers.find(x=>x.id===Number(button.dataset.editNumber)));if(button.dataset.editProvider)openModal('provider',state.providers.find(x=>x.id===Number(button.dataset.editProvider)));if(button.dataset.editWebhook)openModal('webhook',state.webhooks.find(x=>x.id===Number(button.dataset.editWebhook)));if(button.dataset.editUser)openModal('user',state.users.find(x=>x.id===Number(button.dataset.editUser)));if(button.dataset.deleteExtension)remove('extension',button.dataset.deleteExtension,button.dataset.deleteExtension);if(button.dataset.deleteNumber){const item=state.phone_numbers.find(x=>x.id===Number(button.dataset.deleteNumber));remove('number',item.id,item.number)}if(button.dataset.deleteProvider){const item=state.providers.find(x=>x.id===Number(button.dataset.deleteProvider));remove('provider',item.id,item.name)}if(button.dataset.deleteWebhook){const item=state.webhooks.find(x=>x.id===Number(button.dataset.deleteWebhook));remove('webhook',item.id,item.name)}if(button.dataset.deleteUser){const item=state.users.find(x=>x.id===Number(button.dataset.deleteUser));remove('user',item.id,item.username)}if(button.dataset.discontinueNumber){if(confirm('Discontinue this number at its next monthly renewal? Calls will stop on that date.')){try{const result=await api(`/admin/api/numbers/${encodeURIComponent(button.dataset.discontinueNumber)}/discontinue`,{method:'POST'});notify(`Number scheduled to end ${result.discontinue_at}`);await loadState()}catch(error){notify(error.message,true)}}}if(button.dataset.paidInvoice){try{await api(`/admin/api/invoices/${button.dataset.paidInvoice}/status`,{method:'POST',body:JSON.stringify({status:'paid'})});notify('Invoice marked paid');await loadState()}catch(error){notify(error.message,true)}}if(button.dataset.copySecret){navigator.clipboard.writeText($('created-api-key').value);notify('API key copied')}if(button.dataset.revokeKey){if(confirm('Permanently delete this API key? Integrations using it will stop immediately.')){try{await api(`/admin/api/api-keys/${button.dataset.revokeKey}`,{method:'DELETE'});notify('API key deleted');await loadState()}catch(error){notify(error.message,true)}}}if(button.dataset.defaultNumber){const item=state.phone_numbers.find(x=>x.id===Number(button.dataset.defaultNumber));try{await api('/admin/api/numbers/default',{method:'POST',body:JSON.stringify({number:item.number,extension:item.inbound_extension})});notify('Default outbound number updated');await loadState()}catch(error){notify(error.message,true)}}if(button.dataset.readVoicemail)voicemailAction('read',button.dataset.readVoicemail);if(button.dataset.deleteVoicemail)voicemailAction('delete',button.dataset.deleteVoicemail);if(button.dataset.testWebhook){try{const result=await api(`/admin/api/webhooks/${button.dataset.testWebhook}/test`,{method:'POST'});notify(`Webhook delivered — HTTP ${result.status_code}`)}catch(error){notify(error.message,true)}}});
-$('customer-search').addEventListener('input',renderUsers);$('extension-search').addEventListener('input',renderExtensions);$('number-search').addEventListener('input',renderNumbers);$('call-search').addEventListener('input',()=>debounce(()=>{callOffset=0;loadCalls()}));$('recording-search').addEventListener('input',()=>debounce(()=>{recordingOffset=0;loadRecordings()}));$('call-extension').addEventListener('change',()=>{callOffset=0;loadCalls()});$('call-status').addEventListener('change',()=>{callOffset=0;loadCalls()});$('recording-extension').addEventListener('change',()=>{recordingOffset=0;loadRecordings()});$('recording-customer').addEventListener('change',()=>{recordingOffset=0;loadRecordings()});$('recording-from').addEventListener('change',loadRecordings);$('recording-to').addEventListener('change',loadRecordings);$('voicemail-extension').addEventListener('change',loadVoicemails);$('voicemail-folder').addEventListener('change',loadVoicemails);$('voicemail-search').addEventListener('input',()=>debounce(loadVoicemails));$('refresh-calls').onclick=loadCalls;$('refresh-recordings').onclick=loadRecordings;$('refresh-voicemails').onclick=loadVoicemails;$('modal-form').addEventListener('submit',saveModal);$('modal-close').onclick=$('modal-cancel').onclick=closeModal;$('modal').addEventListener('click',event=>{if(event.target===$('modal'))closeModal()});
-$('customer-drawer-close').onclick=closeCustomer;document.querySelectorAll('[data-customer-tab]').forEach(button=>button.onclick=()=>renderCustomerTab(button.dataset.customerTab));
-$('read-all-notifications').onclick=async()=>{try{await api('/admin/api/notifications/read-all',{method:'POST'});notify('Notifications marked as read');await loadState()}catch(error){notify(error.message,true)}};
-$('request-number').onclick=()=>openModal('request');
-$('flow-config-form').addEventListener('submit',saveFlowConfig);$('flow-config-close').onclick=$('flow-config-cancel').onclick=closeFlowConfig;$('flow-config-modal').addEventListener('click',event=>{if(event.target===$('flow-config-modal'))closeFlowConfig()});$('flow-nodes').addEventListener('click',event=>{if(event.target.closest('[data-remove-node]'))return;const node=event.target.closest('[data-flow-index]');if(node)openFlowConfig(Number(node.dataset.flowIndex))});$('flow-nodes').addEventListener('dragstart',event=>{const node=event.target.closest('[data-flow-index]');if(node)event.dataTransfer.setData('application/x-flow-index',node.dataset.flowIndex)});$('flow-nodes').addEventListener('dragover',event=>event.preventDefault());$('flow-nodes').addEventListener('drop',event=>{const target=event.target.closest('[data-flow-index]'),source=Number(event.dataTransfer.getData('application/x-flow-index'));if(target&&Number.isInteger(source)){event.preventDefault();const [node]=flowNodes.splice(source,1);flowNodes.splice(Number(target.dataset.flowIndex),0,node);renderFlowNodes()}});document.querySelectorAll('[data-node-type]').forEach(button=>{button.addEventListener('dragstart',event=>event.dataTransfer.setData('text/plain',button.dataset.nodeType));button.onclick=()=>{flowNodes.push({type:button.dataset.nodeType,label:'Click to configure'});renderFlowNodes()}});$('flow-canvas').addEventListener('dragover',event=>event.preventDefault());$('flow-canvas').addEventListener('drop',event=>{event.preventDefault();const type=event.dataTransfer.getData('text/plain');if(type){flowNodes.push({type,label:'Click to configure'});renderFlowNodes()}});$('route-number').addEventListener('change',()=>{$('flow-entry-number').textContent=$('route-number').value||'Assign a number to begin';flowNodes=(state.call_routes||[]).find(x=>x.phone_number===$('route-number').value)?.route?.nodes||[];renderFlowNodes()});$('save-route').onclick=async()=>{if(!$('route-number').value)return notify('Assign a number first',true);if(!flowNodes.length||flowNodes.some(node=>!node.configured))return notify('Add and configure every routing step before saving',true);try{await api('/admin/api/call-routes',{method:'POST',body:JSON.stringify({phone_number:$('route-number').value,name:'Main call flow',route:{nodes:flowNodes},active:true})});notify('Call flow saved');await loadState()}catch(error){notify(error.message,true)}};
-$('settings-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/admin/api/settings',{method:'POST',body:JSON.stringify({default_extension:$('default-extension').value,inbound_fallback_extension:$('inbound-fallback').value,recording_enabled:$('rec-enabled').checked,recording_format:$('rec-format').value,recording_retention_days:$('rec-retention').value,recording_max_duration_seconds:$('rec-max').value,recording_announcement:$('rec-announcement').checked,recording_announcement_media:$('rec-media').value,recording_beep:$('rec-beep').checked})});notify('Call settings saved');await loadState()}catch(error){notify(error.message,true)}});
-$('email-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/admin/api/email-config',{method:'POST',body:JSON.stringify({enabled:$('email-enabled').checked,api_key:$('sendgrid-key').value,from_email:$('sendgrid-from').value,from_name:$('sendgrid-name').value})});$('sendgrid-key').value='';notify('SendGrid configuration saved');await loadState()}catch(error){notify(error.message,true)}});$('test-email').onclick=async()=>{try{const result=await api('/admin/api/email-config/test',{method:'POST',body:JSON.stringify({email:$('sendgrid-test').value})});notify(result.ok?'Test email accepted by SendGrid':'Test failed')}catch(error){notify(error.message,true)}};
-$('profile-recording-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/admin/api/profile/recording',{method:'POST',body:JSON.stringify({enabled:$('profile-recording').checked})});notify('Recording preference updated');await loadState()}catch(error){notify(error.message,true)}});
-$('profile-email-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/admin/api/profile/email',{method:'POST',body:JSON.stringify({email:$('profile-email').value})});notify('Voicemail email updated');await loadState()}catch(error){notify(error.message,true)}});
-$('password-form').addEventListener('submit',async event=>{event.preventDefault();const password=$('new-password').value;if(password!==$('confirm-password').value){notify('Passwords do not match',true);return}try{await api('/admin/api/password',{method:'POST',body:JSON.stringify({password})});event.target.reset();notify('Administrator password changed')}catch(error){notify(error.message,true)}});
-$('logout').onclick=async()=>{try{await api('/admin/logout',{method:'POST'})}finally{location='/admin/login'}};$('menu').onclick=()=>{$('sidebar').classList.add('open');$('scrim').classList.add('open')};$('scrim').onclick=()=>{$('sidebar').classList.remove('open');if($('customer-drawer').classList.contains('open'))closeCustomer();else $('scrim').classList.remove('open')};
-loadState().then(()=>{const requested=location.hash.slice(1);showPage(pageMeta[requested]?requested:(state.is_admin?'users':'dashboard'))});setInterval(checkHealth,30000);setInterval(()=>{if(!document.hidden&&!$('modal').classList.contains('open'))loadState()},15000);setInterval(()=>{if(!document.hidden)refreshDeviceStatus()},8000);
+const pageMeta = {
+  dashboard: ['Overview', 'Your telephony environment at a glance'],
+  users: ['Customers', 'Open a customer to manage everything they own in one place'],
+  numbers: ['Numbers', 'Ownership, assignment and outbound caller ID'],
+  sipaccounts: ['Devices & SIP', 'Credentials, connected devices and live registration'],
+  extensions: ['Extensions', 'Internal destinations grouped by customer'],
+  routing: ['Call Routing', 'Design the incoming call journey visually'],
+  calls: ['Calls', 'Inbound and outbound activity across extensions'],
+  recordings: ['Recordings', 'Search and play secure call audio'],
+  voicemails: ['Voicemail', 'Messages organised by mailbox'],
+  billing: ['Billing', 'Cycles, next payments and invoice history'],
+  webhooks: ['APIs & Webhooks', 'Keys, event endpoints and delivery health'],
+  notifications: ['Notifications', 'Assignments, devices, payments and alerts'],
+  security: ['Security', 'Protect your account access'],
+  requests: ['Requests', 'Approve customer provisioning requests'],
+  activity: ['Activity', 'Important platform and customer actions'],
+  providers: ['Carrier Providers', 'Platform carrier connections — administrator only'],
+  email: ['Email Delivery', 'SendGrid voicemail attachments'],
+  settings: ['Platform Settings', 'Global routing and recording policy'],
+};
+/* Pages a customer account must never open. Administrator-only resources are
+   also stripped from the API payload for customers, so this is defence in depth. */
+const CUSTOMER_BLOCKED = ['users', 'providers', 'email', 'settings', 'requests', 'activity'];
+
+/* ------------------------------------------------------------ 3. Transport */
+async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (options.body) headers['Content-Type'] = 'application/json';
+  if (csrf && options.method && !['GET', 'HEAD'].includes(options.method)) headers['X-CSRF-Token'] = csrf;
+  const response = await fetch(path, { ...options, headers });
+  let data = {};
+  try { data = await response.json(); } catch { /* empty body is valid for deletes */ }
+  if (response.status === 401) { location = '/login'; throw Error('Login required'); }
+  if (data.csrf_token) csrf = data.csrf_token;
+  if (!response.ok) throw Error(data.error || `Request failed (${response.status})`);
+  return data;
+}
+
+/* ------------------------------------------------------------ 4. Feedback */
+function notify(message, isError = false) {
+  const host = $('toasts');
+  if (!host) return;
+  const node = document.createElement('div');
+  node.className = `toast${isError ? ' error' : ''}`;
+  const life = isError ? 5200 : 3200;
+  node.style.setProperty('--toast-life', `${life}ms`);
+  node.innerHTML = `<span class="glyph">${isError ? '!' : '✓'}</span><span>${esc(message)}</span>`;
+  host.appendChild(node);
+  setTimeout(() => {
+    node.classList.add('leaving');
+    node.addEventListener('animationend', () => node.remove(), { once: true });
+  }, life);
+}
+
+function empty(title, text, glyph = '∅', tone = '', action = '') {
+  return `<div class="empty${tone ? ` tone-${tone}` : ''}"><span class="empty-icon">${glyph}</span>
+    <b>${esc(title)}</b><span>${esc(text)}</span>${action ? `<div class="empty-action">${action}</div>` : ''}</div>`;
+}
+/* Empty states offer the action that fills them, reusing existing flows. */
+function emptyAction(label, attrs, primary = false) {
+  return `<button class="btn ${primary ? 'primary' : 'ghost'} sm" ${attrs}>${label}</button>`;
+}
+/* Failures get a real state with a way out, not a blank panel. */
+function errorState(title, text, action) {
+  return `<div class="empty tone-bad"><span class="empty-icon">⚠</span><b>${esc(title)}</b><span>${esc(text)}</span>
+    <div class="empty-action"><button class="btn ghost sm" data-retry="${esc(action)}">Try again</button></div></div>`;
+}
+const RETRY = {
+  calls: () => loadCalls(), recordings: () => loadRecordings(),
+  voicemails: () => loadVoicemails(), state: () => loadState(),
+};
+function skeletonPanel(rows = 3) {
+  const widths = ['', 'w-60', 'w-80', 'w-40'];
+  return `<div class="skeleton-list">${Array.from({ length: rows }, (_, i) => `<div class="skeleton line ${widths[i % widths.length]}"></div>`).join('')}</div>`;
+}
+/* Mark the panel that owns a list while its request is in flight. */
+function setLoading(el, on) {
+  el?.closest('.panel')?.classList.toggle('loading', !!on);
+}
+function skeletonRows(rows = 6) {
+  return `<div class="skeleton-list">${Array.from({ length: rows }, (_, i) => `<div class="skeleton" style="height:52px;opacity:${(1 - i * 0.09).toFixed(2)}"></div>`).join('')}</div>`;
+}
+
+/* A badge pulses once when its count changes, then stays quiet across polls. */
+function setBadge(el, value) {
+  if (!el) return;
+  const next = String(value);
+  const changed = el.dataset.value !== undefined && el.dataset.value !== next;
+  el.dataset.value = next;
+  el.textContent = next;
+  el.hidden = !Number(value);
+  if (changed) {
+    el.classList.remove('pulse');
+    void el.offsetWidth;
+    el.classList.add('pulse');
+  }
+}
+
+/* Sequential entrances: children of these hosts animate in with a short stagger
+   (capped, otherwise a 50-row table would still be arriving a second later). */
+const STAGGER_HOSTS = [
+  'user-list', 'number-list', 'provider-list', 'sip-account-list', 'api-key-list',
+  'webhook-list', 'webhook-delivery-list', 'email-delivery-list', 'extension-list',
+  'request-list', 'my-request-list', 'activity-list', 'notification-list',
+  'invoice-list', 'subscription-list', 'platform-admin-list', 'recording-list',
+  'voicemail-list',
+];
+function markStagger() {
+  STAGGER_HOSTS.forEach(id => {
+    const host = $(id);
+    if (!host) return;
+    [...host.children].forEach((child, index) => child.style.setProperty('--i', String(Math.min(index, 10))));
+  });
+  document.querySelectorAll('table.data tbody').forEach(body => {
+    [...body.rows].forEach((row, index) => row.style.setProperty('--i', String(Math.min(index, 14))));
+  });
+}
+/* Status pill with a leading dot; keeps wording human across both themes. */
+const seenStatus = new Map();
+/* Passing a stable key lets a status pill pulse the first time it changes after
+   a refresh, so approvals, cancellations and finalisations are noticeable. */
+function statusPill(value, key) {
+  const v = String(value || 'unknown');
+  const previous = key ? seenStatus.get(key) : undefined;
+  const changed = previous !== undefined && previous !== v;
+  if (key) seenStatus.set(key, v);
+  return `<span class="status ${esc(v)}${changed ? ' changed' : ''}">${esc(v.replaceAll('_', ' '))}</span>`;
+}
+function tag(text, tone = '', glyph = '') {
+  return `<span class="tag ${tone}">${glyph ? `${glyph} ` : ''}${esc(text)}</span>`;
+}
+function registration(account) {
+  const online = account.registration_status === 'online';
+  return `<span class="device ${online ? 'online' : 'offline'}"><i></i>${online ? 'Registered' : 'Offline'}</span>`;
+}
+function kv(label, value, cls = '') {
+  return `<div class="kv-item ${cls}"><small>${esc(label)}</small><strong>${esc(value || '—')}</strong></div>`;
+}
+
+/* --------------------------------------------------------- 5. Navigation */
+function showPage(name) {
+  if (!pageMeta[name]) name = 'dashboard';
+  if (!state.is_admin && CUSTOMER_BLOCKED.includes(name)) name = 'dashboard';
+  if (name === 'users' && !state.is_admin) name = 'dashboard';
+  currentPage = name;
+  // A navigation is the one moment the console is allowed to animate: drop the
+  // background-repaint suppression and let the incoming page cascade once.
+  endQuiet();
+  const incoming = $(`page-${name}`);
+  document.querySelectorAll('.page').forEach(p => {
+    p.classList.toggle('active', p === incoming);
+    p.classList.remove('entering');
+  });
+  if (incoming) {
+    void incoming.offsetWidth; // restart the cascade even when the page was already mounted
+    incoming.classList.add('entering');
+    clearTimeout(showPage.cascade);
+    showPage.cascade = setTimeout(() => incoming.classList.remove('entering'), 700);
+  }
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.page === name));
+  $('page-title').textContent = pageMeta[name][0];
+  $('page-subtitle').textContent = pageMeta[name][1];
+  history.replaceState(null, '', `#${name}`);
+  $('sidebar').classList.remove('open');
+  document.querySelector('.content')?.scrollTo?.({ top: 0, behavior: 'auto' });
+  window.scrollTo({ top: 0, behavior: 'auto' });
+  if (!$('workspace').classList.contains('open')) $('scrim').classList.remove('open');
+  if (name === 'routing') { renderRoutingOwner(); renderFlow(); renderGroups(); }
+  if (name === 'calls') loadCalls();
+  if (name === 'recordings') loadRecordings();
+  if (name === 'voicemails') loadVoicemails();
+}
+
+/* ------------------------------------------------------- 5b. Theme switch */
+/* Role decides the default skin; the operator's choice wins from then on and
+   is remembered per browser. */
+const THEME_KEY = 'eip-console-theme';
+const ROLE_KEY = 'eip-console-role';
+/* Preferences are per role, so an administrator who prefers light does not drag
+   customers onto the dark palette (and vice versa) in a shared browser. */
+const themeKey = () => `${THEME_KEY}:${state.is_admin ? 'admin' : 'customer'}`;
+function currentSkin() {
+  try {
+    const saved = localStorage.getItem(themeKey());
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch { /* private mode: fall back to the role default */ }
+  return state.is_admin ? 'dark' : 'light';
+}
+function applySkin() {
+  const skin = currentSkin();
+  try {
+    // Remembered for the pre-paint boot script, which has no role yet.
+    localStorage.setItem(ROLE_KEY, state.is_admin ? 'admin' : 'customer');
+    localStorage.setItem(themeKey(), skin);
+  } catch { /* ignore */ }
+  document.body.classList.toggle('theme-dark', skin === 'dark');
+  document.body.classList.toggle('theme-light', skin === 'light');
+  const toggle = $('theme-toggle');
+  if (toggle) {
+    const goingTo = skin === 'dark' ? 'light' : 'dark';
+    toggle.setAttribute('aria-pressed', String(skin === 'dark'));
+    toggle.setAttribute('title', `Switch to ${goingTo} theme`);
+    toggle.setAttribute('aria-label', `Switch to ${goingTo} theme`);
+    $('theme-label').textContent = skin === 'dark' ? 'Dark' : 'Light';
+    $('theme-glyph').textContent = skin === 'dark' ? '☾' : '☀';
+  }
+  return skin;
+}
+function toggleSkin() {
+  const next = currentSkin() === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem(themeKey(), next); } catch { /* ignore */ }
+  applySkin();
+  notify(`${next === 'dark' ? 'Dark' : 'Light'} theme enabled`);
+}
+
+/* ------------------------------------------------- 6. Health & analytics */
+async function checkHealth() {
+  try {
+    const response = await fetch('/health');
+    const data = await response.json();
+    $('health').classList.toggle('bad', !response.ok);
+    $('health').querySelector('span').textContent = response.ok ? 'System operational' : (data.error || 'System unavailable');
+  } catch {
+    $('health').classList.add('bad');
+    $('health').querySelector('span').textContent = 'System unavailable';
+  }
+}
+
+async function loadAnalytics() {
+  try {
+    const data = await api('/admin/api/analytics');
+    $('metric-answer-rate').textContent = `${data.answer_rate}%`;
+    $('metric-missed').textContent = fmtNum(data.missed);
+    $('metric-duration').textContent = fmtDuration(data.average_duration_seconds);
+    $('metric-direction').textContent = `${fmtNum(data.inbound)} / ${fmtNum(data.outbound)}`;
+    const max = Math.max(1, ...data.daily.map(d => d.total));
+    paint('call-trend', data.daily.map((day, i) => `
+      <div class="chart-day" title="${esc(day.date)}: ${day.answered} answered of ${day.total}">
+        <i style="height:${Math.max(3, (day.total / max) * 100)}%"></i>
+        <b style="height:${Math.max(3, (day.answered / max) * 100)}%"></b>
+        ${i % 2 === 0 ? `<small>${esc(String(day.date).slice(5))}</small>` : ''}
+      </div>`).join(''));
+  } catch {
+    paint('call-trend', empty('Analytics unavailable', 'Call metrics will retry automatically.', '◷'));
+  }
+}
+
+async function loadRecent() {
+  const target = state.is_admin ? $('recent-calls') : $('recent-calls-customer');
+  if (!target) return;
+  try {
+    const data = await api('/admin/api/calls?limit=6');
+    paint(target, callTable(data.calls));
+  } catch (error) { notify(error.message, true); }
+}
+
+/* ------------------------------------------------------- 7. Boot & refresh */
+/* Background polling must not repaint the console. Every 15s the state payload
+   is compared with the previous one; identical payloads skip rendering
+   entirely, so nothing flickers, replays an entrance animation or loses focus.
+   When something did change, the repaint runs with animations suppressed. */
+let stateSignature = '';
+function signatureOf(payload) {
+  const { csrf_token, ...rest } = payload || {};
+  return JSON.stringify(rest);
+}
+/* Animation is enabled for anything the operator drives from here on. */
+function endQuiet() { document.body.classList.remove('updating'); }
+/* True while a background refresh is repainting. Loading placeholders belong to
+   first paint and to what the operator asked for; a silent refresh keeps the
+   content that is already on screen and only swaps in data that changed. */
+let quietRender = false;
+/* Replace a host's markup only when it actually differs. Rewriting an identical
+   table still repaints it, which reads as a flicker on a slow screen. */
+function paint(id, html, force = false) {
+  const host = typeof id === 'string' ? $(id) : id;
+  if (!host) return false;
+  if (!force && host.innerHTML === html) return false;
+  host.innerHTML = html;
+  return true;
+}
+function quietly(task) {
+  document.body.classList.add('updating');
+  const prior = quietRender;
+  quietRender = true;
+  try { return task(); } finally { quietRender = prior; }
+  // `updating` is deliberately not removed here: it is cleared by the next
+  // navigation (showPage). Removing it right after the repaint would restore the
+  // animations on the nodes just rendered and replay the entrance a frame later.
+}
+
+async function loadState() {
+  const keepWorkspace = workspace?.customer?.id;
+  const firstPaint = !stateSignature;
+  try {
+    const payload = await api('/admin/api/state');
+    const signature = signatureOf(payload);
+    const changed = signature !== stateSignature;
+    stateSignature = signature;
+    state = payload;
+    csrf = state.csrf_token;
+    document.body.classList.toggle('admin-theme', !!state.is_admin);
+    document.body.classList.toggle('customer-theme', !state.is_admin);
+    // The skin is applied before the boot guard is lifted, so the console never
+    // paints in the wrong theme first.
+    applySkin();
+    document.body.classList.remove('theme-loading');
+    if (!changed && !firstPaint) { checkHealth(); return; }
+    quietly(() => {
+      $('who').textContent = state.username;
+      $('role').textContent = state.is_admin ? 'Platform administrator' : 'Customer account';
+      $('avatar').textContent = (state.username || 'A')[0].toUpperCase();
+      document.querySelectorAll('[data-admin-only]').forEach(el => (el.hidden = !state.is_admin));
+      document.querySelectorAll('[data-customer-only]').forEach(el => (el.hidden = !!state.is_admin));
+      renderAll();
+      loadAnalytics();
+      loadRecent();
+      // Keep the open workspace in step with the new data, without animating it
+      // again or stealing the scroll position.
+      if (keepWorkspace && $('workspace').classList.contains('open')) return openCustomer(keepWorkspace, wsTab, true);
+      return undefined;
+    });
+    checkHealth();
+  } catch (error) { notify(error.message, true); }
+}
+
+async function refreshDeviceStatus() {
+  try {
+    const data = await api('/admin/api/device-status');
+    const live = new Map(data.devices.map(d => [d.id, d.registration_status]));
+    // Only touch the DOM when a state actually changed: re-rendering on every
+    // poll would replay entrance animations while nothing had moved.
+    const apply = accounts => (accounts || []).reduce((changed, account) => {
+      const next = live.get(account.id);
+      if (next === undefined || next === account.registration_status) return changed;
+      account.registration_status = next;
+      return true;
+    }, false);
+    const ownChanged = apply(state.sip_accounts);
+    // A registration change is worth showing, but it must arrive as a status
+    // pill flipping over, not as the whole list rebuilding itself.
+    quietly(() => {
+      if (ownChanged && currentPage === 'sipaccounts') renderSipAccounts();
+      if (workspace && $('workspace').classList.contains('open')) {
+        const changed = apply(workspace.sip_accounts);
+        updateWsDeviceChip();
+        syncDeviceChip('#customer-status', state.sip_accounts);
+        if (changed && (wsTab === 'devices' || wsTab === 'overview')) renderWsTab(wsTab);
+      } else if (ownChanged) {
+        syncDeviceChip('#customer-status', state.sip_accounts);
+      }
+    });
+  } catch { /* health polling already surfaces connectivity problems */ }
+}
+
+/* ---------------------------------------------- 7b. Render: system board */
+/* What the platform is doing right now. The shell is written once and its
+   numbers are then updated in place, so a poll that moves a counter never
+   rebuilds the board under the operator's eyes. */
+const SYSTEM_TILES = [
+  ['calls-now', '☎', 'Calls in progress', 'ringing · connected'],
+  ['calls-peak', '⚡', 'Peak at once today', 'most simultaneous'],
+  ['calls-today', '◷', 'Calls today', 'of which answered'],
+  ['devices-online', '◈', 'Devices registered', 'of total endpoints'],
+  ['channels', '⇄', 'Asterisk channels', 'live media paths'],
+  ['recordings', '◉', 'Recordings running', 'recorded today'],
+];
+
+function renderSystemBoard() {
+  const host = $('system-board');
+  if (!host || !state.is_admin) return;
+  paint('system-board', `
+    <div class="board-head">
+      <div><span class="live-dot"></span><b>System activity</b><small id="system-updated">Measuring…</small></div>
+      <button class="btn ghost sm" id="system-refresh">Refresh</button>
+    </div>
+    <div class="board-tiles">${SYSTEM_TILES.map(([key, glyph, label, hint]) => `
+      <div class="board-tile"><span class="glyph">${glyph}</span>
+        <p><small>${esc(label)}</small><b id="system-${key}">—</b><i id="system-${key}-hint">${esc(hint)}</i></p>
+      </div>`).join('')}
+    </div>
+    <div class="board-load">
+      <div class="load-row"><span>CPU load</span><div class="load-bar"><i id="system-cpu-bar"></i></div><b id="system-cpu">—</b></div>
+      <div class="load-row"><span>Memory</span><div class="load-bar"><i id="system-mem-bar"></i></div><b id="system-mem">—</b></div>
+    </div>`, !host.innerHTML);
+  $('system-refresh')?.addEventListener('click', () => loadSystem());
+}
+
+function updateSystemBoard(data) {
+  if (!data) return;
+  const put = (id, value) => { const node = $(id); if (node && node.textContent !== String(value)) node.textContent = String(value); };
+  const calls = data.calls || {}, host = data.host || {};
+  put('system-calls-now', calls.in_progress ?? 0);
+  $('system-calls-now-hint').textContent = `${calls.ringing || 0} ringing · ${calls.connected || 0} connected`;
+  put('system-calls-peak', calls.peak_today ?? 0);
+  put('system-calls-today', calls.today ?? 0);
+  $('system-calls-today-hint').textContent = `${calls.answered_today || 0} answered`;
+  put('system-devices-online', data.devices?.online ?? 0);
+  $('system-devices-online-hint').textContent = `of ${data.devices?.total ?? 0} endpoints`;
+  put('system-channels', data.channels?.active ?? 0);
+  put('system-recordings', data.recordings?.in_progress ?? 0);
+  $('system-recordings-hint').textContent = `${data.recordings?.today || 0} recorded today`;
+  const bar = (id, pct) => { const node = $(id); if (node) node.style.width = `${Math.max(2, Math.min(100, pct || 0))}%`; };
+  bar('system-cpu-bar', host.load_pct);
+  bar('system-mem-bar', host.memory_pct);
+  put('system-cpu', `${host.load_1 ?? 0} / ${host.cpu_count || 1} core${(host.cpu_count || 1) === 1 ? '' : 's'}`);
+  put('system-mem', `${host.memory_pct || 0}%`);
+  put('system-updated', `updated ${new Date().toLocaleTimeString()}`);
+}
+
+async function loadSystem() {
+  if (!state.is_admin || !$('system-board')) return;
+  try {
+    updateSystemBoard(await api('/admin/api/system'));
+  } catch { /* the health poll already reports connectivity */ }
+}
+
+/* ------------------------------------------------------- 8. Render: shell */
+function renderAll() {
+  const summary = state.call_summary || {};
+  countTo($('stat-total'), summary.total);
+  countTo($('stat-answered'), summary.answered);
+  countTo($('stat-failed'), summary.failed);
+  countTo($('stat-recordings'), summary.recordings);
+  countTo($('stat-voicemails'), state.voicemail_summary?.new);
+  const rate = summary.total ? Math.round((summary.answered / summary.total) * 100) : 0;
+  $('answer-rate').textContent = `${rate}% answer rate`;
+
+  const activeNumbers = state.phone_numbers.filter(n => n.active);
+  countTo($('dash-customers'), state.customers.filter(c => c.active).length);
+  countTo($('dash-numbers'), activeNumbers.length);
+  countTo($('dash-sipaccounts'), state.sip_accounts.filter(s => s.active).length);
+  countTo($('dash-providers'), state.providers.filter(p => p.active).length);
+
+  const pending = (state.requests || []).filter(r => r.status === 'pending').length;
+  setBadge($('request-badge'), pending);
+  setBadge($('notification-badge'), (state.notifications || []).filter(n => !n.read_at).length);
+
+  if (!state.is_admin) renderCustomerStatus();
+  // Resolve whose numbers, devices and integrations are on screen *before* the
+  // lists render, so the first paint already belongs to the chosen customer.
+  renderNumberOwnerPicker();
+  renderSipOwnerPicker();
+  renderIntegrationOwnerPicker();
+  renderExtensions();
+  renderNumbers();
+  renderProviders();
+  renderCustomers();
+  renderSipAccounts();
+  renderRequests();
+  renderMyRequests();
+  renderActivity();
+  renderNotifications();
+  renderApiKeys();
+  renderWebhooks();
+  renderDeliveries();
+  renderBilling();
+  renderSelects();
+  renderSettings();
+  renderRecordingSwitch();
+  renderServiceAddress();
+  renderCallDefaults();
+  renderSystemBoard();
+  if (state.is_admin) loadSystem();
+  renderEmailSettings();
+  renderRoutingOwner();
+  renderFlow();
+
+  const myExtension = state.extensions.find(x => x.extension === state.assigned_extension);
+  $('profile-recording-form').hidden = !myExtension;
+  $('profile-recording').checked = !!myExtension?.recording_enabled;
+  // The platform's switch can veto every device. Say so, instead of leaving a
+  // switch that silently does nothing.
+  const platformRecording = platformRecordingAllowed();
+  $('profile-recording').disabled = !platformRecording;
+  $('profile-recording-help').textContent = !platformRecording
+    ? 'Recording is switched off for this whole platform by your provider, so no device can record at the moment.'
+    : myExtension?.recording_enabled
+      ? 'Calls on this extension are recorded. Switch it off to stop recording this device.'
+      : 'Recording is off for this extension. Switch it on to record calls on this device.';
+  $('profile-email').value = state.email || '';
+  markStagger();
+}
+
+/* --------------------------------------------------- 9. Render: customers */
+function renderCustomers() {
+  const query = val('customer-search').toLowerCase();
+  const rows = state.customers.filter(c =>
+    `${c.company_name} ${c.full_name} ${c.username} ${c.email} ${c.phone}`.toLowerCase().includes(query));
+  $('customer-count').textContent = `${rows.length} customer${rows.length === 1 ? '' : 's'}`;
+  paint('user-list', rows.map((c, i) => `
+    <article class="glass-card card-enter" style="--i:${Math.min(i, 10)}">
+      <div class="glass-card-head">
+        <span class="ws-glyph">${esc((c.company_name || c.username || 'C')[0].toUpperCase())}</span>
+        <div>
+          <h3>${esc(c.company_name || c.username)}</h3>
+          <p>${esc(c.full_name || c.username)} · ${esc(c.email)}</p>
+        </div>
+      </div>
+      <div class="tags">
+        ${c.active ? tag('Active', 'on') : tag('Disabled', 'off')}
+        ${tag(`${c.number_count} number${c.number_count === 1 ? '' : 's'}`, '', '☎')}
+        ${tag(`${c.sip_count} device${c.sip_count === 1 ? '' : 's'}`, '', '◈')}
+        ${tag(`${c.extension_count} ext`, '', '⌁')}
+        ${c.payment_status === 'current' ? tag('Paid up', 'on', '▣') : tag('Payment due', 'warn', '▣')}
+      </div>
+      <div class="ws-card-actions">
+        <button class="btn primary sm" data-open-customer="${c.id}">Open workspace</button>
+        <button class="btn ghost sm" data-edit-user="${c.id}">Edit details</button>
+      </div>
+    </article>`).join('') || empty('No customers yet', 'Create a customer, or wait for a public signup.', '◍', '',
+      emptyAction('Create customer', 'data-open="user"', true)));
+
+  paint('platform-admin-list', state.users.filter(u => u.role === 'admin').map(u => `
+    <div class="row">
+      <span class="row-icon">${esc((u.username || 'A')[0].toUpperCase())}</span>
+      <div><h3>${esc(u.username)}</h3><p>${esc(u.email)}</p></div>
+      <div class="tags">${u.active ? tag('Active', 'on') : tag('Disabled', 'off')}${tag('Administrator', 'violet')}</div>
+      <div class="row-actions"><span class="cell-sub">Managed from the platform</span></div>
+    </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂'));
+  if (currentPage === 'routing') { renderRoutingOwner(); renderFlow($('route-target')?.value); renderGroups(); }
+  markStagger();
+}
+
+/* -------------------------------------------------- 10. Render: extensions */
+function extensionName(number) {
+  const item = state.extensions.find(x => x.extension === number);
+  return item?.display_name || `Extension ${number}`;
+}
+/* The platform switch, as both consoles receive it. Absent means on, so an older
+   payload never silently claims recording is stopped. */
+function platformRecordingAllowed() {
+  return state.recording_platform_enabled !== false;
+}
+
+function renderExtensions() {
+  const query = val('extension-search').toLowerCase();
+  const rows = state.extensions.filter(x => `${x.extension} ${x.display_name} ${x.sip_username}`.toLowerCase().includes(query));
+  $('extension-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
+  const card = x => `
+    <div class="row">
+      <span class="row-icon">${esc(x.extension)}</span>
+      <div><h3>${esc(x.display_name || `Extension ${x.extension}`)}</h3><p>SIP username: ${esc(x.sip_username)}</p></div>
+      <div class="tags">
+        ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
+        ${x.recording_enabled
+          ? (platformRecordingAllowed() ? tag('Recording on', 'on') : tag('Recording paused', 'warn'))
+          : tag('Recording off')}
+        ${x.voicemail_enabled ? tag('Voicemail on', 'info') : tag('Voicemail off')}
+      </div>
+      <div class="row-actions">
+        <button class="btn ghost sm" data-extension-credentials="${x.extension}">Credentials</button>
+        <button class="btn ghost sm" data-extension-flow="${x.extension}">Call flow</button>
+        <button class="btn ghost sm" data-edit-extension="${x.extension}">Edit</button>
+        <button class="btn danger sm" data-delete-extension="${x.extension}">Delete</button>
+      </div>
+    </div>`;
+  if (state.is_admin) {
+    const groups = groupBy(rows, x => {
+      const owner = state.users.find(u => u.id === x.owner_user_id);
+      return owner?.company_name || owner?.username || 'Platform / unassigned';
+    });
+    paint('extension-list', Object.entries(groups).map(([name, items]) => `
+      <div class="acc-item open">
+        <div class="acc-head"><span class="row-icon">${esc(name[0].toUpperCase())}</span>
+          <div><h3 style="font-size:13px">${esc(name)}</h3><p style="font-size:11px;color:var(--text-3)">${items.length} extension${items.length === 1 ? '' : 's'}</p></div>
+          <span class="chev">›</span>
+        </div>
+        <div class="acc-body" style="padding:0">${items.map(card).join('')}</div>
+      </div>`).join('') || empty('No extensions found', 'Open a customer workspace to create an extension.', '⌁'));
+  } else {
+    paint('extension-list', rows.map(card).join('') || empty('No extensions yet', 'Create departments such as Sales, Support or Operations.', '⌁', '',
+      emptyAction('Create extension', 'data-open="extension"', true)));
+  }
+  markStagger();
+}
+
+/* ----------------------------------------------------- 11. Render: numbers */
+/* The two lists an administrator most often reads one customer at a time. The
+   choice lives here, not in the DOM, so a refresh keeps it. */
+let numberOwner = null, sipOwner = null;
+
+function ownerChoices() {
+  return [...(state.customers || [])].sort((left, right) =>
+    (left.company_name || left.username).localeCompare(right.company_name || right.username));
+}
+
+/* Nothing is selected until the operator (or the data) picks: with one customer
+   there is no choice to make, and with none the page is simply empty. */
+function resolvePickedOwner(current, rows) {
+  const choices = ownerChoices();
+  if (!choices.length) return null;
+  if (current !== null && choices.some(c => c.id === current)) return current;
+  const withRows = choices.find(c => rows(c.id));
+  return (withRows || choices[0]).id;
+}
+
+function renderOwnerPicker(hostId, selected, counts, onPick) {
+  const host = $(hostId);
+  if (!host) return;
+  const choices = ownerChoices();
+  host.innerHTML = choices.map(customer => {
+    const picked = customer.id === selected;
+    const count = counts(customer.id);
+    return `<button type="button" class="customer-chip ${picked ? 'active' : ''}" data-owner="${customer.id}" aria-pressed="${picked}">
+      <span class="avatar">${esc((customer.company_name || customer.username || 'C')[0].toUpperCase())}</span>
+      <span class="copy"><b>${esc(customer.company_name || customer.username)}</b><small>${esc(count)}</small></span>
+    </button>`;
+  }).join('') || '<p class="picker-empty">No customers yet. Add one to assign numbers and devices.</p>';
+  host.querySelectorAll('[data-owner]').forEach(button => {
+    button.addEventListener('click', () => onPick(Number(button.dataset.owner)));
+  });
+}
+
+function renderNumberOwnerPicker() {
+  if (!state.is_admin) return;
+  const rows = id => (state.phone_numbers || []).filter(x => x.owner_user_id === id).length;
+  numberOwner = resolvePickedOwner(numberOwner, rows);
+  renderOwnerPicker('number-picker', numberOwner, id => {
+    const count = rows(id);
+    return `${count} number${count === 1 ? '' : 's'}`;
+  }, id => {
+    numberOwner = id;
+    renderNumbers();
+    renderNumberOwnerPicker();
+  });
+}
+
+function renderSipOwnerPicker() {
+  if (!state.is_admin) return;
+  const devices = id => (state.sip_accounts || []).filter(x => x.owner_user_id === id).length;
+  const extensions = id => (state.extensions || []).filter(x => x.owner_user_id === id).length;
+  sipOwner = resolvePickedOwner(sipOwner, devices);
+  renderOwnerPicker('sip-picker', sipOwner, id =>
+    `${extensions(id)} extension${extensions(id) === 1 ? '' : 's'} · ${devices(id)} device${devices(id) === 1 ? '' : 's'}`,
+    id => {
+      sipOwner = id;
+      renderSipAccounts();
+      renderSipOwnerPicker();
+    });
+}
+
+function renderNumbers() {
+  const query = val('number-search').toLowerCase();
+  const owner = state.is_admin ? numberOwner : null;
+  const rows = state.phone_numbers
+    .filter(x => !state.is_admin || x.owner_user_id === owner)
+    .filter(x => `${x.number} ${x.provider} ${x.description} ${x.inbound_extension}`.toLowerCase().includes(query));
+  $('number-count').textContent = `${rows.length} number${rows.length === 1 ? '' : 's'}`;
+  paint('number-list', rows.map(x => {
+    const owner = state.users.find(u => u.id === x.owner_user_id);
+    const sip = state.sip_accounts.find(s => s.phone_number === x.number);
+    const expiring = x.discontinue_at && x.discontinue_at <= new Date().toISOString().slice(0, 10);
+    return `
+    <div class="row">
+      <span class="row-icon">☎</span>
+      <div><h3>${esc(x.number)}</h3><p>${esc(owner?.company_name || owner?.username || 'Platform unassigned')}</p></div>
+      <div>
+        <p style="font-size:12px;color:var(--text-2)">${state.is_admin ? esc(sip?.label || 'No device linked') : 'Managed by EIP'}</p>
+        <div class="tags" style="margin-top:7px">
+          ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
+          ${tag(`Ext ${x.inbound_extension || '—'}`, 'info')}
+          ${tag(`${money(x.monthly_price_cents ?? 500)}/mo`)}
+          ${x.default_outbound ? tag('Default caller ID', 'violet') : ''}
+          ${x.discontinue_at ? tag(`Ends ${fmtDay(x.discontinue_at)}`, expiring ? 'off' : 'warn') : ''}
+        </div>
+      </div>
+      <div class="row-actions">
+        ${x.inbound_extension ? `<button class="btn ghost sm" data-number-flow="${esc(x.number)}">Call flow</button>` : ''}
+        ${state.is_admin
+          ? `<button class="btn ghost sm" data-edit-number="${x.id}">Manage</button><button class="btn danger sm" data-delete-number="${x.id}">Delete</button>`
+          : (x.active && !x.default_outbound && x.inbound_extension
+              ? `<button class="btn primary sm" data-default-number="${x.id}">Use for outbound</button>`
+              : (x.active && !x.default_outbound
+                ? '<span class="cell-sub">Assign an extension to set the caller ID</span>'
+                : ''))}
+      </div>
+    </div>`;
+  }).join('') || empty('No phone numbers', state.is_admin ? 'Assign a number from a customer workspace.' : 'Request a number to get started.', '☎', '',
+      state.is_admin ? emptyAction('Assign a number', 'data-open="number"', true) : emptyAction('Request a number', 'data-open="request"', true)));
+  markStagger();
+}
+
+/* --------------------------------------------------- 12. Render: providers */
+function renderProviders() {
+  paint('provider-list', state.providers.map(x => `
+    <div class="row">
+      <span class="row-icon">⇄</span>
+      <div><h3>${esc(x.name)}</h3><p>${esc(x.server)}:${esc(x.port)} · ${esc(String(x.transport).toUpperCase())}</p></div>
+      <div>
+        <p style="font-size:12px;color:var(--text-2)">Gateway user: ${esc(x.username)}</p>
+        <div class="tags" style="margin-top:7px">
+          ${tag(x.codecs)}${tag(x.allowed_ips, 'violet')}
+          ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn ghost sm" data-edit-provider="${x.id}">Edit</button>
+        <button class="btn danger sm" data-delete-provider="${x.id}">Delete</button>
+      </div>
+    </div>`).join('') || empty('No SIP providers', 'Add a carrier before assigning phone numbers.', '⇄', '',
+      emptyAction('Add provider', 'data-open="provider"', true)));
+  markStagger();
+}
+
+/* ------------------------------------------------ 13. Render: SIP accounts */
+/* The SIP identities the customer actually registers: one per extension, with the
+   same reveal treatment as a device account. */
+function renderExtensionCredentials() {
+  const host = $('extension-credential-list');
+  if (!host) return;
+  const query = val('sip-search').toLowerCase();
+  const owner = state.is_admin ? sipOwner : null;
+  const numbers = extension => (state.phone_numbers || []).filter(x => x.inbound_extension === extension).map(x => x.number);
+  const rows = (state.extensions || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x => x.active).filter(x =>
+    `${x.extension} ${x.display_name || ''} ${x.sip_username || ''} ${numbers(x.extension).join(' ')}`.toLowerCase().includes(query));
+  $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
+  host.innerHTML = rows.map(x => {
+    const linked = numbers(x.extension);
+    const flows = (state.routing_flows || []).filter(flow => flow.target_type === 'extension' && flow.target === x.extension);
+    return `<div class="row">
+      <span class="row-icon">${esc(x.extension)}</span>
+      <div><h3>${esc(x.display_name || `Extension ${x.extension}`)}</h3>
+        <p>Register with username ${esc(x.sip_username || x.extension)} · ${linked.length ? esc(linked.join(', ')) : 'no number linked yet'}</p></div>
+      <div class="tags">${flows.length ? tag('Call flow ready', 'info') : tag('No call flow', 'off')}${x.voicemail_enabled ? tag('Voicemail on', 'on') : ''}</div>
+      <div class="row-actions">
+        <button class="btn primary sm" data-extension-credentials="${x.extension}">Show credentials</button>
+        <button class="btn ghost sm" data-extension-flow="${x.extension}">Call flow</button>
+      </div>
+    </div>`;
+  }).join('') || empty('No extensions yet', 'Extensions are created with your phone numbers, and each one gets SIP credentials and a call flow.', '⌁');
+  markStagger();
+}
+
+function renderSipAccounts() {
+  const query = val('sip-search').toLowerCase();
+  const owner = state.is_admin ? sipOwner : null;
+  const rows = (state.sip_accounts || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x =>
+    `${x.label} ${x.sip_username} ${x.extension || ''} ${x.phone_number || ''}`.toLowerCase().includes(query));
+  $('sip-count').textContent = `${rows.length} account${rows.length === 1 ? '' : 's'}`;
+  paint('sip-account-list', rows.map((x, i) => {
+    const owner = state.users.find(u => u.id === x.owner_user_id);
+    return `
+    <article class="glass-card card-enter" style="--i:${Math.min(i, 10)}">
+      <div class="glass-card-head">
+        <span class="ws-glyph">◈</span>
+        <div><h3>${esc(x.label)}</h3><p>${esc(owner?.company_name || owner?.username || 'My account')}</p></div>
+        ${registration(x)}
+      </div>
+      <div class="kv kv-2">
+        ${kv('SIP username', x.sip_username)}
+        ${kv('Server', `${x.server}:${x.port}`)}
+        ${kv('Assigned number', x.phone_number || 'Not linked')}
+        ${kv('Extension', x.extension || 'Not linked')}
+      </div>
+      <div class="ws-card-actions">
+        <button class="btn primary sm" data-show-credentials="${x.id}">Credentials</button>
+        ${state.is_admin ? `<button class="btn ghost sm" data-edit-sip="${x.id}">Edit</button><button class="btn danger sm" data-delete-sip="${x.id}">Delete</button>` : ''}
+      </div>
+    </article>`;
+  }).join('') || empty('No devices yet', state.is_admin ? 'Assign SIP credentials here or from a customer workspace.' : 'Add the phone or softphone you want to connect.', '◈', '',
+      emptyAction(state.is_admin ? 'Assign SIP service' : 'Add a device', 'data-open="sipaccount"', true)));
+  renderExtensionCredentials();
+  markStagger();
+}
+
+/* ------------------------------------------------- 14. Render: API & hooks */
+/* Integrations belong to the customer who runs them. An administrator selects an
+   account and manages what is there; creating one is the customer's action. */
+let integrationOwner = null;
+
+function renderIntegrationOwnerPicker() {
+  const keys = id => (state.api_keys || []).filter(x => x.owner_user_id === id).length;
+  const hooks = id => (state.webhooks || []).filter(x => x.owner_user_id === id).length;
+  integrationOwner = resolvePickedOwner(integrationOwner, id => keys(id) || hooks(id));
+  renderOwnerPicker('integration-picker', integrationOwner, id =>
+    `${keys(id)} key${keys(id) === 1 ? '' : 's'} · ${hooks(id)} endpoint${hooks(id) === 1 ? '' : 's'}`,
+    id => {
+      integrationOwner = id;
+      renderApiKeys();
+      renderWebhooks();
+      renderDeliveries();
+      renderIntegrationOwnerPicker();
+    });
+}
+
+function ownedIntegrations(rows) {
+  if (!state.is_admin) return rows;
+  // Ownerless rows predate customer-owned integrations; keep them reachable
+  // rather than losing sight of a live key.
+  return rows.filter(row => row.owner_user_id === integrationOwner || !row.owner_user_id);
+}
+
+function renderApiKeys() {
+  paint('api-key-list', ownedIntegrations(state.api_keys || []).map(x => `
+    <div class="row">
+      <span class="row-icon">⌘</span>
+      <div><h3>${esc(x.name)}</h3><p><code>${esc(x.prefix)}…</code> · created ${esc(fmtDay(x.created_at))}</p></div>
+      <div class="tags">
+        <span class="tag on">Active</span>
+        ${tag(x.scopes === '*' ? 'Full access' : x.scopes, 'info')}
+        ${tag(`Last used ${x.last_used_at ? fmtDate(x.last_used_at) : 'never'}`)}
+      </div>
+      <div class="row-actions">
+        <button class="btn ghost sm" data-edit-apikey="${x.id}">Edit</button>
+        <button class="btn danger sm" data-revoke-key="${x.id}">Revoke</button>
+      </div>
+    </div>`).join('') || empty(state.is_admin ? 'This customer has no API keys' : 'No API keys',
+      state.is_admin ? 'Sign in as the customer to create one; you can revoke what they own here.'
+        : 'Create a scoped key so your own software can call the EIP API.', '⌘', '',
+      state.is_admin ? '' : emptyAction('Create API key', 'data-open="apikey"', true)));
+  markStagger();
+}
+
+function renderWebhooks() {
+  paint('webhook-list', ownedIntegrations(state.webhooks || []).map(x => `
+    <div class="row">
+      <span class="row-icon">◇</span>
+      <div><h3>${esc(x.name)}</h3><p>${esc(x.url)}</p></div>
+      <div class="tags">
+        ${x.active ? tag('Active', 'on') : tag('Paused', 'off')}
+        ${x.has_token ? tag('Signed with secret', 'violet', '⚿') : tag('No secret', 'warn')}
+        ${tag(x.events === '*' ? 'All events' : x.events, 'info')}
+      </div>
+      <div class="row-actions">
+        <button class="btn ghost sm" data-test-webhook="${x.id}">Test</button>
+        <button class="btn ghost sm" data-edit-webhook="${x.id}">Edit</button>
+        <button class="btn danger sm" data-delete-webhook="${x.id}">Delete</button>
+      </div>
+    </div>`).join('') || empty(state.is_admin ? 'This customer has no endpoints' : 'No webhook endpoints',
+      state.is_admin ? 'Sign in as the customer to add one; you can manage what they own here.'
+        : 'Add an endpoint to push call events to your CRM.', '◇', '',
+      state.is_admin ? '' : emptyAction('Add webhook', 'data-open="webhook"', true)));
+  markStagger();
+}
+
+function renderDeliveries() {
+  const mine = state.is_admin
+    ? new Set(ownedIntegrations(state.webhooks || []).map(hook => hook.id))
+    : null;
+  const rows = (state.webhook_deliveries || []).filter(x => !mine || mine.has(x.endpoint_id));
+  $('delivery-count').textContent = `${rows.length} deliver${rows.length === 1 ? 'y' : 'ies'}`;
+  paint('webhook-delivery-list', rows.length ? `
+    <table class="data"><thead><tr><th>Event</th><th>Endpoint</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Last error</th></tr></thead>
+    <tbody>${rows.map(x => `<tr>
+      <td class="cell-strong">${esc(x.event)}</td>
+      <td>${esc(x.webhook_name || x.endpoint_id || '—')}</td>
+      <td>${statusPill(x.status)}</td>
+      <td>${esc(x.attempts)}</td>
+      <td>${esc(fmtDate(x.updated_at))}</td>
+      <td>${esc(x.last_error || '—')}</td>
+    </tr>`).join('')}</tbody></table>` : empty('No deliveries yet', 'Delivery attempts appear here once calls trigger your endpoints.', '◇'));
+}
+
+/* ------------------------------------------------ 15. Render: requests etc */
+function renderRequests() {
+  const rows = state.requests || [];
+  const pending = rows.filter(r => r.status === 'pending');
+  $('request-count').textContent = `${pending.length} pending`;
+  paint('request-list', rows.map(x => `
+    <div class="row">
+      <span class="row-icon">↗</span>
+      <div><h3>${esc(x.company_name || x.username)} · ${esc(String(x.request_type).replaceAll('_', ' '))}</h3><p>${esc(x.details)}</p></div>
+      <div>${statusPill(x.status, `request-${x.id}`)}<p style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(fmtDate(x.created_at))}</p></div>
+      <div class="row-actions">
+        ${x.status === 'pending' ? `
+          <button class="btn primary sm" data-resolve-request="${x.id}:approved">Approve</button>
+          <button class="btn ghost sm" data-assign-request="${x.id}:${x.user_id}">Assign number</button>
+          <button class="btn danger sm" data-resolve-request="${x.id}:rejected">Reject</button>` : ''}
+      </div>
+    </div>`).join('') || empty('No requests', 'Customer number and access requests will appear here.', '↗'));
+  markStagger();
+}
+
+function renderMyRequests() {
+  const host = $('my-request-list');
+  if (!host) return;
+  const rows = state.requests || [];
+  const pendingNumber = rows.some(r => r.request_type === 'number' && r.status === 'pending');
+  const button = $('request-number');
+  if (button) {
+    button.disabled = pendingNumber;
+    button.textContent = pendingNumber ? 'Number request pending' : (state.phone_numbers.length ? 'Request another number' : 'Request a number');
+  }
+  $('my-request-count').textContent = `${rows.length} request${rows.length === 1 ? '' : 's'}`;
+  host.innerHTML = rows.slice(0, 5).map(x => `
+    <div class="tl-item"><b>${esc(String(x.request_type).replaceAll('_', ' '))}</b>
+      <p>${esc(x.details)}</p>
+      ${x.admin_note ? `<small>Administrator: ${esc(x.admin_note)}</small>` : ''}
+      <small>${esc(fmtDate(x.created_at))}</small>
+      <div class="tags" style="margin-top:7px">${statusPill(x.status, `myrequest-${x.id}`)}</div>
+    </div>`).join('') || empty('No requests yet', 'Request a phone number and its progress will appear here.', '↗');
+
+  /* Setup journey: completed steps are ticked, the first unfinished step is the
+     current milestone, and every milestone links to the page that advances it. */
+  // Customers raise requests from their dashboard; administrators review them
+  // on the requests page, so each milestone points at the right surface.
+  const requestPage = state.is_admin ? 'requests' : 'dashboard';
+  // "Connect a device" means the customer can register a phone. Provisioning
+  // mints an extension *with* credentials, so an active extension is a device
+  // ready to register - counting only device accounts would leave the journey
+  // stuck at 5 of 6 for a line that is already live.
+  const hasDevice = state.extensions.some(x => x.active) || state.sip_accounts.length > 0;
+  const steps = [
+    ['request', 'Request a number', rows.some(r => r.request_type === 'number'), requestPage],
+    ['number', 'Number assigned', !!state.phone_numbers.length, 'numbers'],
+    ['sip', 'Register a device', hasDevice, 'sipaccounts'],
+    ['extensions', 'Extensions', !!state.extensions.length, 'extensions'],
+    ['routing', 'Call routing', !!state.call_routes.length, 'routing'],
+    ['api', 'APIs & webhooks', !!(state.api_keys.length || myWebhooks()), 'webhooks'],
+  ];
+  const currentIndex = steps.findIndex(([, , done]) => !done);
+  const doneCount = steps.filter(([, , done]) => done).length;
+  const percent = Math.round((doneCount / steps.length) * 100);
+  const journey = [
+    `<div class="journey-head"><b>${doneCount} of ${steps.length} steps complete</b>`,
+    `<span class="journey-bar" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"` +
+      `aria-label="Setup progress: ${doneCount} of ${steps.length} steps complete"><i style="--p:${percent}%"></i></span>`,
+    `<small>${steps.length - doneCount === 0 ? 'Your phone system is fully live' : `Next: ${esc(steps[currentIndex][1])}`}</small></div>`,
+    '<div class="journey-steps">',
+  ];
+  steps.forEach(([key, label, done, page], index) => {
+    if (index) journey.push(`<i class="${steps[index - 1][2] ? 'done' : ''}" aria-hidden="true"></i>`);
+    const state = done ? 'done' : (index === currentIndex ? 'current' : '');
+    const glyph = done ? '✓' : index === currentIndex ? '◐' : index + 1;
+    journey.push(`<button class="journey-step ${state}" data-page="${esc(page)}" data-journey="${esc(key)}" type="button"
+      aria-label="${esc(label)} — ${done ? 'complete' : index === currentIndex ? 'in progress' : 'not started'}">
+      <span class="tick" aria-hidden="true">${glyph}</span>${esc(label)}</button>`);
+  });
+  journey.push('</div>');
+  paint('customer-journey', journey.join(''));
+  markStagger();
+}
+
+/* Webhooks are already scoped to the signed-in customer in non-admin payloads. */
+function myWebhooks() {
+  return (state.webhooks || []).length;
+}
+
+function renderActivity() {
+  paint('activity-list', (state.activity || []).map(x => `
+    <div class="tl-item"><b>${esc(x.description)}</b><p>${esc(String(x.action).replaceAll('.', ' '))} · ${esc(x.resource_type)}</p><small>${esc(fmtDate(x.created_at))}</small></div>
+  `).join('') || empty('No activity yet', 'Important platform changes will be recorded here.', '◌'));
+  markStagger();
+}
+
+function renderNotifications() {
+  paint('notification-list', (state.notifications || []).map(x => `
+    <div class="row">
+      <span class="row-icon">${x.read_at ? '○' : '●'}</span>
+      <div><h3>${esc(x.title)}</h3><p>${esc(x.message)}</p></div>
+      <div>${x.read_at ? tag('Read') : tag('Unread', 'warn')}<p style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(fmtDate(x.created_at))}</p></div>
+      <div class="row-actions">${x.read_at ? '' : `<button class="btn ghost sm" data-read-notification="${x.id}">Mark read</button>`}</div>
+    </div>`).join('') || empty('You are all caught up', 'New assignments and service events will appear here.', '●'));
+  markStagger();
+}
+
+/* --------------------------------------------------- 16. Render: billing */
+function renderBilling() {
+  const numbers = state.phone_numbers || [];
+  paint('subscription-list', numbers.map(x => `
+    <div class="row">
+      <span class="row-icon">$</span>
+      <div><h3>${esc(x.number)}</h3><p>${esc(x.description || 'EIP phone number')}</p></div>
+      <div class="tags">
+        ${tag(`${money(x.monthly_price_cents ?? 500)}/month`, 'on')}
+        ${tag(`Renews day ${x.billing_cycle_day || 1}`)}
+        ${x.discontinue_at ? tag(`Ends ${fmtDay(x.discontinue_at)}`, 'off') : ''}
+      </div>
+      <div class="row-actions">${!state.is_admin && !x.discontinue_at ? `<button class="btn danger sm" data-discontinue-number="${esc(x.number)}">Discontinue at renewal</button>` : ''}</div>
+    </div>`).join('') || empty('No active subscriptions', state.is_admin ? 'Assign a number to start billing.' : 'An administrator will assign your phone numbers.', '▣'));
+
+  const invoices = state.invoices || [];
+  paint('invoice-list', invoices.length ? `
+    <table class="data"><thead><tr><th>Invoice</th><th>Number</th><th>Period</th><th>Amount</th><th>Status</th><th>Due</th><th>Action</th></tr></thead>
+    <tbody>${invoices.map(x => `<tr>
+      <td class="cell-strong">#${esc(x.id)}</td>
+      <td>${esc(x.number)}</td>
+      <td>${esc(x.period_start)} → ${esc(x.period_end)}</td>
+      <td>${money(x.amount_cents)}</td>
+      <td>${statusPill(x.status)}</td>
+      <td>${esc(fmtDay(x.due_at))}</td>
+      <td>${state.is_admin && x.status === 'open' ? `<button class="btn ghost sm" data-paid-invoice="${x.id}">Mark paid</button>` : '—'}</td>
+    </tr>`).join('')}</tbody></table>` : empty('No invoices yet', 'Invoices appear automatically for assigned numbers.', '▣'));
+  markStagger();
+}
+
+/* --------------------------------------------------- 17. Render: settings */
+function optionList(includeEmpty = false) {
+  return `${includeEmpty ? '<option value="">Use fallback extension</option>' : ''}${state.extensions.filter(x => x.active)
+    .map(x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}`;
+}
+
+function renderSelects() {
+  const customerSelect = $('recording-customer');
+  if (customerSelect) customerSelect.innerHTML = '<option value="">All customers</option>' + state.customers
+    .map(x => `<option value="${x.id}">${esc(x.company_name || x.username)}</option>`).join('');
+  const allExtensions = `<option value="">All extensions</option>${optionList()}`;
+  paint('call-extension', allExtensions);
+  paint('recording-extension', allExtensions);
+  paint('voicemail-extension', `<option value="">All mailboxes</option>${state.extensions
+    .filter(x => x.voicemail_enabled).map(x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}`);
+}
+
+/* The customer's own call defaults: which extension an API call without one
+   uses, and where a number with no valid destination lands. Both selects are
+   that customer's extensions, because an extension belongs to one customer. */
+/* The address customers register with, and the base every API and webhook
+   example is built from. It belongs to the platform, so only an administrator
+   may change it; both consoles read it from the state payload. */
+function renderServiceAddress() {
+  const service = state.service_address || {};
+  const configured = state.is_admin ? String((state.settings || {}).service_host || '') : '';
+  const host = $('service-host');
+  if (host && document.activeElement !== host) host.value = configured;
+  const port = $('service-sip-port');
+  if (port && document.activeElement !== port) port.value = service.port || 5060;
+  const stateTag = $('service-address-state');
+  if (stateTag) {
+    stateTag.textContent = service.configured ? 'Set by the platform' : (service.host ? 'Using this console\'s address' : 'Not set');
+    stateTag.className = `tag ${service.configured ? 'on' : 'warn'}`;
+  }
+  paint('integration-api-base', service.api_base ? `<code>${esc(service.api_base)}/api/v1</code>` : 'not set yet', true);
+
+  const preview = $('service-address-preview');
+  if (!preview) return;
+  const rows = [
+    ['Devices register with', service.sip ? `<code>${esc(service.sip)}</code>` : 'no address yet', '⇄'],
+    ['API base', service.api_base ? `<code>${esc(service.api_base)}/api/v1</code>` : 'no address yet', '⌘'],
+    ['Documentation', service.api_base
+      ? `<a href="/documentation" target="_blank" rel="noopener">${esc(service.api_base)}/documentation</a> — every example uses this address`
+      : 'the page falls back to the address in your browser bar', '▤'],
+  ];
+  paint('service-address-preview', rows.map(([title, value, glyph]) => `
+    <div class="row">
+      <span class="row-icon">${glyph}</span>
+      <div><h3>${esc(title)}</h3><p>${value}</p></div>
+    </div>`).join(''), true);
+}
+
+function renderCallDefaults() {
+  const form = $('call-defaults-form');
+  if (!form) return;
+  const options = state.extensions.filter(x => x.active);
+  const defaults = state.call_defaults || {};
+  const list = selected => `<option value="">First available extension</option>` + options
+    .map(x => `<option value="${esc(x.extension)}" ${String(selected) === String(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`).join('');
+  paint('default-extension', list(defaults.outbound));
+  paint('inbound-fallback', list(defaults.fallback));
+  $('call-defaults-count').textContent = `${options.length} extension${options.length === 1 ? '' : 's'}`;
+}
+
+/* The platform's recording switch: the one control that can stop recording
+   everywhere. It is the administrator's veto, not the decision that a device
+   records - that stays with the customer, per extension. */
+function renderRecordingSwitch() {
+  const toggle = $('platform-recording');
+  if (!toggle) return;
+  const enabled = !!state.recording_platform_enabled;
+  if (document.activeElement !== toggle) toggle.checked = enabled;
+  const tag = $('recording-platform-state');
+  if (tag) {
+    tag.textContent = enabled ? 'On' : 'Off — nobody records';
+    tag.className = `tag ${enabled ? 'on' : 'off'}`;
+  }
+  const help = $('recording-platform-help');
+  if (help) {
+    help.textContent = enabled
+      ? 'On. A device records while its own switch is on — the customer sets that per device under Devices & SIP. Switch this off to stop every recording immediately.'
+      : 'Off. No device records, whatever a customer set on their own extension. Switch it on to let each device follow its own switch again.';
+  }
+}
+
+/* What remains on the platform settings page: facts, not controls. Call defaults
+   belong to the customer who owns the extensions, so the page says where they
+   went and reports what is configured. */
+function renderSettings() {
+  const rows = [
+    ['Recording', 'Each device records only when its own switch is on, and only while the platform switch above is on. The customer turns the device switch on under Devices & SIP.', '◉'],
+    ['Call defaults', "Each customer chooses the extension an API call uses and where an unmatched number lands, on their Numbers page.", '☎'],
+  ];
+  const legacy = state.settings || {};
+  const legacyDefaults = [legacy.default_extension, legacy.inbound_fallback_extension].filter(Boolean);
+  if (legacyDefaults.length) {
+    rows.push(['Legacy platform defaults', `${legacyDefaults.join(', ')} — still honoured where a customer has not chosen their own.`, '⚑']);
+  }
+  const email = state.email_config || {};
+  rows.push(['Voicemail email delivery', email.enabled ? `Enabled as ${esc(email.from_email || 'configured sender')}` : 'Disabled. Configure it under Email Delivery.', '✉']);
+  paint('platform-policy', rows.map(([title, copy, glyph]) => `
+    <div class="row">
+      <span class="row-icon">${glyph}</span>
+      <div><h3>${esc(title)}</h3><p>${copy}</p></div>
+    </div>`).join(''));
+  markStagger();
+}
+
+function renderEmailSettings() {
+  const config = state.email_config || {};
+  $('email-enabled').checked = !!config.enabled;
+  $('sendgrid-from').value = config.from_email || '';
+  $('sendgrid-name').value = config.from_name || 'EIP Telephony Voicemail';
+  $('sendgrid-key-status').textContent = config.has_api_key ? 'API key configured — leave blank to keep it' : 'No API key configured';
+  const rows = state.email_deliveries || [];
+  paint('email-delivery-list', rows.length ? `
+    <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
+    <tbody>${rows.map(x => `<tr>
+      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${statusPill(x.status, `mail-${x.id}`)}</td>
+      <td>${esc(x.attempts)}</td><td>${esc(fmtDate(x.updated_at))}</td><td>${esc(x.last_error || '—')}</td>
+    </tr>`).join('')}</tbody></table>` : empty('No delivery attempts', 'New voicemail email attempts will appear here.', '✎'));
+}
+
+/* ------------------------------------------------------ 18. Call tables */
+function callTable(calls, compact = false) {
+  if (!calls.length) return empty('No calls found', 'Calls will appear here once activity begins.', '◷');
+  return `<table class="data"><thead><tr>
+      <th>Caller / destination</th><th>Direction</th><th>Assigned number</th><th>Extension</th><th>Status</th><th>Started</th><th>Duration</th>${compact ? '' : '<th>Recording / reference</th>'}
+    </tr></thead><tbody>${calls.map(x => `<tr>
+      <td class="cell-strong">${esc(x.phone)}<span class="cell-sub">${esc(x.provider || 'EIP network')}</span></td>
+      <td>${tag(x.direction || 'outbound', x.direction === 'inbound' ? 'info' : '')}</td>
+      <td>${esc(x.caller_id_number || '—')}</td>
+      <td>${esc(x.extension)}<span class="cell-sub">${esc(extensionName(x.extension))}</span></td>
+      <td>${statusPill(x.status, `call-${x.call_id}`)}</td>
+      <td>${esc(fmtDate(x.started_at))}</td>
+      <td>${fmtDuration(x.duration_seconds)}</td>
+      ${compact ? '' : `<td>${x.recording_status === 'finalized' ? tag('Available', 'on') : tag('None')}<span class="cell-sub">${esc(x.contact_id || x.call_id || '—')}</span></td>`}
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function loadCalls() {
+  const params = new URLSearchParams({ limit: '50', offset: String(callOffset) });
+  if (val('call-extension')) params.set('extension', val('call-extension'));
+  if (val('call-status')) params.set('status', val('call-status'));
+  if (val('call-search')) params.set('q', val('call-search'));
+  if (!quietRender) {
+    paint('call-list', skeletonRows(6), true);
+    setLoading($('call-list'), true);
+  }
+  try {
+    const data = await api(`/admin/api/calls?${params}`);
+    $('call-count').textContent = `${fmtNum(data.total)} call${data.total === 1 ? '' : 's'}`;
+    paint('call-list', callTable(data.calls));
+    renderPager('call-pager', data.total, callOffset, value => { callOffset = value; loadCalls(); });
+    markStagger();
+  } catch (error) {
+    paint('call-list', errorState('Calls could not be loaded', error.message, 'calls'));
+    notify(error.message, true);
+  } finally {
+    setLoading($('call-list'), false);
+  }
+}
+
+function renderPager(id, total, offset, callback) {
+  const target = $(id);
+  target.innerHTML = '';
+  if (total <= 50) return;
+  const previous = document.createElement('button');
+  const next = document.createElement('button');
+  previous.className = next.className = 'btn ghost sm';
+  previous.textContent = '← Previous';
+  next.textContent = 'Next →';
+  previous.disabled = offset === 0;
+  next.disabled = offset + 50 >= total;
+  previous.onclick = () => callback(Math.max(0, offset - 50));
+  next.onclick = () => callback(offset + 50);
+  target.append(previous, next);
+}
+
+/* ------------------------------------------------------- 19. Recordings */
+function waveform() {
+  return `<span class="wave">${Array.from({ length: 30 }, (_, i) => `<i style="height:${7 + (i * 11) % 24}px"></i>`).join('')}</span>`;
+}
+
+async function loadRecordings() {
+  const params = new URLSearchParams({ limit: '50', offset: String(recordingOffset), recordings: 'true' });
+  if (val('recording-extension')) params.set('extension', val('recording-extension'));
+  if (val('recording-search')) params.set('q', val('recording-search'));
+  if (!quietRender) setLoading($('recording-list'), true);
+  try {
+    const data = await api(`/admin/api/calls?${params}`);
+    const customerId = Number(val('recording-customer') || 0);
+    const from = val('recording-from'), to = val('recording-to');
+    const owned = customerId ? new Set(state.extensions.filter(x => x.owner_user_id === customerId).map(x => x.extension)) : null;
+    const calls = data.calls.filter(x =>
+      (!owned || owned.has(x.extension)) &&
+      (!from || String(x.started_at).slice(0, 10) >= from) &&
+      (!to || String(x.started_at).slice(0, 10) <= to));
+    $('recording-count').textContent = `${calls.length} recording${calls.length === 1 ? '' : 's'}`;
+    const groups = groupBy(calls, x => x.extension);
+    paint('recording-list', Object.entries(groups).map(([ext, items]) => `
+      <div class="acc-item open">
+        <div class="acc-head">
+          <span class="row-icon">◉</span>
+          <div><h3 style="font-size:13px">Extension ${esc(ext)} · ${esc(extensionName(ext))}</h3>
+            <p style="font-size:11px;color:var(--text-3)">${items.length} recording${items.length === 1 ? '' : 's'}</p></div>
+          <span class="chev">›</span>
+        </div>
+        <div class="acc-body" style="padding:0 18px 16px">${items.map(x => `
+          <div class="row rec-row" style="grid-template-columns:minmax(150px,1fr) minmax(140px,auto) minmax(240px,1.4fr)">
+            <div><h3>${esc(x.phone)}</h3><p>${esc(fmtDate(x.started_at))} · ${fmtDuration(x.duration_seconds)}</p></div>
+            <div>${statusPill(x.recording_status, `rec-${x.call_id}`)}<span class="cell-sub">Call ${esc(x.call_id)}</span></div>
+            <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap">
+              ${waveform()}
+              ${x.recording_status === 'finalized'
+                ? `<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
+                   <a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a>`
+                : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
+            </div>
+          </div>`).join('')}</div>
+      </div>`).join('') || empty('No recordings found', 'Try another extension, or complete a recorded call.', '◉'));
+    renderPager('recording-pager', data.total, recordingOffset, value => { recordingOffset = value; loadRecordings(); });
+    markStagger();
+  } catch (error) {
+    paint('recording-list', errorState('Recordings could not be loaded', error.message, 'recordings'));
+    notify(error.message, true);
+  } finally {
+    setLoading($('recording-list'), false);
+  }
+}
+
+/* -------------------------------------------------------- 20. Voicemail */
+async function loadVoicemails() {
+  const params = new URLSearchParams();
+  if (val('voicemail-extension')) params.set('extension', val('voicemail-extension'));
+  if (val('voicemail-folder')) params.set('folder', val('voicemail-folder'));
+  if (!quietRender) setLoading($('voicemail-list'), true);
+  try {
+    const data = await api(`/admin/api/voicemails?${params}`);
+    const query = val('voicemail-search').toLowerCase();
+    const messages = data.voicemails.filter(x => `${x.caller_id} ${x.message} ${x.mailbox}`.toLowerCase().includes(query));
+    $('voicemail-count').textContent = `${messages.length} message${messages.length === 1 ? '' : 's'}`;
+    const groups = groupBy(messages, x => x.mailbox);
+    paint('voicemail-list', Object.entries(groups).map(([mailbox, items]) => `
+      <div class="acc-item open">
+        <div class="acc-head">
+          <span class="row-icon">✉</span>
+          <div><h3 style="font-size:13px">Mailbox ${esc(mailbox)} · ${esc(extensionName(mailbox))}</h3>
+            <p style="font-size:11px;color:var(--text-3)">${items.filter(x => x.folder === 'inbox').length} new of ${items.length}</p></div>
+          <span class="chev">›</span>
+        </div>
+        <div class="acc-body" style="padding:0 18px 16px">${items.map(x => `
+          <div class="row" style="grid-template-columns:minmax(150px,1fr) minmax(220px,1.3fr) auto">
+            <div><h3>${esc(x.caller_id)}</h3><p>${esc(fmtDate(x.received_at))} · ${fmtDuration(x.duration_seconds)}</p></div>
+            <div style="display:flex;align-items:center;gap:10px">
+              ${tag(x.folder, x.folder === 'inbox' ? 'warn' : x.folder === 'urgent' ? 'off' : '')}
+              <audio controls preload="none" src="/admin/api/voicemails/${esc(x.mailbox)}/${esc(x.folder)}/${esc(x.message)}/file"></audio>
+            </div>
+            <div class="row-actions">
+              ${x.folder === 'inbox' ? `<button class="btn ghost sm" data-read-voicemail="${esc(x.mailbox)}:${esc(x.folder)}:${esc(x.message)}">Mark read</button>` : ''}
+              <button class="btn danger sm" data-delete-voicemail="${esc(x.mailbox)}:${esc(x.folder)}:${esc(x.message)}">Delete</button>
+            </div>
+          </div>`).join('')}</div>
+      </div>`).join('') || empty('No voicemail messages', 'Enable voicemail on an extension and unanswered callers can leave a message.', '✉'));
+    markStagger();
+  } catch (error) {
+    paint('voicemail-list', errorState('Voicemail could not be loaded', error.message, 'voicemails'));
+    notify(error.message, true);
+  } finally {
+    setLoading($('voicemail-list'), false);
+  }
+}
+
+async function voicemailAction(action, value) {
+  const [mailbox, folder, message] = value.split(':');
+  const suffix = action === 'read' ? '/read' : '';
+  if (action === 'delete' && !confirm('Delete this voicemail permanently?')) return;
+  try {
+    await api(`/admin/api/voicemails/${mailbox}/${folder}/${message}${suffix}`, { method: action === 'read' ? 'POST' : 'DELETE' });
+    notify(action === 'read' ? 'Voicemail marked as read' : 'Voicemail deleted');
+    await loadVoicemails();
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+}
+
+/* ---------------------------------------------------- 21. Call flow studio */
+const FLOW_ICONS = { business_hours: '◷', simultaneous: '⇉', sequential: '⇢', ring_group: '◎', extension: '⌁', voicemail: '✉', forward: '↗' };
+const FLOW_TILES = { business_hours: 'tile-hours', simultaneous: 'tile-ring', sequential: 'tile-seq', ring_group: 'tile-group', extension: 'tile-ext', voicemail: 'tile-vm', forward: 'tile-fwd' };
+
+/* ------------------------------------------------- 21a. Flow targets */
+/* Numbers, extensions and groups all get a call flow. Numbers stay in
+   state.call_routes (their own API contract), the other two in
+   state.routing_flows, and the builder treats them identically. */
+const flowKey = (type, target) => `${type}:${target}`;
+function flowTargetParts(raw) {
+  const [type, ...rest] = String(raw || '').split(':');
+  return { type, target: rest.join(':') };
+}
+/* Call flows describe one customer's lines, so the builder always works inside
+   a customer: a customer session is that customer, an administrator picks one. */
+function routingOwner() {
+  if (!state.is_admin) return Number(state.user_id) || null;
+  const chosen = Number(val('route-owner'));
+  return Number.isFinite(chosen) && chosen ? chosen : null;
+}
+
+function flowOwnerId() {
+  const { type, target } = flowTargetParts($('route-target')?.value);
+  if (type === 'number') return (state.phone_numbers || []).find(x => x.number === target)?.owner_user_id ?? routingOwner();
+  if (type === 'extension') return (state.extensions || []).find(x => x.extension === target)?.owner_user_id ?? routingOwner();
+  if (type === 'group') return (state.groups || []).find(x => String(x.id) === String(target))?.owner_user_id ?? routingOwner();
+  return routingOwner();
+}
+function routeTargets() {
+  const targets = [];
+  const owner = routingOwner();
+  // A flow belongs to one customer, so the builder only offers that customer's
+  // numbers, extensions and groups. Unassigned platform numbers stay listed as
+  // a reminder that they cannot carry a customer flow yet.
+  const mine = row => !state.is_admin || owner === null || row.owner_user_id === owner || !row.owner_user_id;
+  (state.phone_numbers || []).filter(mine).forEach(x => targets.push({
+    key: flowKey('number', x.number), section: 'Numbers', type: 'number', target: x.number,
+    label: `${x.number} — ${x.description || (x.inbound_extension ? `ext ${x.inbound_extension}` : 'unassigned')}${x.owner_user_id ? '' : ' · not assigned'}`,
+  }));
+  (state.extensions || []).filter(x => x.active && mine(x)).forEach(x => targets.push({
+    key: flowKey('extension', x.extension), section: 'Extensions', type: 'extension', target: x.extension,
+    label: `${x.extension} — ${x.display_name || 'Extension'}`,
+  }));
+  (state.groups || []).filter(mine).forEach(group => targets.push({
+    key: flowKey('group', group.id), section: 'Groups', type: 'group', target: String(group.id),
+    label: `${group.name} — ${group.members.length} member${group.members.length === 1 ? '' : 's'}`,
+  }));
+  return targets;
+}
+
+/* The customer picker the administrator routes for. Customers see their own. */
+function renderRoutingOwner(preferred) {
+  const select = $('route-owner');
+  if (!select) return;
+  if (!state.is_admin) { select.hidden = true; select.innerHTML = ''; return; }
+  const customers = (state.customers || []).length ? state.customers : (state.users || []).filter(u => u.role === 'user');
+  // Prefer what the operator chose, then the customer whose workspace is open,
+  // then the one the routing page was already showing. Failing all three, land
+  // on a customer that actually has something to route: an empty page reads as
+  // a missing flow, and the flows are the reason the page exists.
+  const hasWork = id => (state.phone_numbers || []).some(x => x.owner_user_id === id)
+    || (state.extensions || []).some(x => x.owner_user_id === id)
+    || (state.groups || []).some(x => x.owner_user_id === id);
+  const fallback = customers.find(c => hasWork(c.id)) || customers[0];
+  const prior = String(preferred ?? select.value ?? workspace?.customer?.id ?? fallback?.id ?? '');
+  select.innerHTML = customers.map(c => `<option value="${c.id}">${esc(c.company_name || c.username)}</option>`).join('')
+    || '<option value="">No customers yet</option>';
+  if (customers.some(c => String(c.id) === prior)) select.value = prior;
+}
+/* Every flow that belongs to one owner, in the shape the pickers expect. */
+function allFlowsFor(ownerUserId) {
+  const owns = row => ownerUserId === undefined || row.owner_user_id === ownerUserId;
+  return [
+    ...(state.call_routes || []).filter(row => owns(row)).map(row => ({
+      key: flowKey('number', row.phone_number), type: 'number', target: row.phone_number,
+      name: row.name || 'Main call flow', nodes: row.route?.nodes || [], owner_user_id: row.owner_user_id, active: row.active,
+    })),
+    ...(state.routing_flows || []).filter(row => owns(row)).map(row => ({
+      key: flowKey(row.target_type, row.target), type: row.target_type, target: String(row.target),
+      name: row.name || (row.target_type === 'group' ? 'Group call flow' : 'Extension call flow'),
+      nodes: row.route?.nodes || [], owner_user_id: row.owner_user_id, active: row.active,
+    })),
+  ];
+}
+
+function savedFlowFor(type, target) {
+  if (type === 'number') return (state.call_routes || []).find(row => row.phone_number === target);
+  return (state.routing_flows || []).find(row => row.target_type === type && String(row.target) === String(target));
+}
+function renderRouteTargets(preferred) {
+  const select = $('route-target');
+  if (!select) return '';
+  const targets = routeTargets();
+  const prior = preferred ?? select.value;
+  const sections = ['Numbers', 'Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
+  select.innerHTML = sections.map(section => `<optgroup label="${section}">${targets.filter(t => t.section === section)
+    .map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}</optgroup>`).join('');
+  if (targets.some(t => t.key === prior)) select.value = prior;
+  else if (targets.length) select.value = targets[0].key;
+  else select.innerHTML = '<option value="">No target yet</option>';
+  return select.value;
+}
+
+/* Open the builder on one target, from any page. An administrator lands on the
+   customer that target belongs to, so saving can never write across customers. */
+function focusRouteTarget(key) {
+  if (!key) return;
+  if (state.is_admin && $('route-owner')) {
+    const { type, target } = flowTargetParts(key);
+    const owner = type === 'number'
+      ? (state.phone_numbers || []).find(row => row.number === target)?.owner_user_id
+      : type === 'extension'
+        ? (state.extensions || []).find(row => row.extension === target)?.owner_user_id
+        : (state.groups || []).find(row => String(row.id) === String(target))?.owner_user_id;
+    if (owner) renderRoutingOwner(owner);
+  }
+  renderRouteTargets(key);
+  renderFlow(key);
+  renderGroups();
+}
+
+function renderFlow(preferred) {
+  const select = $('route-target');
+  if (!select) return;
+  const key = renderRouteTargets(preferred);
+  const { type, target } = flowTargetParts(key);
+  const saved = key ? savedFlowFor(type, target) : null;
+  flowNodes = saved?.route?.nodes ? saved.route.nodes.map(node => ({ ...node })) : [];
+  const save = $('save-route');
+  if (save) {
+    save.disabled = !canDesignFlows();
+    save.title = canDesignFlows() ? '' : flowDesignHint();
+  }
+  const entry = $('flow-entry-number');
+  if (entry) entry.textContent = key ? (select.selectedOptions[0]?.textContent || key) : 'Add a number, extension or group to begin';
+  renderFlowNodes();
+}
+
+function renderGroups() {
+  const host = $('group-list');
+  if (!host) return;
+  const owner = state.is_admin ? routingOwner() : null;
+  const groups = (state.groups || []).filter(group => !state.is_admin || owner === null || group.owner_user_id === owner);
+  const rows = groups.map(group => {
+    const active = flowTargetParts($('route-target')?.value).type === 'group'
+      && String(flowTargetParts($('route-target')?.value).target) === String(group.id);
+    const flow = savedFlowFor('group', group.id);
+    return `<div class="row${active ? ' selected' : ''}">
+      <span class="row-icon">◎</span>
+      <div><h3>${esc(group.name)}</h3><p>${group.members.length ? group.members.map(ext => esc(ext)).join(' · ') : 'No members yet'} · rings for ${group.timeout}s</p></div>
+      <div class="tags">${flow ? tag(`${flow.route?.nodes?.length || 0} step flow`, 'info') : tag('Default flow', 'off')}${group.active ? '' : tag('Paused', 'off')}</div>
+      <div class="row-actions">
+        <button class="btn ghost sm" data-edit-group="${group.id}">Edit</button>
+        <button class="btn ghost sm" data-group-flow="${group.id}">Call flow</button>
+        <button class="btn danger sm" data-delete-group="${group.id}">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+  host.innerHTML = rows || empty(
+    state.is_admin && owner === null ? 'Choose a customer' : 'No groups yet',
+    state.is_admin && owner === null
+      ? 'Pick the customer whose groups you want to see or change.'
+      : 'A group rings its members together and can carry its own call flow.',
+    '◎',
+  );
+}
+
+/* Ring steps can target a saved group; picking one fills in its members. */
+function flowGroupOptions(selected = '') {
+  // Only groups belonging to the target's owner: a ring step may not use
+  // somebody else's group, and validation rejects it if it does.
+  const owner = flowOwnerId();
+  const groups = state.is_admin && owner ? (state.groups || []).filter(g => g.owner_user_id === owner) : (state.groups || []);
+  return `<option value="">Individual extensions</option>${groups.map(group =>
+    `<option value="${group.id}" ${String(selected) === String(group.id) ? 'selected' : ''}>${esc(group.name)} — ${group.members.length} member${group.members.length === 1 ? '' : 's'}</option>`).join('')}`;
+}
+
+function renderFlowNodes() {
+  const host = $('flow-nodes');
+  if (!host) return;
+  host.innerHTML = flowNodes.map((node, index) => `
+    <div class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="${canDesignFlows()}" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
+      <span class="icon ${FLOW_TILES[node.type] || 'tile-ext'}">${FLOW_ICONS[node.type] || '◇'}</span>
+      <div class="copy"><b>${esc(String(node.type).replaceAll('_', ' '))}</b><small>${esc(node.label || (canDesignFlows() ? 'Click to configure this step' : 'Step in this call flow'))}</small></div>
+      <span class="step">${String(index + 1).padStart(2, '0')}</span>
+      ${canDesignFlows() ? `<button class="remove" data-remove-node="${index}" aria-label="Remove step">✕</button>` : ''}
+    </div>`).join('');
+  $('flow-canvas').classList.toggle('has-nodes', flowNodes.length > 0);
+}
+
+function flowExtensionOptions(selected = []) {
+  const values = Array.isArray(selected) ? selected : [selected];
+  const owner = flowOwnerId();
+  const available = state.is_admin && owner
+    ? state.extensions.filter(x => x.owner_user_id === owner)
+    : state.extensions;
+  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+}
+
+/* What a freshly added step should already contain. A ring step on a number
+   starts with every device the customer owns, which is how their main line
+   behaves: add an extension and its phone joins the ring. An extension step
+   rings that device; a group step rings its members. */
+function flowStepDefaults(node) {
+  if (!['simultaneous', 'sequential', 'ring_group'].includes(node?.type)) return node;
+  if ((node.extensions || []).length) return node;
+  const { type, target } = flowTargetParts($('route-target')?.value);
+  const owner = flowOwnerId();
+  const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || !owner || x.owner_user_id === owner));
+  if (type === 'number') return { ...node, extensions: mine.map(x => x.extension) };
+  if (type === 'extension') return { ...node, extensions: [target] };
+  const group = (state.groups || []).find(x => String(x.id) === String(target));
+  if (type === 'group' && group) return { ...node, extensions: [...group.members] };
+  return node;
+}
+
+function openFlowConfig(index) {
+  flowConfigIndex = index;
+  const node = flowStepDefaults(flowNodes[index]);
+  if (node && node !== flowNodes[index]) {
+    flowNodes[index] = node;
+    renderFlowNodes();
+  }
+  if (!node) return;
+  const common = `<label class="field">Step label<input name="label" maxlength="80" value="${esc(node.label === 'Click to configure' ? '' : node.label || '')}"></label>`;
+  let fields = '';
+  if (node.type === 'business_hours') {
+    fields = `<div class="field-row">
+        <label class="field">Open time<input type="time" name="start" value="${esc(node.start || '09:00')}" required></label>
+        <label class="field">Close time<input type="time" name="end" value="${esc(node.end || '17:00')}" required></label>
+      </div>
+      <label class="field">Business days<select name="days" multiple size="7">${['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+        .map((day, i) => `<option value="${i + 1}" ${(node.days || [1,2,3,4,5]).includes(i + 1) ? 'selected' : ''}>${day}</option>`).join('')}</select>
+        <small>Use Ctrl/Cmd to select multiple days.</small></label>`;
+  } else if (['simultaneous', 'sequential', 'ring_group'].includes(node.type)) {
+    fields = `<label class="field">Ring a saved group<select name="group_id">${flowGroupOptions(node.group_id)}</select>
+        <small>Choosing a group fills in its members below; you can still adjust them for this step.</small></label>
+      <label class="field">Ring destinations<select name="extensions" multiple size="6" required>${flowExtensionOptions(node.extensions || [])}</select><small>Select at least one extension.</small></label>
+      <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
+  } else if (node.type === 'extension') {
+    fields = `<label class="field">Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension || '')}</select></label>`;
+  } else if (node.type === 'voicemail') {
+    fields = `<label class="field">Voicemail mailbox<select name="mailbox" required><option value="">Choose mailbox</option>${flowExtensionOptions(node.mailbox || '')}</select></label>`;
+  } else if (node.type === 'forward') {
+    fields = `<label class="field">Forward to E.164 number<input name="phone" type="tel" pattern="\\+[1-9][0-9]{7,14}" placeholder="+13025550123" value="${esc(node.phone || '')}" required></label>
+      <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
+  }
+  $('flow-config-title').textContent = `Configure ${String(node.type).replaceAll('_', ' ')}`;
+  $('flow-config-fields').innerHTML = common + fields;
+  openOverlay('flow-config-modal');
+}
+
+function saveFlowConfig(event) {
+  event.preventDefault();
+  const node = flowNodes[flowConfigIndex];
+  const form = new FormData(event.target);
+  if (!node) return closeOverlay('flow-config-modal');
+  node.label = String(form.get('label') || '').trim();
+  if (node.type === 'business_hours') {
+    node.start = form.get('start');
+    node.end = form.get('end');
+    node.days = form.getAll('days').map(Number);
+    if (!node.days.length) return notify('Select at least one business day', true);
+    node.label = node.label || `${node.start}–${node.end} · ${node.days.length} days`;
+  } else if (['simultaneous', 'sequential', 'ring_group'].includes(node.type)) {
+    const groupId = String(form.get('group_id') || '');
+    const group = (state.groups || []).find(x => String(x.id) === groupId);
+    node.extensions = form.getAll('extensions');
+    if (group && !node.extensions.length) node.extensions = [...group.members];
+    node.timeout = Number(form.get('timeout'));
+    if (group) node.group_id = groupId; else delete node.group_id;
+    if (!node.extensions.length) return notify('Select at least one extension', true);
+    node.label = node.label || `${group ? `${group.name} · ` : ''}${node.extensions.join(', ')} · ${node.timeout}s`;
+  } else if (node.type === 'extension') {
+    node.extension = form.get('extension');
+    node.label = node.label || `Extension ${node.extension}`;
+  } else if (node.type === 'voicemail') {
+    node.mailbox = form.get('mailbox');
+    node.label = node.label || `Mailbox ${node.mailbox}`;
+  } else if (node.type === 'forward') {
+    node.phone = form.get('phone');
+    node.timeout = Number(form.get('timeout'));
+    node.label = node.label || `${node.phone} · ${node.timeout}s`;
+  }
+  node.configured = true;
+  renderFlowNodes();
+  closeOverlay('flow-config-modal');
+  notify('Routing step configured');
+}
+
+/* ------------------------------------------------------ 22. Overlay engine */
+function openOverlay(id) {
+  const node = $(id);
+  node.classList.add('open');
+  node.setAttribute('aria-hidden', 'false');
+}
+function closeOverlay(id) {
+  const node = $(id);
+  node.classList.remove('open');
+  node.setAttribute('aria-hidden', 'true');
+}
+/* Extension numbers are unique platform-wide, so the suggestion comes from the
+   server rather than from whatever this session can see. */
+async function prefillNextExtension() {
+  const field = $('modal-fields')?.querySelector('[name=extension]');
+  if (!field || editing) return;
+  try {
+    const { extension } = await api('/admin/api/extensions/next');
+    if (!$('modal').classList.contains('open') || field.value) return;
+    field.value = extension;
+    field.placeholder = extension;
+  } catch { /* the field stays editable by hand */ }
+}
+
+function closeModal() {
+  closeOverlay('modal');
+  $('modal-form').reset();
+  $('modal-save').hidden = false;
+  $('modal-card').classList.remove('wide');
+  editing = null;
+  pendingFulfilRequest = null;
+}
+
+/* ------------------------------------------------- 23a. Groups & credentials */
+function groupMemberOptions(item) {
+  const owner = state.is_admin ? item?.owner_user_id : null;
+  const available = state.is_admin && owner
+    ? state.extensions.filter(x => x.owner_user_id === Number(owner))
+    : state.extensions;
+  const selected = item?.members || [];
+  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+}
+
+/* The credentials a device registers with. One sheet per extension: the whole
+   set in a single table, every value copyable on its own or as one block ready
+   to paste into a softphone, and the password rotatable without leaving it. */
+let credentialSheet = null;   // { extension, credentials, rotating }
+
+/* Where a phone registers, in one value: "sip.example.com:5060 · UDP". */
+function registrationAddress(c) {
+  if (!c.server) return 'Ask EIP for your registration host';
+  return `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}`;
+}
+
+/* What a person actually types into a phone, in the order they type it. */
+function credentialLines(c) {
+  return [
+    `Extension: ${c.extension}`,
+    `SIP username: ${c.sip_username}`,
+    `SIP password: ${c.sip_password}`,
+    `Registration server: ${c.server ? `${c.server}:${c.port}` : 'ask EIP for your registration host'}`,
+    `Transport: ${String(c.transport || 'udp').toUpperCase()}`,
+    `Number: ${(c.numbers || []).join(', ') || 'none assigned yet'}`,
+  ].join('\n');
+}
+
+function credentialSheetBody({ credentials: c, rotating }) {
+  const source = c.registration === 'device'
+    ? `Device account${c.device_label ? ` · ${esc(c.device_label)}` : ''}`
+    : 'This extension';
+  const rows = [
+    ['SIP username', c.sip_username, true],
+    ['SIP password', c.sip_password, true],
+    ['Registration server', c.server ? `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}` : 'Ask EIP for your registration host', true],
+    ['Numbers', (c.numbers || []).join(', ') || 'None assigned yet', false],
+    ['Password comes from', source, false],
+  ];
+  return `<div class="cred-sheet">
+    <div class="cred-identity">
+      <span class="ws-glyph">${esc(c.extension)}</span>
+      <div><b>${esc(c.display_name || `Extension ${c.extension}`)}</b>
+        <small>Register a phone or softphone with these ${rows.filter(row => row[2]).length} values${c.managed_address ? '' : ' — this is the console\'s own address, ask EIP for the public one'}</small></div>
+      <span class="tag ${c.active ? 'on' : 'off'}">${c.active ? 'Active' : 'Disabled'}</span>
+    </div>
+    <table class="cred-table">
+      <tbody>${rows.map(([label, value, copyable]) => `
+        <tr><th>${esc(label)}</th>
+          <td><code>${esc(String(value ?? '—'))}</code></td>
+          <td class="cred-copy">${copyable ? `<button class="btn ghost sm" type="button" data-copy-value="${esc(String(value))}" data-copy-label="${esc(label)}">Copy</button>` : ''}</td>
+        </tr>`).join('')}</tbody>
+    </table>
+    <div class="cred-actions">
+      <button class="btn primary sm" type="button" data-cred-copy-all>Copy everything</button>
+      <button class="btn ghost sm" type="button" data-cred-rotate="${esc(c.extension)}" aria-expanded="${rotating ? 'true' : 'false'}">${rotating ? 'Cancel' : 'Change password'}</button>
+      <small>Anyone with these can place calls as this extension.</small>
+    </div>
+    <div class="cred-rotate" ${rotating ? '' : 'hidden'}>
+      <label class="field">New SIP password
+        <input type="text" id="cred-new-password" autocomplete="new-password" placeholder="Leave blank to generate a strong one"></label>
+      <div class="cred-rotate-actions">
+        <button class="btn primary sm" type="button" data-cred-save="${esc(c.extension)}">Save password</button>
+        <button class="btn ghost sm" type="button" data-cred-generate="${esc(c.extension)}">Generate a strong one</button>
+        <small>${c.registration === 'device'
+          ? 'This device account is what Asterisk authenticates, so its password is the one that changes.'
+          : 'Registered phones keep their current session until they register again with the new password.'}</small>
+      </div>
+    </div>
+  </div>`;
+}
+
+function paintCredentialSheet() {
+  const sheet = credentialSheet;
+  if (!sheet) return;
+  showSecret({
+    title: `Extension ${sheet.credentials.extension} credentials`,
+    subtitle: 'Everything a phone needs, in one place',
+    body: credentialSheetBody(sheet),
+  });
+}
+
+async function showExtensionCredentials(extension) {
+  try {
+    const { credentials } = await api(`/admin/api/extensions/${encodeURIComponent(extension)}/credentials`);
+    credentialSheet = { extension: credentials.extension, credentials, rotating: false };
+    paintCredentialSheet();
+  } catch (error) { notify(error.message, true); }
+}
+
+/* Rotate the password a device registers with, then show the new one. */
+async function rotateExtensionPassword(extension, password = "") {
+  try {
+    const result = await api(`/admin/api/extensions/${encodeURIComponent(extension)}/password`, {
+      method: 'POST', body: JSON.stringify({ password }),
+    });
+    const { credentials } = await api(`/admin/api/extensions/${encodeURIComponent(extension)}/credentials`);
+    credentialSheet = { extension: credentials.extension, credentials, rotating: false };
+    paintCredentialSheet();
+    notify(password ? 'SIP password changed' : 'New SIP password generated');
+    await loadState();
+    return result;
+  } catch (error) {
+    notify(error.message, true);
+    return null;
+  }
+}
+
+/* What the platform built when a number was assigned: the extension, its
+   credentials and the flows that are already handling calls. */
+function showProvisioned(provisioned) {
+  const items = [
+    `Extension <b>${esc(provisioned.extension)}</b> created${provisioned.display_name ? ` — ${esc(provisioned.display_name)}` : ''}`,
+    `SIP credentials generated (username <b>${esc(provisioned.sip_username)}</b>)`,
+    `Inbound calls to <b>${esc(provisioned.number)}</b> now ring that extension`,
+    provisioned.default_outbound ? 'Set as the default caller ID for the new extension' : 'Caller ID left as it was',
+    'Default call flow written for the number and for the extension',
+  ];
+  showSecret({
+    title: `Line ready — ${provisioned.number}`,
+    subtitle: 'The extension, its credentials and the call flows were created automatically',
+    value: provisioned.sip_password,
+    body: `<div class="notice ok"><span class="glyph">✓</span><div><b>Created for the customer</b><ul class="plain">${items.map(item => `<li>${item}</li>`).join('')}</ul></div></div>
+      <div class="grid cols-2">
+        <label class="field">Extension<input readonly value="${esc(provisioned.extension)}"></label>
+        <label class="field">SIP username<input readonly value="${esc(provisioned.sip_username)}"></label>
+      </div>
+      <label class="field">SIP password<div class="secret"><input id="created-api-key" readonly><button class="btn primary" type="button" data-copy-secret>Copy</button></div></label>
+      <article class="notice"><span class="glyph">⌘</span><div><b>Both flows are editable</b>Open the flow builder to adjust how the number answers, or how the extension itself rings, at any time.</div></article>`,
+  });
+}
+
+/* --------------------------------------------------- 23. Modal templates */
+const activeCustomers = () => state.users.filter(x => x.role === 'user' && x.active);
+
+const templates = {
+  call: () => ({
+    title: 'New outbound call',
+    subtitle: 'Your phone rings first. The customer sees the selected callback number.',
+    fields: `<label class="field">Customer phone number<input name="phone" type="tel" placeholder="+13025550123" required></label>
+      <div class="field-row">
+        <label class="field">Extension<select name="extension" ${state.is_admin ? '' : 'disabled'}>${state.extensions.filter(x => x.active)
+          .map(x => `<option value="${x.extension}">${x.extension} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}</select></label>
+        <label class="field">Callback / caller ID<select name="caller_id_number"><option value="">Use default assigned number</option>${state.phone_numbers.filter(x => x.active)
+          .map(x => `<option value="${esc(x.number)}" ${x.default_outbound ? 'selected' : ''}>${esc(x.number)} — ${esc(x.description || '')}</option>`).join('')}</select></label>
+      </div>
+      <div class="field-row">
+        <label class="field">CRM contact ID (optional)<input name="contact_id"></label>
+        <label class="field">CRM member ID (optional)<input name="member_id"></label>
+      </div>`,
+  }),
+  extension: item => ({
+    title: item ? 'Edit extension' : 'Add extension',
+    subtitle: 'Configure the SIP identity and per-extension policies',
+    fields: `${state.is_admin ? `<label class="field">Customer account<select name="owner_user_id"><option value="">Platform / administrator</option>${activeCustomers()
+      .map(x => `<option value="${x.id}" ${item?.owner_user_id === x.id ? 'selected' : ''}>${esc(x.username)} — ${esc(x.email)}</option>`).join('')}</select>
+      <small>The customer will be able to manage this extension.</small></label>` : ''}
+      <div class="field-row">
+        <label class="field">Extension<input name="extension" inputmode="numeric" maxlength="3" ${item ? 'readonly' : ''} placeholder="102" required value="${esc(item?.extension || '')}"></label>
+        <label class="field">Employee / display name<input name="display_name" maxlength="120" placeholder="Sales desk" value="${esc(item?.display_name || '')}"></label>
+      </div>
+      <div class="field-row">
+        <label class="field">SIP username<input name="sip_username" readonly value="${esc(item?.sip_username || '')}" placeholder="Equals the extension number" aria-describedby="sip-username-note"><small id="sip-username-note">Fixed by the platform — this is what the device authenticates with.</small></label>
+        <label class="field">SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Leave blank to generate one'}"></label>
+      </div>
+      <div class="credential-note">${item
+        ? `<span>Credentials are created automatically. The username never changes; the password is yours to set.</span><button class="btn ghost sm" type="button" data-reveal-extension="${esc(item.extension)}">Reveal credentials</button>`
+        : '<span>A SIP password is generated for this extension, and it gets a default call flow straight away.</span>'}</div>
+      <label class="check" style="margin-bottom:13px"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Active and allowed to make calls</label>
+      <label class="check" style="margin-bottom:13px"><input name="recording_enabled" type="checkbox" ${item?.recording_enabled ? 'checked' : ''}> Record calls on this device</label>
+      <div class="field-row">
+        <label class="check"><input name="voicemail_enabled" type="checkbox" ${item?.voicemail_enabled ? 'checked' : ''}> Enable voicemail</label>
+        <label class="field">Voicemail PIN<input name="voicemail_pin" type="password" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="${item ? 'Leave blank to keep existing' : '4 to 10 digits'}"></label>
+      </div>
+      <label class="field">Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(item?.voicemail_email || '')}"><small>New messages are sent here when SendGrid is enabled.</small></label>
+      <label class="check"><input name="webrtc_enabled" type="checkbox" ${item?.webrtc_enabled ? 'checked' : ''}> WebRTC enabled</label>`,
+  }),
+  group: item => ({
+    title: item ? `Edit group ${item.name}` : 'Add a ring group',
+    subtitle: 'Group the extensions that ring together, then give the group its own call flow',
+    fields: `${state.is_admin ? `<label class="field">Customer account<select name="owner_user_id" required>${activeCustomers()
+      .map(x => `<option value="${x.id}" ${Number(item?.owner_user_id) === x.id ? 'selected' : ''}>${esc(x.company_name || x.username)}</option>`).join('')}</select>
+      <small>Groups belong to one customer and can only ring that customer's extensions.</small></label>` : ''}
+      <div class="field-row">
+        <label class="field">Group name<input name="name" maxlength="80" required placeholder="Sales desk" value="${esc(item?.name || '')}"></label>
+        <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${item?.timeout || 25}" required></label>
+      </div>
+      <label class="field">Members<select name="members" multiple size="6">${groupMemberOptions(item)}</select>
+        <small>Extensions that ring together. A group can also be the target of its own call flow.</small></label>
+      <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Group is active</label>`,
+  }),
+  number: item => ({
+    title: item ? 'Manage phone number' : 'Assign phone number',
+    subtitle: 'Assign the carrier, owner, routing and monthly billing',
+    fields: `<label class="field">Customer account<select name="owner_user_id"><option value="">Platform / administrator</option>${activeCustomers()
+      .map(x => `<option value="${x.id}" ${item?.owner_user_id === x.id ? 'selected' : ''}>${esc(x.username)} — ${esc(x.email)}</option>`).join('')}</select></label>
+      <label class="field">Phone number (E.164)<input name="number" type="tel" ${item ? 'readonly' : ''} placeholder="+13025551234" required value="${esc(item?.number || '')}"></label>
+      <div class="field-row">
+        <label class="field">SIP provider<select name="provider" required><option value="">Select provider</option>${state.providers.filter(x => x.active)
+          .map(x => `<option value="${esc(x.name)}" ${item?.provider === x.name ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+        <label class="field">Inbound extension<select name="inbound_extension">${item ? '' : '<option value="auto" selected>Auto-create extension, SIP credentials and call flow</option>'}<option value="">Choose after creating an extension</option>${state.extensions.filter(x => x.active && String(x.owner_user_id ?? '') === String(item?.owner_user_id ?? ''))
+          .map(x => `<option value="${x.extension}" ${item?.inbound_extension === x.extension ? 'selected' : ''}>${x.extension} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}</select>
+          ${item ? '' : '<small>Leave it on auto-create and the platform builds the whole line: a 3-digit extension, its SIP password, the DID link and default call flows for both the number and the extension.</small>'}</label>
+      </div>
+      <label class="field">Description<input name="description" maxlength="160" placeholder="Customer primary number" value="${esc(item?.description || '')}"></label>
+      <div class="field-row">
+        <label class="field">Monthly price (USD)<input name="monthly_price" type="number" min="0" step="0.01" value="${((item?.monthly_price_cents ?? 500) / 100).toFixed(2)}"></label>
+        <label class="field">Billing cycle day<input name="billing_cycle_day" type="number" min="1" max="28" value="${item?.billing_cycle_day || 1}"></label>
+      </div>
+      <div class="field-row">
+        <label class="field">Billing start<input name="billing_start" type="date" value="${esc(item?.billing_start || '')}"></label>
+        <label class="field">Discontinue on<input name="discontinue_at" type="date" value="${esc(item?.discontinue_at || '')}"><small>Leave blank to keep active.</small></label>
+      </div>
+      <label class="check" style="margin-bottom:13px"><input name="default_outbound" type="checkbox" ${item?.default_outbound ? 'checked' : ''}> Default outbound caller ID for this extension</label>
+      <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Number is active</label>`,
+  }),
+  sipaccount: item => ({
+    title: item ? 'Edit SIP service' : 'Assign SIP service',
+    subtitle: 'Secure credentials and device mapping for one customer device',
+    fields: `<label class="field">Customer<select name="owner_user_id" required>${activeCustomers()
+      .map(x => `<option value="${x.id}" ${item?.owner_user_id === x.id ? 'selected' : ''}>${esc(x.company_name || x.username)}</option>`).join('')}</select></label>
+      <div class="field-row">
+        <label class="field">Label<input name="label" required value="${esc(item?.label || 'Primary softphone')}"></label>
+        <label class="field">SIP username<input name="sip_username" required readonly value="${esc(item?.sip_username || '')}" placeholder="Extension or account name" aria-describedby="sip-device-note"><small id="sip-device-note">Fixed by the platform. Linked to an extension it equals that extension's number.</small></label>
+      </div>
+      <div class="field-row">
+        <label class="field">SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Required'}"></label>
+        <label class="field">Server<input name="server" required value="${esc(item?.server || (state.service_address || {}).host || location.hostname)}"></label>
+      </div>
+      <div class="field-row">
+        <label class="field">Port<input name="port" type="number" value="${item?.port || 5060}"></label>
+        <label class="field">Transport<select name="transport"><option value="udp">UDP</option><option value="tcp" ${item?.transport === 'tcp' ? 'selected' : ''}>TCP</option><option value="tls" ${item?.transport === 'tls' ? 'selected' : ''}>TLS</option></select></label>
+      </div>
+      <div class="field-row">
+        <label class="field">Assigned number<select name="phone_number"><option value="">None</option>${state.phone_numbers
+          .map(x => `<option value="${esc(x.number)}" ${item?.phone_number === x.number ? 'selected' : ''}>${esc(x.number)}</option>`).join('')}</select></label>
+        <label class="field">Extension<select name="extension"><option value="">None</option>${state.extensions
+          .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${x.extension} — ${esc(x.display_name || 'Extension')}</option>`).join('')}</select></label>
+      </div>
+      <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Device is active</label>`,
+  }),
+  provider: item => ({
+    title: item ? 'Edit SIP provider' : 'Add SIP provider',
+    subtitle: 'Administrator-only carrier credentials and trusted source networks',
+    fields: `<label class="field">Provider name<input name="name" maxlength="80" placeholder="IPComms" ${item ? 'readonly' : ''} required value="${esc(item?.name || '')}"></label>
+      <div class="field-row">
+        <label class="field">SIP server<input name="server" placeholder="sip.example.com" required value="${esc(item?.server || '')}"></label>
+        <label class="field">Port<input name="port" type="number" min="1" max="65535" required value="${item?.port || 5060}"></label>
+      </div>
+      <div class="field-row">
+        <label class="field">Username<input name="username" required value="${esc(item?.username || '')}"></label>
+        <label class="field">Password<input name="password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Required'}"></label>
+      </div>
+      <div class="field-row">
+        <label class="field">Transport<select name="transport"><option value="udp" ${item?.transport !== 'tcp' ? 'selected' : ''}>UDP</option><option value="tcp" ${item?.transport === 'tcp' ? 'selected' : ''}>TCP</option></select></label>
+        <label class="field">Codecs<input name="codecs" value="${esc(item?.codecs || 'ulaw,alaw')}" required></label>
+      </div>
+      <label class="field">Allowed provider IPs / CIDRs<input name="allowed_ips" placeholder="203.0.113.10/32,203.0.113.0/24" required value="${esc(item?.allowed_ips || '')}"><small>Required. Only these networks may identify as this provider.</small></label>
+      <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Provider is active</label>`,
+  }),
+  webhook: item => ({
+    title: item ? 'Edit webhook endpoint' : 'Add webhook endpoint',
+    subtitle: 'Deliver authenticated call lifecycle events to your CRM',
+    fields: `<label class="field">Name<input name="name" maxlength="80" placeholder="Production CRM" required value="${esc(item?.name || '')}"></label>
+      <label class="field">Endpoint URL<input name="url" type="url" maxlength="1000" placeholder="https://crm.example.com/api/telephony/events" required value="${esc(item?.url || '')}"></label>
+      <label class="field">Signing secret<input name="token" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Optional shared secret'}"><small>When set, each delivery is signed with an HMAC-SHA256 header so your service can verify authenticity.</small></label>
+      <label class="field">Events<select name="events" multiple size="7" required>${['*','call.started','call.ringing','call.answered','call.completed','call.failed','call.voicemail']
+        .map(ev => `<option value="${ev}" ${(item?.events || '*').split(',').includes(ev) ? 'selected' : ''}>${ev === '*' ? 'All call events' : ev}</option>`).join('')}</select>
+        <small>Select only the events this integration needs.</small></label>
+      <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Endpoint is active</label>`,
+  }),
+  apikey: item => ({
+    title: item ? `Edit key ${item.name}` : 'Create API key',
+    subtitle: item
+      ? 'Change what this key is called or what it may do. Its secret is not affected.'
+      : 'The secret is displayed exactly once, immediately after creation',
+    fields: `<label class="field">Integration name<input name="name" required placeholder="Production CRM" value="${esc(item?.name || '')}"></label>
+      <label class="field">Scopes<select name="scopes" multiple size="8">
+        <option value="calls:read" ${(item?.scopes || '').split(',').includes('calls:read') ? 'selected' : ''}>Read calls</option>
+        <option value="calls:write" ${(item?.scopes || '').split(',').includes('calls:write') ? 'selected' : ''}>Create / update calls</option>
+        <option value="config:read" ${(item?.scopes || '').split(',').includes('config:read') ? 'selected' : ''}>Read extensions and numbers</option>
+        <option value="recordings:read" ${(item?.scopes || '').split(',').includes('recordings:read') ? 'selected' : ''}>Read recordings</option>
+        <option value="voicemail:read" ${(item?.scopes || '').split(',').includes('voicemail:read') ? 'selected' : ''}>Read voicemail</option>
+        <option value="voicemail:write" ${(item?.scopes || '').split(',').includes('voicemail:write') ? 'selected' : ''}>Manage voicemail</option>
+        <option value="webhooks:manage" ${(item?.scopes || '').split(',').includes('webhooks:manage') ? 'selected' : ''}>Manage webhooks</option>
+        <option value="*" ${(item?.scopes || '').split(',').includes('*') ? 'selected' : ''}>Full access</option>
+      </select><small>Use Ctrl/Cmd to select multiple. Prefer only calls:read, calls:write and config:read for a normal CRM.</small></label>`,
+  }),
+  user: item => ({
+    title: item ? 'Edit customer' : 'Add customer',
+    subtitle: 'Login details only — numbers, devices and SIP service are assigned separately',
+    fields: `<div class="field-row">
+        <label class="field">Name<input name="full_name" required value="${esc(item?.full_name || '')}"></label>
+        <label class="field">Company<input name="company_name" required value="${esc(item?.company_name || '')}"></label>
+      </div>
+      <div class="field-row">
+        <label class="field">Role<input name="job_role" required value="${esc(item?.job_role || '')}"></label>
+        <label class="field">Phone<input name="phone" type="tel" required value="${esc(item?.phone || '')}"></label>
+      </div>
+      <div class="field-row">
+        <label class="field">Username<input name="username" required value="${esc(item?.username || '')}"></label>
+        <label class="field">Email<input name="email" type="email" required value="${esc(item?.email || '')}"></label>
+      </div>
+      <label class="field">Password<input name="password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Minimum 14 characters'}"></label>
+      <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Customer can sign in</label>`,
+  }),
+  request: () => ({
+    title: 'Request a phone number',
+    subtitle: 'Tell the administrator what your business needs',
+    fields: `<label class="field">Request type<select name="request_type">
+        <option value="number">New phone number</option>
+        <option value="routing">Routing assistance</option>
+        <option value="billing">Billing question</option>
+        <option value="access">Access support</option>
+      </select></label>
+      <label class="field">Requirements<textarea name="details" rows="5" maxlength="2000" required placeholder="Preferred country, area code, local or toll-free number, and how it will be used"></textarea>
+        <small>Include the area code or region and any timing requirements.</small></label>`,
+  }),
+  platformadmin: () => ({
+    title: 'Add platform administrator',
+    subtitle: 'Privileged account with access to every customer and carrier setting',
+    fields: `<div class="field-row">
+        <label class="field">Username<input name="username" required></label>
+        <label class="field">Email<input name="email" type="email" required></label>
+      </div>
+      <label class="field">Password<input name="password" type="password" minlength="14" autocomplete="new-password" required></label>`,
+  }),
+};
+
+function openModal(type, item = null) {
+  modalType = type;
+  editing = item;
+  const template = templates[type](item);
+  $('modal-title').textContent = template.title;
+  $('modal-subtitle').textContent = template.subtitle;
+  $('modal-fields').innerHTML = template.fields;
+  $('modal-save').hidden = false;
+  $('modal-save').textContent = item ? 'Save changes' : 'Save';
+  // Wider canvas for the resource-heavy forms.
+  $('modal-card').classList.toggle('wide', ['number', 'extension', 'sipaccount', 'webhook'].includes(type));
+  openOverlay('modal');
+
+  if (type === 'call') {
+    const extension = $('modal-fields').querySelector('[name=extension]');
+    const number = $('modal-fields').querySelector('[name=caller_id_number]');
+    const update = () => {
+      [...number.options].forEach((option, index) => {
+        if (index) option.hidden = state.phone_numbers.find(x => x.number === option.value)?.inbound_extension !== extension.value;
+      });
+      const preferred = [...number.options].find(o => !o.hidden && state.phone_numbers.find(x => x.number === o.value)?.default_outbound);
+      number.value = preferred?.value || '';
+    };
+    extension?.addEventListener('change', update);
+    update();
+  }
+  if (type === 'extension' && !editing) {
+    const number = $('modal-fields').querySelector('[name=extension]');
+    const username = $('modal-fields').querySelector('[name=sip_username]');
+    const mirror = () => { username.value = number.value; };
+    number.addEventListener('input', mirror);
+    mirror();
+  }
+  if (type === 'number') {
+    const owner = $('modal-fields').querySelector('[name=owner_user_id]');
+    const extension = $('modal-fields').querySelector('[name=inbound_extension]');
+    owner?.addEventListener('change', () => {
+      extension.innerHTML = '<option value="">Choose an extension</option>' + state.extensions
+        .filter(x => String(x.owner_user_id ?? '') === owner.value && x.active)
+        .map(x => `<option value="${x.extension}">${x.extension} — ${esc(x.display_name || 'Unnamed')}</option>`).join('');
+    });
+  }
+  if (type === 'sipaccount') {
+    const owner = $('modal-fields').querySelector('[name=owner_user_id]');
+    const number = $('modal-fields').querySelector('[name=phone_number]');
+    const extension = $('modal-fields').querySelector('[name=extension]');
+    const username = $('modal-fields').querySelector('[name=sip_username]');
+    // Picking an extension hands the device that extension's identity, so the
+    // name follows the extension instead of being typed.
+    const syncUsername = () => { username.value = extension.value || (item?.sip_username && !item.extension ? item.sip_username : ''); };
+    extension?.addEventListener('change', syncUsername);
+    syncUsername();
+    const update = () => {
+      const id = Number(owner.value);
+      number.innerHTML = '<option value="">None</option>' + state.phone_numbers.filter(x => x.owner_user_id === id)
+        .map(x => `<option value="${esc(x.number)}" ${item?.phone_number === x.number ? 'selected' : ''}>${esc(x.number)}</option>`).join('');
+      extension.innerHTML = '<option value="">None</option>' + state.extensions.filter(x => x.owner_user_id === id)
+        .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${x.extension} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+    };
+    owner?.addEventListener('change', update);
+    update();
+  }
+  if (modalType === 'group' && state.is_admin) {
+    // The members a group can ring are the chosen customer's extensions.
+    const owner = $('modal-fields').querySelector('[name=owner_user_id]');
+    const members = $('modal-fields').querySelector('[name=members]');
+    if (owner && members && !editing) {
+      const fill = () => {
+        members.innerHTML = state.extensions
+          .filter(x => x.active && String(x.owner_user_id ?? '') === String(owner.value))
+          .map(x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+      };
+      owner.addEventListener('change', fill);
+      fill();
+    }
+  }
+  setTimeout(() => $('modal-fields').querySelector('input,select')?.focus(), 80);
+}
+
+/* One-time secret reveals (API key, device credentials). */
+function showSecret({ title, subtitle, body, value, label }) {
+  modalType = 'secret';
+  $('modal-title').textContent = title;
+  $('modal-subtitle').textContent = subtitle;
+  $('modal-fields').innerHTML = body;
+  $('modal-save').hidden = true;
+  $('modal-card').classList.add('wide');
+  openOverlay('modal');
+  if (value !== undefined) {
+    const input = $('created-api-key');
+    if (input) input.value = value;
+  }
+}
+
+/* --------------------------------------------------------- 24. Mutations */
+async function saveModal(event) {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target));
+  event.target.querySelectorAll('input[type=checkbox]').forEach(x => (data[x.name] = x.checked));
+  if (modalType === 'apikey') data.scopes = [...event.target.querySelector('[name=scopes]').selectedOptions].map(x => x.value).join(',');
+  if (modalType === 'webhook') data.events = [...event.target.querySelector('[name=events]').selectedOptions].map(x => x.value).join(',');
+  if (['webhook', 'user', 'group', 'apikey'].includes(modalType) && editing) data.id = editing.id;
+  if (modalType === 'sipaccount' && editing) data.id = editing.id;
+  if (modalType === 'group') data.members = [...event.target.querySelector('[name=members]').selectedOptions].map(x => x.value);
+  if (modalType === 'group' && state.is_admin && !data.owner_user_id) data.owner_user_id = String(routingOwner() || '');
+  try {
+    const collection = { number: 'numbers', webhook: 'webhooks', apikey: 'api-keys', sipaccount: 'sip-accounts' }[modalType] || `${modalType}s`;
+    // An existing record is updated at its own address; only a new one is created
+    // on the collection.
+    const url = modalType === 'apikey' && editing ? `/admin/api/api-keys/${editing.id}` : `/admin/api/${collection}`;
+    const result = await api(url, { method: 'POST', body: JSON.stringify(data) });
+
+    if (modalType === 'number' && pendingFulfilRequest) {
+      await api(`/admin/api/requests/${pendingFulfilRequest}/resolve`, { method: 'POST', body: JSON.stringify({ status: 'fulfilled', admin_note: `Number ${data.number} assigned` }) });
+      pendingFulfilRequest = null;
+    }
+    if (modalType === 'number' && result.provisioned) {
+      // The platform built the whole line: show the administrator exactly what
+      // now exists, credentials included, so they can hand them over.
+      const refreshed = workspace?.customer?.id, refreshedTab = wsTab;
+      closeModal();
+      await loadState();
+      if (refreshed) await openCustomer(refreshed, refreshedTab, true);
+      showProvisioned(result.provisioned);
+      notify(`Extension ${result.provisioned.extension} provisioned for ${result.number}`);
+      return;
+    }
+    if (modalType === 'extension' && result.created && result.credentials) {
+      closeModal();
+      await loadState();
+      const id = workspace?.customer?.id, tab = wsTab;
+      if (id) await openCustomer(id, tab, true);
+      showSecret({
+        title: `Extension ${result.extension} created`,
+        subtitle: 'A SIP password and a default call flow were generated automatically',
+        value: result.credentials.sip_password,
+        body: `<div class="notice ok"><span class="glyph">✓</span><div><b>Ready to register</b>Enter these into a phone or softphone. Change the password from Edit at any time — the generated Asterisk configuration follows it.</div></div>
+          <div class="grid cols-2">
+            <label class="field">Extension<input readonly value="${esc(result.credentials.extension)}"></label>
+            <label class="field">SIP username<input readonly value="${esc(result.credentials.sip_username)}"></label>
+            <label class="field">Registration server<input readonly value="${esc(result.credentials.server || 'Ask EIP for your registration host')}"></label>
+            <label class="field">Port · transport<input readonly value="${esc(`${result.credentials.port} · ${String(result.credentials.transport).toUpperCase()}`)}"></label>
+          </div>
+          <label class="field">SIP password<div class="secret"><input id="created-api-key" readonly><button class="btn primary" type="button" data-copy-secret>Copy</button></div></label>
+          <article class="notice"><span class="glyph">⌘</span><div><b>Call flow included</b>Extension ${esc(result.extension)} already has a default flow. Open the flow builder and choose it to customise how it rings.</div></article>`,
+      });
+      notify(`Extension ${result.extension} created`);
+      return;
+    }
+    if (modalType === 'apikey' && editing) {
+      closeModal();
+      await loadState();
+      notify(`Key ${data.name} updated`);
+      return;
+    }
+    if (modalType === 'apikey') {
+      const refreshedCustomer = workspace?.customer?.id, refreshedTab = wsTab;
+      closeModal();
+      await loadState();
+      if (refreshedCustomer) await openCustomer(refreshedCustomer, refreshedTab, true);
+      showSecret({
+        title: 'API key created',
+        subtitle: 'Copy and store this credential now — for security it cannot be shown again.',
+        value: result.token,
+        body: `<div class="notice warn"><span class="glyph">⚿</span><div><b>Store this key safely</b>Use it as a Bearer token from your own server. Never embed it in browser code, mobile apps or public repositories.</div></div>
+          <label class="field">Secret key<div class="secret"><input id="created-api-key" readonly><button class="btn primary" type="button" data-copy-secret>Copy</button></div></label>`,
+      });
+      notify('API key created');
+      return;
+    }
+    const messages = {
+      group: 'Group saved', call: 'Outbound call started', extension: 'Extension saved', number: 'Phone number saved',
+      sipaccount: 'SIP service saved', provider: 'Provider saved', webhook: 'Webhook saved',
+      user: 'Customer saved', platformadmin: 'Administrator added',
+    };
+    notify(messages[modalType] || 'Saved');
+    const keepCustomer = workspace?.customer?.id, keepTab = wsTab;
+    closeModal();
+    await loadState();
+    if (keepCustomer) await openCustomer(keepCustomer, keepTab, true);
+    if (modalType === 'call') loadCalls();
+  } catch (error) { notify(error.message, true); }
+}
+
+async function remove(type, id, label) {
+  if (!confirm(`Delete ${label}? This cannot be undone.`)) return;
+  try {
+    const path = type === 'number' ? `/admin/api/numbers/${encodeURIComponent(label)}` : `/admin/api/${type}s/${id}`;
+    await api(path, { method: 'DELETE' });
+    notify(`${type[0].toUpperCase() + type.slice(1)} deleted`);
+    const keepCustomer = workspace?.customer?.id, keepTab = wsTab;
+    await loadState();
+    if (keepCustomer) await openCustomer(keepCustomer, keepTab, true);
+  } catch (error) { notify(error.message, true); }
+}
+
+/* Device credentials — the only place a customer sees their SIP password. */
+async function showCredentials(id) {
+  try {
+    const data = await api(`/admin/api/sip-accounts/${id}/credentials`);
+    const x = data.sip_account;
+    const rows = [
+      ['Number', x.phone_number], ['SIP username', x.sip_username], ['Password', x.sip_password],
+      ['Server', x.server], ['Port', x.port], ['Transport', String(x.transport).toUpperCase()],
+      ['Extension', x.extension],
+    ];
+    showSecret({
+      title: 'Device credentials',
+      subtitle: 'Enter these into your phone or softphone. Share them only with the person using this device.',
+      body: `<div class="notice warn"><span class="glyph">⚿</span><div><b>Treat these as secrets</b>Anyone with these credentials can place calls as this device. Rotate them from the console if they are ever exposed.</div></div>
+        <div class="grid cols-2">${rows.map(([label, value]) => `
+          <label class="field">${esc(label)}
+            <div style="display:flex;gap:8px">
+              <input ${label === 'Password' ? 'type="password" data-secret' : ''} readonly value="${esc(value || '—')}">
+              ${label === 'Password' ? '<button type="button" class="btn ghost" data-toggle-secret>Show</button>' : ''}
+              <button type="button" class="btn ghost" data-copy-value="${esc(value || '')}">Copy</button>
+            </div>
+          </label>`).join('')}</div>`,
+    });
+  } catch (error) { notify(error.message, true); }
+}
+
+/* ================================================== 25. CUSTOMER WORKSPACE
+   The administrator's primary control centre. Every tab reads from the
+   existing endpoints — no new backend surface is introduced. */
+const WS_TABS = [
+  ['overview', '▦', 'Overview'],
+  ['numbers', '☎', 'Numbers'],
+  ['devices', '◈', 'Devices & SIP'],
+  ['routing', '⌘', 'Routing'],
+  ['calls', '◷', 'Calls'],
+  ['recordings', '◉', 'Recordings'],
+  ['requests', '↗', 'Requests'],
+  ['billing', '▣', 'Billing'],
+  ['integrations', '◇', 'Integrations'],
+  ['activity', '◌', 'Activity'],
+];
+
+const wsOwned = key => (state[key] || []).filter(row => row.owner_user_id === workspace?.customer?.id);
+const wsCalls = () => workspace?.calls || [];
+const wsRecordings = () => wsCalls().filter(c => c.recording_name && c.recording_status !== 'deleted');
+
+async function openCustomer(customerId, tab = 'overview', silent = false) {
+  if (!state.is_admin) return;
+  try {
+    if (!silent) {
+      paint('ws-body', skeletonPanel(4));
+      paint('ws-status', '<div class="skeleton line w-60" style="margin:0"></div>');
+      paint('ws-quick', '');
+      paint('ws-recent', '');
+    }
+    workspace = await api(`/admin/api/customers/${customerId}`);
+    if (silent) {
+      // Called from a background refresh, which already holds body.updating. The
+      // scroll position is kept so a live update never moves the page someone is
+      // reading.
+      const scroll = $('ws-scroll')?.scrollTop || 0;
+      renderWsHeader();
+      renderWsTabs();
+      wsTab = WS_TABS.some(t => t[0] === tab) ? tab : 'overview';
+      renderWsTab(wsTab, { keepScroll: true });
+      if ($('ws-scroll')) $('ws-scroll').scrollTop = scroll;
+      return;
+    }
+    endQuiet();
+    renderWsHeader();
+    renderWsTabs();
+    wsTab = WS_TABS.some(t => t[0] === tab) ? tab : 'overview';
+    renderWsTab(wsTab, { keepScroll: true });
+    resetWsScroll();
+    openOverlay('workspace');
+    $('scrim').classList.add('open');
+    setTimeout(() => $('ws-close').focus(), 90);
+  } catch (error) { notify(error.message, true); }
+}
+
+/* The workspace header is a compact command centre: identity, account state,
+   live device count, billing position and the customer's latest activity, with
+   shortcuts into the flows an administrator reaches for most often. */
+/* Opening the drawer starts at the top of the scroll region: identity first,
+   then the account summary, with the tab row pinned below it. */
+function resetWsScroll() {
+  const scroll = $('ws-scroll');
+  if (scroll) scroll.scrollTop = 0;
+}
+
+/* Bring a tab's content into view: the drawer scrolls just far enough that the
+   pinned tab row sits at the top of the scroll box. */
+function revealWsTabs() {
+  const scroll = $('ws-scroll'), tabs = $('ws-tabs');
+  if (!scroll || !tabs) return;
+  const top = tabs.offsetTop;
+  if (scroll.scrollTop > top) scroll.scrollTop = top;
+}
+
+function renderWsHeader() {
+  if (!workspace) return;
+  const c = workspace.customer;
+  const today = new Date().toISOString().slice(0, 10);
+  const openInvoices = workspace.invoices.filter(i => i.status === 'open');
+  const overdue = openInvoices.filter(i => i.due_at && i.due_at < today);
+  const pendingRequests = workspace.requests.filter(r => r.status === 'pending').length;
+  const devices = workspace.sip_accounts || [];
+  const online = devices.filter(d => d.registration_status === 'online').length;
+
+  const avatar = $('ws-avatar');
+  avatar.textContent = (c.company_name || c.full_name || c.username || 'C').trim()[0].toUpperCase();
+  avatar.classList.toggle('muted', !c.active);
+  avatar.classList.add('pop');
+  $('ws-title').textContent = c.company_name || c.username;
+  $('ws-meta').textContent = `${c.full_name || c.username} · ${c.email}`;
+  paint('ws-flags', [
+    c.active ? tag('Active', 'on') : tag('Access disabled', 'off'),
+    c.username ? tag(c.username, '', '@') : '',
+    c.job_role ? tag(c.job_role, 'violet') : '',
+    overdue.length ? tag(`${overdue.length} payment due`, 'warn', '▣') : tag('Paid up', 'on', '▣'),
+  ].join(''));
+
+  const deviceTone = !devices.length ? '' : online === devices.length ? 'ok' : online ? 'warn' : 'bad';
+  const paymentTone = overdue.length ? 'bad' : openInvoices.length ? 'warn' : 'ok';
+  paint('ws-status', [
+    ['user', c.active ? 'Active account' : 'Access disabled', c.active ? 'ok' : 'bad',
+      `Member since ${fmtDay(c.created_at)}`],
+    ['devices', devices.length ? `${online} of ${devices.length} registered` : 'No devices yet',
+      deviceTone, devices.length ? 'Live SIP registration' : 'Add a device to go live'],
+    ['payments', overdue.length ? `${overdue.length} invoice overdue`
+      : openInvoices.length ? `${openInvoices.length} invoice open` : 'Paid up', paymentTone,
+      `${workspace.invoices.length} invoice${workspace.invoices.length === 1 ? '' : 's'} on file`],
+    ['requests', pendingRequests ? `${pendingRequests} awaiting decision` : 'Nothing pending',
+      pendingRequests ? 'warn' : 'ok', `${workspace.requests.length} request${workspace.requests.length === 1 ? '' : 's'} raised`],
+  ].map(([key, value, tone, hint]) => `<div class="ws-chip ${tone}" data-chip="${key}">
+      <i>${WS_CHIP_GLYPHS[key]}</i><p><small>${esc(hint)}</small><b>${esc(value)}</b></p></div>`).join(''));
+
+  // Quick actions reuse the existing modals and pages — nothing new is created.
+  paint('ws-quick', [
+    ['extension', 'Add extension', '⌁', 'data-open="extension"'],
+    ['sipaccount', 'Add device', '◈', 'data-open="sipaccount"'],
+    ['number', 'Assign number', '☎', 'data-open="number"'],
+    ['routing', state.is_admin ? 'Edit call flows' : 'Open call flow', '⌘', `data-ws-goto="routing"`],
+    ['customer', 'Edit customer', '✎', 'data-ws-edit-customer="1"'],
+  ].map(([, label, glyph, attr]) => `<button type="button" ${attr}><span class="glyph">${glyph}</span>${label}</button>`).join(''));
+
+  const recent = (workspace.activity || []).slice(0, 3);
+  paint('ws-recent', recent.length
+    ? recent.map(x => `<div class="tl-item"><b>${esc(x.description)}</b>
+        <p>${esc(String(x.action).replaceAll('.', ' '))} · ${esc(x.resource_type)}</p>
+        <small>${esc(fmtDate(x.created_at))}</small></div>`).join('')
+    : '<div class="tl-item"><b>No recorded activity yet</b><p>Provisioning and access changes will appear here.</p></div>');
+
+  paint('ws-metrics', [
+    ['☎', 'Numbers', workspace.numbers.length, 'ws-metric-numbers'],
+    ['◈', 'Devices', devices.length, 'ws-metric-devices'],
+    ['⌁', 'Extensions', workspace.extensions.length, 'ws-metric-extensions'],
+    ['↗', 'Pending requests', pendingRequests, 'ws-metric-requests'],
+  ].map(([glyph, label, value, id]) => `
+    <div class="ws-metric"><span class="glyph">${glyph}</span><p><small>${label}</small><b id="${id}">0</b></p></div>`).join(''));
+  [['ws-metric-numbers', workspace.numbers.length], ['ws-metric-devices', devices.length],
+    ['ws-metric-extensions', workspace.extensions.length], ['ws-metric-requests', pendingRequests]]
+    .forEach(([id, value]) => countTo($(id), value));
+}
+
+const WS_CHIP_GLYPHS = { user: '◍', devices: '◈', payments: '▣', requests: '↗' };
+let wsTabCounts = {};
+
+/* Live registration polls update the device chip in place, so neither header
+   re-animates every eight seconds. */
+function syncDeviceChip(rootSelector, accounts) {
+  const chip = document.querySelector(`${rootSelector} [data-chip="devices"]`);
+  if (!chip) return;
+  const devices = accounts || [];
+  const online = devices.filter(d => d.registration_status === 'online').length;
+  const next = devices.length ? `${online} of ${devices.length} registered` : 'No devices yet';
+  const tone = !devices.length ? '' : online === devices.length ? 'ok' : online ? 'warn' : 'bad';
+  const label = chip.querySelector('b');
+  if (!label || label.textContent === next) return;
+  label.textContent = next;
+  chip.classList.remove('ok', 'warn', 'bad');
+  if (tone) chip.classList.add(tone);
+  label.classList.remove('bump');
+  void label.offsetWidth;
+  label.classList.add('bump');
+}
+function updateWsDeviceChip() {
+  if (workspace) syncDeviceChip('#ws-status', workspace.sip_accounts);
+}
+
+/* Customer dashboard summary: the same chips as the administrator's workspace,
+   limited to what a customer owns and can act on. */
+function renderCustomerStatus() {
+  const host = $('customer-status');
+  if (!host) return;
+  const devices = state.sip_accounts || [];
+  const online = devices.filter(d => d.registration_status === 'online').length;
+  const numbers = state.phone_numbers || [];
+  const invoices = (state.invoices || []).filter(i => i.status === 'open');
+  const overdue = invoices.filter(i => i.due_at && i.due_at < new Date().toISOString().slice(0, 10));
+  const deviceTone = !devices.length ? '' : online === devices.length ? 'ok' : online ? 'warn' : 'bad';
+  host.innerHTML = [
+    ['user', 'Account', `${state.username} · active`, 'ok', `${state.extensions?.length || 0} extension${state.extensions?.length === 1 ? '' : 's'} ready`],
+    ['numbers', 'Phone numbers', numbers.length ? `${numbers.length} assigned` : 'None yet',
+      numbers.length ? 'ok' : 'warn', numbers.length ? 'Receiving calls' : 'Request a number to begin'],
+    ['devices', 'Devices', devices.length ? `${online} of ${devices.length} registered` : 'No devices yet',
+      deviceTone, devices.length ? 'Live SIP registration' : 'Add the phone or softphone you use'],
+    ['payments', 'Billing', overdue.length ? `${overdue.length} overdue`
+      : invoices.length ? `${invoices.length} open` : 'Paid up',
+      overdue.length ? 'bad' : invoices.length ? 'warn' : 'ok',
+      `${(state.invoices || []).length} invoice${(state.invoices || []).length === 1 ? '' : 's'} on file`],
+  ].map(([key, label, value, tone, hint]) => `<div class="ws-chip ${tone}" data-chip="${key}">
+      <i>${WS_CHIP_GLYPHS[key] || '•'}</i><p><small>${esc(hint)}</small><b>${esc(value)}</b></p></div>`).join('');
+}
+
+function renderWsTabs() {
+  const pending = workspace.requests.filter(r => r.status === 'pending').length;
+  const counts = { numbers: workspace.numbers.length, devices: workspace.sip_accounts.length, requests: pending, integrations: wsOwned('webhooks').length + wsOwned('api_keys').length };
+  const pulse = key => (counts[key] !== wsTabCounts[key] ? ' pulse' : '');
+  paint('ws-tabs', WS_TABS.map(([key, glyph, label]) => `
+    <button class="ws-tab ${key === wsTab ? 'active' : ''}" data-ws-tab="${key}">
+      <span class="glyph">${glyph}</span>${esc(label)}
+      ${counts[key] ? `<span class="dot${pulse(key)}">${counts[key]}</span>` : ''}
+    </button>`).join('') + '<span class="ws-tab-ink" id="ws-tab-ink" aria-hidden="true"></span>');
+  wsTabCounts = { ...counts };
+  moveTabInk();
+}
+
+/* One indicator glides between tabs instead of an underline per tab. */
+function moveTabInk() {
+  const ink = $('ws-tab-ink');
+  const active = document.querySelector('#ws-tabs .ws-tab.active');
+  if (!ink || !active) return;
+  ink.style.setProperty('--ink-x', `${active.offsetLeft}px`);
+  ink.style.setProperty('--ink-w', `${active.offsetWidth}px`);
+}
+
+function wsEmpty(title, text, glyph) { return `<div class="ws-empty">${empty(title, text, glyph)}</div>`; }
+
+function renderWsTab(tab, { keepScroll = false } = {}) {
+  if (!workspace) return;
+  wsTab = tab;
+  document.querySelectorAll('[data-ws-tab]').forEach(b => b.classList.toggle('active', b.dataset.wsTab === tab));
+  const body = $('ws-body');
+  body.innerHTML = ({
+    overview: wsOverview(), numbers: wsNumbers(), devices: wsDevices(), routing: wsRouting(),
+    calls: wsCallsTab(), recordings: wsRecordingsTab(), requests: wsRequestsTab(),
+    billing: wsBilling(), integrations: wsIntegrations(), activity: wsActivityTab(),
+  }[tab] || wsOverview());
+  if (!keepScroll) revealWsTabs();
+  body.classList.remove('swapping');
+  void body.offsetWidth;
+  body.classList.add('swapping');
+  moveTabInk();
+  markStagger();
+}
+
+/* --- Overview: everything that needs attention, at a glance. --- */
+function wsOverview() {
+  const c = workspace.customer;
+  const openInvoices = workspace.invoices.filter(i => i.status === 'open');
+  const overdue = openInvoices.filter(i => i.due_at && i.due_at < new Date().toISOString().slice(0, 10));
+  const answered = wsCalls().filter(x => x.answered).length;
+  const routes = wsOwned('call_routes');
+  const unlinked = workspace.numbers.filter(n => !workspace.sip_accounts.some(s => s.phone_number === n.number));
+  return `
+  <section class="ws-section">
+    <div class="ws-section-head"><div><h3>Account profile</h3><p>Login identity and primary business contact.</p></div>
+      <button class="btn ghost sm" data-edit-user="${c.id}">Edit customer</button></div>
+    <div class="panel" style="background:transparent;border:0;box-shadow:none">
+      <div class="kv kv-2">
+        ${kv('Full name', c.full_name)}${kv('Company', c.company_name)}
+        ${kv('Business role', c.job_role)}${kv('Phone', c.phone)}
+        ${kv('Username', c.username)}${kv('Email', c.email)}
+      </div>
+    </div>
+  </section>
+
+  <section class="ws-section">
+    <div class="ws-section-head"><div><h3>Needs attention</h3><p>Resource gaps and billing items for this customer.</p></div></div>
+    <div class="ws-cards">
+      ${overdue.length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#b45309,#d97706)">!</span>
+        <div><small>Billing</small><h4>${overdue.length} invoice${overdue.length === 1 ? '' : 's'} past due</h4></div>
+        <button class="btn ghost sm" data-ws-tab="billing">Review</button></div></article>` : ''}
+      ${workspace.requests.filter(r => r.status === 'pending').length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#be123c,#e11d48)">↗</span>
+        <div><small>Requests</small><h4>${workspace.requests.filter(r => r.status === 'pending').length} request${workspace.requests.filter(r => r.status === 'pending').length === 1 ? '' : 's'} awaiting a decision</h4></div>
+        <button class="btn primary sm" data-ws-tab="requests">Review</button></div></article>` : ''}
+      ${unlinked.length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#0369a1,#0284c7)">☎</span>
+        <div><small>Provisioning</small><h4>${unlinked.length} number${unlinked.length === 1 ? '' : 's'} without a device</h4></div>
+        <button class="btn ghost sm" data-ws-tab="numbers">View numbers</button></div></article>` : ''}
+      ${!routes.length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">⌘</span>
+        <div><small>Routing</small><h4>No call flow configured yet</h4></div>
+        <button class="btn ghost sm" data-ws-tab="routing">Set up routing</button></div></article>` : ''}
+      ${(!overdue.length && !workspace.requests.filter(r => r.status === 'pending').length && !unlinked.length && routes.length)
+        ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#15803d,#16a34a)">✓</span>
+          <div><small>Status</small><h4>Everything provisioned and up to date</h4></div></div></article>` : ''}
+    </div>
+  </section>
+
+  <section class="ws-section">
+    <div class="ws-section-head"><div><h3>Resource summary</h3><p>What this customer owns right now.</p></div></div>
+    <div class="ws-cards">
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">☎</span><div><small>Numbers</small><h4>${workspace.numbers.length} assigned</h4>
+        <p>${workspace.numbers.filter(n => n.active).length} active · ${workspace.numbers.filter(n => n.default_outbound).length} default caller ID</p></div>
+        <button class="btn ghost sm" data-ws-tab="numbers">Manage</button></div></article>
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">◈</span><div><small>Devices</small><h4>${workspace.sip_accounts.length} SIP account${workspace.sip_accounts.length === 1 ? '' : 's'}</h4>
+        <p>${workspace.sip_accounts.filter(s => s.registration_status === 'online').length} registered now</p></div>
+        <button class="btn ghost sm" data-ws-tab="devices">Manage</button></div></article>
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">◷</span><div><small>Call activity</small><h4>${workspace.call_total} call${workspace.call_total === 1 ? '' : 's'}</h4>
+        <p>${answered} answered in the most recent ${wsCalls().length}</p></div>
+        <button class="btn ghost sm" data-ws-tab="calls">View calls</button></div></article>
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">▣</span><div><small>Billing</small><h4>${openInvoices.length} open invoice${openInvoices.length === 1 ? '' : 's'}</h4>
+        <p>${money(workspace.numbers.reduce((sum, n) => sum + (n.monthly_price_cents ?? 500), 0))} monthly recurring</p></div>
+        <button class="btn ghost sm" data-ws-tab="billing">Review</button></div></article>
+    </div>
+  </section>`;
+}
+
+/* --- Numbers --- */
+function wsNumbers() {
+  const c = workspace.customer;
+  const cards = workspace.numbers.map(x => {
+    const sip = workspace.sip_accounts.find(a => a.phone_number === x.number);
+    const route = (state.call_routes || []).find(r => r.phone_number === x.number && r.owner_user_id === workspace?.customer?.id);
+    return `<article class="ws-card">
+      <div class="ws-card-head">
+        <span class="ws-glyph">☎</span>
+        <div><small>Phone number</small><h4>${esc(x.number)}</h4>
+          <div class="tags" style="margin-top:6px">
+            ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
+            ${x.default_outbound ? tag('Default caller ID', 'violet') : ''}
+            ${x.discontinue_at ? tag(`Ends ${fmtDay(x.discontinue_at)}`, 'warn') : ''}
+          </div>
+        </div>
+      </div>
+      <div class="kv kv-2">
+        ${kv('Description', x.description || 'Customer number')}
+        ${kv('Inbound extension', x.inbound_extension || 'Not assigned')}
+        ${kv('Device', sip?.label || 'No device linked')}
+        ${kv('Call flow', route ? 'Configured' : 'Not configured')}
+        ${kv('Monthly rate', money(x.monthly_price_cents ?? 500))}
+        ${kv('Billing cycle', `Day ${x.billing_cycle_day || 1}`)}
+      </div>
+      <div class="ws-card-actions">
+        <button class="btn ghost sm" data-edit-number="${x.id}">Manage number</button>
+        ${route ? '' : `<button class="btn ghost sm" data-ws-tab="routing">Configure routing</button>`}
+      </div>
+    </article>`;
+  }).join('');
+  return `<section class="ws-section">
+    <div class="ws-section-head"><div><h3>Assigned phone numbers</h3><p>Numbers are provisioned here. The customer controls routing and outbound caller ID.</p></div>
+      <button class="btn primary" data-new-for-customer="number:${c.id}">＋ Assign number</button></div>
+    <div class="ws-cards">${cards || wsEmpty('No numbers assigned', 'Assign the first phone number to begin provisioning.', '☎')}</div>
+  </section>`;
+}
+
+/* --- Devices & SIP --- */
+function wsDevices() {
+  const c = workspace.customer;
+  const cards = workspace.sip_accounts.map(x => `
+    <article class="ws-card">
+      <div class="ws-card-head">
+        <span class="ws-glyph">◈</span>
+        <div><small>Device</small><h4>${esc(x.label)}</h4>
+          <p>${esc(x.sip_username)} @ ${esc(x.server)}:${esc(x.port)}</p></div>
+        ${registration(x)}
+      </div>
+      <div class="kv kv-2">
+        ${kv('Assigned number', x.phone_number || 'Not linked')}
+        ${kv('Extension', x.extension || 'Not linked')}
+        ${kv('Transport', String(x.transport).toUpperCase())}
+        ${kv('Credential', x.has_password ? 'Stored securely' : 'Password required')}
+      </div>
+      <div class="ws-card-actions">
+        <button class="btn primary sm" data-show-credentials="${x.id}">Credentials</button>
+        <button class="btn ghost sm" data-edit-sip="${x.id}">Edit service</button>
+      </div>
+    </article>`).join('');
+  return `<section class="ws-section">
+    <div class="ws-section-head"><div><h3>Devices &amp; SIP accounts</h3><p>Credentials for the phones and softphones this customer connects. The customer can view these too.</p></div>
+      <button class="btn primary" data-new-for-customer="sipaccount:${c.id}">＋ Assign SIP service</button></div>
+    <div class="ws-cards">${cards || wsEmpty('No SIP service assigned', 'Assign device credentials after provisioning a number.', '◈')}</div>
+
+    <div class="ws-section-head" style="margin-top:26px"><div><h3>Extensions</h3><p>Internal destinations owned by this customer.</p></div>
+      <button class="btn ghost" data-new-for-customer="extension:${c.id}">＋ Add extension</button></div>
+    <div class="ws-cards">${workspace.extensions.map(x => `
+      <article class="ws-card"><div class="ws-card-head">
+        <span class="ws-glyph">⌁</span>
+        <div><small>Extension ${esc(x.extension)}</small><h4>${esc(x.display_name || 'Unnamed')}</h4>
+          <div class="tags" style="margin-top:6px">
+            ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
+            ${x.recording_enabled ? tag('Recording on') : tag('Recording off')}
+            ${x.voicemail_enabled ? tag('Voicemail on', 'info') : tag('Voicemail off')}
+          </div></div>
+        <button class="btn ghost sm" data-edit-extension="${esc(x.extension)}">Edit</button>
+      </div></article>`).join('') || wsEmpty('No extensions', 'Add an extension to give this customer an internal destination.', '⌁')}</div>
+  </section>`;
+}
+
+/* --- Routing --- */
+function wsRouting() {
+  const owner = workspace?.customer?.id;
+  const flows = allFlowsFor(owner);
+  const labels = {
+    number: flow => flow.target,
+    extension: flow => `Extension ${flow.target}`,
+    group: flow => `${(state.groups || []).find(g => String(g.id) === String(flow.target))?.name || 'Group'} (group)`,
+  };
+  const cards = flows.map(flow => {
+    const nodes = flow.nodes || [];
+    const label = labels[flow.type](flow);
+    return `<article class="ws-card">
+      <div class="ws-card-head"><span class="ws-glyph">${flow.type === 'group' ? '◎' : flow.type === 'extension' ? '⌁' : '⌘'}</span>
+        <div><small>${flow.type === 'number' ? 'Number call flow' : flow.type === 'extension' ? 'Extension call flow' : 'Group call flow'}</small><h4>${esc(label)}</h4><p>${esc(flow.name)}</p>
+          <div class="tags" style="margin-top:6px">${flow.active ? tag('Active', 'on') : tag('Paused', 'off')}${tag(`${nodes.length} step${nodes.length === 1 ? '' : 's'}`)}</div>
+        </div>
+      </div>
+      <div class="ws-flow">${nodes.length ? nodes.map((node, i) => `
+        <div class="ws-flow-node">
+          <span class="tile ${FLOW_TILES[node.type] || 'tile-ext'}" style="width:32px;height:32px;border-radius:10px;display:grid;place-items:center;color:#fff">${FLOW_ICONS[node.type] || '◇'}</span>
+          <div style="flex:1;min-width:0"><b style="font-size:12.5px;text-transform:capitalize">${esc(String(node.type).replaceAll('_', ' '))}</b>
+            <small style="display:block;color:var(--text-3);font-size:11px">${esc(node.label || 'Not configured')}</small></div>
+          <span class="step">${String(i + 1).padStart(2, '0')}</span>
+        </div>`).join('') : '<small style="color:var(--text-3)">No steps configured for this number yet.</small>'}</div>
+      <div class="ws-card-actions"><button class="btn ghost sm" data-route-target="${esc(flow.key)}">${state.is_admin ? 'Edit this flow' : 'Open in flow builder'}</button></div>
+    </article>`;
+  }).join('');
+  const unconfigured = workspace.numbers.filter(n => !flows.some(flow => flow.key === flowKey('number', n.number)));
+  const flowsFor = type => flows.filter(flow => flow.type === type).length;
+  const defaultTarget = workspace.numbers[0] ? flowKey('number', workspace.numbers[0].number) : flows[0]?.key || '';
+  return `<section class="ws-section">
+    <div class="ws-section-head"><div><h3>Call routing</h3><p>${state.is_admin ? "Edit the customer's flows; callers reach them exactly as shown." : "Flows for this customer's numbers, extensions and groups."}</p></div>
+      <button class="btn primary" data-route-target="${esc(defaultTarget)}">${state.is_admin ? 'Edit call flows' : 'Open flow builder'}</button></div>
+    <div class="ws-status" style="margin-bottom:14px">
+      <span class="ws-chip"><b>${flowsFor('number')}</b><small>number flows</small></span>
+      <span class="ws-chip"><b>${flowsFor('extension')}</b><small>extension flows</small></span>
+      <span class="ws-chip"><b>${flowsFor('group')}</b><small>group flows</small></span>
+    </div>
+    <div class="ws-cards">${cards || wsEmpty('No call flow configured', 'Open the flow builder to design how inbound calls are routed.', '⌘')}</div>
+    ${unconfigured.length ? `<div class="notice" style="margin-top:16px"><span class="glyph">⌘</span><div><b>Numbers without a call flow</b>${unconfigured.map(n => esc(n.number)).join(', ')}</div></div>` : ''}
+  </section>`;
+}
+
+/* --- Calls / Recordings --- */
+function wsCallsTab() {
+  return `<section class="ws-section">
+    <div class="ws-section-head"><div><h3>Recent calls</h3><p>The most recent ${wsCalls().length} of ${workspace.call_total} calls for this customer.</p></div>
+      <button class="btn ghost sm" data-ws-goto="calls">Open full call history</button></div>
+    <div class="panel" style="overflow:hidden"><div class="table-wrap">${callTable(wsCalls())}</div></div>
+  </section>`;
+}
+
+function wsRecordingsTab() {
+  const rows = wsRecordings();
+  return `<section class="ws-section">
+    <div class="ws-section-head"><div><h3>Recordings</h3><p>Secure playback for this customer's recorded calls. Only finalised audio can be played.</p></div>
+      <button class="btn ghost sm" data-ws-goto="recordings">Open recording library</button></div>
+    <div class="ws-cards">${rows.map(x => `
+      <article class="ws-card">
+        <div class="ws-card-head"><span class="ws-glyph">◉</span>
+          <div><small>Extension ${esc(x.extension)}</small><h4>${esc(x.phone)}</h4>
+            <p>${esc(fmtDate(x.started_at))} · ${fmtDuration(x.duration_seconds)}</p></div>
+          ${statusPill(x.recording_status)}
+        </div>
+        ${x.recording_status === 'finalized' ? `<div style="margin-top:13px;display:flex;align-items:center;gap:11px;flex-wrap:wrap">
+          ${waveform()}<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
+          <a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a></div>`
+        : '<p style="margin-top:11px;color:var(--text-3);font-size:11.5px">Audio becomes available after finalisation.</p>'}
+      </article>`).join('') || wsEmpty('No recordings', 'Recording is off by default; enable it globally and per extension.', '◉')}</div>
+  </section>`;
+}
+
+/* --- Requests --- */
+function wsRequestsTab() {
+  const rows = workspace.requests;
+  return `<section class="ws-section">
+    <div class="ws-section-head"><div><h3>Customer requests</h3><p>Approve, fulfil or reject provisioning and access requests raised by this customer.</p></div></div>
+    <div class="ws-cards">${rows.map(x => `
+      <article class="ws-card">
+        <div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#be123c,#e11d48)">↗</span>
+          <div><small>${esc(String(x.request_type).replaceAll('_', ' '))}</small><h4>${esc(x.details)}</h4>
+            <p>Raised ${esc(fmtDate(x.created_at))}${x.admin_note ? ` · ${esc(x.admin_note)}` : ''}</p></div>
+          ${statusPill(x.status)}
+        </div>
+        ${x.status === 'pending' ? `<div class="ws-card-actions">
+          <button class="btn primary sm" data-resolve-request="${x.id}:approved">Approve</button>
+          <button class="btn ghost sm" data-assign-request="${x.id}:${x.user_id}">Assign a number</button>
+          <button class="btn danger sm" data-resolve-request="${x.id}:rejected">Reject</button>
+        </div>` : ''}
+      </article>`).join('') || wsEmpty('No requests', 'This customer has not raised any requests.', '↗')}</div>
+  </section>`;
+}
+
+/* --- Billing --- */
+function wsBilling() {
+  const invoices = workspace.invoices;
+  const open = invoices.filter(i => i.status === 'open');
+  const recurring = workspace.numbers.reduce((sum, n) => sum + (n.monthly_price_cents ?? 500), 0);
+  return `<section class="ws-section">
+    <div class="ws-section-head"><div><h3>Billing &amp; payments</h3><p>Payments are collected externally. Record the outcome here to keep status accurate.</p></div></div>
+    <div class="ws-cards">
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">▣</span>
+        <div><small>Recurring monthly</small><h4>${money(recurring)}</h4>
+          <p>${workspace.numbers.length} number${workspace.numbers.length === 1 ? '' : 's'} at $5/month</p></div></div></article>
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,${open.length ? '#b45309,#d97706' : '#15803d,#16a34a'})">${open.length ? '!' : '✓'}</span>
+        <div><small>Payment status</small><h4>${open.length ? `${open.length} invoice${open.length === 1 ? '' : 's'} open` : 'All invoices settled'}</h4>
+          <p>${money(open.reduce((sum, i) => sum + i.amount_cents, 0))} outstanding</p></div></div></article>
+    </div>
+    <div class="panel" style="margin-top:16px;overflow:hidden">
+      <div class="panel-head"><div><h2>Invoices</h2><p>Full billing history for this customer</p></div></div>
+      <div class="table-wrap">${invoices.length ? `
+        <table class="data"><thead><tr><th>Invoice</th><th>Number</th><th>Period</th><th>Amount</th><th>Status</th><th>Due</th><th>Action</th></tr></thead>
+        <tbody>${invoices.map(x => `<tr>
+          <td class="cell-strong">#${esc(x.id)}</td><td>${esc(x.number)}</td>
+          <td>${esc(x.period_start)} → ${esc(x.period_end)}</td><td>${money(x.amount_cents)}</td>
+          <td>${statusPill(x.status, `invoice-${x.id}`)}</td><td>${esc(fmtDay(x.due_at))}</td>
+          <td>${x.status === 'open' ? `<button class="btn ghost sm" data-paid-invoice="${x.id}">Mark paid</button>` : '—'}</td>
+        </tr>`).join('')}</tbody></table>` : empty('No invoices', 'Invoices are generated for each assigned number.', '▣')}</div>
+    </div>
+  </section>`;
+}
+
+/* --- Integrations (API keys + webhooks) --- */
+function wsIntegrations() {
+  const keys = wsOwned('api_keys');
+  const hooks = wsOwned('webhooks');
+  return `<section class="ws-section">
+    <div class="notice secure"><span class="glyph">◇</span><div><b>Customer-owned integrations</b>These keys and endpoints belong to this customer. Signing secrets and key material are never displayed here after creation.</div></div>
+
+    <div class="ws-section-head"><div><h3>API keys</h3><p>Scoped credentials this customer's software uses to call the EIP API.</p></div></div>
+    <div class="ws-cards">${keys.map(x => `
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">⌘</span>
+        <div><small>API key</small><h4>${esc(x.name)}</h4><p><code>${esc(x.prefix)}…</code> · created ${esc(fmtDay(x.created_at))}</p></div>
+        <span class="tag on">Active</span>
+      </div>
+      <div class="kv">${kv('Scopes', x.scopes === '*' ? 'Full access' : x.scopes)}${kv('Last used', x.last_used_at ? fmtDate(x.last_used_at) : 'Never')}</div>
+      <div class="ws-card-actions"><button class="btn danger sm" data-revoke-key="${x.id}">Revoke key</button></div></article>`).join('')
+      || wsEmpty('No API keys', 'This customer has not created any integration keys.', '⌘')}</div>
+
+    <div class="ws-section-head" style="margin-top:26px"><div><h3>Webhook endpoints</h3><p>Call lifecycle events pushed to this customer's systems.</p></div></div>
+    <div class="ws-cards">${hooks.map(x => `
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">◇</span>
+        <div><small>Webhook</small><h4>${esc(x.name)}</h4><p style="word-break:break-all">${esc(x.url)}</p></div>
+        ${x.active ? tag('Active', 'on') : tag('Paused', 'off')}
+      </div>
+      <div class="kv">${kv('Subscribed events', x.events === '*' ? 'All call events' : x.events)}
+        ${kv('Signing secret', x.has_token ? 'Configured (hidden)' : 'Not set')}</div>
+      <div class="ws-card-actions">
+        <button class="btn ghost sm" data-test-webhook="${x.id}">Send test</button>
+        <button class="btn ghost sm" data-edit-webhook="${x.id}">Edit</button>
+      </div></article>`).join('') || wsEmpty('No webhook endpoints', 'This customer has not subscribed to any events.', '◇')}</div>
+  </section>`;
+}
+
+function wsActivityTab() {
+  return `<section class="ws-section">
+    <div class="ws-section-head"><div><h3>Customer activity</h3><p>Provisioning, access and integration changes for this customer.</p></div></div>
+    <div class="panel" style="background:transparent;border:0;box-shadow:none"><div class="timeline" style="padding:0">
+      ${workspace.activity.map(x => `<div class="tl-item"><b>${esc(x.description)}</b>
+        <p>${esc(String(x.action).replaceAll('.', ' '))} · ${esc(x.resource_type)}</p>
+        <small>${esc(fmtDate(x.created_at))}</small></div>`).join('') || empty('No activity yet', 'Customer and administrator changes will be recorded here.', '◌')}
+    </div></div>
+  </section>`;
+}
+
+function closeWorkspace() {
+  closeOverlay('workspace');
+  $('scrim').classList.remove('open');
+  workspace = null;
+}
+
+/* ============================================================ 26. Events */
+document.addEventListener('click', event => {
+  const reveal = event.target.closest('[data-reveal-extension]');
+  if (reveal) {
+    // Fill the form in place so the operator can see and change the secret.
+    api(`/admin/api/extensions/${encodeURIComponent(reveal.dataset.revealExtension)}/credentials`).then(({ credentials }) => {
+      const fields = $('modal-fields');
+      fields.querySelector('[name=sip_username]').value = credentials.sip_username;
+      fields.querySelector('[name=sip_password]').value = credentials.sip_password;
+      fields.querySelector('[name=sip_password]').type = 'text';
+      notify(`Credentials revealed · register at ${credentials.server || 'your EIP host'}:${credentials.port}`);
+    }).catch(error => notify(error.message, true));
+  }
+});
+document.addEventListener('click', async event => {
+  // Grouped lists (extensions by customer, recordings/voicemails by extension)
+  // collapse from their header, so long lists stay scannable.
+  const head = event.target.closest('.acc-head');
+  if (head) { head.closest('.acc-item')?.classList.toggle('open'); return; }
+
+  const button = event.target.closest('button');
+  if (!button || button.disabled) return;
+  const d = button.dataset;
+  const keepWorkspace = () => workspace?.customer?.id;
+
+  if (d.retry) return RETRY[d.retry]?.();
+  if (d.openCustomer) return openCustomer(Number(d.openCustomer));
+  if (d.wsTab) { endQuiet(); return renderWsTab(d.wsTab); }
+  if (d.wsGoto) { closeWorkspace(); showPage(d.wsGoto); return; }
+  if (d.wsRoute) {
+    const number = d.wsRoute;
+    closeWorkspace();
+    showPage('routing');
+    if (number) {
+      focusRouteTarget(flowKey('number', number));
+      $('flow-entry-number').textContent = number;
+      flowNodes = (state.call_routes || []).find(x => x.phone_number === number)?.route?.nodes || [];
+      renderFlowNodes();
+    }
+    return;
+  }
+  if (d.showCredentials) return showCredentials(Number(d.showCredentials));
+  if (d.editSip) return openModal('sipaccount', state.sip_accounts.find(x => x.id === Number(d.editSip)));
+
+  if (d.toggleSecret !== undefined) {
+    const input = button.parentElement.querySelector('[data-secret]');
+    if (input) { input.type = input.type === 'password' ? 'text' : 'password'; button.textContent = input.type === 'password' ? 'Show' : 'Hide'; }
+    return;
+  }
+  if (d.copyValue !== undefined) {
+    navigator.clipboard?.writeText(d.copyValue);
+    notify(`${d.copyLabel || 'Value'} copied`);
+    return;
+  }
+  if (d.copySecret) { navigator.clipboard?.writeText($('created-api-key').value); notify('API key copied'); return; }
+  if (d.credCopyAll) {
+    const text = credentialSheet ? credentialLines(credentialSheet.credentials) : '';
+    navigator.clipboard?.writeText(text);
+    notify('Phone setup copied');
+    return;
+  }
+  if (d.credRotate) {
+    if (!credentialSheet) return;
+    credentialSheet.rotating = !credentialSheet.rotating;
+    paintCredentialSheet();
+    if (credentialSheet.rotating) setTimeout(() => $('cred-new-password')?.focus(), 60);
+    return;
+  }
+  if (d.credSave) return rotateExtensionPassword(d.credSave, ($('cred-new-password')?.value || '').trim());
+  if (d.credGenerate) return rotateExtensionPassword(d.credGenerate, '');
+
+  if (d.removeNode !== undefined) { flowNodes.splice(Number(d.removeNode), 1); renderFlowNodes(); return; }
+  if (d.readNotification) {
+    try { await api(`/admin/api/notifications/${d.readNotification}/read`, { method: 'POST' }); await loadState(); }
+    catch (error) { notify(error.message, true); }
+    return;
+  }
+  if (d.resolveRequest) {
+    const [id, status] = d.resolveRequest.split(':');
+    try {
+      await api(`/admin/api/requests/${id}/resolve`, { method: 'POST', body: JSON.stringify({ status, admin_note: `Request ${status} by administrator` }) });
+      notify(`Request ${status}`);
+      const id2 = keepWorkspace(), tab = wsTab;
+      await loadState();
+      if (id2) await openCustomer(id2, tab, true);
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  if (d.assignRequest) {
+    const [requestId, userId] = d.assignRequest.split(':');
+    pendingFulfilRequest = requestId;
+    closeWorkspace();
+    showPage('numbers');
+    openModal('number');
+    setTimeout(() => {
+      const owner = $('modal-fields').querySelector('[name=owner_user_id]');
+      if (owner) { owner.value = userId; owner.dispatchEvent(new Event('change')); }
+    }, 0);
+    return;
+  }
+  if (d.newForCustomer) {
+    const [type, id] = d.newForCustomer.split(':');
+    openModal(type);
+    if (type === 'extension') prefillNextExtension();
+    setTimeout(() => {
+      const owner = $('modal-fields').querySelector('[name=owner_user_id]');
+      if (owner) { owner.value = id; owner.dispatchEvent(new Event('change')); }
+    }, 0);
+    return;
+  }
+  if (d.page) return showPage(d.page);
+  if (d.go) { showPage(d.go); if (d.new) openModal(d.new); return; }
+  if (d.open) {
+    const type = d.open;
+    openModal(type);
+    if (type === 'extension') prefillNextExtension();
+    return;
+  }
+
+  if (d.editExtension) return openModal('extension', state.extensions.find(x => x.extension === d.editExtension));
+  if (d.extensionCredentials) return showExtensionCredentials(d.extensionCredentials);
+  if (d.extensionFlow) {
+    showPage('routing');
+    return focusRouteTarget(flowKey('extension', d.extensionFlow));
+  }
+  if (d.numberFlow) {
+    showPage('routing');
+    return focusRouteTarget(flowKey('number', d.numberFlow));
+  }
+  if (d.routeTarget) {
+    showPage('routing');
+    return focusRouteTarget(d.routeTarget);
+  }
+  if (d.editGroup) return openModal('group', (state.groups || []).find(x => String(x.id) === String(d.editGroup)));
+  if (d.groupFlow) {
+    showPage('routing');
+    return focusRouteTarget(flowKey('group', d.groupFlow));
+  }
+  if (d.deleteGroup) {
+    if (!confirm('Delete this group? Its call flow is removed too; the extensions stay.')) return;
+    try {
+      await api(`/admin/api/groups/${d.deleteGroup}`, { method: 'DELETE' });
+      notify('Group deleted');
+      await loadState();
+      renderFlow(); renderGroups();
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  if (d.editNumber) return openModal('number', state.phone_numbers.find(x => x.id === Number(d.editNumber)));
+  if (d.editProvider) return openModal('provider', state.providers.find(x => x.id === Number(d.editProvider)));
+  if (d.editWebhook) return openModal('webhook', state.webhooks.find(x => x.id === Number(d.editWebhook)));
+  if (d.editApikey) return openModal('apikey', state.api_keys.find(x => x.id === Number(d.editApikey)));
+  if (d.editUser) return openModal('user', state.users.find(x => x.id === Number(d.editUser)));
+  if (d.wsEditCustomer) return openModal('user', workspace?.customer);
+
+  if (d.deleteExtension) return remove('extension', d.deleteExtension, d.deleteExtension);
+  if (d.deleteNumber) { const item = state.phone_numbers.find(x => x.id === Number(d.deleteNumber)); return remove('number', item.id, item.number); }
+  if (d.deleteProvider) { const item = state.providers.find(x => x.id === Number(d.deleteProvider)); return remove('provider', item.id, item.name); }
+  if (d.deleteWebhook) { const item = state.webhooks.find(x => x.id === Number(d.deleteWebhook)); return remove('webhook', item.id, item.name); }
+  if (d.deleteUser) { const item = state.users.find(x => x.id === Number(d.deleteUser)); return remove('user', item.id, item.username); }
+  if (d.deleteSip) {
+    if (!confirm('Delete this SIP account and revoke its credentials?')) return;
+    try {
+      await api(`/admin/api/sip-accounts/${d.deleteSip}`, { method: 'DELETE' });
+      notify('SIP account deleted');
+      const id = keepWorkspace(), tab = wsTab;
+      await loadState();
+      if (id) await openCustomer(id, tab, true);
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  if (d.discontinueNumber) {
+    if (!confirm('Discontinue this number at its next monthly renewal? Calls will stop on that date.')) return;
+    try {
+      const result = await api(`/admin/api/numbers/${encodeURIComponent(d.discontinueNumber)}/discontinue`, { method: 'POST' });
+      notify(`Number scheduled to end ${result.discontinue_at}`);
+      await loadState();
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  if (d.paidInvoice) {
+    try {
+      await api(`/admin/api/invoices/${d.paidInvoice}/status`, { method: 'POST', body: JSON.stringify({ status: 'paid' }) });
+      notify('Invoice marked paid');
+      const id = keepWorkspace(), tab = wsTab;
+      await loadState();
+      if (id) await openCustomer(id, tab, true);
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  if (d.revokeKey) {
+    if (!confirm('Permanently delete this API key? Integrations using it will stop working immediately.')) return;
+    try {
+      await api(`/admin/api/api-keys/${d.revokeKey}`, { method: 'DELETE' });
+      notify('API key revoked');
+      const id = keepWorkspace(), tab = wsTab;
+      await loadState();
+      if (id) await openCustomer(id, tab, true);
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  if (d.defaultNumber) {
+    const item = state.phone_numbers.find(x => x.id === Number(d.defaultNumber));
+    // The API resolves the caller ID from the number's inbound extension, so a
+    // number without one cannot be promoted and must not offer the action.
+    if (!item?.inbound_extension) return notify('Assign an extension to this number first', true);
+    try {
+      await api('/admin/api/numbers/default', { method: 'POST', body: JSON.stringify({ number: item.number, extension: item.inbound_extension }) });
+      notify('Default outbound number updated');
+      await loadState();
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  if (d.readVoicemail) return voicemailAction('read', d.readVoicemail);
+  if (d.deleteVoicemail) return voicemailAction('delete', d.deleteVoicemail);
+  if (d.testWebhook) {
+    try {
+      const result = await api(`/admin/api/webhooks/${d.testWebhook}/test`, { method: 'POST' });
+      notify(`Webhook delivered — HTTP ${result.status_code}`);
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+});
+
+/* ------------------------------------------------------- 27. Field wiring */
+const wire = (id, event, handler) => $(id)?.addEventListener(event, handler);
+['customer-search', 'extension-search', 'number-search'].forEach(id => wire(id, 'input', () => ({ 'customer-search': renderCustomers, 'extension-search': renderExtensions, 'number-search': renderNumbers }[id]())));
+wire('sip-search', 'input', () => { renderExtensionCredentials(); renderSipAccounts(); });
+wire('call-search', 'input', () => debounce(() => { callOffset = 0; loadCalls(); }));
+wire('recording-search', 'input', () => debounce(() => { recordingOffset = 0; loadRecordings(); }));
+wire('voicemail-search', 'input', () => debounce(loadVoicemails));
+['call-extension', 'call-status'].forEach(id => wire(id, 'change', () => { callOffset = 0; loadCalls(); }));
+['recording-extension', 'recording-customer', 'recording-from', 'recording-to'].forEach(id => wire(id, 'change', () => { recordingOffset = 0; loadRecordings(); }));
+['voicemail-extension', 'voicemail-folder'].forEach(id => wire(id, 'change', loadVoicemails));
+wire('refresh-calls', 'click', loadCalls);
+wire('refresh-recordings', 'click', loadRecordings);
+wire('refresh-voicemails', 'click', loadVoicemails);
+
+wire('modal-form', 'submit', saveModal);
+wire('modal-close', 'click', closeModal);
+wire('modal-cancel', 'click', closeModal);
+wire('modal', 'click', event => { if (event.target === $('modal')) closeModal(); });
+wire('ws-close', 'click', closeWorkspace);
+wire('menu', 'click', () => { $('sidebar').classList.add('open'); $('scrim').classList.add('open'); });
+wire('scrim', 'click', () => {
+  $('sidebar').classList.remove('open');
+  if ($('workspace').classList.contains('open')) closeWorkspace();
+  else $('scrim').classList.remove('open');
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  if ($('modal').classList.contains('open')) closeModal();
+  else if ($('flow-config-modal').classList.contains('open')) closeOverlay('flow-config-modal');
+  else if ($('workspace').classList.contains('open')) closeWorkspace();
+  else $('sidebar').classList.remove('open');
+});
+wire('topbar', 'click', () => {});
+
+wire('read-all-notifications', 'click', async () => {
+  try { await api('/admin/api/notifications/read-all', { method: 'POST' }); notify('Notifications marked as read'); await loadState(); }
+  catch (error) { notify(error.message, true); }
+});
+wire('theme-toggle', 'click', toggleSkin);
+wire('request-number', 'click', () => openModal('request'));
+wire('logout', 'click', async () => {
+  try { await api('/admin/logout', { method: 'POST' }); } finally { location = '/login'; }
+});
+
+/* Call-flow canvas: click to configure, drag to reorder, palette drag to add. */
+wire('flow-config-form', 'submit', saveFlowConfig);
+wire('flow-config-close', 'click', () => closeOverlay('flow-config-modal'));
+wire('flow-config-cancel', 'click', () => closeOverlay('flow-config-modal'));
+wire('flow-config-modal', 'click', event => { if (event.target === $('flow-config-modal')) closeOverlay('flow-config-modal'); });
+wire('flow-nodes', 'click', event => {
+  if (!canDesignFlows() || event.target.closest('[data-remove-node]')) return;
+  const node = event.target.closest('[data-flow-index]');
+  if (node) openFlowConfig(Number(node.dataset.flowIndex));
+});
+wire('flow-nodes', 'dragstart', event => {
+  const node = event.target.closest('[data-flow-index]');
+  if (node && canDesignFlows()) event.dataTransfer.setData('application/x-flow-index', node.dataset.flowIndex);
+});
+wire('flow-nodes', 'dragover', event => event.preventDefault());
+wire('flow-nodes', 'drop', event => {
+  const target = event.target.closest('[data-flow-index]');
+  const source = Number(event.dataTransfer.getData('application/x-flow-index'));
+  if (target && Number.isInteger(source) && canDesignFlows()) {
+    event.preventDefault();
+    const [node] = flowNodes.splice(source, 1);
+    flowNodes.splice(Number(target.dataset.flowIndex), 0, node);
+    renderFlowNodes();
+  }
+});
+const dragSurface = $('flow-canvas');
+const dragging = (el, on) => el?.classList.toggle('dragging', on);
+/* A flow belongs to one customer, so designing one always happens inside a
+   customer: the signed-in customer is that customer, an administrator picks one
+   in the owner selector first. */
+const canDesignFlows = () => !state.is_admin || routingOwner() !== null;
+const flowDesignHint = () => 'Choose a customer above to design their call flows';
+document.querySelectorAll('[data-node-type]').forEach(button => {
+  button.addEventListener('dragstart', event => {
+    if (!canDesignFlows()) return;
+    event.dataTransfer.setData('text/plain', button.dataset.nodeType);
+    dragging(button, true);
+  });
+  button.addEventListener('dragend', () => dragging(button, false));
+  button.onclick = () => {
+    if (!canDesignFlows()) return notify(flowDesignHint(), true);
+    flowNodes.push({ type: button.dataset.nodeType, label: 'Click to configure' });
+    renderFlowNodes();
+  };
+});
+wire('flow-nodes', 'dragstart', event => dragging(event.target.closest('[data-flow-index]'), true));
+wire('flow-nodes', 'dragend', event => dragging(event.target.closest('[data-flow-index]'), false));
+if (dragSurface) {
+  let depth = 0;
+  dragSurface.addEventListener('dragenter', () => { depth += 1; dragSurface.classList.add('drag-over'); });
+  dragSurface.addEventListener('dragleave', () => { depth -= 1; if (depth <= 0) { depth = 0; dragSurface.classList.remove('drag-over'); } });
+  dragSurface.addEventListener('dragover', event => event.preventDefault());
+  dragSurface.addEventListener('drop', event => {
+    event.preventDefault();
+    depth = 0;
+    dragSurface.classList.remove('drag-over');
+    const type = canDesignFlows() ? event.dataTransfer.getData('text/plain') : '';
+    if (type) { flowNodes.push({ type, label: 'Click to configure' }); renderFlowNodes(); }
+  });
+}
+wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
+wire('route-owner', 'change', () => { renderRouteTargets(); renderFlow(); renderGroups(); });
+wire('save-route', 'click', async () => {
+  if (!canDesignFlows()) return notify(flowDesignHint(), true);
+  const { type, target } = flowTargetParts($('route-target')?.value);
+  if (!type || !target) return notify('Add a number, extension or group first', true);
+  if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);
+  try {
+    const payload = type === 'number'
+      ? { target_type: 'number', phone_number: target, target, owner_user_id: flowOwnerId(), name: savedFlowFor('number', target)?.name || 'Main call flow' }
+      : { target_type: type, target, owner_user_id: flowOwnerId(), name: savedFlowFor(type, target)?.name || (type === 'group' ? 'Group call flow' : 'Extension call flow') };
+    await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, route: { nodes: flowNodes }, active: true }) });
+    notify(`Call flow saved for ${type === 'number' ? target : `${type} ${target}`}`);
+    const id = workspace?.customer?.id, tab = wsTab;
+    await loadState();
+    if (id) await openCustomer(id, tab, true);
+  } catch (error) { notify(error.message, true); }
+});
+
+/* ------------------------------------------------------------- 28. Forms */
+/* The customer's own call defaults. An administrator never writes these: the
+   endpoint refuses them, and the form is customer-only markup. */
+wire('call-defaults-form', 'submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/admin/api/call-defaults', { method: 'POST', body: JSON.stringify({
+      outbound: val('default-extension'), fallback: val('inbound-fallback'),
+    }) });
+    notify('Call defaults saved');
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+});
+/* The platform recording switch. Flipping it is the whole interaction: it saves,
+   then reloads state so both consoles show the same rule. */
+wire('platform-recording', 'change', async event => {
+  const toggle = event.target;
+  const wanted = toggle.checked;
+  toggle.disabled = true;
+  try {
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ recording_enabled: wanted }) });
+    notify(wanted ? 'Recording allowed platform-wide' : 'Recording stopped platform-wide');
+    await loadState();
+  } catch (error) {
+    toggle.checked = !wanted;
+    notify(error.message, true);
+  } finally {
+    toggle.disabled = false;
+  }
+});
+
+/* The platform's own address, not the carrier trunk: an administrator sets it
+   once and every SIP sheet, API base and documentation example follows. */
+wire('service-address-form', 'submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
+      service_host: val('service-host').trim(), service_sip_port: val('service-sip-port').trim() || '5060',
+    }) });
+    notify('Server address saved');
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+});
+wire('service-address-reset', 'click', async () => {
+  try {
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_sip_port: '5060' }) });
+    notify('Server address cleared — the console address is used');
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+});
+wire('email-form', 'submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/admin/api/email-config', { method: 'POST', body: JSON.stringify({
+      enabled: $('email-enabled').checked, api_key: val('sendgrid-key'),
+      from_email: val('sendgrid-from'), from_name: val('sendgrid-name'),
+    }) });
+    $('sendgrid-key').value = '';
+    notify('SendGrid configuration saved');
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+});
+wire('test-email', 'click', async () => {
+  try {
+    const result = await api('/admin/api/email-config/test', { method: 'POST', body: JSON.stringify({ email: val('sendgrid-test') }) });
+    notify(result.ok ? 'Test email accepted by SendGrid' : 'Test failed');
+  } catch (error) { notify(error.message, true); }
+});
+wire('profile-recording-form', 'submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/admin/api/profile/recording', { method: 'POST', body: JSON.stringify({ enabled: $('profile-recording').checked }) });
+    notify('Recording preference updated');
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+});
+wire('profile-email-form', 'submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/admin/api/profile/email', { method: 'POST', body: JSON.stringify({ email: val('profile-email') }) });
+    notify('Voicemail email updated');
+    await loadState();
+  } catch (error) { notify(error.message, true); }
+});
+wire('password-form', 'submit', async event => {
+  event.preventDefault();
+  if ($('new-password').value !== $('confirm-password').value) return notify('Passwords do not match', true);
+  try {
+    await api('/admin/api/password', { method: 'POST', body: JSON.stringify({ password: $('new-password').value }) });
+    event.target.reset();
+    notify('Password changed');
+  } catch (error) { notify(error.message, true); }
+});
+
+/* -------------------------------------------------------------- 29. Boot */
+window.addEventListener('scroll', () => $('topbar')?.classList.toggle('scrolled', window.scrollY > 6), { passive: true });
+window.addEventListener('resize', () => { if (workspace) moveTabInk(); }, { passive: true });
+// Webfonts change tab widths after first paint; realign the indicator once loaded.
+document.fonts?.ready.then(() => { if (workspace) moveTabInk(); });
+
+loadState().then(() => {
+  const requested = location.hash.slice(1);
+  showPage(pageMeta[requested] ? requested : (state.is_admin ? 'users' : 'dashboard'));
+});
+
+setInterval(checkHealth, 30000);
+setInterval(() => {
+  if (document.hidden || $('modal').classList.contains('open')) return;
+  loadState();
+}, 15000);
+setInterval(() => { if (!document.hidden) refreshDeviceStatus(); }, 8000);
+// Live platform activity for an administrator: calls in flight, load and the
+// recording work in progress. Small and in-place, so it never competes with the
+// console for attention or repaints.
+setInterval(() => { if (!document.hidden) loadSystem(); }, 5000);
