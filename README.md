@@ -220,7 +220,8 @@ For a normal local build, before deployment:
 
 ```bash
 cp .env.example .env
-# edit .env with real secrets, public address, extension passwords and provider details
+# edit .env: secrets, public address and the RTP range. Carrier credentials and
+# extensions are configured in the console (/admin), not in the environment.
 
 docker compose config
 docker compose build --no-cache
@@ -240,11 +241,11 @@ Use strong unique values for:
 
 - `SECRET_KEY`
 - `TELEPHONY_TOKEN`
-- `CRM_WEBHOOK_TOKEN`
+- `ADMIN_PASSWORD` (first-run administrator; change it in the console)
 - `ASTERISK_ARI_PASSWORD`
 - `ASTERISK_AMI_PASSWORD`
-- `EXTENSION_<number>_PASSWORD` for every configured SIP extension
-- `IPCOMMS_SIP_PASSWORD`
+- `CRM_WEBHOOK_TOKEN`, if a CRM endpoint is configured
+- the SIP passwords the console generates per extension, once handed to a device
 
 Rotate any credentials that were previously exposed in logs, screenshots, source code, or chat history.
 

@@ -18,6 +18,25 @@ Sign-in lives at **`/login`**. `login_required` redirects there, the sign-in scr
 posts there, and the marketing page links there; nothing in the UI points at the old
 `/admin/login` path.
 
+## Who does what
+
+The console splits along one line: **an administrator manages customers, and a
+customer runs their own line.**
+
+| An administrator | A customer |
+| --- | --- |
+| Adds customers, assigns numbers, provisions devices | Designs how their calls route |
+| Reveals extension credentials when handing over a device | Places and receives calls, reads voicemail and recordings |
+| Sees call history read-only | Owns extensions, ring groups and every call flow |
+
+Nothing in the administrator's console dials or designs. `POST /admin/api/calls`
+answers 403 for an administrator, and so do the flow endpoints (`call-routes`,
+`groups`): `canDesignFlows()` in `web/admin.js` hides the palette, the save button,
+the remove control and dragging, and the API refuses the same writes independently.
+What remains is what the job needs - the routing page becomes a read-only view of the
+customer's journey (`View call flows`), and provisioning still builds the default
+flows on the customer's behalf. A customer-created group or flow is theirs to change.
+
 ## Two experiences, one shell
 
 `GET /admin/api/state` returns `is_admin`, and the app sets a body class from it:
@@ -90,12 +109,33 @@ builds everything else in one step:
 | A default flow for the number and one for the extension | `call_routes` and `routing_flows` |
 | An activity entry and a notification | `activity_history`, `notifications` |
 
+That default flow is the workflow the product promises, and `inbound_plan()` is the
+one place it is turned into a call plan, so the engine and the builder cannot drift:
+
+| Call arrives on | What rings | Nobody answers |
+| --- | --- | --- |
+| The customer's primary number | Every active device the customer owns, at once | The call ends |
+| A number tied to one extension | Just that extension | The call ends |
+| A number whose flow ends in voicemail | The ring step, then that mailbox | The caller leaves a message |
+
+Adding a device extends the primary number (`sync_primary_flows`), because a main
+line rings everyone - but only while that flow is still the generated one: a single
+ring step, the default 25s timeout, no group and only the customer's own extensions.
+The moment the customer designs something of their own, it is never rewritten.
+
 Extension numbers are the primary key and therefore unique platform-wide, so
 provisioning never hands a customer a number another customer already owns; the
 suggestion comes from `GET /admin/api/extensions/next`. The customers' own
 `POST /admin/api/extensions` behaves the same way: leave the password blank and the
-server generates one, then writes the extension's default flow. Nothing is a one-way
-door — the password is editable, and both flows are editable in the builder.
+server generates one, then writes the extension's default flow.
+
+The SIP username is the identity the device authenticates with, so the platform owns
+it: it *is* the extension number (`idx_extensions_sip_username`, a unique index on
+`extensions.sip_username`). `save_extension()` derives it and ignores whatever a
+caller sends, both console forms show it read-only, and a device account linked to an
+extension inherits it too - an account may not take a username that is an extension
+number, nor one another account already uses. Passwords stay the customer's to set;
+the two default flows stay editable in the builder.
 
 `GET /admin/api/extensions/<extension>/credentials` (owner or administrator) returns
 the effective credential: if a device account is linked to the extension, that account
@@ -155,6 +195,17 @@ pages are linkable.
 
 * `PYTHONPATH=. .venv/bin/python -m pytest -q` — the API/settings suites (the console
   shares those endpoints, so this must stay green).
+* `node tools/uicheck.js` — boots the real console in jsdom against captured fixtures
+  and asserts the promises above: refreshes that paint nothing, only customers dial,
+  only customers design flows, the SIP username is fixed, provisioning reveals
+  credentials.
+* `node tools/contrastcheck.js` — audits every text colour in `admin.css` against its
+  own skin's surfaces, so the light and dark themes both stay legible.
+* `node tools/csscheck.js` — cross-checks `.class` names between `admin.css`,
+  `admin.html` and `admin.js`: nothing styled without a user, nothing applied without
+  a rule.
+* `tools/devpreview.py` — a seeded preview (`PREVIEW_DATA`, default `/tmp/eip-preview`)
+  for looking at both consoles with real data.
 * Render both roles headlessly against captured `/admin/api/*` fixtures to catch
   runtime errors and missing DOM nodes without a browser.
 * Parse `admin.css` and cross-check every class against `admin.html` and `admin.js`:
@@ -180,10 +231,15 @@ consistent and nothing outruns the interface:
 Two rules keep it feeling fast rather than busy:
 
 1. **Cascades stay under ~0.2s** and only run on real navigation or re-render.
-2. **Polls never re-animate.** `loadState()` skips the repaint entirely when the
-   payload is unchanged, `refreshDeviceStatus()` compares state before touching the
-   DOM, and any repaint that does happen runs under `body.updating`, which suppresses
-   entrance animations. An idle console is visually static.
+2. **A poll never repaints what did not change.** Three layers, strongest first:
+   `loadState()` skips the repaint entirely when the payload is unchanged;
+   `refreshDeviceStatus()` compares before touching the DOM; and every list is written
+   through `paint(id, html)`, which compares the markup with what is already there and
+   leaves the existing nodes in place when they match. Identical bytes written again
+   would still swap every child node out, which reads as a flicker on both consoles,
+   so the comparison is on the markup, not on the data. Any repaint that does happen
+   runs under `body.updating`, which suppresses entrance animations. An idle console
+   is visually static, and a changing one only moves what changed.
 
 ## Keyboard and motion
 

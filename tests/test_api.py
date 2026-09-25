@@ -473,7 +473,7 @@ def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
     store = client.application.extensions["settings_store"]
     service = client.application.extensions["telephony_service"]
 
-    def provision(username: str, extension: str, number: str, sip_username: str) -> tuple[int, int]:
+    def provision(username: str, extension: str, number: str, sip_username: str = "", linked: bool = True) -> tuple[int, int]:
         owner_id = store.save_user({
             "username": username, "email": f"{username}@example.com",
             "password": f"{username}-secure-password", "role": "user",
@@ -485,18 +485,21 @@ def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
         })
         account_id = store.save_sip_account({
             "label": f"Desk phone {extension}", "sip_username": sip_username, "sip_password": f"{extension}-handset",
-            "server": "sip.example.com", "phone_number": number, "extension": extension, "active": True,
+            "server": "sip.example.com", "phone_number": number,
+            "extension": extension if linked else "", "active": True,
         }, owner_id)
         return owner_id, account_id
 
-    _, account_one = provision("device-one", "301", "+13025550301", "device301")
-    _, account_two = provision("device-two", "302", "+13025550302", "device302")
+    # An account linked to an extension authenticates as that extension; a device
+    # account with no extension keeps its own name.
+    _, account_one = provision("device-one", "301", "+13025550301")
+    _, account_two = provision("device-two", "302", "+13025550302", "device302", linked=False)
 
     # ARI reports resources as <extension> / <sip_username> / device-<sip_username>.
     service.asterisk = FakeEndpointList([
-        {"technology": "pjsip", "resource": "device-device301", "state": "online"},
-        {"technology": "pjsip", "resource": "device302", "state": "unavailable"},
-        {"technology": "chan_sip", "resource": "302", "state": "online"},
+        {"technology": "pjsip", "resource": "301", "state": "online"},
+        {"technology": "pjsip", "resource": "device-device302", "state": "unavailable"},
+        {"technology": "chan_sip", "resource": "302", "state": "online"},   # not pjsip: ignored
     ])
 
     admin = client.get("/admin/api/device-status")

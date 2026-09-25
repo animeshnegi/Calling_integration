@@ -27,6 +27,9 @@ class Call:
     ended_at: str | None = None
     duration_seconds: int = 0
     employee_channel_id: str | None = None
+    # Every leg rung for this call, comma separated. A primary number rings the
+    # customer's devices together, so more than one exists until somebody answers.
+    employee_channel_ids: str = ""
     customer_channel_id: str | None = None
     bridge_id: str | None = None
     recording_name: str | None = None
@@ -43,7 +46,7 @@ class Call:
 _COLUMNS = (
     "call_id", "contact_id", "member_id", "extension", "phone", "caller_id_number", "provider", "direction", "status",
     "answered", "started_at", "answered_at", "ended_at", "duration_seconds", "employee_channel_id",
-    "customer_channel_id", "bridge_id", "recording_name", "recording_format", "recording_status",
+    "employee_channel_ids", "customer_channel_id", "bridge_id", "recording_name", "recording_format", "recording_status",
     "recording_path", "disposition", "notes",
 )
 
@@ -83,6 +86,7 @@ class CallStore:
                     ended_at TEXT,
                     duration_seconds INTEGER NOT NULL DEFAULT 0,
                     employee_channel_id TEXT,
+                    employee_channel_ids TEXT NOT NULL DEFAULT '',
                     customer_channel_id TEXT,
                     bridge_id TEXT,
                     recording_name TEXT,
@@ -96,6 +100,8 @@ class CallStore:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(calls)").fetchall()}
             if "caller_id_number" not in columns:
                 db.execute("ALTER TABLE calls ADD COLUMN caller_id_number TEXT")
+            if "employee_channel_ids" not in columns:
+                db.execute("ALTER TABLE calls ADD COLUMN employee_channel_ids TEXT NOT NULL DEFAULT ''")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_employee_channel ON calls(employee_channel_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_customer_channel ON calls(customer_channel_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_recording_name ON calls(recording_name)")

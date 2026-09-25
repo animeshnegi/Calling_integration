@@ -202,7 +202,7 @@
       <!-- ==================================================== DEVICES & SIP -->
       <section class="page" id="page-sipaccounts">
         <div class="toolbar">
-          <div class="callout-strip"><span class="live-dot"></span> Live registration status refreshes automatically</div>
+          <div class="search"><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
           <span class="spacer"></span>
           <button class="btn primary" data-open="sipaccount" data-admin-only>＋ Assign SIP service</button>
         </div>
@@ -220,11 +220,15 @@
       <!-- ============================================================ ROUTING -->
       <section class="page" id="page-routing">
         <div class="flow-toolbar sheen">
-          <div><h2>Visual call flow builder</h2><p>One builder for every target: save a flow to a number, an extension or a group.</p></div>
-          <div class="tools"><select id="route-target" aria-label="Call flow target"></select><button class="btn primary" id="save-route">Save flow</button></div>
+          <div><h2>Call flows</h2><p data-customer-only>One builder for every target: save a flow to a number, an extension or a group.</p><p data-admin-only>Read-only view. The customer designs how their own lines answer.</p></div>
+          <div class="tools">
+            <select id="route-owner" aria-label="Customer" data-admin-only></select>
+            <select id="route-target" aria-label="Call flow target"></select>
+            <button class="btn primary" id="save-route" data-customer-only>Save flow</button>
+          </div>
         </div>
         <div class="flow-layout">
-          <aside class="panel palette">
+          <aside class="panel palette" data-customer-only>
             <div class="title"><span>FLOW BLOCKS</span><h3>Build the caller journey</h3><p>Drag a block onto the canvas, or click to append it.</p></div>
             <button draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>Open and closed schedules</small></span></button>
             <button draggable="true" data-node-type="simultaneous"><b class="tile tile-ring">⇉</b><span class="copy"><b>Simultaneous ring</b><small>Reach everyone at once</small></span></button>
@@ -236,12 +240,13 @@
           </aside>
           <section class="panel canvas" id="flow-canvas">
             <div class="canvas-orb a"></div><div class="canvas-orb b"></div>
-            <div class="canvas-status"><span><span class="live-dot"></span> LIVE CALL PATH</span><small>Drag nodes to reorder · click to configure</small></div>
+            <div class="canvas-status"><span><span class="live-dot"></span> LIVE CALL PATH</span><small data-customer-only>Drag nodes to reorder · click to configure</small><small data-admin-only>What the customer's callers hear</small></div>
             <div class="canvas-empty">
               <div class="glyph">⌘</div>
               <h4>Design how this line answers</h4>
-              <p>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
-              <ol>
+              <p data-customer-only>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
+              <p data-admin-only>This is the journey the customer has built for this number. Provision their devices and numbers here; they decide how a call is answered.</p>
+              <ol data-customer-only>
                 <li>Choose a number, extension or group</li>
                 <li>Add routing blocks</li>
                 <li>Configure each step</li>
@@ -250,10 +255,10 @@
             </div>
             <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Your assigned number</small></div><span class="step">START</span></div>
             <div id="flow-nodes"></div>
-            <div class="flow-drop"><b>＋</b><span>Drop the next routing block here</span></div>
+            <div class="flow-drop" data-customer-only><b>＋</b><span>Drop the next routing block here</span></div>
           </section>
         </div>
-        <aside class="panel palette groups-panel">
+        <aside class="panel palette groups-panel" data-customer-only>
           <div class="title"><span>RING GROUPS</span><h3>Teams and departments</h3>
             <p>A group rings its members together and can carry its own call flow: choose it as the target above, or as a ring destination inside any flow.</p>
             <button class="btn primary" data-open="group">＋ Add group</button></div>
@@ -270,7 +275,7 @@
           <span class="spacer"></span>
           <button class="btn ghost sm" id="refresh-calls">Refresh</button>
           <a class="btn ghost sm" href="/admin/api/calls/export.csv" download>Export CSV</a>
-          <button class="btn primary" data-open="call">＋ New call</button>
+          <button class="btn primary" data-open="call" data-customer-only>＋ New call</button>
         </div>
         <article class="panel">
           <div class="panel-head"><div><h2>Call history</h2><p>Outbound lifecycle, CRM references and duration</p></div><span class="count" id="call-count">0 calls</span></div>

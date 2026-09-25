@@ -156,8 +156,10 @@ def test_assigning_a_number_provisions_extension_credentials_and_flows(tmp_path)
     # A default flow exists for the number and for the extension.
     number_flow = next(flow for flow in store.list_call_routes(user_id) if flow["phone_number"] == "+13025550001")
     nodes = number_flow["route"]["nodes"]
-    assert [node["type"] for node in nodes] == ["business_hours", "ring_group"]
-    assert nodes[1]["extensions"] == [extension]
+    # The default is exactly the workflow the customer asked for: ring the
+    # provisioned device, and if nobody answers the call ends.
+    assert [node["type"] for node in nodes] == ["ring_group"]
+    assert nodes[0]["extensions"] == [extension]
     assert all(node.get("configured") for node in nodes)
 
     extension_flow = next(
@@ -169,6 +171,29 @@ def test_assigning_a_number_provisions_extension_credentials_and_flows(tmp_path)
     state = customer.get("/admin/api/state").json
     assert state["routing_flows"][0]["target"] == extension
     assert state["call_routes"][0]["phone_number"] == "+13025550001"
+
+
+def test_credentials_reveal_follows_a_linked_device_account(tmp_path):
+    """A device account linked to an extension is what Asterisk authenticates,
+    so revealing the extension's credentials must report that account's secret."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")            # creates extension 101
+    store.save_sip_account({
+        "label": "Reception phone", "sip_username": "101", "sip_password": "device-secret-9",
+        "server": "sip.example.com", "port": 5060, "transport": "udp", "extension": "101",
+        "phone_number": "+13025550001",
+    }, user_id)
+
+    for client in (admin, customer):
+        revealed = client.get("/admin/api/extensions/101/credentials")
+        assert revealed.status_code == 200, revealed.data[:200]
+        credentials = revealed.json["credentials"]
+        assert credentials["sip_username"] == "101"
+        assert credentials["sip_password"] == "device-secret-9"   # the device's, not the extension's
+        assert credentials["registration"] == "device"
 
 
 def test_each_additional_number_gets_its_own_extension_and_flow(tmp_path):
@@ -371,27 +396,78 @@ def test_extension_flows_are_validated_and_tenant_isolated(tmp_path):
     assert bad_timeout.status_code == 400
 
 
-def test_admin_can_write_flows_and_groups_for_a_customer_from_the_workspace(tmp_path):
+def test_a_device_account_cannot_take_an_extension_identity(tmp_path):
+    """The number a device authenticates with stays unique and unchangeable."""
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    _, other_id = customer_client(app, "northwind")
+    assign_number(store, user_id, "+13025550001")          # extension 101
+
+    # Linked to an extension: the account uses that extension's number, whatever
+    # the caller asked for.
+    account_id = store.save_sip_account({
+        "label": "Desk phone", "sip_username": "reception", "sip_password": "device-secret-1",
+        "server": "sip.example.com", "extension": "101",
+    }, user_id)
+    assert store.reveal_extension_credentials("101", user_id)["sip_username"] == "101"
+    assert next(row for row in store.list_sip_accounts(user_id) if row["id"] == account_id)["sip_username"] == "101"
+
+    # Unlinked accounts may be named - but never after an extension number, and
+    # never twice, whichever customer owns them.
+    assert store.save_sip_account({
+        "label": "Lobby phone", "sip_username": "lobby", "sip_password": "device-secret-2",
+        "server": "sip.example.com",
+    }, user_id) is not None
+    with pytest.raises(ValueError):
+        store.save_sip_account({
+            "label": "Sneaky", "sip_username": "101", "sip_password": "device-secret-3",
+            "server": "sip.example.com",
+        }, other_id)
+    with pytest.raises(ValueError):
+        store.save_sip_account({
+            "label": "Duplicate", "sip_username": "lobby", "sip_password": "device-secret-4",
+            "server": "sip.example.com",
+        }, other_id)
+
+
+def test_administrators_design_no_call_flows(tmp_path):
+    """An administrator manages customers; the customer designs how calls route."""
     app = make_app(tmp_path)
     admin = admin_client(app)
     store = app.extensions["settings_store"]
-    _, user_id = customer_client(app, "kappa")
+    customer, user_id = customer_client(app, "kappa")
     store.save_extension({"extension": "901", "sip_password": "kappa-secret"}, user_id)
+    assign_number(store, user_id, "+13025550001")
 
-    group = admin.post("/admin/api/groups", json={"owner_user_id": user_id, "name": "Front desk", "members": ["901"], "timeout": 30})
-    assert group.status_code == 200, group.json
-    flow = admin.post("/admin/api/call-routes", json={
-        "target_type": "extension", "owner_user_id": user_id, "target": "901",
+    refused = admin.post("/admin/api/call-routes", json={
+        "target_type": "number", "phone_number": "+13025550001",
         "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
     })
-    assert flow.status_code == 200, flow.json
+    assert refused.status_code == 403, refused.json
+    assert admin.post("/admin/api/call-routes", json={
+        "target_type": "extension", "owner_user_id": user_id, "target": "901",
+        "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
+    }).status_code == 403
+    assert admin.post("/admin/api/groups", json={"owner_user_id": user_id, "name": "Front desk", "members": ["901"]}).status_code == 403
 
+    # The customer, on the same endpoints, does everything the administrator may not.
+    group = customer.post("/admin/api/groups", json={"name": "Front desk", "members": ["901"], "timeout": 30})
+    assert group.status_code == 200, group.json
+    assert customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "901",
+        "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
+    }).status_code == 200
+    assert customer.post("/admin/api/call-routes", json={
+        "target_type": "number", "phone_number": "+13025550001", "target": "+13025550001",
+        "route": {"nodes": [{"type": "extension", "extension": "901", "configured": True}]},
+    }).status_code == 200
+
+    # What the administrator still owns: the customer they provisioned, readable.
     detail = admin.get(f"/admin/api/customers/{user_id}").json
-    assert [row["target"] for row in detail["routing_flows"]] == ["901"]
+    assert {row["extension"] for row in detail["extensions"]} == {"101", "901"}   # 101 came with the number
+    assert "901" in {row["target"] for row in detail["routing_flows"]}   # 101's own flow came too
     assert [row["name"] for row in detail["groups"]] == ["Front desk"]
-
-    # An administrator must name the customer; a group cannot be created ownerless.
-    assert admin.post("/admin/api/groups", json={"name": "Orphan"}).status_code == 400
 
 
 def test_provisioning_reports_a_number_that_already_has_an_extension(tmp_path):
@@ -412,13 +488,271 @@ def test_provisioning_reports_a_number_that_already_has_an_extension(tmp_path):
 def test_default_route_shapes_match_the_canvas(tmp_path):
     app = make_app(tmp_path)
     store = app.extensions["settings_store"]
-    number_route = store.default_number_route("101", voicemail=True)
+    number_route = store.default_number_route(["101"], voicemail="101")
     extension_route = store.default_extension_route("101", voicemail=True)
-    assert [node["type"] for node in number_route["nodes"]] == ["business_hours", "ring_group", "voicemail"]
+    assert [node["type"] for node in number_route["nodes"]] == ["ring_group", "voicemail"]
     assert [node["type"] for node in extension_route["nodes"]] == ["extension", "voicemail"]
+    # Without voicemail the default flow is a single ring step: no answer ends
+    # the call rather than parking the caller.
+    assert [node["type"] for node in store.default_number_route(["101"])["nodes"]] == ["ring_group"]
+    assert [node["type"] for node in store.default_extension_route("101")["nodes"]] == ["extension"]
     # Saving what the builder produced must pass the same validation the UI does.
     _, user_id = customer_client(app, "munich")
     store.save_extension({"extension": "111", "sip_password": "mu-secret"}, user_id)
     assert store.save_routing_flow(user_id, {"route": store.default_extension_route("111")}, target_type="extension", target="111")
     with pytest.raises(ValueError):
         store.save_routing_flow(user_id, {"route": {"nodes": [{"type": "extension", "extension": "999"}]}}, target_type="extension", target="111")
+
+
+# --------------------------------------------------------------------------
+# The default call workflow: ring the provisioned device(s), and if nobody
+# answers the call simply ends. Extension-specific numbers ring only their own
+# device; a customer's main line rings every device they have.
+# --------------------------------------------------------------------------
+
+class RingingAsterisk(FakeAsterisk):
+    """Records what the engine rings and what it tears down."""
+
+    def __init__(self, live=None):
+        self.legs = []
+        self.hangups = []
+        self.dialplan = []
+        self.bridges = []
+        self.live = list(live or [])
+
+    def create_bridge(self, bridge_id):
+        self.bridges.append(bridge_id)
+        return bridge_id
+
+    def add_channel_to_bridge(self, bridge_id, channel_id):
+        return None
+
+    def start_bridge_recording(self, *args, **kwargs):
+        return None
+
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0):
+        leg = f"{call_id}-employee" if index == 0 else f"{call_id}-employee-{index}"
+        self.legs.append((leg, extension))
+        self.live.append(leg)
+        return leg
+
+    def hangup(self, channel_id):
+        self.hangups.append(channel_id)
+        if channel_id in self.live:
+            self.live.remove(channel_id)
+
+    def list_channels(self):
+        return [{"id": channel_id} for channel_id in self.live]
+
+    def continue_in_dialplan(self, channel_id, context, extension):
+        self.dialplan.append((channel_id, context, extension))
+
+    def hangup_call(self, employee_channel_id, customer_channel_id):
+        self.hangup(employee_channel_id)
+        self.hangup(customer_channel_id)
+
+
+def assign_number(store, user_id, number):
+    """What the console does: the DID is assigned to the customer first, and
+    provisioning then builds the extension, credentials and flows on top."""
+    store.save_number({
+        "number": number, "provider": "TestProvider", "description": "Assigned line",
+        "inbound_extension": "", "owner_user_id": user_id, "monthly_price": 5, "active": True,
+    })
+    return store.provision_number(user_id, number)
+
+
+def ring_engine(app):
+    """An app whose Asterisk client records the ringing plan."""
+    asterisk = RingingAsterisk()
+    service = app.extensions["telephony_service"]
+    service.asterisk = asterisk
+    return service, asterisk
+
+
+def inbound(service, number, extension):
+    service.handle_ari_event({
+        "type": "StasisStart", "args": ["inbound", number, extension],
+        "channel": {"id": f"carrier-{number}", "state": "Up", "caller": {"number": "+919999999999"}},
+    })
+    return service.store.all()[-1]
+
+
+def test_main_line_rings_every_device_the_customer_has(tmp_path):
+    """Incoming call -> main number -> every phone rings (answer or end)."""
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")
+    assign_number(store, user_id, "+13025550002")
+
+    main = store.primary_number(user_id)
+    assert main == "+13025550001"
+    plan = store.inbound_plan(main)
+    assert plan["destinations"] == ["101", "102"], plan
+    assert plan["voicemail"] == ""  # nobody answers -> the call ends
+
+    service, asterisk = ring_engine(app)
+    call = inbound(service, main, "101")
+    assert asterisk.legs == [
+        (f"{call.call_id}-employee", "101"),
+        (f"{call.call_id}-employee-1", "102"),
+    ], asterisk.legs
+    stored = service.store.get(call.call_id)
+    assert stored.employee_channel_id == f"{call.call_id}-employee"
+    assert stored.employee_channel_ids == f"{call.call_id}-employee|101,{call.call_id}-employee-1|102"
+
+
+def test_extension_specific_number_rings_only_that_extension(tmp_path):
+    """A number tied to one extension rings that extension, not the whole office."""
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "bluewave")
+    assign_number(store, user_id, "+13025550001")          # 101, the main line
+    second = assign_number(store, user_id, "+13025550002")  # 102
+    assert store.inbound_plan("+13025550002")["destinations"] == [second["extension"]]
+
+    service, asterisk = ring_engine(app)
+    inbound(service, "+13025550002", second["extension"])
+    assert [extension for _, extension in asterisk.legs] == [second["extension"]]
+
+
+def test_answering_one_device_cancels_the_other_legs(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "northwind")
+    assign_number(store, user_id, "+13025550001")
+    assign_number(store, user_id, "+13025550002")
+
+    service, asterisk = ring_engine(app)
+    call = inbound(service, "+13025550001", "101")
+    service.handle_ari_event({
+        "type": "ChannelStateChange", "channel": {"id": f"{call.call_id}-employee-1", "state": "Up"},
+    })
+    updated = service.store.get(call.call_id)
+    assert updated.employee_channel_id == f"{call.call_id}-employee-1"
+    assert updated.extension == "102"          # the phone that picked up
+    assert updated.answered is True            # and the call connected
+    assert f"{call.call_id}-employee" in asterisk.hangups  # the other phone stops ringing
+
+
+def test_no_answer_ends_the_call_without_voicemail(tmp_path):
+    """Ring -> answer = connect, no answer = disconnect. That is the whole default."""
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "acme")
+    assign_number(store, user_id, "+13025550001")
+
+    service, asterisk = ring_engine(app)
+    call = inbound(service, "+13025550001", "101")
+    service.handle_ari_event({
+        "type": "ChannelDestroyed", "channel": {"id": f"{call.call_id}-employee"},
+    })
+    assert asterisk.dialplan == []
+    assert "carrier-+13025550001" in asterisk.hangups
+    assert service.store.get(call.call_id).status == "failed"
+
+
+def test_a_flow_that_ends_in_voicemail_still_takes_a_message(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")
+    store.save_call_route(user_id, {
+        "phone_number": "+13025550001", "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": ["101"], "timeout": 20, "configured": True},
+            {"type": "voicemail", "mailbox": "101", "configured": True},
+        ]},
+    })
+    assert store.inbound_plan("+13025550001")["voicemail"] == "101"
+
+    service, asterisk = ring_engine(app)
+    call = inbound(service, "+13025550001", "101")
+    service.handle_ari_event({
+        "type": "ChannelDestroyed", "channel": {"id": f"{call.call_id}-employee"},
+    })
+    assert asterisk.dialplan == [("carrier-+13025550001", "voicemail-inbound", "101")]
+
+
+def test_business_hours_skip_ringing_outside_the_schedule(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "munich")
+    assign_number(store, user_id, "+13025550001")
+    store.save_call_route(user_id, {
+        "phone_number": "+13025550001", "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "business_hours", "start": "00:00", "end": "00:01", "days": [1], "configured": True},
+            {"type": "ring_group", "extensions": ["101"], "timeout": 20, "configured": True},
+            {"type": "voicemail", "mailbox": "101", "configured": True},
+        ]},
+    })
+    plan = store.inbound_plan("+13025550001")
+    assert plan["outside_hours"] is True
+    assert plan["destinations"] == []
+    assert plan["voicemail"] == "101"
+
+
+def test_adding_an_extension_extends_the_main_line(tmp_path):
+    """The main line keeps ringing every device, without touching edited flows."""
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")
+    store.save_extension({"extension": "102", "sip_password": "second-secret", "active": True}, user_id)
+
+    assert store.inbound_plan("+13025550001")["destinations"] == ["101", "102"]
+
+    # A flow the customer designed is never rewritten.
+    store.save_call_route(user_id, {
+        "phone_number": "+13025550001", "name": "Custom", "active": True,
+        "route": {"nodes": [{"type": "ring_group", "extensions": ["101"], "timeout": 15, "configured": True}]},
+    })
+    store.save_extension({"extension": "105", "sip_password": "third-secret", "active": True}, user_id)
+    assert store.inbound_plan("+13025550001")["destinations"] == ["101"]
+
+
+def test_a_stale_main_line_default_catches_up_with_later_devices(tmp_path):
+    """A device added while the platform was not looking is still picked up."""
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")
+    store.save_extension({"extension": "102", "sip_password": "second-secret", "active": True}, user_id)
+    # The main line still lists only 101 - as a flow provisioned before 102 existed
+    # would. Adding the next device must bring all of them in.
+    store.save_call_route(user_id, {
+        "phone_number": "+13025550001", "name": "Main call flow", "active": True,
+        "route": store.default_number_route(["101"]),
+    })
+    store.save_extension({"extension": "103", "sip_password": "third-secret", "active": True}, user_id)
+    assert store.inbound_plan("+13025550001")["destinations"] == ["101", "102", "103"]
+
+
+def test_sip_username_is_generated_and_cannot_be_changed(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    store.save_extension({"extension": "101", "sip_password": "chosen", "sip_username": "meridian-softphone"}, user_id)
+    row = next(item for item in store.list_extensions(user_id) if item["extension"] == "101")
+    assert row["sip_username"] == "101"
+
+    # An edit that tries to rename it is ignored: devices authenticate with the
+    # extension number, and the name can never drift away from it.
+    store.save_extension({"extension": "101", "sip_password": "chosen", "sip_username": "renamed"}, user_id)
+    row = next(item for item in store.list_extensions(user_id) if item["extension"] == "101")
+    assert row["sip_username"] == "101"
+    assert store.reveal_extension_credentials("101", user_id)["sip_username"] == "101"
+    with store._connect() as db:  # noqa: SLF001 - asserting the schema, not the API
+        indexes = [row["name"] for row in db.execute("PRAGMA index_list(extensions)").fetchall()]
+    assert "idx_extensions_sip_username" in indexes
+
+
+def test_administrators_cannot_place_calls(tmp_path):
+    """The administrator manages the platform; dialling is the customer's action."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    response = admin.post("/admin/api/calls", json={"phone": "+13025550123", "extension": "101"})
+    assert response.status_code == 403, response.json
+    assert "do not place calls" in response.json["error"]

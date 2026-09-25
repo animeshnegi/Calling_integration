@@ -238,7 +238,7 @@ function showPage(name) {
   document.querySelector('.content')?.scrollTo?.({ top: 0, behavior: 'auto' });
   window.scrollTo({ top: 0, behavior: 'auto' });
   if (!$('workspace').classList.contains('open')) $('scrim').classList.remove('open');
-  if (name === 'routing') { renderFlow(); renderGroups(); }
+  if (name === 'routing') { renderRoutingOwner(); renderFlow(); renderGroups(); }
   if (name === 'calls') loadCalls();
   if (name === 'recordings') loadRecordings();
   if (name === 'voicemails') loadVoicemails();
@@ -307,14 +307,14 @@ async function loadAnalytics() {
     $('metric-duration').textContent = fmtDuration(data.average_duration_seconds);
     $('metric-direction').textContent = `${fmtNum(data.inbound)} / ${fmtNum(data.outbound)}`;
     const max = Math.max(1, ...data.daily.map(d => d.total));
-    $('call-trend').innerHTML = data.daily.map((day, i) => `
+    paint('call-trend', data.daily.map((day, i) => `
       <div class="chart-day" title="${esc(day.date)}: ${day.answered} answered of ${day.total}">
         <i style="height:${Math.max(3, (day.total / max) * 100)}%"></i>
         <b style="height:${Math.max(3, (day.answered / max) * 100)}%"></b>
         ${i % 2 === 0 ? `<small>${esc(String(day.date).slice(5))}</small>` : ''}
-      </div>`).join('');
+      </div>`).join(''));
   } catch {
-    $('call-trend').innerHTML = empty('Analytics unavailable', 'Call metrics will retry automatically.', '◷');
+    paint('call-trend', empty('Analytics unavailable', 'Call metrics will retry automatically.', '◷'));
   }
 }
 
@@ -323,7 +323,7 @@ async function loadRecent() {
   if (!target) return;
   try {
     const data = await api('/admin/api/calls?limit=6');
-    target.innerHTML = callTable(data.calls);
+    paint(target, callTable(data.calls));
   } catch (error) { notify(error.message, true); }
 }
 
@@ -339,12 +339,27 @@ function signatureOf(payload) {
 }
 /* Animation is enabled for anything the operator drives from here on. */
 function endQuiet() { document.body.classList.remove('updating'); }
+/* True while a background refresh is repainting. Loading placeholders belong to
+   first paint and to what the operator asked for; a silent refresh keeps the
+   content that is already on screen and only swaps in data that changed. */
+let quietRender = false;
+/* Replace a host's markup only when it actually differs. Rewriting an identical
+   table still repaints it, which reads as a flicker on a slow screen. */
+function paint(id, html, force = false) {
+  const host = typeof id === 'string' ? $(id) : id;
+  if (!host) return false;
+  if (!force && host.innerHTML === html) return false;
+  host.innerHTML = html;
+  return true;
+}
 function quietly(task) {
   document.body.classList.add('updating');
-  // Deliberately not removed here: `updating` is cleared by the next navigation
-  // (showPage). Removing it right after the repaint would restore the animations
-  // on the nodes just rendered and replay the entrance a frame later.
-  return task();
+  const prior = quietRender;
+  quietRender = true;
+  try { return task(); } finally { quietRender = prior; }
+  // `updating` is deliberately not removed here: it is cleared by the next
+  // navigation (showPage). Removing it right after the repaint would restore the
+  // animations on the nodes just rendered and replay the entrance a frame later.
 }
 
 async function loadState() {
@@ -449,6 +464,7 @@ function renderAll() {
   renderSelects();
   renderSettings();
   renderEmailSettings();
+  renderRoutingOwner();
   renderFlow();
 
   const myExtension = state.extensions.find(x => x.extension === state.assigned_extension);
@@ -468,7 +484,7 @@ function renderCustomers() {
   const rows = state.customers.filter(c =>
     `${c.company_name} ${c.full_name} ${c.username} ${c.email} ${c.phone}`.toLowerCase().includes(query));
   $('customer-count').textContent = `${rows.length} customer${rows.length === 1 ? '' : 's'}`;
-  $('user-list').innerHTML = rows.map((c, i) => `
+  paint('user-list', rows.map((c, i) => `
     <article class="glass-card card-enter" style="--i:${Math.min(i, 10)}">
       <div class="glass-card-head">
         <span class="ws-glyph">${esc((c.company_name || c.username || 'C')[0].toUpperCase())}</span>
@@ -489,16 +505,16 @@ function renderCustomers() {
         <button class="btn ghost sm" data-edit-user="${c.id}">Edit details</button>
       </div>
     </article>`).join('') || empty('No customers yet', 'Create a customer, or wait for a public signup.', '◍', '',
-      emptyAction('Create customer', 'data-open="user"', true));
+      emptyAction('Create customer', 'data-open="user"', true)));
 
-  $('platform-admin-list').innerHTML = state.users.filter(u => u.role === 'admin').map(u => `
+  paint('platform-admin-list', state.users.filter(u => u.role === 'admin').map(u => `
     <div class="row">
       <span class="row-icon">${esc((u.username || 'A')[0].toUpperCase())}</span>
       <div><h3>${esc(u.username)}</h3><p>${esc(u.email)}</p></div>
       <div class="tags">${u.active ? tag('Active', 'on') : tag('Disabled', 'off')}${tag('Administrator', 'violet')}</div>
       <div class="row-actions"><button class="btn danger sm" data-delete-user="${u.id}">Delete</button></div>
-    </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂');
-  if (currentPage === 'routing') { renderFlow($('route-target')?.value); renderGroups(); }
+    </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂'));
+  if (currentPage === 'routing') { renderRoutingOwner(); renderFlow($('route-target')?.value); renderGroups(); }
   markStagger();
 }
 
@@ -532,17 +548,17 @@ function renderExtensions() {
       const owner = state.users.find(u => u.id === x.owner_user_id);
       return owner?.company_name || owner?.username || 'Platform / unassigned';
     });
-    $('extension-list').innerHTML = Object.entries(groups).map(([name, items]) => `
+    paint('extension-list', Object.entries(groups).map(([name, items]) => `
       <div class="acc-item open">
         <div class="acc-head"><span class="row-icon">${esc(name[0].toUpperCase())}</span>
           <div><h3 style="font-size:13px">${esc(name)}</h3><p style="font-size:11px;color:var(--text-3)">${items.length} extension${items.length === 1 ? '' : 's'}</p></div>
           <span class="chev">›</span>
         </div>
         <div class="acc-body" style="padding:0">${items.map(card).join('')}</div>
-      </div>`).join('') || empty('No extensions found', 'Open a customer workspace to create an extension.', '⌁');
+      </div>`).join('') || empty('No extensions found', 'Open a customer workspace to create an extension.', '⌁'));
   } else {
-    $('extension-list').innerHTML = rows.map(card).join('') || empty('No extensions yet', 'Create departments such as Sales, Support or Operations.', '⌁', '',
-      emptyAction('Create extension', 'data-open="extension"', true));
+    paint('extension-list', rows.map(card).join('') || empty('No extensions yet', 'Create departments such as Sales, Support or Operations.', '⌁', '',
+      emptyAction('Create extension', 'data-open="extension"', true)));
   }
   markStagger();
 }
@@ -552,7 +568,7 @@ function renderNumbers() {
   const query = val('number-search').toLowerCase();
   const rows = state.phone_numbers.filter(x => `${x.number} ${x.provider} ${x.description} ${x.inbound_extension}`.toLowerCase().includes(query));
   $('number-count').textContent = `${rows.length} number${rows.length === 1 ? '' : 's'}`;
-  $('number-list').innerHTML = rows.map(x => {
+  paint('number-list', rows.map(x => {
     const owner = state.users.find(u => u.id === x.owner_user_id);
     const sip = state.sip_accounts.find(s => s.phone_number === x.number);
     const expiring = x.discontinue_at && x.discontinue_at <= new Date().toISOString().slice(0, 10);
@@ -581,13 +597,13 @@ function renderNumbers() {
       </div>
     </div>`;
   }).join('') || empty('No phone numbers', state.is_admin ? 'Assign a number from a customer workspace.' : 'Request a number to get started.', '☎', '',
-      state.is_admin ? emptyAction('Assign a number', 'data-open="number"', true) : emptyAction('Request a number', 'data-open="request"', true));
+      state.is_admin ? emptyAction('Assign a number', 'data-open="number"', true) : emptyAction('Request a number', 'data-open="request"', true)));
   markStagger();
 }
 
 /* --------------------------------------------------- 12. Render: providers */
 function renderProviders() {
-  $('provider-list').innerHTML = state.providers.map(x => `
+  paint('provider-list', state.providers.map(x => `
     <div class="row">
       <span class="row-icon">⇄</span>
       <div><h3>${esc(x.name)}</h3><p>${esc(x.server)}:${esc(x.port)} · ${esc(String(x.transport).toUpperCase())}</p></div>
@@ -603,7 +619,7 @@ function renderProviders() {
         <button class="btn danger sm" data-delete-provider="${x.id}">Delete</button>
       </div>
     </div>`).join('') || empty('No SIP providers', 'Add a carrier before assigning phone numbers.', '⇄', '',
-      emptyAction('Add provider', 'data-open="provider"', true));
+      emptyAction('Add provider', 'data-open="provider"', true)));
   markStagger();
 }
 
@@ -613,9 +629,11 @@ function renderProviders() {
 function renderExtensionCredentials() {
   const host = $('extension-credential-list');
   if (!host) return;
-  const rows = (state.extensions || []).filter(x => x.active);
-  $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
+  const query = val('sip-search').toLowerCase();
   const numbers = extension => (state.phone_numbers || []).filter(x => x.inbound_extension === extension).map(x => x.number);
+  const rows = (state.extensions || []).filter(x => x.active).filter(x =>
+    `${x.extension} ${x.display_name || ''} ${x.sip_username || ''} ${numbers(x.extension).join(' ')}`.toLowerCase().includes(query));
+  $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
   host.innerHTML = rows.map(x => {
     const linked = numbers(x.extension);
     const flows = (state.routing_flows || []).filter(flow => flow.target_type === 'extension' && flow.target === x.extension);
@@ -634,9 +652,11 @@ function renderExtensionCredentials() {
 }
 
 function renderSipAccounts() {
-  const rows = state.sip_accounts || [];
+  const query = val('sip-search').toLowerCase();
+  const rows = (state.sip_accounts || []).filter(x =>
+    `${x.label} ${x.sip_username} ${x.extension || ''} ${x.phone_number || ''}`.toLowerCase().includes(query));
   $('sip-count').textContent = `${rows.length} account${rows.length === 1 ? '' : 's'}`;
-  $('sip-account-list').innerHTML = rows.map((x, i) => {
+  paint('sip-account-list', rows.map((x, i) => {
     const owner = state.users.find(u => u.id === x.owner_user_id);
     return `
     <article class="glass-card card-enter" style="--i:${Math.min(i, 10)}">
@@ -657,14 +677,14 @@ function renderSipAccounts() {
       </div>
     </article>`;
   }).join('') || empty('No devices yet', state.is_admin ? 'Assign SIP credentials here or from a customer workspace.' : 'Add the phone or softphone you want to connect.', '◈', '',
-      emptyAction(state.is_admin ? 'Assign SIP service' : 'Add a device', 'data-open="sipaccount"', true));
+      emptyAction(state.is_admin ? 'Assign SIP service' : 'Add a device', 'data-open="sipaccount"', true)));
   renderExtensionCredentials();
   markStagger();
 }
 
 /* ------------------------------------------------- 14. Render: API & hooks */
 function renderApiKeys() {
-  $('api-key-list').innerHTML = (state.api_keys || []).map(x => `
+  paint('api-key-list', (state.api_keys || []).map(x => `
     <div class="row">
       <span class="row-icon">⌘</span>
       <div><h3>${esc(x.name)}</h3><p><code>${esc(x.prefix)}…</code> · created ${esc(fmtDay(x.created_at))}</p></div>
@@ -675,12 +695,12 @@ function renderApiKeys() {
       </div>
       <div class="row-actions"><button class="btn danger sm" data-revoke-key="${x.id}">Revoke</button></div>
     </div>`).join('') || empty('No API keys', 'Create a scoped key so your own software can call the EIP API.', '⌘', '',
-      emptyAction('Create API key', 'data-open="apikey"', true));
+      emptyAction('Create API key', 'data-open="apikey"', true)));
   markStagger();
 }
 
 function renderWebhooks() {
-  $('webhook-list').innerHTML = state.webhooks.map(x => `
+  paint('webhook-list', state.webhooks.map(x => `
     <div class="row">
       <span class="row-icon">◇</span>
       <div><h3>${esc(x.name)}</h3><p>${esc(x.url)}</p></div>
@@ -695,14 +715,14 @@ function renderWebhooks() {
         <button class="btn danger sm" data-delete-webhook="${x.id}">Delete</button>
       </div>
     </div>`).join('') || empty('No webhook endpoints', 'Add an endpoint to push call events to your CRM.', '◇', '',
-      emptyAction('Add webhook', 'data-open="webhook"', true));
+      emptyAction('Add webhook', 'data-open="webhook"', true)));
   markStagger();
 }
 
 function renderDeliveries() {
   const rows = state.webhook_deliveries || [];
   $('delivery-count').textContent = `${rows.length} deliver${rows.length === 1 ? 'y' : 'ies'}`;
-  $('webhook-delivery-list').innerHTML = rows.length ? `
+  paint('webhook-delivery-list', rows.length ? `
     <table class="data"><thead><tr><th>Event</th><th>Endpoint</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Last error</th></tr></thead>
     <tbody>${rows.map(x => `<tr>
       <td class="cell-strong">${esc(x.event)}</td>
@@ -711,7 +731,7 @@ function renderDeliveries() {
       <td>${esc(x.attempts)}</td>
       <td>${esc(fmtDate(x.updated_at))}</td>
       <td>${esc(x.last_error || '—')}</td>
-    </tr>`).join('')}</tbody></table>` : empty('No deliveries yet', 'Delivery attempts appear here once calls trigger your endpoints.', '◇');
+    </tr>`).join('')}</tbody></table>` : empty('No deliveries yet', 'Delivery attempts appear here once calls trigger your endpoints.', '◇'));
 }
 
 /* ------------------------------------------------ 15. Render: requests etc */
@@ -719,7 +739,7 @@ function renderRequests() {
   const rows = state.requests || [];
   const pending = rows.filter(r => r.status === 'pending');
   $('request-count').textContent = `${pending.length} pending`;
-  $('request-list').innerHTML = rows.map(x => `
+  paint('request-list', rows.map(x => `
     <div class="row">
       <span class="row-icon">↗</span>
       <div><h3>${esc(x.company_name || x.username)} · ${esc(String(x.request_type).replaceAll('_', ' '))}</h3><p>${esc(x.details)}</p></div>
@@ -730,7 +750,7 @@ function renderRequests() {
           <button class="btn ghost sm" data-assign-request="${x.id}:${x.user_id}">Assign number</button>
           <button class="btn danger sm" data-resolve-request="${x.id}:rejected">Reject</button>` : ''}
       </div>
-    </div>`).join('') || empty('No requests', 'Customer number and access requests will appear here.', '↗');
+    </div>`).join('') || empty('No requests', 'Customer number and access requests will appear here.', '↗'));
   markStagger();
 }
 
@@ -783,7 +803,7 @@ function renderMyRequests() {
       <span class="tick">${glyph}</span>${esc(label)}</button>`);
   });
   journey.push('</div>');
-  $('customer-journey').innerHTML = journey.join('');
+  paint('customer-journey', journey.join(''));
   markStagger();
 }
 
@@ -793,27 +813,27 @@ function myWebhooks() {
 }
 
 function renderActivity() {
-  $('activity-list').innerHTML = (state.activity || []).map(x => `
+  paint('activity-list', (state.activity || []).map(x => `
     <div class="tl-item"><b>${esc(x.description)}</b><p>${esc(String(x.action).replaceAll('.', ' '))} · ${esc(x.resource_type)}</p><small>${esc(fmtDate(x.created_at))}</small></div>
-  `).join('') || empty('No activity yet', 'Important platform changes will be recorded here.', '◌');
+  `).join('') || empty('No activity yet', 'Important platform changes will be recorded here.', '◌'));
   markStagger();
 }
 
 function renderNotifications() {
-  $('notification-list').innerHTML = (state.notifications || []).map(x => `
+  paint('notification-list', (state.notifications || []).map(x => `
     <div class="row">
       <span class="row-icon">${x.read_at ? '○' : '●'}</span>
       <div><h3>${esc(x.title)}</h3><p>${esc(x.message)}</p></div>
       <div>${x.read_at ? tag('Read') : tag('Unread', 'warn')}<p style="font-size:11px;color:var(--text-3);margin-top:6px">${esc(fmtDate(x.created_at))}</p></div>
       <div class="row-actions">${x.read_at ? '' : `<button class="btn ghost sm" data-read-notification="${x.id}">Mark read</button>`}</div>
-    </div>`).join('') || empty('You are all caught up', 'New assignments and service events will appear here.', '●');
+    </div>`).join('') || empty('You are all caught up', 'New assignments and service events will appear here.', '●'));
   markStagger();
 }
 
 /* --------------------------------------------------- 16. Render: billing */
 function renderBilling() {
   const numbers = state.phone_numbers || [];
-  $('subscription-list').innerHTML = numbers.map(x => `
+  paint('subscription-list', numbers.map(x => `
     <div class="row">
       <span class="row-icon">$</span>
       <div><h3>${esc(x.number)}</h3><p>${esc(x.description || 'EIP phone number')}</p></div>
@@ -823,10 +843,10 @@ function renderBilling() {
         ${x.discontinue_at ? tag(`Ends ${fmtDay(x.discontinue_at)}`, 'off') : ''}
       </div>
       <div class="row-actions">${!state.is_admin && !x.discontinue_at ? `<button class="btn danger sm" data-discontinue-number="${esc(x.number)}">Discontinue at renewal</button>` : ''}</div>
-    </div>`).join('') || empty('No active subscriptions', state.is_admin ? 'Assign a number to start billing.' : 'An administrator will assign your phone numbers.', '▣');
+    </div>`).join('') || empty('No active subscriptions', state.is_admin ? 'Assign a number to start billing.' : 'An administrator will assign your phone numbers.', '▣'));
 
   const invoices = state.invoices || [];
-  $('invoice-list').innerHTML = invoices.length ? `
+  paint('invoice-list', invoices.length ? `
     <table class="data"><thead><tr><th>Invoice</th><th>Number</th><th>Period</th><th>Amount</th><th>Status</th><th>Due</th><th>Action</th></tr></thead>
     <tbody>${invoices.map(x => `<tr>
       <td class="cell-strong">#${esc(x.id)}</td>
@@ -836,7 +856,7 @@ function renderBilling() {
       <td>${statusPill(x.status)}</td>
       <td>${esc(fmtDay(x.due_at))}</td>
       <td>${state.is_admin && x.status === 'open' ? `<button class="btn ghost sm" data-paid-invoice="${x.id}">Mark paid</button>` : '—'}</td>
-    </tr>`).join('')}</tbody></table>` : empty('No invoices yet', 'Invoices appear automatically for assigned numbers.', '▣');
+    </tr>`).join('')}</tbody></table>` : empty('No invoices yet', 'Invoices appear automatically for assigned numbers.', '▣'));
   markStagger();
 }
 
@@ -851,12 +871,12 @@ function renderSelects() {
   if (customerSelect) customerSelect.innerHTML = '<option value="">All customers</option>' + state.customers
     .map(x => `<option value="${x.id}">${esc(x.company_name || x.username)}</option>`).join('');
   const allExtensions = `<option value="">All extensions</option>${optionList()}`;
-  $('call-extension').innerHTML = allExtensions;
-  $('recording-extension').innerHTML = allExtensions;
-  $('voicemail-extension').innerHTML = `<option value="">All mailboxes</option>${state.extensions
-    .filter(x => x.voicemail_enabled).map(x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}`;
-  $('default-extension').innerHTML = optionList();
-  $('inbound-fallback').innerHTML = optionList();
+  paint('call-extension', allExtensions);
+  paint('recording-extension', allExtensions);
+  paint('voicemail-extension', `<option value="">All mailboxes</option>${state.extensions
+    .filter(x => x.voicemail_enabled).map(x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}`);
+  paint('default-extension', optionList());
+  paint('inbound-fallback', optionList());
 }
 
 function renderSettings() {
@@ -881,12 +901,12 @@ function renderEmailSettings() {
   $('sendgrid-name').value = config.from_name || 'EIP Telephony Voicemail';
   $('sendgrid-key-status').textContent = config.has_api_key ? 'API key configured — leave blank to keep it' : 'No API key configured';
   const rows = state.email_deliveries || [];
-  $('email-delivery-list').innerHTML = rows.length ? `
+  paint('email-delivery-list', rows.length ? `
     <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
     <tbody>${rows.map(x => `<tr>
       <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${statusPill(x.status, `mail-${x.id}`)}</td>
       <td>${esc(x.attempts)}</td><td>${esc(fmtDate(x.updated_at))}</td><td>${esc(x.last_error || '—')}</td>
-    </tr>`).join('')}</tbody></table>` : empty('No delivery attempts', 'New voicemail email attempts will appear here.', '✎');
+    </tr>`).join('')}</tbody></table>` : empty('No delivery attempts', 'New voicemail email attempts will appear here.', '✎'));
 }
 
 /* ------------------------------------------------------ 18. Call tables */
@@ -911,16 +931,18 @@ async function loadCalls() {
   if (val('call-extension')) params.set('extension', val('call-extension'));
   if (val('call-status')) params.set('status', val('call-status'));
   if (val('call-search')) params.set('q', val('call-search'));
-  $('call-list').innerHTML = skeletonRows(6);
-  setLoading($('call-list'), true);
+  if (!quietRender) {
+    paint('call-list', skeletonRows(6), true);
+    setLoading($('call-list'), true);
+  }
   try {
     const data = await api(`/admin/api/calls?${params}`);
     $('call-count').textContent = `${fmtNum(data.total)} call${data.total === 1 ? '' : 's'}`;
-    $('call-list').innerHTML = callTable(data.calls);
+    paint('call-list', callTable(data.calls));
     renderPager('call-pager', data.total, callOffset, value => { callOffset = value; loadCalls(); });
     markStagger();
   } catch (error) {
-    $('call-list').innerHTML = errorState('Calls could not be loaded', error.message, 'calls');
+    paint('call-list', errorState('Calls could not be loaded', error.message, 'calls'));
     notify(error.message, true);
   } finally {
     setLoading($('call-list'), false);
@@ -952,7 +974,7 @@ async function loadRecordings() {
   const params = new URLSearchParams({ limit: '50', offset: String(recordingOffset), recordings: 'true' });
   if (val('recording-extension')) params.set('extension', val('recording-extension'));
   if (val('recording-search')) params.set('q', val('recording-search'));
-  setLoading($('recording-list'), true);
+  if (!quietRender) setLoading($('recording-list'), true);
   try {
     const data = await api(`/admin/api/calls?${params}`);
     const customerId = Number(val('recording-customer') || 0);
@@ -964,7 +986,7 @@ async function loadRecordings() {
       (!to || String(x.started_at).slice(0, 10) <= to));
     $('recording-count').textContent = `${calls.length} recording${calls.length === 1 ? '' : 's'}`;
     const groups = groupBy(calls, x => x.extension);
-    $('recording-list').innerHTML = Object.entries(groups).map(([ext, items]) => `
+    paint('recording-list', Object.entries(groups).map(([ext, items]) => `
       <div class="acc-item open">
         <div class="acc-head">
           <span class="row-icon">◉</span>
@@ -984,11 +1006,11 @@ async function loadRecordings() {
                 : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
             </div>
           </div>`).join('')}</div>
-      </div>`).join('') || empty('No recordings found', 'Try another extension, or complete a recorded call.', '◉');
+      </div>`).join('') || empty('No recordings found', 'Try another extension, or complete a recorded call.', '◉'));
     renderPager('recording-pager', data.total, recordingOffset, value => { recordingOffset = value; loadRecordings(); });
     markStagger();
   } catch (error) {
-    $('recording-list').innerHTML = errorState('Recordings could not be loaded', error.message, 'recordings');
+    paint('recording-list', errorState('Recordings could not be loaded', error.message, 'recordings'));
     notify(error.message, true);
   } finally {
     setLoading($('recording-list'), false);
@@ -1000,14 +1022,14 @@ async function loadVoicemails() {
   const params = new URLSearchParams();
   if (val('voicemail-extension')) params.set('extension', val('voicemail-extension'));
   if (val('voicemail-folder')) params.set('folder', val('voicemail-folder'));
-  setLoading($('voicemail-list'), true);
+  if (!quietRender) setLoading($('voicemail-list'), true);
   try {
     const data = await api(`/admin/api/voicemails?${params}`);
     const query = val('voicemail-search').toLowerCase();
     const messages = data.voicemails.filter(x => `${x.caller_id} ${x.message} ${x.mailbox}`.toLowerCase().includes(query));
     $('voicemail-count').textContent = `${messages.length} message${messages.length === 1 ? '' : 's'}`;
     const groups = groupBy(messages, x => x.mailbox);
-    $('voicemail-list').innerHTML = Object.entries(groups).map(([mailbox, items]) => `
+    paint('voicemail-list', Object.entries(groups).map(([mailbox, items]) => `
       <div class="acc-item open">
         <div class="acc-head">
           <span class="row-icon">✉</span>
@@ -1027,10 +1049,10 @@ async function loadVoicemails() {
               <button class="btn danger sm" data-delete-voicemail="${esc(x.mailbox)}:${esc(x.folder)}:${esc(x.message)}">Delete</button>
             </div>
           </div>`).join('')}</div>
-      </div>`).join('') || empty('No voicemail messages', 'Enable voicemail on an extension and unanswered callers can leave a message.', '✉');
+      </div>`).join('') || empty('No voicemail messages', 'Enable voicemail on an extension and unanswered callers can leave a message.', '✉'));
     markStagger();
   } catch (error) {
-    $('voicemail-list').innerHTML = errorState('Voicemail could not be loaded', error.message, 'voicemails');
+    paint('voicemail-list', errorState('Voicemail could not be loaded', error.message, 'voicemails'));
     notify(error.message, true);
   } finally {
     setLoading($('voicemail-list'), false);
@@ -1062,35 +1084,55 @@ function flowTargetParts(raw) {
   const [type, ...rest] = String(raw || '').split(':');
   return { type, target: rest.join(':') };
 }
+/* Call flows describe one customer's lines, so the builder always works inside
+   a customer: a customer session is that customer, an administrator picks one. */
+function routingOwner() {
+  if (!state.is_admin) return Number(state.user_id) || null;
+  const chosen = Number(val('route-owner'));
+  return Number.isFinite(chosen) && chosen ? chosen : null;
+}
+
 function flowOwnerId() {
   const { type, target } = flowTargetParts($('route-target')?.value);
-  if (type === 'number') return (state.phone_numbers || []).find(x => x.number === target)?.owner_user_id ?? null;
-  if (type === 'extension') return (state.extensions || []).find(x => x.extension === target)?.owner_user_id ?? null;
-  if (type === 'group') return (state.groups || []).find(x => String(x.id) === String(target))?.owner_user_id ?? null;
-  return null;
+  if (type === 'number') return (state.phone_numbers || []).find(x => x.number === target)?.owner_user_id ?? routingOwner();
+  if (type === 'extension') return (state.extensions || []).find(x => x.extension === target)?.owner_user_id ?? routingOwner();
+  if (type === 'group') return (state.groups || []).find(x => String(x.id) === String(target))?.owner_user_id ?? routingOwner();
+  return routingOwner();
 }
 function routeTargets() {
   const targets = [];
-  // An administrator sees every customer's targets in one list, so each label
-  // names its owner; a customer only ever sees their own.
-  const ownerName = id => {
-    if (!state.is_admin) return '';
-    const owner = (state.users || []).find(u => u.id === id);
-    return owner ? ` · ${owner.company_name || owner.username}` : ' · platform';
-  };
-  (state.phone_numbers || []).forEach(x => targets.push({
+  const owner = routingOwner();
+  // A flow belongs to one customer, so the builder only offers that customer's
+  // numbers, extensions and groups. Unassigned platform numbers stay listed as
+  // a reminder that they cannot carry a customer flow yet.
+  const mine = row => !state.is_admin || owner === null || row.owner_user_id === owner || !row.owner_user_id;
+  (state.phone_numbers || []).filter(mine).forEach(x => targets.push({
     key: flowKey('number', x.number), section: 'Numbers', type: 'number', target: x.number,
-    label: `${x.number} — ${x.description || (x.inbound_extension ? `ext ${x.inbound_extension}` : 'unassigned')}${ownerName(x.owner_user_id)}`,
+    label: `${x.number} — ${x.description || (x.inbound_extension ? `ext ${x.inbound_extension}` : 'unassigned')}${x.owner_user_id ? '' : ' · not assigned'}`,
   }));
-  (state.extensions || []).filter(x => x.active).forEach(x => targets.push({
+  (state.extensions || []).filter(x => x.active && mine(x)).forEach(x => targets.push({
     key: flowKey('extension', x.extension), section: 'Extensions', type: 'extension', target: x.extension,
-    label: `${x.extension} — ${x.display_name || 'Extension'}${ownerName(x.owner_user_id)}`,
+    label: `${x.extension} — ${x.display_name || 'Extension'}`,
   }));
-  (state.groups || []).forEach(group => targets.push({
+  (state.groups || []).filter(mine).forEach(group => targets.push({
     key: flowKey('group', group.id), section: 'Groups', type: 'group', target: String(group.id),
-    label: `${group.name} — ${group.members.length} member${group.members.length === 1 ? '' : 's'}${ownerName(group.owner_user_id)}`,
+    label: `${group.name} — ${group.members.length} member${group.members.length === 1 ? '' : 's'}`,
   }));
   return targets;
+}
+
+/* The customer picker the administrator routes for. Customers see their own. */
+function renderRoutingOwner(preferred) {
+  const select = $('route-owner');
+  if (!select) return;
+  if (!state.is_admin) { select.hidden = true; select.innerHTML = ''; return; }
+  const customers = (state.customers || []).length ? state.customers : (state.users || []).filter(u => u.role === 'user');
+  // Prefer what the operator chose, then the customer whose workspace is open,
+  // then whoever the picker was already showing.
+  const prior = String(preferred ?? select.value ?? workspace?.customer?.id ?? '');
+  select.innerHTML = customers.map(c => `<option value="${c.id}">${esc(c.company_name || c.username)}</option>`).join('')
+    || '<option value="">No customers yet</option>';
+  if (customers.some(c => String(c.id) === prior)) select.value = prior;
 }
 /* Every flow that belongs to one owner, in the shape the pickers expect. */
 function allFlowsFor(ownerUserId) {
@@ -1124,6 +1166,24 @@ function renderRouteTargets(preferred) {
   else if (targets.length) select.value = targets[0].key;
   else select.innerHTML = '<option value="">No target yet</option>';
   return select.value;
+}
+
+/* Open the builder on one target, from any page. An administrator lands on the
+   customer that target belongs to, so saving can never write across customers. */
+function focusRouteTarget(key) {
+  if (!key) return;
+  if (state.is_admin && $('route-owner')) {
+    const { type, target } = flowTargetParts(key);
+    const owner = type === 'number'
+      ? (state.phone_numbers || []).find(row => row.number === target)?.owner_user_id
+      : type === 'extension'
+        ? (state.extensions || []).find(row => row.extension === target)?.owner_user_id
+        : (state.groups || []).find(row => String(row.id) === String(target))?.owner_user_id;
+    if (owner) renderRoutingOwner(owner);
+  }
+  renderRouteTargets(key);
+  renderFlow(key);
+  renderGroups();
 }
 
 function renderFlow(preferred) {
@@ -1174,11 +1234,11 @@ function renderFlowNodes() {
   const host = $('flow-nodes');
   if (!host) return;
   host.innerHTML = flowNodes.map((node, index) => `
-    <div class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="true" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
+    <div class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="${canDesignFlows()}" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
       <span class="icon ${FLOW_TILES[node.type] || 'tile-ext'}">${FLOW_ICONS[node.type] || '◇'}</span>
-      <div class="copy"><b>${esc(String(node.type).replaceAll('_', ' '))}</b><small>${esc(node.label || 'Click to configure this step')}</small></div>
+      <div class="copy"><b>${esc(String(node.type).replaceAll('_', ' '))}</b><small>${esc(node.label || (canDesignFlows() ? 'Click to configure this step' : 'Step in this call flow'))}</small></div>
       <span class="step">${String(index + 1).padStart(2, '0')}</span>
-      <button class="remove" data-remove-node="${index}" aria-label="Remove step">✕</button>
+      ${canDesignFlows() ? `<button class="remove" data-remove-node="${index}" aria-label="Remove step">✕</button>` : ''}
     </div>`).join('');
   $('flow-canvas').classList.toggle('has-nodes', flowNodes.length > 0);
 }
@@ -1388,12 +1448,12 @@ const templates = {
         <label class="field">Employee / display name<input name="display_name" maxlength="120" placeholder="Sales desk" value="${esc(item?.display_name || '')}"></label>
       </div>
       <div class="field-row">
-        <label class="field">SIP username<input name="sip_username" maxlength="80" placeholder="Defaults to extension" value="${esc(item?.sip_username || '')}"></label>
+        <label class="field">SIP username<input name="sip_username" readonly value="${esc(item?.sip_username || '')}" placeholder="Equals the extension number" aria-describedby="sip-username-note"><small id="sip-username-note">Fixed by the platform — this is what the device authenticates with.</small></label>
         <label class="field">SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Leave blank to generate one'}"></label>
       </div>
       <div class="credential-note">${item
-        ? `<span>Credentials are created automatically and can be changed any time.</span><button class="btn ghost sm" type="button" data-reveal-extension="${esc(item.extension)}">Reveal credentials</button>`
-        : '<span>A SIP username and a strong password are generated for this extension, and it gets a default call flow straight away.</span>'}</div>
+        ? `<span>Credentials are created automatically. The username never changes; the password is yours to set.</span><button class="btn ghost sm" type="button" data-reveal-extension="${esc(item.extension)}">Reveal credentials</button>`
+        : '<span>A SIP password is generated for this extension, and it gets a default call flow straight away.</span>'}</div>
       <label class="check" style="margin-bottom:13px"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Active and allowed to make calls</label>
       <label class="check" style="margin-bottom:13px"><input name="recording_enabled" type="checkbox" ${item?.recording_enabled ? 'checked' : ''}> Allow recording when global recording is enabled</label>
       <div class="field-row">
@@ -1449,7 +1509,7 @@ const templates = {
       .map(x => `<option value="${x.id}" ${item?.owner_user_id === x.id ? 'selected' : ''}>${esc(x.company_name || x.username)}</option>`).join('')}</select></label>
       <div class="field-row">
         <label class="field">Label<input name="label" required value="${esc(item?.label || 'Primary softphone')}"></label>
-        <label class="field">SIP username<input name="sip_username" required value="${esc(item?.sip_username || '')}"></label>
+        <label class="field">SIP username<input name="sip_username" required readonly value="${esc(item?.sip_username || '')}" placeholder="Extension or account name" aria-describedby="sip-device-note"><small id="sip-device-note">Fixed by the platform. Linked to an extension it equals that extension's number.</small></label>
       </div>
       <div class="field-row">
         <label class="field">SIP password<input name="sip_password" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Required'}"></label>
@@ -1579,6 +1639,13 @@ function openModal(type, item = null) {
     extension?.addEventListener('change', update);
     update();
   }
+  if (type === 'extension' && !editing) {
+    const number = $('modal-fields').querySelector('[name=extension]');
+    const username = $('modal-fields').querySelector('[name=sip_username]');
+    const mirror = () => { username.value = number.value; };
+    number.addEventListener('input', mirror);
+    mirror();
+  }
   if (type === 'number') {
     const owner = $('modal-fields').querySelector('[name=owner_user_id]');
     const extension = $('modal-fields').querySelector('[name=inbound_extension]');
@@ -1592,6 +1659,12 @@ function openModal(type, item = null) {
     const owner = $('modal-fields').querySelector('[name=owner_user_id]');
     const number = $('modal-fields').querySelector('[name=phone_number]');
     const extension = $('modal-fields').querySelector('[name=extension]');
+    const username = $('modal-fields').querySelector('[name=sip_username]');
+    // Picking an extension hands the device that extension's identity, so the
+    // name follows the extension instead of being typed.
+    const syncUsername = () => { username.value = extension.value || (item?.sip_username && !item.extension ? item.sip_username : ''); };
+    extension?.addEventListener('change', syncUsername);
+    syncUsername();
     const update = () => {
       const id = Number(owner.value);
       number.innerHTML = '<option value="">None</option>' + state.phone_numbers.filter(x => x.owner_user_id === id)
@@ -1762,10 +1835,10 @@ async function openCustomer(customerId, tab = 'overview', silent = false) {
   if (!state.is_admin) return;
   try {
     if (!silent) {
-      $('ws-body').innerHTML = skeletonPanel(4);
-      $('ws-status').innerHTML = '<div class="skeleton line w-60" style="margin:0"></div>';
-      $('ws-quick').innerHTML = '';
-      $('ws-recent').innerHTML = '';
+      paint('ws-body', skeletonPanel(4));
+      paint('ws-status', '<div class="skeleton line w-60" style="margin:0"></div>');
+      paint('ws-quick', '');
+      paint('ws-recent', '');
     }
     workspace = await api(`/admin/api/customers/${customerId}`);
     if (silent) {
@@ -1808,16 +1881,16 @@ function renderWsHeader() {
   avatar.classList.add('pop');
   $('ws-title').textContent = c.company_name || c.username;
   $('ws-meta').textContent = `${c.full_name || c.username} · ${c.email}`;
-  $('ws-flags').innerHTML = [
+  paint('ws-flags', [
     c.active ? tag('Active', 'on') : tag('Access disabled', 'off'),
     c.username ? tag(c.username, '', '@') : '',
     c.job_role ? tag(c.job_role, 'violet') : '',
     overdue.length ? tag(`${overdue.length} payment due`, 'warn', '▣') : tag('Paid up', 'on', '▣'),
-  ].join('');
+  ].join(''));
 
   const deviceTone = !devices.length ? '' : online === devices.length ? 'ok' : online ? 'warn' : 'bad';
   const paymentTone = overdue.length ? 'bad' : openInvoices.length ? 'warn' : 'ok';
-  $('ws-status').innerHTML = [
+  paint('ws-status', [
     ['user', c.active ? 'Active account' : 'Access disabled', c.active ? 'ok' : 'bad',
       `Member since ${fmtDay(c.created_at)}`],
     ['devices', devices.length ? `${online} of ${devices.length} registered` : 'No devices yet',
@@ -1828,31 +1901,31 @@ function renderWsHeader() {
     ['requests', pendingRequests ? `${pendingRequests} awaiting decision` : 'Nothing pending',
       pendingRequests ? 'warn' : 'ok', `${workspace.requests.length} request${workspace.requests.length === 1 ? '' : 's'} raised`],
   ].map(([key, value, tone, hint]) => `<div class="ws-chip ${tone}" data-chip="${key}">
-      <i>${WS_CHIP_GLYPHS[key]}</i><p><small>${esc(hint)}</small><b>${esc(value)}</b></p></div>`).join('');
+      <i>${WS_CHIP_GLYPHS[key]}</i><p><small>${esc(hint)}</small><b>${esc(value)}</b></p></div>`).join(''));
 
   // Quick actions reuse the existing modals and pages — nothing new is created.
-  $('ws-quick').innerHTML = [
+  paint('ws-quick', [
     ['extension', 'Add extension', '⌁', 'data-open="extension"'],
     ['sipaccount', 'Add device', '◈', 'data-open="sipaccount"'],
     ['number', 'Assign number', '☎', 'data-open="number"'],
-    ['routing', 'Open call flow', '⌘', `data-ws-goto="routing"`],
+    ['routing', state.is_admin ? 'View call flows' : 'Open call flow', '⌘', `data-ws-goto="routing"`],
     ['customer', 'Edit customer', '✎', 'data-ws-edit-customer="1"'],
-  ].map(([, label, glyph, attr]) => `<button type="button" ${attr}><span class="glyph">${glyph}</span>${label}</button>`).join('');
+  ].map(([, label, glyph, attr]) => `<button type="button" ${attr}><span class="glyph">${glyph}</span>${label}</button>`).join(''));
 
   const recent = (workspace.activity || []).slice(0, 3);
-  $('ws-recent').innerHTML = recent.length
+  paint('ws-recent', recent.length
     ? recent.map(x => `<div class="tl-item"><b>${esc(x.description)}</b>
         <p>${esc(String(x.action).replaceAll('.', ' '))} · ${esc(x.resource_type)}</p>
         <small>${esc(fmtDate(x.created_at))}</small></div>`).join('')
-    : '<div class="tl-item"><b>No recorded activity yet</b><p>Provisioning and access changes will appear here.</p></div>';
+    : '<div class="tl-item"><b>No recorded activity yet</b><p>Provisioning and access changes will appear here.</p></div>');
 
-  $('ws-metrics').innerHTML = [
+  paint('ws-metrics', [
     ['☎', 'Numbers', workspace.numbers.length, 'ws-metric-numbers'],
     ['◈', 'Devices', devices.length, 'ws-metric-devices'],
     ['⌁', 'Extensions', workspace.extensions.length, 'ws-metric-extensions'],
     ['↗', 'Pending requests', pendingRequests, 'ws-metric-requests'],
   ].map(([glyph, label, value, id]) => `
-    <div class="ws-metric"><span class="glyph">${glyph}</span><p><small>${label}</small><b id="${id}">0</b></p></div>`).join('');
+    <div class="ws-metric"><span class="glyph">${glyph}</span><p><small>${label}</small><b id="${id}">0</b></p></div>`).join(''));
   [['ws-metric-numbers', workspace.numbers.length], ['ws-metric-devices', devices.length],
     ['ws-metric-extensions', workspace.extensions.length], ['ws-metric-requests', pendingRequests]]
     .forEach(([id, value]) => countTo($(id), value));
@@ -1912,11 +1985,11 @@ function renderWsTabs() {
   const pending = workspace.requests.filter(r => r.status === 'pending').length;
   const counts = { numbers: workspace.numbers.length, devices: workspace.sip_accounts.length, requests: pending, integrations: wsOwned('webhooks').length + wsOwned('api_keys').length };
   const pulse = key => (counts[key] !== wsTabCounts[key] ? ' pulse' : '');
-  $('ws-tabs').innerHTML = WS_TABS.map(([key, glyph, label]) => `
+  paint('ws-tabs', WS_TABS.map(([key, glyph, label]) => `
     <button class="ws-tab ${key === wsTab ? 'active' : ''}" data-ws-tab="${key}">
       <span class="glyph">${glyph}</span>${esc(label)}
       ${counts[key] ? `<span class="dot${pulse(key)}">${counts[key]}</span>` : ''}
-    </button>`).join('') + '<span class="ws-tab-ink" id="ws-tab-ink" aria-hidden="true"></span>';
+    </button>`).join('') + '<span class="ws-tab-ink" id="ws-tab-ink" aria-hidden="true"></span>');
   wsTabCounts = { ...counts };
   moveTabInk();
 }
@@ -1974,20 +2047,20 @@ function wsOverview() {
   <section class="ws-section">
     <div class="ws-section-head"><div><h3>Needs attention</h3><p>Resource gaps and billing items for this customer.</p></div></div>
     <div class="ws-cards">
-      ${overdue.length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#f59e0b,#fbbf24)">!</span>
+      ${overdue.length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#b45309,#d97706)">!</span>
         <div><small>Billing</small><h4>${overdue.length} invoice${overdue.length === 1 ? '' : 's'} past due</h4></div>
         <button class="btn ghost sm" data-ws-tab="billing">Review</button></div></article>` : ''}
-      ${workspace.requests.filter(r => r.status === 'pending').length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#f43f5e,#fb7185)">↗</span>
+      ${workspace.requests.filter(r => r.status === 'pending').length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#be123c,#e11d48)">↗</span>
         <div><small>Requests</small><h4>${workspace.requests.filter(r => r.status === 'pending').length} request${workspace.requests.filter(r => r.status === 'pending').length === 1 ? '' : 's'} awaiting a decision</h4></div>
         <button class="btn primary sm" data-ws-tab="requests">Review</button></div></article>` : ''}
-      ${unlinked.length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#38bdf8,#7dd3fc)">☎</span>
+      ${unlinked.length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#0369a1,#0284c7)">☎</span>
         <div><small>Provisioning</small><h4>${unlinked.length} number${unlinked.length === 1 ? '' : 's'} without a device</h4></div>
         <button class="btn ghost sm" data-ws-tab="numbers">View numbers</button></div></article>` : ''}
       ${!routes.length ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">⌘</span>
         <div><small>Routing</small><h4>No call flow configured yet</h4></div>
         <button class="btn ghost sm" data-ws-tab="routing">Set up routing</button></div></article>` : ''}
       ${(!overdue.length && !workspace.requests.filter(r => r.status === 'pending').length && !unlinked.length && routes.length)
-        ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#22c55e,#4ade80)">✓</span>
+        ? `<article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#15803d,#16a34a)">✓</span>
           <div><small>Status</small><h4>Everything provisioned and up to date</h4></div></div></article>` : ''}
     </div>
   </section>
@@ -2117,15 +2190,15 @@ function wsRouting() {
             <small style="display:block;color:var(--text-3);font-size:11px">${esc(node.label || 'Not configured')}</small></div>
           <span class="step">${String(i + 1).padStart(2, '0')}</span>
         </div>`).join('') : '<small style="color:var(--text-3)">No steps configured for this number yet.</small>'}</div>
-      <div class="ws-card-actions"><button class="btn ghost sm" data-route-target="${esc(flow.key)}">Open in flow builder</button></div>
+      <div class="ws-card-actions"><button class="btn ghost sm" data-route-target="${esc(flow.key)}">${state.is_admin ? 'View this flow' : 'Open in flow builder'}</button></div>
     </article>`;
   }).join('');
   const unconfigured = workspace.numbers.filter(n => !flows.some(flow => flow.key === flowKey('number', n.number)));
   const flowsFor = type => flows.filter(flow => flow.type === type).length;
   const defaultTarget = workspace.numbers[0] ? flowKey('number', workspace.numbers[0].number) : flows[0]?.key || '';
   return `<section class="ws-section">
-    <div class="ws-section-head"><div><h3>Call routing</h3><p>Flows for this customer's numbers, extensions and groups.</p></div>
-      <button class="btn primary" data-route-target="${esc(defaultTarget)}">Open flow builder</button></div>
+    <div class="ws-section-head"><div><h3>Call routing</h3><p>${state.is_admin ? "The customer's flows, as their callers experience them." : "Flows for this customer's numbers, extensions and groups."}</p></div>
+      <button class="btn primary" data-route-target="${esc(defaultTarget)}">${state.is_admin ? 'View call flows' : 'Open flow builder'}</button></div>
     <div class="ws-status" style="margin-bottom:14px">
       <span class="ws-chip"><b>${flowsFor('number')}</b><small>number flows</small></span>
       <span class="ws-chip"><b>${flowsFor('extension')}</b><small>extension flows</small></span>
@@ -2172,7 +2245,7 @@ function wsRequestsTab() {
     <div class="ws-section-head"><div><h3>Customer requests</h3><p>Approve, fulfil or reject provisioning and access requests raised by this customer.</p></div></div>
     <div class="ws-cards">${rows.map(x => `
       <article class="ws-card">
-        <div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#f43f5e,#fb7185)">↗</span>
+        <div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,#be123c,#e11d48)">↗</span>
           <div><small>${esc(String(x.request_type).replaceAll('_', ' '))}</small><h4>${esc(x.details)}</h4>
             <p>Raised ${esc(fmtDate(x.created_at))}${x.admin_note ? ` · ${esc(x.admin_note)}` : ''}</p></div>
           ${statusPill(x.status)}
@@ -2197,7 +2270,7 @@ function wsBilling() {
       <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">▣</span>
         <div><small>Recurring monthly</small><h4>${money(recurring)}</h4>
           <p>${workspace.numbers.length} number${workspace.numbers.length === 1 ? '' : 's'} at $5/month</p></div></div></article>
-      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,${open.length ? '#f59e0b,#fbbf24' : '#22c55e,#4ade80'})">${open.length ? '!' : '✓'}</span>
+      <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,${open.length ? '#b45309,#d97706' : '#15803d,#16a34a'})">${open.length ? '!' : '✓'}</span>
         <div><small>Payment status</small><h4>${open.length ? `${open.length} invoice${open.length === 1 ? '' : 's'} open` : 'All invoices settled'}</h4>
           <p>${money(open.reduce((sum, i) => sum + i.amount_cents, 0))} outstanding</p></div></div></article>
     </div>
@@ -2298,7 +2371,7 @@ document.addEventListener('click', async event => {
     closeWorkspace();
     showPage('routing');
     if (number) {
-      renderFlow(flowKey('number', number));
+      focusRouteTarget(flowKey('number', number));
       $('flow-entry-number').textContent = number;
       flowNodes = (state.call_routes || []).find(x => x.phone_number === number)?.route?.nodes || [];
       renderFlowNodes();
@@ -2368,16 +2441,16 @@ document.addEventListener('click', async event => {
   if (d.extensionCredentials) return showExtensionCredentials(d.extensionCredentials);
   if (d.extensionFlow) {
     showPage('routing');
-    return renderFlow(flowKey('extension', d.extensionFlow));
+    return focusRouteTarget(flowKey('extension', d.extensionFlow));
   }
   if (d.routeTarget) {
     showPage('routing');
-    return renderFlow(d.routeTarget);
+    return focusRouteTarget(d.routeTarget);
   }
   if (d.editGroup) return openModal('group', (state.groups || []).find(x => String(x.id) === String(d.editGroup)));
   if (d.groupFlow) {
     showPage('routing');
-    return renderFlow(flowKey('group', d.groupFlow));
+    return focusRouteTarget(flowKey('group', d.groupFlow));
   }
   if (d.deleteGroup) {
     if (!confirm('Delete this group? Its call flow is removed too; the extensions stay.')) return;
@@ -2467,6 +2540,7 @@ document.addEventListener('click', async event => {
 /* ------------------------------------------------------- 27. Field wiring */
 const wire = (id, event, handler) => $(id)?.addEventListener(event, handler);
 ['customer-search', 'extension-search', 'number-search'].forEach(id => wire(id, 'input', () => ({ 'customer-search': renderCustomers, 'extension-search': renderExtensions, 'number-search': renderNumbers }[id]())));
+wire('sip-search', 'input', () => { renderExtensionCredentials(); renderSipAccounts(); });
 wire('call-search', 'input', () => debounce(() => { callOffset = 0; loadCalls(); }));
 wire('recording-search', 'input', () => debounce(() => { recordingOffset = 0; loadRecordings(); }));
 wire('voicemail-search', 'input', () => debounce(loadVoicemails));
@@ -2513,19 +2587,19 @@ wire('flow-config-close', 'click', () => closeOverlay('flow-config-modal'));
 wire('flow-config-cancel', 'click', () => closeOverlay('flow-config-modal'));
 wire('flow-config-modal', 'click', event => { if (event.target === $('flow-config-modal')) closeOverlay('flow-config-modal'); });
 wire('flow-nodes', 'click', event => {
-  if (event.target.closest('[data-remove-node]')) return;
+  if (!canDesignFlows() || event.target.closest('[data-remove-node]')) return;
   const node = event.target.closest('[data-flow-index]');
   if (node) openFlowConfig(Number(node.dataset.flowIndex));
 });
 wire('flow-nodes', 'dragstart', event => {
   const node = event.target.closest('[data-flow-index]');
-  if (node) event.dataTransfer.setData('application/x-flow-index', node.dataset.flowIndex);
+  if (node && canDesignFlows()) event.dataTransfer.setData('application/x-flow-index', node.dataset.flowIndex);
 });
 wire('flow-nodes', 'dragover', event => event.preventDefault());
 wire('flow-nodes', 'drop', event => {
   const target = event.target.closest('[data-flow-index]');
   const source = Number(event.dataTransfer.getData('application/x-flow-index'));
-  if (target && Number.isInteger(source)) {
+  if (target && Number.isInteger(source) && canDesignFlows()) {
     event.preventDefault();
     const [node] = flowNodes.splice(source, 1);
     flowNodes.splice(Number(target.dataset.flowIndex), 0, node);
@@ -2534,13 +2608,21 @@ wire('flow-nodes', 'drop', event => {
 });
 const dragSurface = $('flow-canvas');
 const dragging = (el, on) => el?.classList.toggle('dragging', on);
+/* Editing a flow is the customer's job. An administrator reads it (and still
+   provisions the devices and numbers it rings); they cannot add steps. */
+const canDesignFlows = () => !state.is_admin;
 document.querySelectorAll('[data-node-type]').forEach(button => {
   button.addEventListener('dragstart', event => {
+    if (!canDesignFlows()) return;
     event.dataTransfer.setData('text/plain', button.dataset.nodeType);
     dragging(button, true);
   });
   button.addEventListener('dragend', () => dragging(button, false));
-  button.onclick = () => { flowNodes.push({ type: button.dataset.nodeType, label: 'Click to configure' }); renderFlowNodes(); };
+  button.onclick = () => {
+    if (!canDesignFlows()) return notify('Call flows are designed by the customer', true);
+    flowNodes.push({ type: button.dataset.nodeType, label: 'Click to configure' });
+    renderFlowNodes();
+  };
 });
 wire('flow-nodes', 'dragstart', event => dragging(event.target.closest('[data-flow-index]'), true));
 wire('flow-nodes', 'dragend', event => dragging(event.target.closest('[data-flow-index]'), false));
@@ -2553,12 +2635,14 @@ if (dragSurface) {
     event.preventDefault();
     depth = 0;
     dragSurface.classList.remove('drag-over');
-    const type = event.dataTransfer.getData('text/plain');
+    const type = canDesignFlows() ? event.dataTransfer.getData('text/plain') : '';
     if (type) { flowNodes.push({ type, label: 'Click to configure' }); renderFlowNodes(); }
   });
 }
 wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
+wire('route-owner', 'change', () => { renderRouteTargets(); renderFlow(); renderGroups(); });
 wire('save-route', 'click', async () => {
+  if (!canDesignFlows()) return notify('Call flows are designed by the customer', true);
   const { type, target } = flowTargetParts($('route-target')?.value);
   if (!type || !target) return notify('Add a number, extension or group first', true);
   if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);
