@@ -65,7 +65,7 @@ function boot({ isAdmin = true, state = null, routes = {}, html = 'admin.html' }
       window.fetch = async (url, options = {}) => {
         const clean = String(url).split('?')[0];
         seen.push({ url: clean, method: (options.method || 'GET').toUpperCase(), body: options.body });
-        if (clean in table) return json(table[clean]);
+        if (clean in table) return json(typeof table[clean] === 'function' ? table[clean]() : table[clean]);
         if (clean.startsWith('/admin/api/calls')) return json(load('calls.json'));
         if (clean.startsWith('/admin/api/analytics')) return json(load('analytics.json'));
         if (clean.startsWith('/admin/api/device-status')) return json(load('devices.json'));
@@ -162,7 +162,82 @@ async function main() {
     check('the customer dialler is available to the customer', !!customerButton && customerButton.hidden === false);
   }
 
-  /* --------------------------------------------------- who designs call flows */
+  /* --------------------------------------------------------- credential sheet */
+  section('Extension credentials');
+  {
+    const { w, d } = boot({
+      routes: {
+        '/admin/api/extensions/101/credentials': {
+          credentials: {
+            extension: '101', display_name: 'Reception', active: true,
+            sip_username: 'QwErTy_101', sip_password: 'hanA3x-secret',
+            server: 'sip.ipcomms.net', port: 5060, transport: 'udp',
+            registration: 'extension', device_label: '', numbers: ['+13025550001'],
+            voicemail_enabled: false,
+          },
+        },
+      },
+    });
+    await settle(340);
+    w.eval("showExtensionCredentials('101')");
+    await settle(260);
+    const sheet = d.querySelector('#modal-fields .cred-sheet');
+    check('the credentials open as one sheet', !!sheet);
+    check('the sheet is a table, not a column of fields', d.querySelectorAll('#modal-fields .cred-table tr').length >= 5,
+      `${d.querySelectorAll('#modal-fields .cred-table tr').length} rows`);
+    const labels = [...d.querySelectorAll('#modal-fields .cred-table th')].map(x => x.textContent);
+    check('it states the SIP username in the new format',
+      d.getElementById('modal-fields').textContent.includes('QwErTy_101'), labels.join(', '));
+    check('it states the password, server and number',
+      ['hanA3x-secret', 'sip.ipcomms.net', '+13025550001'].every(value => d.getElementById('modal-fields').textContent.includes(value)));
+    const copies = [...d.querySelectorAll('#modal-fields [data-copy-value]')].map(x => x.dataset.copyValue);
+    check('every value that goes into a phone has its own copy button',
+      copies.length >= 4 && copies.includes('QwErTy_101'), copies.join(' | '));
+    check('one button copies the whole setup', !!d.querySelector('#modal-fields [data-cred-copy-all]'));
+    check('changing the password starts hidden', d.querySelector('#modal-fields .cred-rotate').hidden === true);
+    d.querySelector('#modal-fields [data-cred-rotate]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await settle(200);
+    check('the change-password panel opens in place',
+      d.querySelector('#modal-fields .cred-rotate').hidden === false && !!d.getElementById('cred-new-password'));
+    check('it offers a chosen password and a generated one',
+      !!d.querySelector('#modal-fields [data-cred-save]') && !!d.querySelector('#modal-fields [data-cred-generate]'));
+    const passwordRows = [...d.querySelectorAll('#modal-fields .cred-table th')]
+      .filter(cell => cell.textContent.trim() === 'SIP password');
+    check('the password appears once, as a row in the table', passwordRows.length === 1, `${passwordRows.length} rows`);
+    w.eval('closeModal()');
+
+    // Saving a password the customer chose posts it, and the sheet shows the result.
+    const typed = boot({
+      routes: {
+        '/admin/api/extensions/101/credentials': (() => {
+          let call = 0;
+          return () => ({
+            credentials: {
+              extension: '101', display_name: 'Reception', active: true,
+              sip_username: 'QwErTy_101', sip_password: call++ ? 'customer-picked-1' : 'old-secret',
+              server: 'sip.ipcomms.net', port: 5060, transport: 'udp',
+              registration: 'extension', device_label: '', numbers: [],
+            },
+          });
+        })(),
+      },
+    });
+    await settle(340);
+    typed.w.eval("showExtensionCredentials('101')");
+    await settle(240);
+    typed.d.querySelector('#modal-fields [data-cred-rotate]').dispatchEvent(new typed.w.MouseEvent('click', { bubbles: true }));
+    await settle(180);
+    typed.d.getElementById('cred-new-password').value = 'customer-picked-1';
+    typed.d.querySelector('#modal-fields [data-cred-save]').dispatchEvent(new typed.w.MouseEvent('click', { bubbles: true }));
+    await settle(300);
+    const posted = typed.seen.filter(call => call.url === '/admin/api/extensions/101/password');
+    check('saving the password posts it to the rotation endpoint', posted.length === 1 && /customer-picked-1/.test(posted[0].body),
+      posted.length ? String(posted[0].body) : 'no request');
+    check('and the sheet shows the new password afterwards',
+      typed.d.getElementById('modal-fields').textContent.includes('customer-picked-1'));
+  }
+
+  /* ----------------------------------------------------- who designs call flows */
   section('Who designs call flows');
   {
     const admin = boot();
@@ -202,6 +277,21 @@ async function main() {
   }
 
   /* ------------------------------------------------------------ extensions */
+  section('Administrators cannot be deleted');
+  {
+    const { w, d } = boot();
+    await settle(320);
+    w.eval("showPage('users')");
+    await settle(260);
+    const admins = state.users.filter(u => u.role === 'admin');
+    check('the platform administrators are listed', d.querySelectorAll('#platform-admin-list .row').length === admins.length,
+      `${d.querySelectorAll('#platform-admin-list .row').length} rows for ${admins.length} admins`);
+    check('no administrator row offers a delete action',
+      d.querySelectorAll('#platform-admin-list [data-delete-user]').length === 0);
+    check('each row still explains where it is managed',
+      [...d.querySelectorAll('#platform-admin-list .row')].every(row => /Managed from the platform/.test(row.textContent)));
+  }
+
   section('SIP identity');
   {
     const { w, d } = boot();
@@ -491,6 +581,67 @@ async function main() {
       .filter(option => option.selected).map(option => option.value);
     check('a fresh ring step already rings every device', chosen.length >= 2 && chosen.includes('102'),
       chosen.join(','));
+  }
+
+  /* --------------------------------------------------------- setup journey */
+  section('Setup journey');
+  {
+    const { w, d } = boot({ isAdmin: false, state: customerState });
+    await settle(340);
+    w.eval("showPage('dashboard')");
+    await settle(280);
+    const bar = d.querySelector('#customer-journey .journey-bar');
+    check('the progress bar is a progress bar', !!bar && bar.getAttribute('role') === 'progressbar');
+    const fill = bar && bar.querySelector('i');
+    const declared = fill && (fill.getAttribute('style') || '');
+    const percent = Number(bar && bar.getAttribute('aria-valuenow'));
+    check('the fill carries the completed percentage', /--p:\s*\d+%/.test(declared || ''), declared);
+    check('and the same number is announced', percent === Number((declared.match(/(\d+)%/) || [])[1]), `${percent}`);
+    const ticks = [...d.querySelectorAll('#customer-journey .journey-step .tick')];
+    check('every step draws its own tick', ticks.length === 6, `${ticks.length} ticks`);
+    check('the ticks hold a glyph, not an empty circle', ticks.every(tick => tick.textContent.trim().length > 0),
+      ticks.map(t => JSON.stringify(t.textContent)).join(','));
+    const done = d.querySelectorAll('#customer-journey .journey-step.done').length;
+    check('the completed steps are the ones ticked', done === Number((d.querySelector('#customer-journey .journey-head b').textContent.match(/\d+/) || [])[0]),
+      `${done} ticks vs ${d.querySelector('#customer-journey .journey-head b').textContent}`);
+    check('a line with a provisioned extension counts its device step',
+      /6 of 6 steps complete/.test(d.getElementById('customer-journey').textContent),
+      d.querySelector('#customer-journey .journey-head b').textContent);
+
+    // A brand new customer has done nothing: the bar is empty and step one is current.
+    const blank = boot({ isAdmin: false, state: { ...customerState, extensions: [], sip_accounts: [], phone_numbers: [], call_routes: [], api_keys: [], webhooks: [], requests: [], invoices: [] } });
+    await settle(340);
+    blank.w.eval("showPage('dashboard')");
+    await settle(260);
+    check('an empty account shows no progress',
+      Number(blank.d.querySelector('#customer-journey .journey-bar').getAttribute('aria-valuenow')) === 0);
+    check('and marks the first step as the current one',
+      blank.d.querySelectorAll('#customer-journey .journey-step.current').length === 1
+      && blank.d.querySelector('#customer-journey .journey-step.current').dataset.journey === 'request');
+    check('an unfinished step shows its number, not a tick',
+      blank.d.querySelector('#customer-journey .journey-step.current .tick').textContent.trim() === '◐');
+  }
+
+  /* ------------------------------------------------- Documentation is linked */
+  section('Documentation link');
+  {
+    const { w, d } = boot();
+    await settle(320);
+    w.eval("showPage('webhooks')");
+    await settle(240);
+    const link = d.querySelector('#page-webhooks .doc-link a');
+    check('APIs & Webhooks links to the documentation at the top', !!link && link.getAttribute('href') === '/documentation',
+      link ? link.getAttribute('href') : 'missing');
+    check('it opens outside the console', link.getAttribute('target') === '_blank');
+    check('the link is the first thing on the page',
+      d.getElementById('page-webhooks').firstElementChild.classList.contains('doc-link'));
+    check('the sidebar offers the same documentation',
+      !!d.querySelector('.nav-item[href="/documentation"]'));
+    const customer = boot({ isAdmin: false, state: customerState });
+    await settle(300);
+    customer.w.eval("showPage('webhooks')");
+    await settle(220);
+    check('the customer sees the link too', !!customer.d.querySelector('#page-webhooks .doc-link a'));
   }
 
   /* ------------------------------------------------------- customer console */

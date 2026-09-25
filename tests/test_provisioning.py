@@ -5,6 +5,7 @@ These cover the behaviour the console promises: an administrator assigns a
 number and the customer immediately has an extension, SIP credentials, a DID
 link and default call flows, all of them editable afterwards.
 """
+import re
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,11 @@ def customer_client(app, username="tenant"):
     return Session(client), int(user_id)
 
 
+def identity(extension: str) -> re.Pattern:
+    """The SIP username shape: six random letters, an underscore, the extension."""
+    return re.compile(rf"^[A-Za-z]{{6}}_{extension}$")
+
+
 def test_assigning_a_number_provisions_extension_credentials_and_flows(tmp_path):
     app = make_app(tmp_path)
     admin = admin_client(app)
@@ -133,7 +139,7 @@ def test_assigning_a_number_provisions_extension_credentials_and_flows(tmp_path)
     assert provisioned is not None
     extension = provisioned["extension"]
     assert extension == "101"
-    assert provisioned["sip_username"] == extension
+    assert identity(extension).match(provisioned["sip_username"]), provisioned["sip_username"]
     assert len(provisioned["sip_password"]) >= 12
     assert provisioned["default_outbound"] is True
     assert provisioned["flows"] == ["number", "extension"]
@@ -146,8 +152,9 @@ def test_assigning_a_number_provisions_extension_credentials_and_flows(tmp_path)
 
     # The extension belongs to the customer and holds its own credentials.
     extension_row = next(row for row in store.list_extensions(user_id) if row["extension"] == extension)
-    assert extension_row["sip_username"] == extension
+    assert identity(extension).match(extension_row["sip_username"]), extension_row["sip_username"]
     credentials = store.reveal_extension_credentials(extension, user_id)
+    assert credentials["sip_username"] == extension_row["sip_username"]
     assert credentials["sip_password"] == provisioned["sip_password"]
     assert credentials["server"] == "sip.example.com"
     assert credentials["port"] == 5060
@@ -181,8 +188,9 @@ def test_credentials_reveal_follows_a_linked_device_account(tmp_path):
     store = app.extensions["settings_store"]
     customer, user_id = customer_client(app, "meridian")
     assign_number(store, user_id, "+13025550001")            # creates extension 101
+    extension_identity = next(row["sip_username"] for row in store.list_extensions(user_id) if row["extension"] == "101")
     store.save_sip_account({
-        "label": "Reception phone", "sip_username": "101", "sip_password": "device-secret-9",
+        "label": "Reception phone", "sip_username": "reception", "sip_password": "device-secret-9",
         "server": "sip.example.com", "port": 5060, "transport": "udp", "extension": "101",
         "phone_number": "+13025550001",
     }, user_id)
@@ -191,7 +199,7 @@ def test_credentials_reveal_follows_a_linked_device_account(tmp_path):
         revealed = client.get("/admin/api/extensions/101/credentials")
         assert revealed.status_code == 200, revealed.data[:200]
         credentials = revealed.json["credentials"]
-        assert credentials["sip_username"] == "101"
+        assert credentials["sip_username"] == extension_identity
         assert credentials["sip_password"] == "device-secret-9"   # the device's, not the extension's
         assert credentials["registration"] == "device"
 
@@ -252,7 +260,7 @@ def test_customer_created_extension_generates_credentials_and_a_flow(tmp_path):
     assert response.status_code == 200, response.json
     assert response.json["created"] is True
     credentials = response.json["credentials"]
-    assert credentials["sip_username"] == "201"
+    assert identity("201").match(credentials["sip_username"]), credentials["sip_username"]
     assert len(credentials["sip_password"]) >= 12
 
     # Revealable later, and the password is the one that was generated.
@@ -404,17 +412,18 @@ def test_a_device_account_cannot_take_an_extension_identity(tmp_path):
     _, other_id = customer_client(app, "northwind")
     assign_number(store, user_id, "+13025550001")          # extension 101
 
-    # Linked to an extension: the account uses that extension's number, whatever
-    # the caller asked for.
+    # Linked to an extension: the account takes that extension's generated
+    # identity, whatever the caller asked for.
+    identity_of_101 = next(row["sip_username"] for row in store.list_extensions(user_id) if row["extension"] == "101")
     account_id = store.save_sip_account({
         "label": "Desk phone", "sip_username": "reception", "sip_password": "device-secret-1",
         "server": "sip.example.com", "extension": "101",
     }, user_id)
-    assert store.reveal_extension_credentials("101", user_id)["sip_username"] == "101"
-    assert next(row for row in store.list_sip_accounts(user_id) if row["id"] == account_id)["sip_username"] == "101"
+    assert store.reveal_extension_credentials("101", user_id)["sip_username"] == identity_of_101
+    assert next(row for row in store.list_sip_accounts(user_id) if row["id"] == account_id)["sip_username"] == identity_of_101
 
-    # Unlinked accounts may be named - but never after an extension number, and
-    # never twice, whichever customer owns them.
+    # Unlinked accounts may be named - but never after an extension's identity,
+    # nor its number, and never twice, whichever customer owns them.
     assert store.save_sip_account({
         "label": "Lobby phone", "sip_username": "lobby", "sip_password": "device-secret-2",
         "server": "sip.example.com",
@@ -422,6 +431,11 @@ def test_a_device_account_cannot_take_an_extension_identity(tmp_path):
     with pytest.raises(ValueError):
         store.save_sip_account({
             "label": "Sneaky", "sip_username": "101", "sip_password": "device-secret-3",
+            "server": "sip.example.com",
+        }, other_id)
+    with pytest.raises(ValueError):
+        store.save_sip_account({
+            "label": "Impostor", "sip_username": identity_of_101, "sip_password": "device-secret-5",
             "server": "sip.example.com",
         }, other_id)
     with pytest.raises(ValueError):
@@ -757,22 +771,154 @@ def test_a_stale_main_line_default_catches_up_with_later_devices(tmp_path):
 
 
 def test_sip_username_is_generated_and_cannot_be_changed(tmp_path):
+    """Six random letters, an underscore, the extension - and never a caller's choice."""
     app = make_app(tmp_path)
     store = app.extensions["settings_store"]
     _, user_id = customer_client(app, "meridian")
     store.save_extension({"extension": "101", "sip_password": "chosen", "sip_username": "meridian-softphone"}, user_id)
     row = next(item for item in store.list_extensions(user_id) if item["extension"] == "101")
-    assert row["sip_username"] == "101"
+    assert identity("101").match(row["sip_username"]), row["sip_username"]
+    assert row["sip_username"] != "101" and row["sip_username"] != "meridian-softphone"
 
-    # An edit that tries to rename it is ignored: devices authenticate with the
-    # extension number, and the name can never drift away from it.
+    # An edit that tries to rename it is ignored, and so is one that renames it to
+    # a shape the platform did not mint: the identity a registered phone uses
+    # cannot drift.
     store.save_extension({"extension": "101", "sip_password": "chosen", "sip_username": "renamed"}, user_id)
     row = next(item for item in store.list_extensions(user_id) if item["extension"] == "101")
-    assert row["sip_username"] == "101"
-    assert store.reveal_extension_credentials("101", user_id)["sip_username"] == "101"
+    assert identity("101").match(row["sip_username"]), row["sip_username"]
+    assert store.reveal_extension_credentials("101", user_id)["sip_username"] == row["sip_username"]
+
+    # Two extensions never share a username, every identity ends with its own
+    # extension, and the letters are random rather than derived from it.
+    store.save_extension({"extension": "102", "sip_password": "chosen"}, user_id)
+    usernames = {item["extension"]: item["sip_username"] for item in store.list_extensions(user_id)}
+    assert len(set(usernames.values())) == len(usernames)
+    assert all(value.endswith(f"_{key}") for key, value in usernames.items())
+    assert usernames["101"] == row["sip_username"]              # editing did not rename it
+    assert usernames["101"] != f"101" and not usernames["101"].startswith("meridian")
+
+    # A row from an older release is normalised on the next startup rather than
+    # left in a shape the credential sheet does not describe.
     with store._connect() as db:  # noqa: SLF001 - asserting the schema, not the API
+        db.execute("UPDATE extensions SET sip_username=? WHERE extension=?", ("101", "101"))
+        db.execute("UPDATE extensions SET sip_username=? WHERE extension=?", ("102_old", "102"))
+        assert store.normalise_sip_usernames(db) == 2
         indexes = [row["name"] for row in db.execute("PRAGMA index_list(extensions)").fetchall()]
     assert "idx_extensions_sip_username" in indexes
+    for item in store.list_extensions(user_id):
+        assert identity(item["extension"]).match(item["sip_username"]), item
+
+
+def test_the_effective_password_is_the_one_that_rotates(tmp_path):
+    """Changing the password changes what the phone actually registers with."""
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")            # extension 101
+    before = store.reveal_extension_credentials("101", user_id)
+
+    # A chosen password is stored as given, and a blank one is generated.
+    chosen = store.set_extension_password("101", "handset-secret-42", user_id)
+    assert chosen["password"] == "handset-secret-42" and chosen["source"] == "extension"
+    assert store.reveal_extension_credentials("101", user_id)["sip_password"] == "handset-secret-42"
+    generated = store.set_extension_password("101", "", user_id)
+    assert generated["password"] != "handset-secret-42" and len(generated["password"]) >= 12
+    assert store.reveal_extension_credentials("101", user_id)["sip_password"] == generated["password"]
+
+    # With a device account linked, that account is the live credential, so the
+    # rotation has to land there - the console must never show a stale secret.
+    store.save_sip_account({
+        "label": "Reception phone", "sip_username": "reception", "sip_password": "device-secret-9",
+        "server": "sip.example.com", "extension": "101",
+    }, user_id)
+    rotated = store.set_extension_password("101", "rotated-device-secret", user_id)
+    assert rotated["source"] == "device"
+    assert store.reveal_extension_credentials("101", user_id)["sip_password"] == "rotated-device-secret"
+
+    # An empty password on a device keeps the device's name and its server.
+    account = store.list_sip_accounts(user_id, include_password=True)[0]
+    assert account["sip_username"] == before["sip_username"] and account["server"] == "sip.example.com"
+
+    # Only the owner (or an administrator) may rotate it, and the shape is checked.
+    _, other_id = customer_client(app, "northwind")
+    with pytest.raises(ValueError):
+        store.set_extension_password("101", "not-mine", other_id)
+    with pytest.raises(ValueError):
+        store.set_extension_password("101", "bad\npassword", user_id)
+    assert store.set_extension_password("101", "admin-reset", None)["password"] == "admin-reset"
+
+
+def test_the_password_endpoint_rotates_the_credential_a_phone_uses(tmp_path):
+    """The console's "change password" acts on the credential Asterisk reads."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")            # extension 101
+    assert next(row["sip_username"] for row in store.list_extensions(user_id) if row["extension"] == "101").endswith("_101")
+
+    # A password the customer chose is stored and revealed afterwards.
+    response = customer.post("/admin/api/extensions/101/password", json={"password": "handset-secret-42"})
+    assert response.status_code == 200, response.json
+    assert response.json["sip_password"] == "handset-secret-42" and response.json["source"] == "extension"
+    assert store.reveal_extension_credentials("101", user_id)["sip_password"] == "handset-secret-42"
+
+    # A blank request generates a strong one rather than clearing it.
+    generated = customer.post("/admin/api/extensions/101/password", json={})
+    assert generated.status_code == 200
+    secret = generated.json["sip_password"]
+    assert len(secret) >= 12 and secret != "handset-secret-42"
+    assert store.reveal_extension_credentials("101", user_id)["sip_password"] == secret
+
+    # With a device account linked, that account is what authenticates.
+    store.save_sip_account({
+        "label": "Reception phone", "sip_username": "reception", "sip_password": "device-secret-9",
+        "server": "sip.example.com", "extension": "101",
+    }, user_id)
+    linked = customer.post("/admin/api/extensions/101/password", json={"password": "rotated-device-secret"})
+    assert linked.status_code == 200 and linked.json["source"] == "device"
+    assert store.reveal_extension_credentials("101", user_id)["sip_password"] == "rotated-device-secret"
+
+    # Another customer cannot reach it, and neither can an anonymous session.
+    _, other_id = customer_client(app, "northwind")
+    other = app.test_client()
+    assert other.post("/login", json={"username": "northwind", "password": "customer-password-1234"}).status_code == 200
+    other_token = other.get("/admin/api/state").json["csrf_token"]
+    refusal = other.post("/admin/api/extensions/101/password", json={"password": "not-mine"},
+                         headers={"X-CSRF-Token": other_token})
+    assert refusal.status_code == 400 and "not found" in refusal.json["error"], refusal.json
+    assert app.test_client().post("/admin/api/extensions/101/password", json={"password": "anon"}).status_code in (302, 401)
+
+    # An administrator may rotate it on the customer's behalf, and the change is
+    # recorded in that customer's activity feed.
+    assert admin.post("/admin/api/extensions/101/password", json={"password": "operator-reset"}).status_code == 200
+    assert store.reveal_extension_credentials("101", user_id)["sip_password"] == "operator-reset"
+    assert any(row["action"] == "extension.password_rotated" for row in store.list_activity(user_id))
+
+
+def test_administrator_accounts_cannot_be_deleted(tmp_path):
+    """The panel offers no delete action for an admin, and the API refuses it too."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    second = store.save_user({
+        "username": "second-admin", "password": "second-admin-password", "role": "admin",
+        "email": "second@example.test", "full_name": "Second", "company_name": "Platform",
+    })
+    victim = next(row["id"] for row in store.list_users() if row["username"] == "second-admin")
+    assert store.get_user(second) is not None
+
+    refusal = admin.delete(f"/admin/api/users/{victim}")
+    assert refusal.status_code == 400, refusal.json
+    assert "cannot be deleted" in refusal.json["error"]
+    assert store.get_user(victim) is not None                    # still there
+    with pytest.raises(ValueError):
+        store.delete_user(victim, 999)
+
+    # Customers are still removable, which is the action this guard must not block.
+    customer, user_id = customer_client(app, "meridian")
+    assert admin.delete(f"/admin/api/users/{user_id}").status_code == 200
+    assert store.get_user(user_id) is None
 
 
 def test_administrators_cannot_place_calls(tmp_path):

@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import sqlite3
+import string
 import time
 import uuid
 from calendar import monthrange
@@ -49,7 +50,7 @@ class SettingsStore:
             self.database.create_all()
             existing_user_columns = self.database.columns("admin_users")
             with self._connect() as db:
-                db.execute("UPDATE extensions SET sip_username=extension WHERE sip_username IS NULL OR sip_username != extension")
+                self.normalise_sip_usernames(db)
                 try:
                     db.execute("CREATE UNIQUE INDEX idx_extensions_sip_username ON extensions(sip_username)")
                 except Exception:
@@ -221,11 +222,12 @@ class SettingsStore:
                     message TEXT NOT NULL, read_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # Extensions authenticate with their own number, so the column is
-            # unique platform-wide. Rows written before that rule are normalised
-            # first; if duplicates still exist the index is skipped rather than
-            # breaking startup, and save_extension keeps writing canonical values.
-            db.execute("UPDATE extensions SET sip_username=extension WHERE COALESCE(sip_username,'') != extension")
+            # Extensions authenticate with a generated identity, so the column is
+            # unique platform-wide. Rows written before that rule - including the
+            # older "username is the extension number" shape - are normalised here;
+            # if duplicates still exist the index is skipped rather than breaking
+            # startup, and save_extension keeps writing canonical values.
+            self.normalise_sip_usernames(db)
             try:
                 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_extensions_sip_username ON extensions(sip_username)")
             except Exception:
@@ -356,11 +358,6 @@ class SettingsStore:
         extension = str(data.get("extension", "")).strip()
         if not extension.isdigit() or not 100 <= int(extension) <= 999:
             raise ValueError("Extension must be a 3-digit number from 100 to 999")
-        # The SIP username is the extension number and nothing else. Devices
-        # authenticate with it, extensions are unique platform-wide, and the name
-        # is therefore unique too - so it is derived here and never accepted from
-        # a caller, and no console offers it for editing.
-        username = extension
         password = str(data.get("sip_password") or "")
         if any(char in password for char in "\r\n;#"):
             raise ValueError("Invalid SIP password")
@@ -373,11 +370,17 @@ class SettingsStore:
             raise ValueError("Voicemail notification email is invalid")
         with self._connect() as db:
             existing = db.execute(
-                "SELECT sip_password_enc,voicemail_enabled,voicemail_pin_enc,owner_user_id FROM extensions WHERE extension=?", (extension,)
+                "SELECT sip_username,sip_password_enc,voicemail_enabled,voicemail_pin_enc,owner_user_id FROM extensions WHERE extension=?", (extension,)
             ).fetchone()
             created = existing is None
             if existing and enforce_owner and owner_user_id is not None and existing["owner_user_id"] != int(owner_user_id):
                 raise ValueError("Extension belongs to another customer")
+            # Devices authenticate with this name, so it is derived here and never
+            # accepted from a caller: six random letters, an underscore, the
+            # extension. Editing an extension keeps the identity a registered
+            # phone already uses; a row in any other shape (including the older
+            # "username is the number" form) is replaced.
+            username = self.canonical_sip_username(extension, existing["sip_username"] if existing else "")
             voicemail_enabled = bool(voicemail_enabled_value) if voicemail_enabled_value is not None else bool(existing and existing["voicemail_enabled"])
             # A new extension provisions its own SIP credentials, so a customer
             # can create an extension and register a device without inventing a
@@ -489,6 +492,55 @@ class SettingsStore:
         match = next((row for row in numbers if primary and row["inbound_extension"] == primary), None)
         return (match or (numbers[0] if numbers else None) or {}).get("number", "")
 
+
+    # Six letters, an underscore, the extension: the identity a device
+    # authenticates with. The letters are random so a username cannot be guessed
+    # from an extension, and the suffix keeps it recognisable in Asterisk and in
+    # the log.
+    SIP_USERNAME_RE = re.compile(r"^[A-Za-z]{6}_\d{3}$")
+
+    @classmethod
+    def generate_sip_username(cls, extension: str) -> str:
+        letters = string.ascii_letters
+        stem = "".join(secrets.choice(letters) for _ in range(6))
+        return f"{stem}_{str(extension).strip()}"
+
+    @classmethod
+    def canonical_sip_username(cls, extension: str, current: str = "") -> str:
+        """Keep an identity that already has the right shape, mint one otherwise.
+
+        Editing an extension must not silently change the password a phone logs in
+        with, so a canonical value is reused; anything else (a row from before this
+        rule, a caller-supplied name) is replaced.
+        """
+        current = str(current or "")
+        if cls.SIP_USERNAME_RE.match(current) and current.endswith(f"_{str(extension).strip()}"):
+            return current
+        return cls.generate_sip_username(extension)
+
+    def normalise_sip_usernames(self, db=None) -> int:
+        """Give every extension the canonical SIP identity, once, at startup.
+
+        Linked device accounts inherit the identity of the extension they register
+        for, so the two never disagree in the generated Asterisk configuration.
+        """
+        owned = db is None
+        if owned:
+            db = self._connect()
+        try:
+            rows = db.execute("SELECT extension,sip_username FROM extensions").fetchall()
+            changed = 0
+            for row in rows:
+                username = self.canonical_sip_username(row["extension"], row["sip_username"])
+                if username == str(row["sip_username"] or ""):
+                    continue
+                db.execute("UPDATE extensions SET sip_username=? WHERE extension=?", (username, row["extension"]))
+                db.execute("UPDATE customer_sip_accounts SET sip_username=? WHERE extension=?", (username, str(row["extension"])))
+                changed += 1
+            return changed
+        finally:
+            if owned:
+                db.close()
 
     def generate_sip_password(self, length: int = 16) -> str:
         alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -820,15 +872,19 @@ class SettingsStore:
         owner_user_id = int(owner_user_id)
         extension = str(data.get("extension", "")).strip()
         # A device authenticates with this name, so the platform keeps it unique
-        # and anchored. Linked to an extension it *is* the extension number - the
-        # customer may not rename the identity their phone logs in with - and no
-        # account may take a number that some extension already answers to.
+        # and anchored. Linked to an extension it *is* that extension's generated
+        # identity - the customer may not rename the identity their phone logs in
+        # with - and no account may take a name an extension already answers to.
+        extensions = self.list_extensions()
         if extension:
-            username = extension
+            username = next(
+                (str(row["sip_username"] or "") for row in extensions if str(row["extension"]) == extension),
+                "",
+            ) or self.generate_sip_username(extension)
         else:
             username = self._validate_config_value(data.get("sip_username"), "SIP username", 100)
-            if any(str(row["extension"]) == username for row in self.list_extensions()):
-                raise ValueError("That SIP username is an extension number")
+            if username in {str(row["extension"]) for row in extensions} or username in {str(row["sip_username"]) for row in extensions}:
+                raise ValueError("That SIP username belongs to an extension")
         account_id = int(data["id"]) if str(data.get("id", "")).isdigit() else None
         if any(str(row["sip_username"]) == username and row["id"] != account_id for row in self.list_sip_accounts()):
             raise ValueError("That SIP username is already in use")
@@ -858,6 +914,47 @@ class SettingsStore:
                 db.execute("UPDATE customer_sip_accounts SET label=?,sip_username=?,sip_password_enc=?,server=?,port=?,transport=?,phone_number=?,extension=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (*values, account_id))
                 return account_id
             return db.execute("INSERT INTO customer_sip_accounts(label,sip_username,sip_password_enc,server,port,transport,phone_number,extension,active,owner_user_id) VALUES(?,?,?,?,?,?,?,?,?,?)", (*values, owner_user_id)).lastrowid
+
+    def set_extension_password(self, extension, password: str = "", owner_user_id: int | None = None) -> dict:
+        """Rotate the secret a device registers with.
+
+        A linked device account overrides the extension's own password in the
+        generated Asterisk configuration, so the effective credential is what
+        changes - otherwise the console would show a new password while the phone
+        kept registering with the old one. An empty password generates one.
+        """
+        extension = str(extension).strip()
+        with self._connect() as db:
+            row = db.execute("SELECT owner_user_id FROM extensions WHERE extension=?", (extension,)).fetchone()
+        if not row or (owner_user_id is not None and row["owner_user_id"] != int(owner_user_id)):
+            raise ValueError("Extension not found")
+        if password and any(char in password for char in "\r\n;#"):
+            raise ValueError("Invalid SIP password")
+        secret = password or self.generate_sip_password()
+        owner = row["owner_user_id"]
+        device = next(
+            (item for item in self.list_sip_accounts(owner, include_password=True)
+             if str(item.get("extension") or "") == extension and item["active"]),
+            None,
+        ) if owner is not None else None
+        if device:
+            number = str(device.get("phone_number") or "")
+            if number and not any(item["number"] == number for item in self.list_numbers(owner)):
+                number = ""
+            with self._connect() as db:
+                db.execute(
+                    "UPDATE customer_sip_accounts SET sip_password_enc=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (self.encrypt(secret), device["id"]),
+                )
+            source = "device"
+        else:
+            with self._connect() as db:
+                db.execute(
+                    "UPDATE extensions SET sip_password_enc=?,updated_at=CURRENT_TIMESTAMP WHERE extension=?",
+                    (self.encrypt(secret), extension),
+                )
+            source = "extension"
+        return {"password": secret, "source": source, "owner_user_id": owner}
 
     def delete_sip_account(self, account_id: int):
         with self._connect() as db:
@@ -1134,8 +1231,9 @@ class SettingsStore:
         extension = self.next_extension_number()
         display_name = (str(description).strip() or assigned.get("description") or f"{customer['company_name'] or customer['username']} main line")[:120]
         password = self.generate_sip_password()
+        username = self.generate_sip_username(extension)
         self.save_extension({
-            "extension": extension, "display_name": display_name, "sip_username": extension, "sip_password": password,
+            "extension": extension, "display_name": display_name, "sip_username": username, "sip_password": password,
             "active": True, "recording_enabled": bool(self.get_settings().get("recording_enabled") == "true"),
         }, owner_user_id)
 
@@ -1178,7 +1276,10 @@ class SettingsStore:
             "number": number,
             "extension": extension,
             "display_name": display_name,
-            "sip_username": extension,
+            "sip_username": next(
+                (str(row["sip_username"]) for row in self.list_extensions(owner_user_id) if str(row["extension"]) == extension),
+                username,
+            ),
             "sip_password": password,
             "device_linked": bool(device),
             "default_outbound": not has_default,
@@ -1620,6 +1721,11 @@ class SettingsStore:
         if int(user_id) == int(current_user_id):
             raise ValueError("You cannot delete your own account")
         with self._connect() as db:
+            account = db.execute("SELECT role FROM admin_users WHERE id=?", (int(user_id),)).fetchone()
+            if account and account["role"] == "admin":
+                # Administrators manage the platform; the panel offers no way to
+                # remove one, and the API refuses it for the same reason.
+                raise ValueError("Administrator accounts cannot be deleted")
             if db.execute("SELECT 1 FROM phone_numbers WHERE owner_user_id=?", (int(user_id),)).fetchone():
                 raise ValueError("Reassign or discontinue this customer's phone numbers before deleting the account")
             if db.execute("SELECT 1 FROM extensions WHERE owner_user_id=?", (int(user_id),)).fetchone():
@@ -1945,6 +2051,17 @@ def register_admin(app, config, on_telephony_change=None):
     @app.get("/admin/login")
     def admin_login_page(): return send_from_directory(web_dir, "admin-login.html")
 
+    @app.get("/documentation")
+    @login_required
+    def documentation_page():
+        """The setup and API reference that the console links to.
+
+        Signed-in only: it describes the integration surface of this deployment,
+        so it is not something an anonymous visitor needs to read. The page itself
+        is static - no customer data is rendered into it.
+        """
+        return send_from_directory(web_dir, "documentation.html")
+
     @app.post("/login")
     @app.post("/admin/login")
     def admin_login():
@@ -2187,6 +2304,24 @@ def register_admin(app, config, on_telephony_change=None):
             apply_change()
             return jsonify({"ok": True, "extension": result, "created": not existed, "credentials": credentials})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
+
+    @app.post("/admin/api/extensions/<extension>/password")
+    @login_required
+    def admin_extension_password(extension):
+        """Change the SIP password a device registers with, or generate a new one."""
+        try:
+            data = request.get_json(silent=True) or {}
+            owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+            result = store.set_extension_password(extension, str(data.get("password") or ""), owner)
+            if result["owner_user_id"] is not None:
+                store.add_activity(
+                    result["owner_user_id"], int(session["admin_user_id"]), "extension.password_rotated",
+                    "extension", extension, f"SIP password changed for extension {extension}",
+                )
+            apply_change()
+            return jsonify({"ok": True, "sip_password": result["password"], "source": result["source"]})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
     @app.get("/admin/api/extensions/<extension>/credentials")
     @login_required

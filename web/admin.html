@@ -47,6 +47,7 @@
       <p class="nav-group">Account</p>
       <button class="nav-item" data-page="billing"><span class="glyph">▣</span>Billing</button>
       <button class="nav-item" data-page="webhooks"><span class="glyph">◇</span>APIs &amp; Webhooks</button>
+      <a class="nav-item" href="/documentation" target="_blank" rel="noopener"><span class="glyph">▤</span>Documentation</a>
       <button class="nav-item" data-page="notifications"><span class="glyph">●</span>Notifications <b class="nav-badge" id="notification-badge" hidden>0</b></button>
       <button class="nav-item" data-page="security"><span class="glyph">♢</span>Security</button>
 
@@ -331,6 +332,10 @@
 
       <!-- ================================================= APIS & WEBHOOKS -->
       <section class="page" id="page-webhooks">
+        <div class="doc-link">
+          <span>Setup guide, REST API and webhook reference for this deployment</span>
+          <a class="btn ghost sm" href="/documentation" target="_blank" rel="noopener">Documentation ↗</a>
+        </div>
         <div class="customer-picker" id="integration-picker" data-admin-only></div>
         <article class="notice secure"><span class="glyph">◇</span><div><b>Integrations</b><span data-customer-only>API keys authenticate your own software against the EIP API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own.</span><span data-admin-only>Choose a customer to inspect the keys and webhooks their software uses. These credentials belong to them, so creating one is their action, not the platform's.</span></div></article>
 

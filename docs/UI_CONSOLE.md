@@ -137,16 +137,34 @@ suggestion comes from `GET /admin/api/extensions/next`. The customers' own
 server generates one, then writes the extension's default flow.
 
 The SIP username is the identity the device authenticates with, so the platform owns
-it: it *is* the extension number (`idx_extensions_sip_username`, a unique index on
-`extensions.sip_username`). `save_extension()` derives it and ignores whatever a
-caller sends, both console forms show it read-only, and a device account linked to an
-extension inherits it too - an account may not take a username that is an extension
-number, nor one another account already uses. Passwords stay the customer's to set;
-the two default flows stay editable in the builder.
+it: it is six random letters, an underscore and the extension (`kqzvhd_101`), unique
+platform-wide through `idx_extensions_sip_username`. `canonical_sip_username()` keeps
+a value already in that shape and mints a fresh one otherwise, so `save_extension()`
+ignores whatever a caller sends and an edit never renames a registered phone; both
+console forms show it read-only. `normalise_sip_usernames()` rewrites rows stored in
+the old bare-extension format, in `extensions` and in every linked
+`customer_sip_accounts` row, so an existing deployment converges on the same shape on
+start-up. A device account linked to an extension inherits its identity - an account
+may not take a username that is an extension number, nor one another account already
+uses. The two default flows stay editable in the builder.
 
 `GET /admin/api/extensions/<extension>/credentials` (owner or administrator) returns
 the effective credential: if a device account is linked to the extension, that account
-is what Asterisk ends up using, so the endpoint reports it as the source.
+is what Asterisk ends up using, so the endpoint reports it as the source. The console
+shows all of it at once in a credential sheet - the identity, one row per value with
+its own Copy button, a copy-everything block for the phone, and the numbers and
+password source for reference - so nobody has to scroll or hunt for a field.
+
+`POST /admin/api/extensions/<extension>/password` (owner or administrator) rotates
+that same effective credential: send a password to set one, or a blank body to have
+one generated. It answers with the new secret and its `source`, so the sheet can show
+what the phone will actually use, and it records `extension.password_rotated` in the
+owner's activity feed.
+
+`GET /documentation` (any signed-in account) serves `web/documentation.html`: the
+setup, REST API and webhook reference for this deployment, linked from the top of
+APIs & Webhooks and from the sidebar. It is a static page - it reads no customer data -
+and it links back to the console.
 
 ## Call flows: one builder, three kinds of target
 
@@ -269,8 +287,13 @@ pages are linkable.
 * `node tools/uicheck.js` — boots the real console in jsdom against captured fixtures
   and asserts the promises above: refreshes that paint nothing, only customers dial,
   customer-first pickers, the flow builder's administrator mode, the system board, the
-  SIP username is fixed, provisioning reveals
+  the SIP identity cannot be renamed, the
+  credential sheet shows every value once, the setup journey's bar and icons follow
+  the data, administrators offer no delete action, and provisioning reveals
   credentials.
+* `node tools/cascadecheck.js` — resolves which rule wins for a given element path
+  (specificity and source order, with state and media rules kept inert) so a rule the
+  console depends on cannot be silently overridden by a later one.
 * `node tools/contrastcheck.js` — audits every text colour in `admin.css` against its
   own skin's surfaces, so the light and dark themes both stay legible.
 * `node tools/csscheck.js` — cross-checks `.class` names between `admin.css`,

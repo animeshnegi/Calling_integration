@@ -109,7 +109,29 @@ async function main() {
   show('ADMIN · Devices & SIP — choose a customer, then their extensions and devices',
     `${text(d.getElementById('sip-picker')).slice(0, 240)}\ncredential rows: ${d.querySelectorAll('#extension-credential-list .row').length}\nsip rows: ${d.querySelectorAll('#sip-account-list .row').length}\n${text(d.getElementById('sip-account-list')).slice(0, 240)}`);
 
+  // The credential sheet itself: open the first extension's credentials, then
+  // measure how much of it is above the fold.
+  await settle(400);
+  const credButton = d.querySelector('#extension-credential-list [data-extension-credentials]');
+  if (!credButton) {
+    show('ADMIN · the credentials sheet for one extension', 'no extension listed for this customer');
+  }
+  if (credButton) {
+    w.eval(`showExtensionCredentials('${credButton.dataset.extensionCredentials}')`);
+    await settle(600);
+    const body = d.getElementById('modal-fields');
+    const sheet = body?.querySelector('.cred-sheet');
+    const rows = [...(body?.querySelectorAll('.cred-table tr') || [])];
+    show('ADMIN · the credentials sheet for one extension',
+      `table rows: ${rows.length} (copyable ${rows.filter(r => r.querySelector('[data-copy-value]')).length})\n`
+      + `everything in one sheet: ${!!sheet} · rotate panel hidden at rest: ${body?.querySelector('.cred-rotate')?.hidden}\n`
+      + `${text(sheet).slice(0, 420)}`);
+  }
+
   await page(w, d, 'webhooks');
+  const docLink = d.querySelector('#page-webhooks .doc-link a');
+  show('ADMIN · APIs & Webhooks — the documentation link on top',
+    `href: ${docLink?.getAttribute('href')} target: ${docLink?.getAttribute('target')}\n${text(d.querySelector('#page-webhooks .doc-link'))}`);
   show('ADMIN · APIs & Webhooks — whose keys, and what he may do',
     `picker: ${text(d.getElementById('integration-picker')).slice(0, 200)}\nkeys: ${text(d.getElementById('api-key-list')).slice(0, 220)}\nwebhooks: ${text(d.getElementById('webhook-list')).slice(0, 220)}\ncreate buttons: ${[...d.querySelectorAll('[data-open="apikey"],[data-open="webhook"]')].map(x => `${x.dataset.open}:hidden=${x.hidden}`).join(' ')}`);
 
@@ -127,6 +149,17 @@ async function main() {
   await page(cust.w, cust.d, 'numbers');
   show('CUSTOMER · Numbers — their own call defaults',
     `${text(cust.d.getElementById('call-defaults-form'))}\nform hidden=${cust.d.getElementById('call-defaults-form').hidden}`);
+  await page(cust.w, cust.d, 'dashboard');
+  const bar = cust.d.querySelector('#customer-journey .journey-bar');
+  const fill = cust.d.querySelector('#customer-journey .journey-bar i');
+  const ticks = [...cust.d.querySelectorAll('#customer-journey .journey-step .tick')];
+  show('CUSTOMER · Setup journey — the bar and its icons',
+    `headline: ${text(cust.d.querySelector('#customer-journey .journey-head b'))}\n`
+    + `role: ${bar?.getAttribute('role')} valuenow: ${bar?.getAttribute('aria-valuenow')} label: ${bar?.getAttribute('aria-label')}\n`
+    + `fill width: ${fill?.style.getPropertyValue('--p')} (computed ${cust.w.getComputedStyle(fill).width})\n`
+    + `ticks: ${ticks.map(t => t.textContent.trim()).join(' ')}\n`
+    + `steps: ${text(cust.d.querySelector('#customer-journey .journey-steps'))}`);
+
   await page(cust.w, cust.d, 'routing');
   show('CUSTOMER · Call flows',
     `targets: ${text(cust.d.getElementById('route-target')).slice(0, 200)}\ncanvas: ${text(cust.d.getElementById('flow-nodes')).slice(0, 200)}\nflows in state: ${custState.payload.routing_flows.map(r => `${r.target_type} ${r.target}`).join(', ')}\nnumber flows: ${custState.payload.call_routes.map(r => r.phone_number).join(', ')}`);

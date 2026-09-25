@@ -135,7 +135,7 @@ check("the primary number rings it too", made in ring.get("extensions", []),
       f"rings {ring.get('extensions')}")
 
 # --- and the administrator can see it, which is what he could not do before --
-status, detail = admin.json(f"/admin/api/customers/{cust_state['user_id']}")
+status, detail = admin.json(f"/admin/api/customers/{customer.json('/admin/api/state')[1]['user_id']}")
 admin_flows = {row["target"] for row in detail["routing_flows"]}
 check("the administrator sees the flow for the customer's own extension", made in admin_flows,
       ",".join(sorted(admin_flows)))
@@ -152,7 +152,7 @@ status, body = admin.json("/admin/api/call-routes", "POST", {
                         {"type": "voicemail", "mailbox": made, "label": f"Mailbox {made}", "configured": True}]},
 })
 check("the administrator can rewrite that flow", status == 200, f"{status} {str(body)[:90]}")
-status, detail = admin.json(f"/admin/api/customers/{cust_state['user_id']}")
+status, detail = admin.json(f"/admin/api/customers/{customer.json('/admin/api/state')[1]['user_id']}")
 rewritten = next((row for row in detail["routing_flows"] if row["target"] == made), None)
 check("and the customer's copy changes with it",
       bool(rewritten) and [node["type"] for node in rewritten["route"]["nodes"]] == ["extension", "voicemail"],
@@ -213,6 +213,70 @@ check("and it is refused without naming one",
 if status == 200:
     check("and can remove it again",
           admin.json(f"/admin/api/groups/{group['group_id']}", "DELETE")[0] == 200)
+
+# --- SIP identity: six random letters, an underscore, the extension ---------
+status, state4 = customer.json("/admin/api/state")
+identities = {row["extension"]: row["sip_username"] for row in state4["extensions"]}
+import re as _re
+check("every extension authenticates with its generated identity",
+      all(_re.fullmatch(rf"[A-Za-z]{{6}}_{ext}", name) for ext, name in identities.items()),
+      json.dumps(identities))
+check("the identity is not the bare extension number", all(names != ext for ext, names in identities.items()))
+check("editing an extension does not rename its identity",
+      customer.json("/admin/api/extensions", "POST", {
+          "extension": extensions[0], "display_name": "Main device", "sip_username": "wanted-to-rename", "active": True,
+      })[0] == 200
+      and next(row["sip_username"] for row in customer.json("/admin/api/state")[1]["extensions"]
+               if row["extension"] == extensions[0]) == identities[extensions[0]])
+
+# --- the credential sheet: one rotate endpoint that moves the live secret ----
+status, body = customer.json("/admin/api/extensions/" + extensions[0] + "/credentials")
+check("the credentials endpoint reports the generated username",
+      status == 200 and body["credentials"]["sip_username"] == identities[extensions[0]],
+      str(body)[:120])
+status, body = customer.json("/admin/api/extensions/" + extensions[0] + "/password", "POST", {"password": "chosen-by-customer"})
+check("a chosen SIP password is stored", status == 200 and body.get("sip_password") == "chosen-by-customer", str(body)[:120])
+status, body = customer.json("/admin/api/extensions/" + extensions[0] + "/credentials")
+check("and the phone would register with it", body["credentials"]["sip_password"] == "chosen-by-customer")
+status, body = customer.json("/admin/api/extensions/" + extensions[0] + "/password", "POST", {})
+check("a blank request generates a strong password", status == 200 and len(body.get("sip_password", "")) >= 12)
+status, detail = admin.json(f"/admin/api/customers/{customer.json('/admin/api/state')[1]['user_id']}")
+status, northwind_state = admin.json("/admin/api/state")
+check("an administrator may rotate it for any customer",
+      admin.json("/admin/api/extensions/" + extensions[0] + "/password", "POST", {"password": "operator-set"})[0] == 200)
+status, body = admin.json(f"/admin/api/extensions/{extensions[0]}/credentials")
+check("the administrator sees the rotated secret", body["credentials"]["sip_password"] == "operator-set")
+
+# --- nothing deletes an administrator ---------------------------------------
+status, admin_state = admin.json("/admin/api/state")
+administrators = [row for row in admin_state["users"] if row["role"] == "admin"]
+check("the platform administrators are listed", len(administrators) >= 1, f"{len(administrators)}")
+
+# A second administrator, so this is not only the "your own account" rule.
+status, created = admin.json("/admin/api/platformadmins", "POST", {
+    "username": "ops-deputy", "email": "ops.deputy@example.test",
+    "password": "deputy-administrator-password",
+})
+check("the platform can still add an administrator", status in (200, 201), f"{status} {str(created)[:80]}")
+status, admin_state = admin.json("/admin/api/state")
+deputy = next((row for row in admin_state["users"] if row["username"] == "ops-deputy"), None)
+check("the new administrator is listed", bool(deputy))
+status, detail = admin.json(f"/admin/api/users/{deputy['id']}", "DELETE") if deputy else (0, {})
+check("deleting another administrator is refused",
+      status == 400 and "cannot be deleted" in str(detail), f"{status} {str(detail)[:90]}")
+check("and the account is still there",
+      any(row["username"] == "ops-deputy" for row in admin.json("/admin/api/state")[1]["users"]))
+
+# --- the documentation page --------------------------------------------------
+status, page = admin.request("/documentation")
+check("the documentation page is served to a signed-in operator", status == 200 and "EIP Telephony" in page, str(status))
+check("it links back to the console", 'href="/admin"' in page)
+check("it documents the API surface", "/api/v1/calls" in page and "X-EngineerIP-Signature" in page)
+check("it explains the SIP identity format", "QwErTy_101" in page)
+anonymous_status, anonymous_page = Client().request("/documentation")
+check("an anonymous visitor gets the sign-in page instead of the documentation",
+      "EIP Telephony — setup" not in anonymous_page and "password" in anonymous_page.lower(),
+      str(anonymous_status))
 
 # --- recording stays a per-device decision ----------------------------------
 status, state2 = customer.json("/admin/api/state")

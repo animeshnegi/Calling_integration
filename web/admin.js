@@ -581,7 +581,7 @@ function renderCustomers() {
       <span class="row-icon">${esc((u.username || 'A')[0].toUpperCase())}</span>
       <div><h3>${esc(u.username)}</h3><p>${esc(u.email)}</p></div>
       <div class="tags">${u.active ? tag('Active', 'on') : tag('Disabled', 'off')}${tag('Administrator', 'violet')}</div>
-      <div class="row-actions"><button class="btn danger sm" data-delete-user="${u.id}">Delete</button></div>
+      <div class="row-actions"><span class="cell-sub">Managed from the platform</span></div>
     </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂'));
   if (currentPage === 'routing') { renderRoutingOwner(); renderFlow($('route-target')?.value); renderGroups(); }
   markStagger();
@@ -953,10 +953,15 @@ function renderMyRequests() {
   // Customers raise requests from their dashboard; administrators review them
   // on the requests page, so each milestone points at the right surface.
   const requestPage = state.is_admin ? 'requests' : 'dashboard';
+  // "Connect a device" means the customer can register a phone. Provisioning
+  // mints an extension *with* credentials, so an active extension is a device
+  // ready to register - counting only device accounts would leave the journey
+  // stuck at 5 of 6 for a line that is already live.
+  const hasDevice = state.extensions.some(x => x.active) || state.sip_accounts.length > 0;
   const steps = [
     ['request', 'Request a number', rows.some(r => r.request_type === 'number'), requestPage],
     ['number', 'Number assigned', !!state.phone_numbers.length, 'numbers'],
-    ['sip', 'Connect a device', !!state.sip_accounts.length, 'sipaccounts'],
+    ['sip', 'Register a device', hasDevice, 'sipaccounts'],
     ['extensions', 'Extensions', !!state.extensions.length, 'extensions'],
     ['routing', 'Call routing', !!state.call_routes.length, 'routing'],
     ['api', 'APIs & webhooks', !!(state.api_keys.length || myWebhooks()), 'webhooks'],
@@ -966,16 +971,18 @@ function renderMyRequests() {
   const percent = Math.round((doneCount / steps.length) * 100);
   const journey = [
     `<div class="journey-head"><b>${doneCount} of ${steps.length} steps complete</b>`,
-    `<span class="journey-bar"><i style="--p:${percent}%"></i></span>`,
+    `<span class="journey-bar" role="progressbar" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"` +
+      `aria-label="Setup progress: ${doneCount} of ${steps.length} steps complete"><i style="--p:${percent}%"></i></span>`,
     `<small>${steps.length - doneCount === 0 ? 'Your phone system is fully live' : `Next: ${esc(steps[currentIndex][1])}`}</small></div>`,
     '<div class="journey-steps">',
   ];
   steps.forEach(([key, label, done, page], index) => {
-    if (index) journey.push(`<i class="${steps[index - 1][2] ? 'done' : ''}"></i>`);
+    if (index) journey.push(`<i class="${steps[index - 1][2] ? 'done' : ''}" aria-hidden="true"></i>`);
     const state = done ? 'done' : (index === currentIndex ? 'current' : '');
     const glyph = done ? '✓' : index === currentIndex ? '◐' : index + 1;
-    journey.push(`<button class="journey-step ${state}" data-page="${esc(page)}" data-journey="${esc(key)}" type="button">
-      <span class="tick">${glyph}</span>${esc(label)}</button>`);
+    journey.push(`<button class="journey-step ${state}" data-page="${esc(page)}" data-journey="${esc(key)}" type="button"
+      aria-label="${esc(label)} — ${done ? 'complete' : index === currentIndex ? 'in progress' : 'not started'}">
+      <span class="tick" aria-hidden="true">${glyph}</span>${esc(label)}</button>`);
   });
   journey.push('</div>');
   paint('customer-journey', journey.join(''));
@@ -1600,33 +1607,102 @@ function groupMemberOptions(item) {
   return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
 }
 
-/* The credentials a device registers with. The password is only ever fetched on
-   demand, and it is the same secret the Asterisk config is generated from. */
+/* The credentials a device registers with. One sheet per extension: the whole
+   set in a single table, every value copyable on its own or as one block ready
+   to paste into a softphone, and the password rotatable without leaving it. */
+let credentialSheet = null;   // { extension, credentials, rotating }
+
+/* What a person actually types into a phone, in the order they type it. */
+function credentialLines(c) {
+  return [
+    `Extension: ${c.extension}`,
+    `SIP username: ${c.sip_username}`,
+    `SIP password: ${c.sip_password}`,
+    `Registration server: ${c.server || 'ask EIP for your registration host'}`,
+    `Port: ${c.port} (${String(c.transport || 'udp').toUpperCase()})`,
+    `Number: ${(c.numbers || []).join(', ') || 'none assigned yet'}`,
+  ].join('\n');
+}
+
+function credentialSheetBody({ credentials: c, rotating }) {
+  const source = c.registration === 'device'
+    ? `Device account${c.device_label ? ` · ${esc(c.device_label)}` : ''}`
+    : 'This extension';
+  const rows = [
+    ['SIP username', c.sip_username, true],
+    ['SIP password', c.sip_password, true],
+    ['Registration server', c.server || 'Ask EIP for your registration host', true],
+    ['Port · transport', `${c.port} · ${String(c.transport || 'udp').toUpperCase()}`, true],
+    ['Numbers', (c.numbers || []).join(', ') || 'None assigned yet', false],
+    ['Password comes from', source, false],
+  ];
+  return `<div class="cred-sheet">
+    <div class="cred-identity">
+      <span class="ws-glyph">${esc(c.extension)}</span>
+      <div><b>${esc(c.display_name || `Extension ${c.extension}`)}</b>
+        <small>Register a phone or softphone with these ${rows.filter(row => row[2]).length} values</small></div>
+      <span class="tag ${c.active ? 'on' : 'off'}">${c.active ? 'Active' : 'Disabled'}</span>
+    </div>
+    <table class="cred-table">
+      <tbody>${rows.map(([label, value, copyable]) => `
+        <tr><th>${esc(label)}</th>
+          <td><code>${esc(String(value ?? '—'))}</code></td>
+          <td class="cred-copy">${copyable ? `<button class="btn ghost sm" type="button" data-copy-value="${esc(String(value))}" data-copy-label="${esc(label)}">Copy</button>` : ''}</td>
+        </tr>`).join('')}</tbody>
+    </table>
+    <div class="cred-actions">
+      <button class="btn primary sm" type="button" data-cred-copy-all>Copy all for the phone</button>
+      <button class="btn ghost sm" type="button" data-cred-rotate="${esc(c.extension)}" aria-expanded="${rotating ? 'true' : 'false'}">${rotating ? 'Cancel' : 'Change password'}</button>
+      <small>Anyone with these can place calls as this extension.</small>
+    </div>
+    <div class="cred-rotate" ${rotating ? '' : 'hidden'}>
+      <label class="field">New SIP password
+        <input type="text" id="cred-new-password" autocomplete="new-password" placeholder="Leave blank to generate a strong one"></label>
+      <div class="cred-rotate-actions">
+        <button class="btn primary sm" type="button" data-cred-save="${esc(c.extension)}">Save password</button>
+        <button class="btn ghost sm" type="button" data-cred-generate="${esc(c.extension)}">Generate a strong one</button>
+        <small>${c.registration === 'device'
+          ? 'This device account is what Asterisk authenticates, so its password is the one that changes.'
+          : 'Registered phones keep their current session until they register again with the new password.'}</small>
+      </div>
+    </div>
+  </div>`;
+}
+
+function paintCredentialSheet() {
+  const sheet = credentialSheet;
+  if (!sheet) return;
+  showSecret({
+    title: `Extension ${sheet.credentials.extension} credentials`,
+    subtitle: 'Everything a phone needs, in one place',
+    body: credentialSheetBody(sheet),
+  });
+}
+
 async function showExtensionCredentials(extension) {
   try {
     const { credentials } = await api(`/admin/api/extensions/${encodeURIComponent(extension)}/credentials`);
-    const rows = [
-      ['Extension', credentials.extension], ['Display name', credentials.display_name || '—'],
-      ['SIP username', credentials.sip_username], ['SIP password', credentials.sip_password],
-      ['Registration server', credentials.server || 'Ask EIP for your registration host'],
-      ['Port', credentials.port], ['Transport', String(credentials.transport || 'udp').toUpperCase()],
-      ['Numbers', credentials.numbers?.join(', ') || 'No number assigned yet'],
-      ['Credential source', credentials.registration === 'device' ? `Device account${credentials.device_label ? ` · ${credentials.device_label}` : ''}` : 'Extension'],
-    ];
-    const registration = credentials.device_label
-      ? `A device account (<b>${esc(credentials.device_label)}</b>) is linked to this extension and takes precedence in the generated Asterisk configuration.`
-      : `These are the credentials for this extension. Change the password from <b>Edit</b> and new registrations pick it up immediately.`;
-    showSecret({
-      title: `Extension ${credentials.extension} credentials`,
-      subtitle: 'Enter these into a phone or softphone to register this extension',
-      value: credentials.sip_password,
-      body: `<div class="notice warn"><span class="glyph">⚿</span><div><b>Treat these as secrets</b>Anyone with them can place calls as this extension. Rotate the password from Edit if they are ever exposed.</div></div>
-        <div class="grid cols-2">${rows.map(([label, value]) => `
-          <label class="field">${esc(label)}<input readonly value="${esc(String(value ?? '—'))}"></label>`).join('')}</div>
-        <label class="field">SIP password<div class="secret"><input id="created-api-key" readonly><button class="btn primary" type="button" data-copy-secret>Copy</button></div></label>
-        <article class="notice"><span class="glyph">◈</span><div><b>Where this comes from</b>${registration}</div></article>`,
-    });
+    credentialSheet = { extension: credentials.extension, credentials, rotating: false };
+    paintCredentialSheet();
   } catch (error) { notify(error.message, true); }
+}
+
+/* Rotate the password a device registers with, then show the new one. */
+async function rotateExtensionPassword(extension, password = "") {
+  try {
+    const result = await api(`/admin/api/extensions/${encodeURIComponent(extension)}/password`, {
+      method: 'POST', body: JSON.stringify({ password }),
+    });
+    const { credentials } = await api(`/admin/api/extensions/${encodeURIComponent(extension)}/credentials`);
+    credentialSheet = { extension: credentials.extension, credentials, rotating: false };
+    paintCredentialSheet();
+    notify(password ? 'SIP password changed' : 'New SIP password generated');
+    await loadState();
+    return result;
+  } catch (error) {
+    notify(error.message, true);
+    return null;
+  }
 }
 
 /* What the platform built when a number was assigned: the extension, its
@@ -2647,8 +2723,27 @@ document.addEventListener('click', async event => {
     if (input) { input.type = input.type === 'password' ? 'text' : 'password'; button.textContent = input.type === 'password' ? 'Show' : 'Hide'; }
     return;
   }
-  if (d.copyValue !== undefined) { navigator.clipboard?.writeText(d.copyValue); notify('Copied securely'); return; }
+  if (d.copyValue !== undefined) {
+    navigator.clipboard?.writeText(d.copyValue);
+    notify(`${d.copyLabel || 'Value'} copied`);
+    return;
+  }
   if (d.copySecret) { navigator.clipboard?.writeText($('created-api-key').value); notify('API key copied'); return; }
+  if (d.credCopyAll) {
+    const text = credentialSheet ? credentialLines(credentialSheet.credentials) : '';
+    navigator.clipboard?.writeText(text);
+    notify('Phone setup copied');
+    return;
+  }
+  if (d.credRotate) {
+    if (!credentialSheet) return;
+    credentialSheet.rotating = !credentialSheet.rotating;
+    paintCredentialSheet();
+    if (credentialSheet.rotating) setTimeout(() => $('cred-new-password')?.focus(), 60);
+    return;
+  }
+  if (d.credSave) return rotateExtensionPassword(d.credSave, ($('cred-new-password')?.value || '').trim());
+  if (d.credGenerate) return rotateExtensionPassword(d.credGenerate, '');
 
   if (d.removeNode !== undefined) { flowNodes.splice(Number(d.removeNode), 1); renderFlowNodes(); return; }
   if (d.readNotification) {

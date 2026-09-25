@@ -417,23 +417,8 @@ body.theme-light .hero{background:linear-gradient(120deg,#eef2ffd9,#f5ecffd9 55%
 .hero h2{position:relative;z-index:1;font-size:22px;font-weight:770;letter-spacing:-.032em}
 .hero p{position:relative;z-index:1;font-size:13px;color:var(--text-2);margin-top:7px;max-width:62ch}
 .hero-actions{position:relative;z-index:1;display:flex;gap:10px;margin-top:17px;flex-wrap:wrap}
-/* Setup journey: numbered milestones joined by hairlines, ticked when complete. */
-.journey{position:relative;z-index:1;display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:18px}
-.journey i{width:20px;height:1.5px;flex:0 0 auto;border-radius:2px;background:var(--line-strong)}
-.journey span{
-  display:inline-flex;align-items:center;gap:7px;
-  padding:8px 13px;border-radius:var(--r-pill);
-  font-size:12px;font-weight:640;letter-spacing:-.008em;color:var(--text-2);
-  border:1px solid var(--line);background:var(--surface-2);
-  box-shadow:var(--shadow-sm);
-  transition:transform var(--t-fast),border-color var(--t-fast),color var(--t-fast),background var(--t-fast);
-}
-.journey span:hover{transform:translateY(-1px);border-color:var(--line-strong);color:var(--text)}
-.journey span.done{
-  color:var(--tone-ok);border-color:#22c55e4d;background:#22c55e14;
-  box-shadow:0 0 0 1px #22c55e1a,var(--shadow-sm);
-}
-body.theme-dark .journey span.done{color:var(--tone-ok);border-color:#22c55e59;background:#22c55e1f}
+/* Setup journey lives in section 33; the milestone styles there are the only
+   ones, so nothing leaks onto the progress bar or the step ticks. */
 
 /* ---------------------------------------------------------- 10. Buttons */
 .btn{
@@ -1404,11 +1389,20 @@ body.theme-light .empty.tone-bad .empty-icon{background:#fee2e2;color:#b91c1c}
 /* ==========================================================================
    33. Journey / setup progress
    ========================================================================== */
-.journey{display:grid;gap:14px;margin-top:18px}
+/* The bar's fill is driven by --p. Registering the property is what lets the
+   width animate when the percentage changes; without it the custom property is
+   substituted, not interpolated, and the bar jumps. */
+@property --p{syntax:'<percentage>';inherits:false;initial-value:0%}
+.journey{position:relative;z-index:1;display:grid;gap:14px;margin-top:18px}
 .journey-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .journey-head b{font-size:12.5px;font-weight:720}
 .journey-head small{font-size:11px;color:var(--text-3)}
-.journey-bar{flex:1;min-width:160px;height:7px;border-radius:var(--r-pill);background:#8b93a826;overflow:hidden}
+/* The track, the fill that reads --p, the step pills and the round tick holder.
+   Nothing else in this block may add padding or a border to the tick. */
+.journey-bar{
+  flex:1;min-width:160px;height:7px;border:0;border-radius:var(--r-pill);
+  background:#8b93a826;overflow:hidden;box-shadow:inset 0 0 0 1px var(--line);
+}
 .journey-bar i{
   display:block;height:100%;border-radius:var(--r-pill);width:var(--p,0%);
   background:linear-gradient(90deg,var(--acc-1),var(--acc-2),var(--acc-3));
@@ -1425,8 +1419,9 @@ body.theme-light .empty.tone-bad .empty-icon{background:#fee2e2;color:#b91c1c}
   transition:transform var(--t-fast),border-color var(--t-fast),color var(--t-fast),background var(--t-fast),box-shadow var(--t-fast);
 }
 .journey-step .tick{
-  width:17px;height:17px;flex:none;border-radius:50%;display:grid;place-items:center;
-  font-size:9.5px;font-weight:800;background:#8b93a82e;color:var(--text-2);
+  width:17px;height:17px;flex:none;border:0;padding:0;border-radius:50%;
+  display:grid;place-items:center;font-size:9.5px;font-weight:800;
+  background:#8b93a82e;color:var(--text-2);box-shadow:none;
 }
 .journey-step:hover{transform:translateY(-2px);border-color:var(--line-strong);color:var(--text)}
 .journey-step.done{color:var(--tone-ok);border-color:#22c55e4d;background:#22c55e14}
@@ -1438,6 +1433,49 @@ body.theme-dark .journey-step.done{color:var(--tone-ok);border-color:#22c55e59;b
   animation:dropPulse 3.2s var(--ease) infinite;
 }
 .journey-step.current .tick{background:linear-gradient(140deg,var(--fill-1),var(--fill-2));color:#fff}
+
+/* A link out of the console, and the documentation strip above the panels. */
+.doc-link{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;
+  padding:11px 15px;border-radius:var(--r-md);border:1px solid var(--line);background:var(--surface-2);
+}
+.doc-link span{font-size:12px;color:var(--text-3);flex:1;min-width:220px}
+.doc-link a{display:inline-flex;align-items:center;gap:7px;text-decoration:none}
+a.nav-item{
+  display:flex;align-items:center;gap:11px;width:100%;font:inherit;font-size:12.5px;font-weight:620;
+  letter-spacing:-.012em;color:var(--text-2);text-align:left;text-decoration:none;cursor:pointer;
+}
+
+/* ==========================================================================
+   33b. Device credential sheet
+   ========================================================================== */
+.cred-sheet{display:grid;gap:14px}
+.cred-identity{display:flex;align-items:center;gap:12px}
+.cred-identity .ws-glyph{flex:none;font-size:12.5px}
+.cred-identity b{display:block;font-size:14px;font-weight:730;letter-spacing:-.02em}
+.cred-identity small{display:block;font-size:11.5px;color:var(--text-3);margin-top:2px}
+.cred-identity .tag{margin-left:auto}
+.cred-table{
+  width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;
+  border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;background:var(--surface-2);
+}
+.cred-table th,.cred-table td{padding:9px 12px;text-align:left;vertical-align:middle;border-bottom:1px solid var(--line)}
+.cred-table tr:last-child th,.cred-table tr:last-child td{border-bottom:0}
+.cred-table th{width:34%;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3)}
+.cred-table code{
+  font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);
+  font-size:12.5px;color:var(--text);word-break:break-all;
+}
+.cred-table .cred-copy{width:1%;white-space:nowrap;text-align:right}
+.cred-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cred-actions small{font-size:11px;color:var(--text-3);margin-left:auto}
+.cred-rotate{
+  display:grid;gap:11px;padding:13px 14px;border-radius:var(--r-md);
+  border:1px solid var(--line);background:var(--surface-2);
+}
+.cred-rotate .field{margin:0}
+.cred-rotate-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.cred-rotate-actions small{font-size:11px;color:var(--text-3)}
 
 /* ==========================================================================
    34. Call-flow studio
