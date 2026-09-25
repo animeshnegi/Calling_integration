@@ -638,6 +638,67 @@ async function main() {
   }
 
   /* ------------------------------------------------- Documentation is linked */
+  section('Customer workspace drawer');
+  {
+    const { w, d } = boot();
+    await settle(320);
+    w.eval("openCustomer(2)");
+    await settle(700);
+    const scroll = d.getElementById('ws-scroll');
+    check('the drawer has one scrolling region below the identity', !!scroll);
+    const still = d.querySelector('.ws-head .ws-head-top');
+    check('the identity block is outside it, so it cannot scroll away',
+      !!still && !scroll.contains(still));
+    check('the account summary scrolls with the region',
+      ['ws-status', 'ws-metrics', 'ws-quick', 'ws-recent'].every(id => scroll.contains(d.getElementById(id))),
+      ['ws-status', 'ws-metrics', 'ws-quick', 'ws-recent'].filter(id => !scroll.contains(d.getElementById(id))).join(', ') || 'all inside');
+    check('the tab row and its content live in the same region',
+      scroll.contains(d.getElementById('ws-tabs')) && scroll.contains(d.getElementById('ws-body')));
+    check('the tab row comes before the tab content, so it can pin above it',
+      [...scroll.children].indexOf(d.getElementById('ws-tabs')) < [...scroll.children].indexOf(d.getElementById('ws-body')));
+    // jsdom has no layout, so which element scrolls and which one pins is proven
+    // by the cascade check, not by measuring here.
+    check('only the region scrolls: the tab body is plain content, not a second scroller',
+      !d.getElementById('ws-body').getAttribute('style')
+      && d.getElementById('ws-body').querySelector('#ws-scroll') === null);
+    w.eval("renderWsTab('calls')");
+    await settle(200);
+    check('switching a tab still renders its content into the region',
+      d.getElementById('ws-body').textContent.trim().length > 0);
+    w.eval("closeWorkspace()");
+  }
+
+  section('Platform recording switch');
+  {
+    const { w, d, seen } = boot({ isAdmin: true, routes: { '/admin/api/settings': () => ({ ok: true }) } });
+    await settle(340);
+    const toggle = d.getElementById('platform-recording');
+    check('the administrator has the global recording switch back', !!toggle);
+    check('it shows the platform\'s current state',
+      toggle.checked === true && /^On/.test(d.getElementById('recording-platform-state').textContent),
+      `${toggle.checked} / ${d.getElementById('recording-platform-state').textContent}`);
+    check('it explains that a device still decides for itself',
+      /its own switch is on/.test(d.getElementById('recording-platform-help').textContent),
+      d.getElementById('recording-platform-help').textContent.slice(0, 100));
+    // The other state: a switch that has been turned off says so, and explains
+    // the veto rather than the per-device rule.
+    const off = JSON.parse(JSON.stringify(load('state.json')));
+    off.recording_platform_enabled = false;
+    const stopped = boot({ isAdmin: true, state: off });
+    await settle(320);
+    check('switched off, it says nobody records and why',
+      stopped.d.getElementById('recording-platform-state').textContent.startsWith('Off')
+      && /No device records/.test(stopped.d.getElementById('recording-platform-help').textContent),
+      stopped.d.getElementById('recording-platform-state').textContent);
+    toggle.checked = true;
+    toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await settle(300);
+    const posted = seen.filter(x => x.url === '/admin/api/settings' && x.method === 'POST').pop();
+    check('flipping it saves the platform switch',
+      posted && JSON.parse(posted.body).recording_enabled === true,
+      posted ? posted.body : 'no request');
+  }
+
   section('Server address');
   {
     const { w, d, seen } = boot({ isAdmin: true, routes: { '/admin/api/settings': () => ({ ok: true }) } });
@@ -690,6 +751,27 @@ async function main() {
 
   /* ------------------------------------------------------- customer console */
   section('Customer console');
+  {
+    const stopped = JSON.parse(JSON.stringify(customerState));
+    stopped.recording_platform_enabled = false;
+    const { w, d } = boot({ isAdmin: false, state: stopped });
+    await settle(320);
+    const toggle = d.getElementById('profile-recording');
+    check('a customer sees their device switch disabled while the platform switch is off',
+      toggle.disabled === true);
+    check('and is told why, instead of a switch that does nothing',
+      /switched off for this whole platform/.test(d.getElementById('profile-recording-help').textContent),
+      d.getElementById('profile-recording-help').textContent.slice(0, 90));
+    const rows = d.getElementById('extension-list')?.textContent || '';
+    check('a device that opted in reads as paused, not recording',
+      /Recording paused/.test(rows), rows.replace(/\s+/g, ' ').slice(0, 120));
+    const allowed = boot({ isAdmin: false, state: customerState });
+    await settle(320);
+    check('with the platform switch on, the same device reads as recording',
+      /Recording on/.test(allowed.d.getElementById('extension-list')?.textContent || ''),
+      (allowed.d.getElementById('extension-list')?.textContent || '').replace(/\s+/g, ' ').slice(0, 120));
+  }
+
   {
     const { w, d, errors } = boot({ isAdmin: false, state: customerState });
     await settle(320);

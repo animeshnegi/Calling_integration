@@ -284,8 +284,9 @@ def test_extension_user_is_scoped_and_cannot_change_system_settings(tmp_path):
     )
     assert preference.status_code == 200
     assert next(row for row in settings.list_extensions() if row["extension"] == "101")["recording_enabled"] == 1
-    # The global switch remains off, so opting in does not start recording yet.
-    assert settings.get_settings()["recording_enabled"] == "false"
+    # The platform switch (the administrator's) is untouched by that: an
+    # extension user's opt-in is their own switch, nothing more.
+    assert settings.get_settings()["recording_enabled"] == "true"
 
     response = client.post(
         "/admin/api/settings", json={"recording_enabled": False},

@@ -753,11 +753,23 @@ body.theme-light .ws-metric{background:#ffffffb8;box-shadow:var(--shadow-sm)}
 .ws-metric small{display:block;font-size:9.5px;color:var(--text-3);font-weight:650;text-transform:uppercase;letter-spacing:.05em}
 .ws-metric b{display:block;font-size:18px;font-weight:770;letter-spacing:-.03em;font-variant-numeric:tabular-nums;margin-top:1px}
 
+/* The drawer's one scrolling region: the account summary scrolls away, the tab
+   row pins to the top of this box, and the tab's own content scrolls under it. */
+.ws-scroll{
+  flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;
+  scrollbar-gutter:stable;position:relative;
+}
+.ws-summary{padding:20px 26px 22px}
+.ws-summary > .ws-status{margin-top:0}
+.ws-summary > .ws-metrics:first-child{margin-top:0}
 .ws-tabs{
-  flex:none;display:flex;gap:3px;overflow-x:auto;padding:11px 20px 0;
+  position:sticky;top:0;z-index:4;
+  display:flex;gap:3px;overflow-x:auto;padding:11px 20px 0;
   border-bottom:1px solid var(--line);
-  background:var(--surface-2);
-  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  /* Opaque in both skins, so the tab content scrolling underneath stays hidden;
+     the summary above is smaller than this row's blur budget. */
+  background-color:var(--surface-solid);
+  background-image:linear-gradient(var(--surface-2),var(--surface-2));
   scrollbar-width:none;
 }
 .ws-tabs::-webkit-scrollbar{display:none}
@@ -780,18 +792,15 @@ body.theme-light .ws-metric{background:#ffffffb8;box-shadow:var(--shadow-sm)}
   background:#f43f5e2e;color:var(--tone-bad);font-size:9.5px;font-weight:800;display:grid;place-items:center;
 }
 
-.ws-body{
-  flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;
-  padding:24px 26px 34px;scrollbar-gutter:stable;
-}
+.ws-body{padding:24px 26px 34px}
 /* Scrollbars are ambient: a slim thumb that only firms up on hover. */
-.ws-body,.nav,.modal-body,.table-wrap,.ws-tabs{scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
-.ws-body::-webkit-scrollbar,.nav::-webkit-scrollbar,.modal-body::-webkit-scrollbar,.table-wrap::-webkit-scrollbar{width:11px;height:11px}
-.ws-body::-webkit-scrollbar-track,.nav::-webkit-scrollbar-track,.modal-body::-webkit-scrollbar-track,.table-wrap::-webkit-scrollbar-track{background:transparent}
-.ws-body::-webkit-scrollbar-thumb,.nav::-webkit-scrollbar-thumb,.modal-body::-webkit-scrollbar-thumb,.table-wrap::-webkit-scrollbar-thumb{
+.ws-scroll,.nav,.modal-body,.table-wrap,.ws-tabs{scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+.ws-scroll::-webkit-scrollbar,.nav::-webkit-scrollbar,.modal-body::-webkit-scrollbar,.table-wrap::-webkit-scrollbar{width:11px;height:11px}
+.ws-scroll::-webkit-scrollbar-track,.nav::-webkit-scrollbar-track,.modal-body::-webkit-scrollbar-track,.table-wrap::-webkit-scrollbar-track{background:transparent}
+.ws-scroll::-webkit-scrollbar-thumb,.nav::-webkit-scrollbar-thumb,.modal-body::-webkit-scrollbar-thumb,.table-wrap::-webkit-scrollbar-thumb{
   background:#8b93a83d;border:3px solid transparent;background-clip:content-box;border-radius:var(--r-pill);
 }
-.ws-body::-webkit-scrollbar-thumb:hover,.nav::-webkit-scrollbar-thumb:hover,.modal-body::-webkit-scrollbar-thumb:hover,.table-wrap::-webkit-scrollbar-thumb:hover{
+.ws-scroll::-webkit-scrollbar-thumb:hover,.nav::-webkit-scrollbar-thumb:hover,.modal-body::-webkit-scrollbar-thumb:hover,.table-wrap::-webkit-scrollbar-thumb:hover{
   background:#8b93a86b;background-clip:content-box;
 }
 .ws-tabs::-webkit-scrollbar{height:0}
@@ -1201,7 +1210,7 @@ body.theme-light .topbar.scrolled{box-shadow:0 8px 24px #34435e14}
 /* ==========================================================================
    30. Customer workspace — command centre
    ========================================================================== */
-.ws-head{padding-bottom:22px}
+.ws-head{padding-bottom:18px}
 /* Animated aurora ring behind the identity block. */
 .ws-head::before{
   content:"";position:absolute;width:420px;height:420px;left:-140px;top:-260px;border-radius:50%;
@@ -1300,8 +1309,9 @@ body.theme-light .ws-quick button{background:#fff;box-shadow:var(--shadow-sm)}
 .ws-metric .glyph{transition:transform var(--t-mid)}
 .ws-metric:hover .glyph{transform:scale(1.1) rotate(-4deg)}
 
-/* Sliding tab indicator: one element glides between tabs. */
-.ws-tabs{position:relative}
+/* Sliding tab indicator: one element glides between tabs. The row keeps its
+   sticky positioning; sticky is already a containing block for the ink. */
+.ws-tabs{isolation:isolate}
 .ws-tab-ink{
   position:absolute;left:0;bottom:0;height:2.5px;border-radius:3px 3px 0 0;
   width:var(--ink-w,0px);transform:translateX(var(--ink-x,0px));
@@ -1318,7 +1328,7 @@ body.theme-light .ws-quick button{background:#fff;box-shadow:var(--shadow-sm)}
 .ws-tab:hover .dot{transform:scale(1.08)}
 
 /* Tab bodies cross-fade instead of snapping. */
-.ws-body{scroll-behavior:smooth}
+.ws-scroll{scroll-behavior:smooth}
 .ws-body.swapping{animation:wsSwap .34s var(--ease-out) both}
 @keyframes wsSwap{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
 .ws-body.swapping > *:nth-child(1){animation-delay:0ms}
@@ -1566,6 +1576,7 @@ a.nav-item{
   .cols-2{grid-template-columns:1fr}
   .workspace{width:100vw;height:100vh;height:100dvh;border-radius:0;border:0}
   .ws-head{padding:19px 17px 16px}
+  .ws-summary{padding:16px 16px 18px}
   .ws-avatar{width:48px;height:48px;border-radius:15px;font-size:19px}
   .ws-id h2{font-size:17.5px}
   .ws-body{padding:19px 16px 28px}

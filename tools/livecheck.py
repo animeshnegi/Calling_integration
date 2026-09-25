@@ -276,25 +276,77 @@ check("an administrator may change it to an IP address",
 check("and it is put back", admin.json("/admin/api/settings", "POST", {
     "service_host": "sip.engineerip.example", "service_sip_port": "5060"})[0] == 200)
 
+# --- the recording switch: the administrator's, and a real veto --------------
+status, admin_state = admin.json("/admin/api/state")
+check("the platform recording switch is reported to the administrator",
+      admin_state["recording_platform_enabled"] is True, str(admin_state.get("recording_platform_enabled")))
+check("a fresh install allows recording", admin_state["settings"].get("recording_enabled") == "true",
+      json.dumps({k: v for k, v in admin_state["settings"].items() if "record" in k}))
+check("the switch is stored as canonical text, whatever the caller sends",
+      admin.json("/admin/api/settings", "POST", {"recording_enabled": "YES"})[0] == 200
+      and admin.json("/admin/api/state")[1]["settings"]["recording_enabled"] == "true",
+      admin.json("/admin/api/state")[1]["settings"].get("recording_enabled"))
+check("and a false boolean is stored the same way",
+      admin.json("/admin/api/settings", "POST", {"recording_enabled": False})[0] == 200
+      and admin.json("/admin/api/state")[1]["settings"]["recording_enabled"] == "false"
+      and admin.json("/admin/api/state")[1]["recording_platform_enabled"] is False,
+      admin.json("/admin/api/state")[1]["settings"].get("recording_enabled"))
+check("and it is switched back on",
+      admin.json("/admin/api/settings", "POST", {"recording_enabled": True})[0] == 200
+      and admin.json("/admin/api/state")[1]["settings"]["recording_enabled"] == "true")
+status, customer_state = customer.json("/admin/api/state")
+check("the customer is told the platform switch too",
+      customer_state["recording_platform_enabled"] is True)
+check("a customer cannot flip the platform switch",
+      customer.json("/admin/api/settings", "POST", {"recording_enabled": False})[0] in (400, 403))
+check("an invalid switch value is refused",
+      admin.json("/admin/api/settings", "POST", {"recording_enabled": "maybe"})[0] == 400)
+before_veto = {row["extension"]: bool(row["recording_enabled"])
+               for row in customer.json("/admin/api/state")[1]["extensions"]}
+check("the administrator switches recording off",
+      admin.json("/admin/api/settings", "POST", {"recording_enabled": False})[0] == 200)
+check("and the customer is told it is off everywhere",
+      customer.json("/admin/api/state")[1]["recording_platform_enabled"] is False)
+check("the customer's own per-device choices are untouched by the veto",
+      {row["extension"]: bool(row["recording_enabled"])
+       for row in customer.json("/admin/api/state")[1]["extensions"]} == before_veto,
+      json.dumps(before_veto))
+check("and it is switched back on",
+      admin.json("/admin/api/settings", "POST", {"recording_enabled": True})[0] == 200
+      and customer.json("/admin/api/state")[1]["recording_platform_enabled"] is True)
+
+# --- a new line starts with recording off, whatever the platform switch says --
+status, provisioned = admin.json("/admin/api/numbers", "POST", {
+    "number": "+13025550077", "provider": "IPComms", "owner_user_id": 2,
+    "inbound_extension": "auto", "auto_provision": True,
+})
+new_extension = provisioned["provisioned"]["extension"]
+check("a freshly provisioned device starts with its own recording switch off",
+      not next(row for row in customer.json("/admin/api/state")[1]["extensions"]
+               if row["extension"] == new_extension)["recording_enabled"], new_extension)
+check("and the line is removed again", admin.json(f"/admin/api/numbers/+13025550077", "DELETE")[0] in (200, 204))
+
 # --- nothing deletes an administrator ---------------------------------------
 status, admin_state = admin.json("/admin/api/state")
 administrators = [row for row in admin_state["users"] if row["role"] == "admin"]
 check("the platform administrators are listed", len(administrators) >= 1, f"{len(administrators)}")
 
 # A second administrator, so this is not only the "your own account" rule.
+import time as _time
+deputy_name = f"ops-deputy-{int(_time.time())}"
 status, created = admin.json("/admin/api/platformadmins", "POST", {
-    "username": "ops-deputy", "email": "ops.deputy@example.test",
+    "username": deputy_name, "email": f"{deputy_name}@example.test",
     "password": "deputy-administrator-password",
 })
 check("the platform can still add an administrator", status in (200, 201), f"{status} {str(created)[:80]}")
 status, admin_state = admin.json("/admin/api/state")
-deputy = next((row for row in admin_state["users"] if row["username"] == "ops-deputy"), None)
+deputy = next((row for row in admin_state["users"] if row["username"] == deputy_name), None)
 check("the new administrator is listed", bool(deputy))
 status, detail = admin.json(f"/admin/api/users/{deputy['id']}", "DELETE") if deputy else (0, {})
 check("deleting another administrator is refused",
       status == 400 and "cannot be deleted" in str(detail), f"{status} {str(detail)[:90]}")
 check("and the account is still there",
-      any(row["username"] == "ops-deputy" for row in admin.json("/admin/api/state")[1]["users"]))
+      any(row["username"] == deputy_name for row in admin.json("/admin/api/state")[1]["users"]))
 
 # --- the documentation page --------------------------------------------------
 status, page = admin.request("/documentation")

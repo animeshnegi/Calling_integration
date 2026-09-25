@@ -461,6 +461,19 @@
       <!-- ========================================================== SETTINGS -->
       <section class="page" id="page-settings">
         <article class="notice"><span class="glyph">⚙</span><div><b>Nothing to configure here any more</b>Call routing defaults and recording are decisions the customer makes for their own lines: call defaults on their Numbers page, recording per extension. This page keeps only the platform's own switches below.</div></article>
+        <article class="panel" data-admin-only>
+          <div class="panel-head">
+            <div><h2>Call recording</h2><p>The platform switch: off stops recording everywhere, whatever a customer set</p></div>
+            <span class="tag" id="recording-platform-state">Off</span>
+          </div>
+          <div class="panel-body">
+            <label class="switch">
+              <span class="switch-copy"><b>Allow call recording on this platform</b>
+                <small id="recording-platform-help">Loading the current setting…</small></span>
+              <input id="platform-recording" type="checkbox" aria-describedby="recording-platform-help"><i class="track"></i>
+            </label>
+          </div>
+        </article>
         <article class="panel">
           <div class="panel-head">
             <div><h2>Server address</h2><p>Where customers point their phones, and the host every API and webhook example is built from</p></div>
@@ -509,13 +522,19 @@
       </div>
       <button class="icon-btn ws-close" id="ws-close" aria-label="Close customer workspace">✕</button>
     </div>
-    <div class="ws-status" id="ws-status"></div>
-    <div class="ws-metrics" id="ws-metrics"></div>
-    <div class="ws-quick" id="ws-quick"></div>
-    <div class="ws-recent" id="ws-recent"></div>
   </header>
-  <nav class="ws-tabs" id="ws-tabs" aria-label="Customer resources"></nav>
-  <div class="ws-body" id="ws-body"></div>
+  <!-- Everything below the identity scrolls in one region. The tab row sticks to
+       the top of it, so switching a tab keeps its content in view underneath. -->
+  <div class="ws-scroll" id="ws-scroll">
+    <div class="ws-summary">
+      <div class="ws-status" id="ws-status"></div>
+      <div class="ws-metrics" id="ws-metrics"></div>
+      <div class="ws-quick" id="ws-quick"></div>
+      <div class="ws-recent" id="ws-recent"></div>
+    </div>
+    <nav class="ws-tabs" id="ws-tabs" aria-label="Customer resources"></nav>
+    <div class="ws-body" id="ws-body"></div>
+  </div>
 </aside>
 
 <!-- ================================================================== MODAL -->

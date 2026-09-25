@@ -180,6 +180,34 @@ one generated. It answers with the new secret and its `source`, so the sheet can
 what the phone will actually use, and it records `extension.password_rotated` in the
 owner's activity feed.
 
+The customer workspace drawer has one scrolling region. The identity block
+(`.ws-head-top`: avatar, company, contact, status flags) keeps its natural height and
+never moves; everything below it - the account summary (chips, metrics, quick actions,
+recent activity), then the tab row and the tab's content - lives inside `.ws-scroll`,
+which takes the height the identity leaves (`flex:1;min-height:0;overflow-y:auto`). The
+tab row is `position:sticky;top:0` inside that region, drawn above the content, so
+scrolling pins it under the identity and the tab's own content continues to scroll
+underneath; switching a tab scrolls the region back to the pinned row (`renderWsTab`
+calls `revealWsTabs()`), and a background refresh restores the previous scroll position
+instead of jumping. `tools/cascadecheck.js` asserts that geometry, because a headless
+DOM cannot measure a scroll box: exactly one element may scroll, the identity block
+keeps `flex:none`, the tab row wins `position:sticky` against any later rule, and the
+tab body is no longer its own scroller.
+
+Recording has two switches, and both have to agree. Each extension carries its own
+flag, which the customer sets per device, and the platform carries
+`recording_enabled`: the administrator's master switch on Settings, wired to
+`POST /admin/api/settings`. Off stops every recording immediately - a customer's opt-in
+cannot overrule it - and on lets each device follow its own switch. A new extension is
+provisioned with its own flag off, so nothing records until a customer opts a device in;
+`Service._recording_settings()` returns `enabled` (both switches), plus
+`platform_enabled` and `extension_enabled` so the console can say which one is holding
+recording back. Both consoles receive `recording_platform_enabled` in
+`/admin/api/state`, so a customer's own switch is shown disabled, with the reason,
+while the platform switch is off. Boolean settings are stored as the canonical text
+`true`/`false` whatever a caller sends, because the generated Asterisk configuration
+compares them as text.
+
 `GET /documentation` (any signed-in account) serves `web/documentation.html`: the
 setup, REST API and webhook reference for this deployment, linked from the top of
 APIs & Webhooks (which also prints the API base) and from the sidebar. It reads no

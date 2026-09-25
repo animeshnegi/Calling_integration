@@ -73,17 +73,20 @@ class TelephonyService:
             retention = max(1, int(settings.get("recording_retention_days", "90")))
         except (TypeError, ValueError):
             retention = 90
-        # Opt-in, per extension, and off when there is nothing to opt in with:
-        # a device records because its customer switched recording on for it.
+        # Two switches, and both have to agree. The customer decides whether a
+        # device records, per extension; the administrator keeps the platform
+        # switch, which stops every recording when it is off. Neither replaces
+        # the other: the platform switch cannot start a recording, and a
+        # customer's opt-in cannot overrule it.
         extension_enabled = False
         if extension and self.settings_store:
             row = next((item for item in self.settings_store.list_extensions() if item["extension"] == extension), None)
-            # Recording is the customer's decision, per extension: a device records
-            # when its own switch is on. There is no global veto any more - it was
-            # the administrator's, and this is not an administrator's choice.
             extension_enabled = bool(row and row["active"] and row["recording_enabled"])
+        platform_enabled = bool(self.settings_store and self.settings_store.recording_platform_enabled())
         return {
-            "enabled": extension_enabled,
+            "enabled": extension_enabled and platform_enabled,
+            "platform_enabled": platform_enabled,
+            "extension_enabled": extension_enabled,
             "format": fmt,
             "beep": _bool_setting(settings, "recording_beep", False),
             "announcement": _bool_setting(settings, "recording_announcement", False),

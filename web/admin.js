@@ -530,6 +530,7 @@ function renderAll() {
   renderBilling();
   renderSelects();
   renderSettings();
+  renderRecordingSwitch();
   renderServiceAddress();
   renderCallDefaults();
   renderSystemBoard();
@@ -541,9 +542,15 @@ function renderAll() {
   const myExtension = state.extensions.find(x => x.extension === state.assigned_extension);
   $('profile-recording-form').hidden = !myExtension;
   $('profile-recording').checked = !!myExtension?.recording_enabled;
-  $('profile-recording-help').textContent = myExtension?.recording_enabled
-    ? 'Calls on this extension are recorded. Switch it off to stop recording this device.'
-    : 'Recording is off for this extension. Switch it on to record calls on this device.';
+  // The platform's switch can veto every device. Say so, instead of leaving a
+  // switch that silently does nothing.
+  const platformRecording = platformRecordingAllowed();
+  $('profile-recording').disabled = !platformRecording;
+  $('profile-recording-help').textContent = !platformRecording
+    ? 'Recording is switched off for this whole platform by your provider, so no device can record at the moment.'
+    : myExtension?.recording_enabled
+      ? 'Calls on this extension are recorded. Switch it off to stop recording this device.'
+      : 'Recording is off for this extension. Switch it on to record calls on this device.';
   $('profile-email').value = state.email || '';
   markStagger();
 }
@@ -593,6 +600,12 @@ function extensionName(number) {
   const item = state.extensions.find(x => x.extension === number);
   return item?.display_name || `Extension ${number}`;
 }
+/* The platform switch, as both consoles receive it. Absent means on, so an older
+   payload never silently claims recording is stopped. */
+function platformRecordingAllowed() {
+  return state.recording_platform_enabled !== false;
+}
+
 function renderExtensions() {
   const query = val('extension-search').toLowerCase();
   const rows = state.extensions.filter(x => `${x.extension} ${x.display_name} ${x.sip_username}`.toLowerCase().includes(query));
@@ -603,7 +616,9 @@ function renderExtensions() {
       <div><h3>${esc(x.display_name || `Extension ${x.extension}`)}</h3><p>SIP username: ${esc(x.sip_username)}</p></div>
       <div class="tags">
         ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
-        ${x.recording_enabled ? tag('Recording on', 'on') : tag('Recording off')}
+        ${x.recording_enabled
+          ? (platformRecordingAllowed() ? tag('Recording on', 'on') : tag('Recording paused', 'warn'))
+          : tag('Recording off')}
         ${x.voicemail_enabled ? tag('Voicemail on', 'info') : tag('Voicemail off')}
       </div>
       <div class="row-actions">
@@ -1108,12 +1123,33 @@ function renderCallDefaults() {
   $('call-defaults-count').textContent = `${options.length} extension${options.length === 1 ? '' : 's'}`;
 }
 
-/* What remains on the platform settings page: facts, not controls. Recording and
-   call defaults were moved to the customer who owns the extensions, so the page
-   says where they went and reports what is configured. */
+/* The platform's recording switch: the one control that can stop recording
+   everywhere. It is the administrator's veto, not the decision that a device
+   records - that stays with the customer, per extension. */
+function renderRecordingSwitch() {
+  const toggle = $('platform-recording');
+  if (!toggle) return;
+  const enabled = !!state.recording_platform_enabled;
+  if (document.activeElement !== toggle) toggle.checked = enabled;
+  const tag = $('recording-platform-state');
+  if (tag) {
+    tag.textContent = enabled ? 'On' : 'Off — nobody records';
+    tag.className = `tag ${enabled ? 'on' : 'off'}`;
+  }
+  const help = $('recording-platform-help');
+  if (help) {
+    help.textContent = enabled
+      ? 'On. A device records while its own switch is on — the customer sets that per device under Devices & SIP. Switch this off to stop every recording immediately.'
+      : 'Off. No device records, whatever a customer set on their own extension. Switch it on to let each device follow its own switch again.';
+  }
+}
+
+/* What remains on the platform settings page: facts, not controls. Call defaults
+   belong to the customer who owns the extensions, so the page says where they
+   went and reports what is configured. */
 function renderSettings() {
   const rows = [
-    ['Recording', 'Each extension records only when its own switch is on. The customer turns it on per device under Extensions.', '◉'],
+    ['Recording', 'Each device records only when its own switch is on, and only while the platform switch above is on. The customer turns the device switch on under Devices & SIP.', '◉'],
     ['Call defaults', "Each customer chooses the extension an API call uses and where an unmatched number lands, on their Numbers page.", '☎'],
   ];
   const legacy = state.settings || {};
@@ -2218,20 +2254,23 @@ async function openCustomer(customerId, tab = 'overview', silent = false) {
     }
     workspace = await api(`/admin/api/customers/${customerId}`);
     if (silent) {
-      // Called from a background refresh, which already holds body.updating.
-      const scroll = $('ws-body').scrollTop;
+      // Called from a background refresh, which already holds body.updating. The
+      // scroll position is kept so a live update never moves the page someone is
+      // reading.
+      const scroll = $('ws-scroll')?.scrollTop || 0;
       renderWsHeader();
       renderWsTabs();
       wsTab = WS_TABS.some(t => t[0] === tab) ? tab : 'overview';
-      renderWsTab(wsTab);
-      $('ws-body').scrollTop = scroll;
+      renderWsTab(wsTab, { keepScroll: true });
+      if ($('ws-scroll')) $('ws-scroll').scrollTop = scroll;
       return;
     }
     endQuiet();
     renderWsHeader();
     renderWsTabs();
     wsTab = WS_TABS.some(t => t[0] === tab) ? tab : 'overview';
-    renderWsTab(wsTab);
+    renderWsTab(wsTab, { keepScroll: true });
+    resetWsScroll();
     openOverlay('workspace');
     $('scrim').classList.add('open');
     setTimeout(() => $('ws-close').focus(), 90);
@@ -2241,6 +2280,22 @@ async function openCustomer(customerId, tab = 'overview', silent = false) {
 /* The workspace header is a compact command centre: identity, account state,
    live device count, billing position and the customer's latest activity, with
    shortcuts into the flows an administrator reaches for most often. */
+/* Opening the drawer starts at the top of the scroll region: identity first,
+   then the account summary, with the tab row pinned below it. */
+function resetWsScroll() {
+  const scroll = $('ws-scroll');
+  if (scroll) scroll.scrollTop = 0;
+}
+
+/* Bring a tab's content into view: the drawer scrolls just far enough that the
+   pinned tab row sits at the top of the scroll box. */
+function revealWsTabs() {
+  const scroll = $('ws-scroll'), tabs = $('ws-tabs');
+  if (!scroll || !tabs) return;
+  const top = tabs.offsetTop;
+  if (scroll.scrollTop > top) scroll.scrollTop = top;
+}
+
 function renderWsHeader() {
   if (!workspace) return;
   const c = workspace.customer;
@@ -2381,7 +2436,7 @@ function moveTabInk() {
 
 function wsEmpty(title, text, glyph) { return `<div class="ws-empty">${empty(title, text, glyph)}</div>`; }
 
-function renderWsTab(tab) {
+function renderWsTab(tab, { keepScroll = false } = {}) {
   if (!workspace) return;
   wsTab = tab;
   document.querySelectorAll('[data-ws-tab]').forEach(b => b.classList.toggle('active', b.dataset.wsTab === tab));
@@ -2391,7 +2446,7 @@ function renderWsTab(tab) {
     calls: wsCallsTab(), recordings: wsRecordingsTab(), requests: wsRequestsTab(),
     billing: wsBilling(), integrations: wsIntegrations(), activity: wsActivityTab(),
   }[tab] || wsOverview());
-  body.scrollTop = 0;
+  if (!keepScroll) revealWsTabs();
   body.classList.remove('swapping');
   void body.offsetWidth;
   body.classList.add('swapping');
@@ -3073,6 +3128,24 @@ wire('call-defaults-form', 'submit', async event => {
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
+/* The platform recording switch. Flipping it is the whole interaction: it saves,
+   then reloads state so both consoles show the same rule. */
+wire('platform-recording', 'change', async event => {
+  const toggle = event.target;
+  const wanted = toggle.checked;
+  toggle.disabled = true;
+  try {
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ recording_enabled: wanted }) });
+    notify(wanted ? 'Recording allowed platform-wide' : 'Recording stopped platform-wide');
+    await loadState();
+  } catch (error) {
+    toggle.checked = !wanted;
+    notify(error.message, true);
+  } finally {
+    toggle.disabled = false;
+  }
+});
+
 /* The platform's own address, not the carrier trunk: an administrator sets it
    once and every SIP sheet, API base and documentation example follows. */
 wire('service-address-form', 'submit', async event => {

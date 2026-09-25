@@ -63,8 +63,13 @@ class SettingsStore:
                 ):
                     if column not in existing_user_columns:
                         db.execute(f"ALTER TABLE admin_users ADD COLUMN {column} {definition}")
+                # One-time migration. The platform switch is a veto an
+                # administrator holds, and a fresh install allows recording:
+                # nothing records until a device's own switch is on, so the
+                # permissive default costs no privacy and keeps each customer's
+                # control meaningful. An explicit choice is never rewritten.
                 if not db.execute("SELECT 1 FROM settings WHERE `key`='recording_policy_v2_initialized'").fetchone():
-                    db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','false') ON DUPLICATE KEY UPDATE value='false',updated_at=CURRENT_TIMESTAMP")
+                    db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','true') ON DUPLICATE KEY UPDATE value='true',updated_at=CURRENT_TIMESTAMP")
                     db.execute("INSERT IGNORE INTO settings(`key`,value) VALUES('recording_policy_v2_initialized','true')")
             return
         with self._connect() as db:
@@ -232,10 +237,13 @@ class SettingsStore:
                 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_extensions_sip_username ON extensions(sip_username)")
             except Exception:
                 pass
-            # One-time privacy/resource migration: upgrades and new installs
-            # start globally off. A later explicit administrator choice persists.
+            # One-time migration. The platform switch is a veto an administrator
+            # holds, and a fresh install allows recording: nothing records until a
+            # device's own switch is on, so the permissive default costs no privacy
+            # and keeps each customer's control meaningful. An explicit choice is
+            # never rewritten.
             if not db.execute("SELECT 1 FROM settings WHERE `key`='recording_policy_v2_initialized'").fetchone():
-                db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','false') ON CONFLICT(key) DO UPDATE SET value='false',updated_at=CURRENT_TIMESTAMP")
+                db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','true') ON CONFLICT(key) DO UPDATE SET value='true',updated_at=CURRENT_TIMESTAMP")
                 db.execute("INSERT INTO settings(`key`,value) VALUES('recording_policy_v2_initialized','true')")
 
     def ensure_bootstrap_admin(self, username, password):
@@ -1301,7 +1309,10 @@ class SettingsStore:
         username = self.generate_sip_username(extension)
         self.save_extension({
             "extension": extension, "display_name": display_name, "sip_username": username, "sip_password": password,
-            "active": True, "recording_enabled": bool(self.get_settings().get("recording_enabled") == "true"),
+            # Recording is the customer's opt-in per device, so a new line starts
+            # with its own switch off; the platform switch is the administrator's
+            # veto on top of that, never the reason a device records.
+            "active": True, "recording_enabled": False,
         }, owner_user_id)
 
         # Link the DID to the new extension, carrying the existing billing and
@@ -1863,6 +1874,17 @@ class SettingsStore:
             rows = db.execute("SELECT fingerprint,mailbox,recipient,status,attempts,last_error,delivered_at,updated_at FROM voicemail_deliveries ORDER BY updated_at DESC LIMIT ?", (min(100, max(1, limit)),)).fetchall()
         return [dict(row) for row in rows]
 
+    def recording_platform_enabled(self) -> bool:
+        """The administrator's recording switch.
+
+        False means nothing records anywhere, whatever a customer set on their
+        own extension; True lets each device follow its own switch. An
+        unset/unknown value reads as off, which is the privacy default every
+        install starts from.
+        """
+        value = str(self.get_settings().get("recording_enabled", "")).strip().lower()
+        return value in {"true", "1", "yes", "on"}
+
     def get_settings(self):
         with self._connect() as db:
             rows = db.execute("SELECT `key`,value FROM settings ORDER BY `key`").fetchall()
@@ -1926,9 +1948,17 @@ class SettingsStore:
             for key, value in values.items():
                 if key not in allowed:
                     continue
+                # A switch is a switch: store the canonical text, however the
+                # caller spelled the boolean, so a reader comparing the stored
+                # value and the generated configuration always sees the same one.
+                text = str(value)
+                if key in {"recording_enabled", "recording_announcement", "recording_beep", "webrtc_enabled"}:
+                    text = "true" if text.strip().lower() in {"true", "1", "yes", "on"} else "false"
+                if key == "service_host":
+                    text = text.strip()
                 db.execute(
                     "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-                    (str(key), str(value)),
+                    (str(key), text),
                 )
 
     # ------------------------------------------------ per-customer call defaults
@@ -2248,6 +2278,9 @@ def register_admin(app, config, on_telephony_change=None):
                 "old": sum(row["folder"] == "old" for row in voicemail_messages), "urgent": sum(row["folder"] == "urgent" for row in voicemail_messages),
             },
             "settings": store.get_settings() if is_admin else {},
+            # The platform recording switch, so a customer's own switch can say
+            # when it cannot take effect.
+            "recording_platform_enabled": store.recording_platform_enabled(),
             # Where customers register and what the API examples are built from.
             # The administrator sees the stored value; everybody else sees the
             # address their own devices should use.

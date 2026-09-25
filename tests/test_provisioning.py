@@ -892,6 +892,52 @@ def test_a_generated_password_renders_into_the_asterisk_config(tmp_path):
     assert f"username={provisioned['sip_username']}" in rendered
 
 
+def test_the_platform_recording_switch_is_the_administrators_and_it_vetoes(tmp_path):
+    """Round 5 removed the global controls; the administrator asked for the
+    on/off switch back. It is one switch, and off means off everywhere."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")            # extension 101
+
+    # A fresh install allows recording - the switch is a veto, not a gate - and
+    # still records nothing, because no device has opted in.
+    assert store.recording_platform_enabled() is True
+    assert app.extensions["telephony_service"]._recording_settings("101")["enabled"] is False
+    assert customer.get("/admin/api/state").json["recording_platform_enabled"] is True
+
+    # The customer's own per-device switch is what starts recording.
+    switched = customer.post("/admin/api/profile/recording", json={"enabled": True})
+    assert switched.status_code == 200
+    assert next(row for row in store.list_extensions(user_id) if row["extension"] == "101")["recording_enabled"] == 1
+    assert app.extensions["telephony_service"]._recording_settings("101")["enabled"] is True
+
+    # The administrator's switch stops it everywhere, immediately, and the
+    # customer's own choice is kept for when it goes back on.
+    assert admin.post("/admin/api/settings", json={"recording_enabled": False}).status_code == 200
+    assert store.recording_platform_enabled() is False
+    assert app.extensions["telephony_service"]._recording_settings("101")["enabled"] is False
+    assert customer.get("/admin/api/state").json["recording_platform_enabled"] is False
+    assert next(row for row in store.list_extensions(user_id) if row["extension"] == "101")["recording_enabled"] == 1
+
+    # Back on: the device records again without the customer doing anything.
+    assert admin.post("/admin/api/settings", json={"recording_enabled": True}).status_code == 200
+    assert app.extensions["telephony_service"]._recording_settings("101")["enabled"] is True
+
+    # A device that never opted in still does not record, either way.
+    customer.post("/admin/api/profile/recording", json={"enabled": False})
+    assert app.extensions["telephony_service"]._recording_settings("101")["enabled"] is False
+
+    # Customers and extension users never get to flip the platform switch.
+    assert customer.post("/admin/api/settings", json={"recording_enabled": True}).status_code in (400, 403)
+    assert app.test_client().post("/admin/api/settings", json={"recording_enabled": True}).status_code in (302, 401)
+
+    # Only real switches count: anything else is refused, and the switch stays put.
+    assert admin.post("/admin/api/settings", json={"recording_enabled": "maybe"}).status_code == 400
+    assert store.recording_platform_enabled() is True
+
+
 def test_the_registration_address_is_the_platforms_own_not_the_carriers(tmp_path):
     """A device registers with this deployment, so the administrator's address is
     what the credential sheet shows - not the carrier trunk the platform dials."""

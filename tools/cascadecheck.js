@@ -208,6 +208,53 @@ function check(label, ok, detail) {
     rotateGlyph && rotateGlyph.value === 'grid', rotateGlyph ? rotateGlyph.value : 'none');
 }
 
+/* The customer workspace drawer: the identity stays, one region scrolls, and the
+   tab row pins inside it. jsdom cannot measure a scroll box, so the rules that
+   decide it are resolved here instead: exactly one element may scroll, the head
+   may not take the height the region needs, and nothing later may take the
+   sticky positioning away from the tab row. */
+{
+  console.log('\n=== Workspace drawer ===');
+  const scroll = [element('body'), element('div', 'workspace'), element('div', 'ws-scroll')];
+  const overflow = winners(scroll, 'overflow-y').filter(rule => !rule.inert).pop();
+  check('the region below the identity is the scroller',
+    overflow && overflow.value === 'auto', overflow ? `${overflow.selector} -> ${overflow.value}` : 'none');
+  const flex = winners(scroll, 'flex').filter(rule => !rule.inert).pop();
+  check('it takes the height the identity leaves',
+    flex && /flex:1|^1/.test(flex.value.replace(/\s/g, '')), flex ? flex.value : 'none');
+  const minHeight = winners(scroll, 'min-height').filter(rule => !rule.inert).pop();
+  check('and may shrink, so it never pushes itself out of the drawer',
+    minHeight && minHeight.value === '0', minHeight ? minHeight.value : 'none');
+
+  const head = [element('body'), element('div', 'workspace'), element('header', 'ws-head')];
+  const headFlex = winners(head, 'flex').filter(rule => !rule.inert).pop();
+  check('the identity block keeps its natural height',
+    headFlex && headFlex.value === 'none', headFlex ? headFlex.value : 'none');
+
+  const tabs = [element('body'), element('div', 'ws-scroll'), element('nav', 'ws-tabs')];
+  const position = winners(tabs, 'position').filter(rule => !rule.inert).pop();
+  check('the tab row sticks to the top of that region',
+    position && position.value === 'sticky' && /ws-tabs/.test(position.selector),
+    position ? `${position.selector} -> ${position.value}` : 'none');
+  const top = winners(tabs, 'top').filter(rule => !rule.inert).pop();
+  check('at the top edge, with nothing above it',
+    top && top.value === '0', top ? top.value : 'none');
+  const zIndex = winners(tabs, 'z-index').filter(rule => !rule.inert).pop();
+  check('drawn above the content scrolling underneath',
+    zIndex && Number(zIndex.value) >= 2, zIndex ? zIndex.value : 'none');
+
+  const body = [element('body'), element('div', 'ws-scroll'), element('div', 'ws-body')];
+  const bodyOverflow = winners(body, 'overflow-y').filter(rule => !rule.inert).pop();
+  check('the tab body itself does not scroll any more',
+    !bodyOverflow || bodyOverflow.value !== 'auto',
+    bodyOverflow ? `${bodyOverflow.selector} -> ${bodyOverflow.value}` : 'no overflow rule');
+  const summary = [element('body'), element('div', 'ws-scroll'), element('div', 'ws-summary')];
+  const summaryPadding = winners(summary, 'padding').filter(rule => !rule.inert).pop();
+  check('the account summary scrolls inside the region',
+    summaryPadding && /^20px/.test(summaryPadding.value),
+    summaryPadding ? `${summaryPadding.selector} -> ${summaryPadding.value}` : 'none');
+}
+
 console.log(`\n${failures.length ? `${failures.length} CASCADE CHECK(S) FAILED` : 'CASCADE CHECK PASSED'}`);
 console.log(`${passed} checks passed`);
 if (failures.length) failures.forEach(name => console.log(`  - ${name}`));

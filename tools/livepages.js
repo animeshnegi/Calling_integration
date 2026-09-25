@@ -90,11 +90,30 @@ async function main() {
   w.__csrf = csrf;
   await settle(700);
 
+  // The customer workspace drawer: what stays still and what scrolls.
+  await w.eval("openCustomer(2)");
+  await settle(900);
+  const drawer = d.getElementById('workspace');
+  const scrollBox = d.getElementById('ws-scroll');
+  const stillBox = d.querySelector('.ws-head .ws-head-top');
+  show('ADMIN · the customer workspace drawer',
+    `drawer open: ${drawer?.classList.contains('open')}\n`
+    + `still (outside the scroller): ${stillBox ? stillBox.textContent.replace(/\s+/g, ' ').trim().slice(0, 90) : 'missing'}\n`
+    + `scrolls: ${[...(scrollBox?.children || [])].map(child => child.id || child.className).join(' , ')}\n`
+    + `pinned row: ${d.getElementById('ws-tabs')?.getAttribute('aria-label')} `
+    + `(${d.querySelectorAll('#ws-tabs [data-ws-tab]').length} tabs) then ${d.getElementById('ws-body')?.id}\n`
+    + `account summary: ${text(d.getElementById('ws-status'))}`);
+  w.eval("closeWorkspace()");
+  await settle(300);
+
   await page(w, d, 'dashboard');
   show('ADMIN · Overview — the system board (first thing on the page)',
     `${d.getElementById('page-dashboard').firstElementChild.id}\n${text(d.getElementById('system-board'))}`);
 
   await page(w, d, 'settings');
+  show('ADMIN · Settings — the platform recording switch',
+    `switch: ${d.getElementById('platform-recording')?.checked} (${text(d.getElementById('recording-platform-state'))})\n`
+    + `${text(d.getElementById('recording-platform-help'))}`);
   show('ADMIN · Settings — the address every device and link is built from',
     `host: ${d.getElementById('service-host')?.value} port: ${d.getElementById('service-sip-port')?.value}`
     + ` (${text(d.getElementById('service-address-state'))})\n`

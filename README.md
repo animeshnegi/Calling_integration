@@ -170,7 +170,7 @@ Provider inbound traffic is matched using explicit IP/CIDR allowlists rendered a
 
 ## Recording
 
-Call recording is **off by default** globally and for every new extension. The administrator controls a master switch; when it is off, no administrator or user preference can start a recording. When the master switch is on, each assigned extension user can opt their own extension in or out from the Security page, and administrators can manage every extension's preference.
+Call recording is the customer's decision, per extension, and the administrator holds one **platform switch** that can stop it everywhere (Settings → Call recording). A new extension always starts with its own switch **off**, so nothing is recorded until someone opts that device in; the platform switch is a veto on top of that, never the reason a recording starts. A device records while both switches are on: the customer's for that extension, and the platform's. Turning the platform switch off stops recording immediately and keeps every customer's own choice for when it goes back on.
 
 Recordings are stored by Asterisk in the persistent recording volume. The Flask/API containers do not mount the recording volume. Retention is enforced by the ARI worker through the private Asterisk recordings API. Finalized recordings can be listed and securely streamed with the bearer-authenticated recording API, or played in the authenticated admin console; the underlying volume is never published.
 
