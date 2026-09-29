@@ -417,6 +417,17 @@ body.theme-light .hero{background:linear-gradient(120deg,#eef2ffd9,#f5ecffd9 55%
 .hero h2{position:relative;z-index:1;font-size:22px;font-weight:770;letter-spacing:-.032em}
 .hero p{position:relative;z-index:1;font-size:13px;color:var(--text-2);margin-top:7px;max-width:62ch}
 .hero-actions{position:relative;z-index:1;display:flex;gap:10px;margin-top:17px;flex-wrap:wrap}
+/* The journey is advice, not the page: a customer who has read it can put it
+   away, and bring it back from the slim panel that replaces it. */
+.hero-dismiss{
+  position:absolute;top:13px;right:13px;z-index:2;
+  width:29px;height:29px;border-radius:50%;display:grid;place-items:center;
+  font-size:12px;line-height:1;color:var(--text-2);
+  background:#8b93a81f;border:1px solid var(--line);
+  transition:background var(--t-fast),color var(--t-fast),transform var(--t-fast);
+}
+.hero-dismiss:hover{background:#8b93a833;color:var(--text);transform:scale(1.06)}
+.hero-dismiss::before{content:"✕"}
 /* Setup journey lives in section 33; the milestone styles there are the only
    ones, so nothing leaks onto the progress bar or the step ticks. */
 
@@ -436,6 +447,10 @@ body.theme-light .hero{background:linear-gradient(120deg,#eef2ffd9,#f5ecffd9 55%
   box-shadow:0 9px 24px #6366f13d;
 }
 .btn.primary:not(:disabled):hover{transform:translateY(-2px);box-shadow:0 14px 32px #6366f152}
+/* The save button reports its own state - saving, then saved - so the operator
+   never has to guess whether the click landed. */
+.btn.primary[data-state="saved"]{background:#15803d;box-shadow:0 9px 24px #15803d3d}
+.btn.primary[data-state="saving"]{cursor:progress}
 .btn.ghost{
   background:#8b93a814;color:var(--text);border-color:var(--line-strong);
 }
@@ -484,10 +499,52 @@ input::placeholder,textarea::placeholder{color:var(--text-3)}
 input:focus,select:focus,textarea:focus{
   border-color:var(--acc-1);box-shadow:0 0 0 3.5px #6366f129;
 }
+/* The popup of a native select is painted by the browser, and only a solid
+   colour survives: a gradient here was dropped silently while the text went
+   white anyway, so the option the operator had chosen showed as a blank row on
+   the popup's own white background. Solid colours, per skin, both legible. */
 select option,select optgroup{background:var(--surface-solid);color:var(--text)}
-select option:checked{background:linear-gradient(90deg,var(--fill-1),var(--fill-2));color:#fff}
+body.theme-light select option:checked{background:#e6e9ff;color:#1b2140;font-weight:650}
+body.theme-dark select option:checked{background:#2b2a63;color:#ffffff;font-weight:650}
 select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 15px) 50%,calc(100% - 10px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:32px}
 select[multiple]{background-image:none;padding-right:12px}
+
+/* Where the engine can hand the whole popup over (`appearance: base-select`),
+   the list becomes part of the console: the platform's blue hover is replaced
+   with a quiet tint, options get room to breathe, the panel lifts into place by
+   a few pixels - no more than that - and the chevron turns as it opens. */
+@supports (appearance: base-select){
+  select:not([multiple]){appearance:base-select;background-image:none;padding-right:11px}
+  select:not([multiple])::picker-icon{color:var(--text-3);transition:transform var(--t-fast)}
+  select:not([multiple]):open::picker-icon{transform:rotate(180deg)}
+  select:not([multiple])::picker(select){
+    appearance:base-select;margin-top:7px;padding:6px;
+    border:1px solid var(--line-strong);border-radius:var(--r-md);
+    background:var(--surface-solid);box-shadow:var(--shadow-lg);
+    opacity:0;transform:translateY(-6px);
+    transition:opacity var(--t-fast),transform var(--t-fast),display var(--t-fast) allow-discrete;
+  }
+  select:not([multiple]):open::picker(select){opacity:1;transform:none}
+  @starting-style{select:not([multiple]):open::picker(select){opacity:0;transform:translateY(-6px)}}
+  select:not([multiple]) option{
+    padding:9px 11px;border-radius:var(--r-xs);background:transparent;color:var(--text);
+    transition:background var(--t-fast);
+  }
+  select:not([multiple]) option:hover{background:#6366f12e}
+  body.theme-light select:not([multiple]) option:hover{background:#e9ecfb}
+  select:not([multiple]) option:checked{background:transparent;color:var(--text)}
+  body.theme-light select:not([multiple]) option:checked{background:#e6e9ff;color:#1b2140}
+  body.theme-dark select:not([multiple]) option:checked{background:#2b2a63;color:#eaf1ff}
+  body.theme-light select:not([multiple]) option::checkmark{color:#4338ca}
+  body.theme-dark select:not([multiple]) option::checkmark{color:#c7d2fe}
+  @media (prefers-reduced-motion:reduce){select:not([multiple])::picker(select){transition:none}}
+}
+/* A picker that stands on its own - a toolbar filter, a customer chooser - rises
+   by a single pixel under the pointer. Enough to feel alive, not enough to
+   shift the row it sits in. */
+.toolbar select,.flow-toolbar select,.customer-picker select{transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast),transform var(--t-fast)}
+.toolbar select:hover,.flow-toolbar select:hover,.customer-picker select:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+.toolbar select:focus-visible,.flow-toolbar select:focus-visible,.customer-picker select:focus-visible{transform:none}
 label.field input,label.field select,label.field textarea{display:block;margin-top:6px}
 textarea{resize:vertical;min-height:90px;line-height:1.6}
 .field-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -924,7 +981,7 @@ audio{width:100%;height:34px;border-radius:var(--r-pill)}
 
 /* ================================================= 25. Call-flow studio */
 .flow-toolbar{
-  display:flex;align-items:center;justify-content:space-between;gap:16px;
+  display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
   padding:17px 20px;margin-bottom:16px;border-radius:var(--r-lg);
   background:linear-gradient(120deg,#6366f121,#a855f71c);
   border:1px solid var(--line);
@@ -932,7 +989,18 @@ audio{width:100%;height:34px;border-radius:var(--r-pill)}
 body.theme-light .flow-toolbar{background:linear-gradient(120deg,#eef2ff,#f5ecff)}
 .flow-toolbar h2{font-size:15px;font-weight:750;letter-spacing:-.022em}
 .flow-toolbar p{font-size:11.5px;color:var(--text-3);margin-top:3px}
-.flow-toolbar .tools{display:flex;gap:9px;align-items:center}
+/* The pickers share whatever room the row has and the save button keeps its
+   own, so a narrow drawer folds the button onto the next line rather than
+   cutting it off against the edge of the panel. */
+.flow-toolbar .tools{display:flex;gap:9px;align-items:center;flex-wrap:wrap;justify-content:flex-end;min-width:0;flex:1 1 320px}
+.flow-toolbar .tools select{flex:1 1 168px;min-width:0;min-height:40px}
+.flow-toolbar .tools #save-route{flex:0 0 auto;min-height:40px;padding:0 19px}
+.flow-save-hint{flex:1 1 100%;text-align:right;font-size:11.5px;font-weight:600;color:var(--text-3)}
+@media(max-width:820px){
+  .flow-toolbar .tools{justify-content:stretch}
+  .flow-toolbar .tools select,.flow-toolbar .tools #save-route{flex:1 1 100%}
+  .flow-save-hint{text-align:left}
+}
 .flow-layout{display:grid;grid-template-columns:274px minmax(0,1fr);gap:16px;align-items:start}
 .palette{padding:15px;position:sticky;top:calc(var(--topbar-h) + 16px)}
 .palette .title{padding:2px 4px 13px}
@@ -1083,6 +1151,18 @@ body.login-body{display:grid;place-items:center;padding:clamp(20px,5vw,56px);min
   width:20px;height:20px;flex:none;border-radius:50%;display:grid;place-items:center;
   background:#ffffff1a;color:var(--tone-info);font-size:11px;font-style:normal;
 }
+/* The sign-in page is part of the same building as the public pages, so it
+   wears their light surface too: the aside becomes a soft indigo wash instead of
+   a night sky, and every piece of copy is retuned for a light background. */
+body.theme-light .login-aside{
+  background:linear-gradient(145deg,#eef2ff,#f5ecff 46%,#e6fbf5);
+}
+body.theme-light .login-aside::after{border-color:#4338ca1f;box-shadow:0 0 0 46px #4338ca0a,0 0 0 96px #4338ca05}
+body.theme-light .login-copy{color:var(--text)}
+body.theme-light .login-copy > span{background:#ffffffb8;border-color:#1018281f;color:#4338ca}
+body.theme-light .login-copy p{color:var(--text-2)}
+body.theme-light .login-points li{color:var(--text-2)}
+body.theme-light .login-points i{background:#ffffff;color:#0369a1;box-shadow:var(--shadow-sm)}
 @media(max-width:880px){
   .login-shell{grid-template-columns:minmax(0,1fr);max-width:460px}
   .login-aside{display:none}

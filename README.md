@@ -170,6 +170,8 @@ Provider inbound traffic is matched using explicit IP/CIDR allowlists rendered a
 
 ## Recording
 
+The setup journey on the customer's Overview can be closed and brought back; the customer's request list lives with the operator, not on their dashboard. Every dropdown in the console is legible in both themes, including the option currently chosen. The landing page, the documentation page and the sign-in page all use the console's light surface.
+
 Call recording is the customer's decision, per extension, and the administrator holds one **platform switch** that can stop it everywhere (Settings → Call recording). A new extension always starts with its own switch **off**, so nothing is recorded until someone opts that device in; the platform switch is a veto on top of that, never the reason a recording starts. A device records while both switches are on: the customer's for that extension, and the platform's. Turning the platform switch off stops recording immediately and keeps every customer's own choice for when it goes back on.
 
 Recordings are stored by Asterisk in the persistent recording volume. The Flask/API containers do not mount the recording volume. Retention is enforced by the ARI worker through the private Asterisk recordings API. Finalized recordings can be listed and securely streamed with the bearer-authenticated recording API, or played in the authenticated admin console; the underlying volume is never published.

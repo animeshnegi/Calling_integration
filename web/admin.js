@@ -174,7 +174,7 @@ function setBadge(el, value) {
 const STAGGER_HOSTS = [
   'user-list', 'number-list', 'provider-list', 'sip-account-list', 'api-key-list',
   'webhook-list', 'webhook-delivery-list', 'email-delivery-list', 'extension-list',
-  'request-list', 'my-request-list', 'activity-list', 'notification-list',
+  'request-list', 'activity-list', 'notification-list',
   'invoice-list', 'subscription-list', 'platform-admin-list', 'recording-list',
   'voicemail-list',
 ];
@@ -945,9 +945,10 @@ function renderRequests() {
   markStagger();
 }
 
+/* The customer's Overview draws one thing from this: the setup journey, and the
+   number-request button that starts it. Requests themselves are the operator's
+   list now, so there is no customer-side timeline to paint. */
 function renderMyRequests() {
-  const host = $('my-request-list');
-  if (!host) return;
   const rows = state.requests || [];
   const pendingNumber = rows.some(r => r.request_type === 'number' && r.status === 'pending');
   const button = $('request-number');
@@ -955,14 +956,6 @@ function renderMyRequests() {
     button.disabled = pendingNumber;
     button.textContent = pendingNumber ? 'Number request pending' : (state.phone_numbers.length ? 'Request another number' : 'Request a number');
   }
-  $('my-request-count').textContent = `${rows.length} request${rows.length === 1 ? '' : 's'}`;
-  host.innerHTML = rows.slice(0, 5).map(x => `
-    <div class="tl-item"><b>${esc(String(x.request_type).replaceAll('_', ' '))}</b>
-      <p>${esc(x.details)}</p>
-      ${x.admin_note ? `<small>Administrator: ${esc(x.admin_note)}</small>` : ''}
-      <small>${esc(fmtDate(x.created_at))}</small>
-      <div class="tags" style="margin-top:7px">${statusPill(x.status, `myrequest-${x.id}`)}</div>
-    </div>`).join('') || empty('No requests yet', 'Request a phone number and its progress will appear here.', '↗');
 
   /* Setup journey: completed steps are ticked, the first unfinished step is the
      current milestone, and every milestone links to the page that advances it. */
@@ -1002,8 +995,36 @@ function renderMyRequests() {
   });
   journey.push('</div>');
   paint('customer-journey', journey.join(''));
+  renderJourneyVisibility();
   markStagger();
 }
+
+/* -------------------------------------------- the journey can be put away */
+/* Keyed per account: one customer hiding their checklist must not hide it for
+   the next person on the same browser. */
+function journeyStorageKey() {
+  return `eip-journey-hidden:${state?.user_id || 'anonymous'}`;
+}
+function journeyHidden() {
+  try { return localStorage.getItem(journeyStorageKey()) === 'hidden'; } catch (error) { return false; }
+}
+function renderJourneyVisibility() {
+  const hero = $('journey-hero');
+  const restore = $('journey-restore');
+  if (!hero || !restore) return;
+  const hidden = journeyHidden();
+  hero.hidden = hidden;
+  restore.hidden = !hidden;
+}
+function setJourneyHidden(hidden) {
+  try {
+    if (hidden) localStorage.setItem(journeyStorageKey(), 'hidden');
+    else localStorage.removeItem(journeyStorageKey());
+  } catch (error) { /* storage unavailable: hide it for this page view only */ }
+  renderJourneyVisibility();
+  notify(hidden ? 'Setup journey hidden — bring it back from Overview whenever you like' : 'Setup journey back on Overview');
+}
+
 
 /* Webhooks are already scoped to the signed-in customer in non-admin payloads. */
 function myWebhooks() {
@@ -1472,10 +1493,10 @@ function renderFlow(preferred) {
   const { type, target } = flowTargetParts(key);
   const saved = key ? savedFlowFor(type, target) : null;
   flowNodes = saved?.route?.nodes ? saved.route.nodes.map(node => ({ ...node })) : [];
+  // Never re-label a button that is mid-save or showing its confirmation.
   const save = $('save-route');
-  if (save) {
-    save.disabled = !canDesignFlows();
-    save.title = canDesignFlows() ? '' : flowDesignHint();
+  if (save && !saveFlowBusy && save.dataset.state !== 'saved') {
+    setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked');
   }
   const entry = $('flow-entry-number');
   if (entry) entry.textContent = key ? (select.selectedOptions[0]?.textContent || key) : 'Add a number, extension or group to begin';
@@ -3032,6 +3053,8 @@ wire('read-all-notifications', 'click', async () => {
 });
 wire('theme-toggle', 'click', toggleSkin);
 wire('request-number', 'click', () => openModal('request'));
+wire('journey-dismiss', 'click', () => setJourneyHidden(true));
+wire('journey-restore-btn', 'click', () => setJourneyHidden(false));
 wire('logout', 'click', async () => {
   try { await api('/admin/logout', { method: 'POST' }); } finally { location = '/login'; }
 });
@@ -3068,6 +3091,25 @@ const dragging = (el, on) => el?.classList.toggle('dragging', on);
    in the owner selector first. */
 const canDesignFlows = () => !state.is_admin || routingOwner() !== null;
 const flowDesignHint = () => 'Choose a customer above to design their call flows';
+
+/* The save button is the one control on this page with consequences, so it says
+   what it is doing. A disabled button whose reason lives in a tooltip reads as
+   broken; instead it stays live, and the toolbar prints the reason. */
+let saveFlowBusy = false;
+const SAVE_FLOW_LABELS = { ready: 'Save flow', blocked: 'Save flow', saving: 'Saving…', saved: 'Saved ✓' };
+function setSaveFlowState(state, detail) {
+  const save = $('save-route');
+  if (!save) return;
+  save.textContent = SAVE_FLOW_LABELS[state] || SAVE_FLOW_LABELS.ready;
+  save.dataset.state = state;
+  save.disabled = state === 'saving';
+  save.title = detail || (state === 'blocked' ? flowDesignHint() : '');
+  const hint = $('flow-save-hint');
+  if (hint) {
+    hint.textContent = detail || (state === 'blocked' ? flowDesignHint() : '');
+    hint.hidden = !hint.textContent;
+  }
+}
 document.querySelectorAll('[data-node-type]').forEach(button => {
   button.addEventListener('dragstart', event => {
     if (!canDesignFlows()) return;
@@ -3099,20 +3141,32 @@ if (dragSurface) {
 wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
 wire('route-owner', 'change', () => { renderRouteTargets(); renderFlow(); renderGroups(); });
 wire('save-route', 'click', async () => {
-  if (!canDesignFlows()) return notify(flowDesignHint(), true);
+  if (saveFlowBusy) return;                       // one save at a time
+  if (!canDesignFlows()) { setSaveFlowState('blocked'); return notify(flowDesignHint(), true); }
   const { type, target } = flowTargetParts($('route-target')?.value);
   if (!type || !target) return notify('Add a number, extension or group first', true);
   if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);
+  const label = type === 'number' ? target : `${type} ${target}`;
+  saveFlowBusy = true;
+  setSaveFlowState('saving');
   try {
     const payload = type === 'number'
       ? { target_type: 'number', phone_number: target, target, owner_user_id: flowOwnerId(), name: savedFlowFor('number', target)?.name || 'Main call flow' }
       : { target_type: type, target, owner_user_id: flowOwnerId(), name: savedFlowFor(type, target)?.name || (type === 'group' ? 'Group call flow' : 'Extension call flow') };
     await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, route: { nodes: flowNodes }, active: true }) });
-    notify(`Call flow saved for ${type === 'number' ? target : `${type} ${target}`}`);
+    notify(`Call flow saved for ${label}`);
+    setSaveFlowState('saved', `Saved for ${label}`);
     const id = workspace?.customer?.id, tab = wsTab;
     await loadState();
     if (id) await openCustomer(id, tab, true);
-  } catch (error) { notify(error.message, true); }
+    // Leave the confirmation up long enough to read, then go back to normal.
+    setTimeout(() => { if (!saveFlowBusy) setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked'); }, 1900);
+  } catch (error) {
+    notify(error.message, true);
+    setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked');
+  } finally {
+    saveFlowBusy = false;
+  }
 });
 
 /* ------------------------------------------------------------- 28. Forms */

@@ -161,6 +161,19 @@ async function main() {
   await page(w, d, 'routing');
   show('ADMIN · Call flows — which customer, and can he build',
     `owner selector: ${[...d.querySelectorAll('#route-owner option')].map(o => `${o.value}:${o.textContent}`).join(', ')} (value ${d.getElementById('route-owner').value})\nsave button hidden=${d.getElementById('save-route').hidden}, disabled=${d.getElementById('save-route').disabled}\nblocks offered: ${[...d.querySelectorAll('[data-node-type]')].length}\ntargets: ${text(d.getElementById('route-target')).slice(0, 200)}\ncanvas: ${text(d.getElementById('flow-nodes')).slice(0, 200)}\ngroups: ${text(d.getElementById('group-list')).slice(0, 200)}`);
+
+  // Saving: press it and read the button, the hint and the stored flow back.
+  const saveButton = d.getElementById('save-route');
+  const target = d.getElementById('route-target').value;
+  saveButton.click();
+  await settle(250);
+  const midFlight = `${saveButton.textContent} (${saveButton.dataset.state})`;
+  await settle(900);
+  let stored = await api('/admin/api/state');
+  const savedFlow = [...(stored.payload.call_routes || []), ...(stored.payload.routing_flows || [])]
+    .filter(row => `${row.phone_number || ''}${row.target || ''}`.includes(target.replace(/^[a-z]+:/, '')));
+  show('ADMIN · Call flows — the save button reports the save',
+    `target: ${target}\nlabel during save: ${midFlight}\nlabel after: ${saveButton.textContent} (${saveButton.dataset.state}), disabled=${saveButton.disabled}\nhint: ${text(d.getElementById('flow-save-hint'))}\nstored flows for it: ${savedFlow.length} — ${JSON.stringify(savedFlow.map(row => row.route?.nodes?.length)).slice(0, 120)}`);
   if (errors.length) console.log('\npage errors:', errors.slice(0, 3));
 
   // The customer's own view of the same console.
@@ -186,6 +199,17 @@ async function main() {
     + `fill width: ${fill?.style.getPropertyValue('--p')} (computed ${cust.w.getComputedStyle(fill).width})\n`
     + `ticks: ${ticks.map(t => t.textContent.trim()).join(' ')}\n`
     + `steps: ${text(cust.d.querySelector('#customer-journey .journey-steps'))}`);
+
+  // Closing the journey: it goes, a way back takes its place, and it returns.
+  const hero = cust.d.getElementById('journey-hero');
+  const restore = cust.d.getElementById('journey-restore');
+  cust.d.getElementById('journey-dismiss').click();
+  await settle(200);
+  const closed = `hero hidden=${hero.hidden}, restore hidden=${restore.hidden}, "${text(restore).slice(0, 70)}"`;
+  cust.d.getElementById('journey-restore-btn').click();
+  await settle(200);
+  show('CUSTOMER · Setup journey — closing it and bringing it back',
+    `after close: ${closed}\nafter restore: hero hidden=${hero.hidden}, restore hidden=${restore.hidden}\nrequest list still on the page: ${!!cust.d.getElementById('my-request-list')}\nOverview headings: ${[...cust.d.querySelectorAll('#page-dashboard .panel-head h2')].map(x => x.textContent).join(' | ')}`);
 
   await page(cust.w, cust.d, 'sipaccounts');
   const customerCred = cust.d.querySelector('#extension-credential-list [data-extension-credentials]');

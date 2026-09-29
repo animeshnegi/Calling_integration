@@ -75,6 +75,30 @@ const DATA_STATES = new Set([
 const unused = [...defined].filter(name => !clean.includes(name) && !everywhere.includes(name) && !DATA_STATES.has(name));
 check(`no class rule is left without a user (${defined.size} defined)`, unused.length === 0, unused.slice(0, 12).join(', '));
 
+/* The chosen option used to render as white text with no background: the
+   browser drops background-image on option, so the gradient disappeared and only
+   `color:#fff` survived - an invisible row in the list. */
+check('a chosen option is painted in both skins',
+  css.includes('body.theme-light select option:checked{background:#e6e9ff;color:#1b2140')
+  && css.includes('body.theme-dark select option:checked{background:#2b2a63;color:#ffffff'),
+  'solid colours, no gradient');
+check('and no option is left white-on-white by a dropped gradient',
+  !/select option:checked\s*\{[^}]*linear-gradient/.test(css),
+  'no gradient on an option background');
+check('the picker itself is styled where the engine hands it over',
+  css.includes('@supports (appearance: base-select)')
+  && css.includes('::picker(select)') && css.includes('option:hover'),
+  'base-select panel, options and hover');
+check('the flow toolbar may fold rather than push the save button out',
+  /\.flow-toolbar\s*\{[^}]*flex-wrap:\s*wrap/.test(css)
+  && /\.flow-toolbar \.tools\s*\{[^}]*flex-wrap:\s*wrap/.test(css),
+  'wraps at narrow widths');
+check('the public pages wear the console light surface',
+  fs.readFileSync(path.join(WEB, 'index.html'), 'utf8').includes('#f4f5fa')
+  && fs.readFileSync(path.join(WEB, 'documentation.html'), 'utf8').includes('--bg:#f4f5fa')
+  && login.includes('theme-light login-body'),
+  'landing, documentation and sign-in');
+
 check('the entrance cascade is keyed on .page.entering', css.includes('.page.entering > *'));
 check('no cascade is keyed on .page.active', !/\.page\.active\s*>/.test(css));
 check('both skins define their own tokens', css.includes('body.theme-dark{') && css.includes('body.theme-light{'));

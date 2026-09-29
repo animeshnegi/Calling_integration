@@ -261,6 +261,12 @@ async function main() {
     await settle(260);
     check('the administrator sees the customer call path', !!admin.d.getElementById('flow-nodes') && !!admin.d.getElementById('route-target'));
     check('the administrator can save a flow for the chosen customer', admin.d.getElementById('save-route').hidden === false);
+    const saveButton = admin.d.getElementById('save-route');
+    check('the save button is live, not greyed out for a reason it never prints',
+      saveButton.disabled === false && saveButton.dataset.state === 'ready',
+      `disabled=${saveButton.disabled} state=${saveButton.dataset.state} label=${JSON.stringify(saveButton.textContent)}`);
+    check('and it has a line to say what it is doing',
+      !!admin.d.getElementById('flow-save-hint'));
     check('the administrator can add steps to it', admin.d.querySelector('.palette').hidden === false);
     check('the routing page opens on a customer that has lines', admin.d.getElementById('route-owner').value !== '',
       admin.d.getElementById('route-owner').value);
@@ -289,6 +295,22 @@ async function main() {
     check('the customer keeps the save button', customer.d.getElementById('save-route').hidden === false);
     check('the customer keeps the block palette', customer.d.querySelector('.palette').hidden === false);
     check('the customer can reorder their own steps', [...customer.d.querySelectorAll('#flow-nodes .flow-node')].every(node => node.getAttribute('draggable') === 'true'));
+
+    // Saving is the one action here with consequences, so it says when it lands.
+    // The builder holds a configured step - the same shape the fixture's saved
+    // flows have - and the button is pressed for real.
+    admin.w.eval("routeOwner = 2; document.getElementById('route-owner').value = '2'; renderRouteTargets(); renderFlow(); renderGroups();"
+      + "flowNodes = [{type:'ring_group', extensions:['101','102'], timeout:25, label:'Ring 2 devices for 25s', configured:true}]; renderFlowNodes();");
+    await settle(220);
+    check('a configured flow can be saved from the button',
+      Number(admin.w.eval('flowNodes.length')) > 0 && Number(admin.w.eval('flowNodes.filter(n => n.configured).length')) === Number(admin.w.eval('flowNodes.length')),
+      `${admin.w.eval('flowNodes.length')} configured step(s) on the canvas`);
+    const clicked = admin.d.getElementById('save-route');
+    clicked.click();
+    await settle(300);
+    check('and the button reports the save rather than staying silent',
+      /Saved/.test(clicked.textContent) && clicked.dataset.state === 'saved',
+      `${JSON.stringify(clicked.textContent)} state=${clicked.dataset.state} hint=${JSON.stringify(admin.d.getElementById('flow-save-hint').textContent)}`);
   }
 
   /* ------------------------------------------------------------ extensions */
@@ -635,6 +657,36 @@ async function main() {
       && blank.d.querySelector('#customer-journey .journey-step.current').dataset.journey === 'request');
     check('an unfinished step shows its number, not a tick',
       blank.d.querySelector('#customer-journey .journey-step.current .tick').textContent.trim() === '◐');
+  }
+
+  /* ------------------------------------------------- the journey can be put away */
+  section('The setup journey can be put away');
+  {
+    const { w, d } = boot({ isAdmin: false, state: customerState });
+    await settle(340);
+    w.eval("showPage('dashboard')");
+    await settle(260);
+    const hero = d.getElementById('journey-hero');
+    const restore = d.getElementById('journey-restore');
+    check('a customer can see the journey and its close control',
+      hero && !hero.hidden && !!d.getElementById('journey-dismiss'));
+    d.getElementById('journey-dismiss').click();
+    await settle(160);
+    check('closing it puts the journey away', hero.hidden === true && restore.hidden === false,
+      `hero hidden=${hero.hidden} restore hidden=${restore.hidden}`);
+    check('and leaves a way back', /Show it again/.test(restore.textContent));
+    d.getElementById('journey-restore-btn').click();
+    await settle(160);
+    check('the way back works', hero.hidden === false && restore.hidden === true,
+      `hero hidden=${hero.hidden} restore hidden=${restore.hidden}`);
+
+    check('the customer Overview no longer carries a request list',
+      !d.getElementById('my-request-list') && !d.getElementById('my-request-count'));
+    check('and nothing on it still says My requests',
+      !/My requests/.test(d.getElementById('page-dashboard').textContent));
+    check('the number request that starts the journey is still there',
+      /Request a number/.test(d.getElementById('customer-journey').textContent)
+      || !!d.getElementById('request-number'));
   }
 
   /* ------------------------------------------------- Documentation is linked */

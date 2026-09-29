@@ -112,12 +112,17 @@
           </article>
         </div>
 
-        <section class="hero sheen" data-customer-only style="margin-top:16px">
+        <section class="hero sheen" data-customer-only style="margin-top:16px" id="journey-hero">
+          <button class="hero-dismiss" id="journey-dismiss" type="button" aria-label="Hide the setup journey" title="Hide the setup journey"></button>
           <h2>Your setup journey</h2>
           <p>Complete each step to get your phone system fully live. Progress is saved automatically.</p>
           <div class="journey" id="customer-journey"></div>
           <div class="hero-actions"><button class="btn primary" id="request-number">Request a number</button></div>
         </section>
+
+        <article class="panel sheen" data-customer-only style="margin-top:16px" id="journey-restore" hidden>
+          <div class="panel-head"><div><h2>Your setup journey</h2><p>Hidden. Your progress is still saved.</p></div><button class="btn ghost sm" id="journey-restore-btn" type="button">Show it again</button></div>
+        </article>
 
         <div class="grid cols-2" data-admin-only>
           <article class="panel">
@@ -143,11 +148,6 @@
         <article class="panel" data-admin-only style="margin-top:16px">
           <div class="panel-head"><div><h2>Recent call activity</h2><p>Latest calls across every customer</p></div><button class="btn ghost sm" data-go="calls">Open call history</button></div>
           <div class="panel-body flush"><div id="recent-calls" class="table-wrap"></div></div>
-        </article>
-
-        <article class="panel sheen" data-customer-only style="margin-top:16px">
-          <div class="panel-head"><div><h2>My requests</h2><p>Track number provisioning and administrator responses</p></div><span class="count" id="my-request-count">0 requests</span></div>
-          <div class="panel-body flush"><div id="my-request-list" class="timeline"></div></div>
         </article>
 
         <article class="panel" data-customer-only style="margin-top:16px">
@@ -238,7 +238,8 @@
           <div class="tools">
             <select id="route-owner" aria-label="Customer" data-admin-only></select>
             <select id="route-target" aria-label="Call flow target"></select>
-            <button class="btn primary" id="save-route">Save flow</button>
+            <button class="btn primary" id="save-route" data-state="ready">Save flow</button>
+            <span class="flow-save-hint" id="flow-save-hint" hidden></span>
           </div>
         </div>
         <div class="flow-layout">

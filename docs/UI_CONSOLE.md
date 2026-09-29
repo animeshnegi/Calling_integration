@@ -227,6 +227,15 @@ identically (`#route-target` groups the options by kind):
   target cannot satisfy, and rebuilding a table that holds customer data is not worth
   the risk.
 
+The **Save flow** button in `#flow-toolbar` reports its own state rather than sitting
+greyed out with the reason in a tooltip: it stays live (`Saving…` while the request is
+in flight, `Saved ✓` for a moment afterwards, with `#flow-save-hint` naming the target),
+takes one save at a time, and when it cannot save it says so in the toolbar. Its row
+wraps (`flex-wrap`) and the pickers beside it shrink (`flex:1 1 168px`) while the button
+keeps its own size (`flex:0 0 auto`, 40px - level with the pickers), so a narrow window
+or the workspace drawer folds it onto a second line instead of pushing it out of the
+panel.
+
 A **group** (`extension_groups`) is a named set of the customer's extensions with a
 ring timeout. A group can be the target of its own flow, and it can be chosen as the
 ring destination inside any flow: the step then carries `group_id` alongside the
@@ -315,6 +324,25 @@ the viewport on small screens and `.ws-body` is the single scroll region inside 
 long tabs scroll inside the panel while the page behind stays put. The standalone pages
 remain available for cross-customer work.
 
+## The customer Overview
+
+The setup journey is advice, not the page, so it can be put away: `#journey-dismiss`
+hides `#journey-hero` and shows a slim `#journey-restore` panel with the way back. The
+choice is stored per account (`eip-journey-hidden:<user_id>`, so one customer hiding
+their checklist does not hide the next person's), and the journey keeps being computed
+while it is hidden - closing it does not pause the count.
+
+Requests are the operator's list. The customer Overview used to carry a "My requests"
+timeline of `state.requests`; it is gone, and only the number-request button and the
+journey's request step remain on the customer side. The administrator's Requests page
+(`#page-requests`, `request-list`) is untouched.
+
+Public surface: `web/index.html` (landing), `web/documentation.html` and
+`web/admin-login.html` all wear the console's light skin - `--bg:#f4f5fa` with the same
+three soft radials the light theme paints - so the marketing pages, the reference and
+the door into the console read as one product rather than three. `csscheck` asserts the
+three files still carry it.
+
 ## Adding a page
 
 1. Add an entry to `pageMeta` in `web/admin.js` (`title`, `subtitle`).
@@ -351,6 +379,13 @@ pages are linkable.
 * `node tools/cascadecheck.js` — resolves which rule wins for a given element path
   (specificity and source order, with state and media rules kept inert) so a rule the
   console depends on cannot be silently overridden by a later one.
+* `node tools/cascadecheck.js` also stands over the flow toolbar: the row may fold
+  (`flex-wrap:wrap`), the pickers may shrink, and the save button keeps `flex:0 0 auto`
+  at the same height as the pickers, so it cannot be clipped out of the panel.
+* `node tools/csscheck.js` guards the dropdown fix directly: the chosen option must be
+  a solid colour in both skins, no `option` background may be a gradient (the browser
+  drops it), the `base-select` panel rules must exist, and the three public pages must
+  still carry the light surface.
 * `node tools/contrastcheck.js` — audits every text colour in `admin.css` against its
   own skin's surfaces, so the light and dark themes both stay legible.
 * `node tools/csscheck.js` — cross-checks `.class` names between `admin.css`,
@@ -364,6 +399,24 @@ pages are linkable.
   a class applied in markup but absent from the stylesheet renders unstyled, and a
   class in the stylesheet that nothing applies is dead weight. Status values come from
   the API, so they are checked against captured fixtures instead of guessed.
+
+## Dropdowns
+
+A `<select>` is drawn by the browser, and only part of it can be styled. The rule that
+used to mark the chosen option asked for a gradient background - which browsers drop on
+`option` - and set the text white anyway, so the option the operator had picked came
+back as a blank row on the popup's own white background. The chosen option is now a
+solid colour per skin (`#e6e9ff` on `#1b2140` in light, `#2b2a63` on white in dark),
+which the popup honours.
+
+Where the engine hands the whole popup over (`appearance: base-select`, behind
+`@supports`), the list becomes part of the console: the panel is our surface with our
+shadow and radius, the platform's blue hover is replaced by our own quiet tint, the
+options get padding and a radius, the chevron turns as it opens, and the panel lifts
+into place by six pixels - a minimum of movement, on a `.16s` curve, and none at all
+under `prefers-reduced-motion`. Standalone pickers - a toolbar filter, a customer
+chooser, the flow toolbar - rise by a single pixel under the pointer; form fields in
+modals do not, because a moving row inside a dialog reads as a mistake.
 
 ## Motion and interaction
 

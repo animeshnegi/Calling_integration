@@ -348,6 +348,32 @@ check("deleting another administrator is refused",
 check("and the account is still there",
       any(row["username"] == deputy_name for row in admin.json("/admin/api/state")[1]["users"]))
 
+# --- the public pages wear the console's light surface -----------------------
+status, landing = Client().request("/")
+check("the landing page is served on the console's light surface",
+      status == 200 and "#f4f5fa" in landing and "radial-gradient(circle at 6% 0%,#e5ecff" in landing,
+      str(status))
+check("and it kept its copy and its signup form",
+      "Your US business number" in landing and 'id="signup-form"' in landing)
+check("with none of the old night-sky base left",
+      "#070b16" not in landing and "#0d1424" not in landing)
+
+status, page = admin.request("/documentation")
+check("the documentation page wears the same light surface",
+      status == 200 and "--bg:#f4f5fa" in page and "color-scheme: light" in page, str(status))
+check("and its code blocks were retuned for it",
+      "background:#f7f8fd" in page and "--text:#141b2d" in page)
+
+status, page = Client().request("/login")
+check("so does the sign-in page", status == 200 and "theme-light login-body" in page, str(status))
+
+status, console_page = admin.request("/admin")
+check("the console markup ships the closable journey",
+      "journey-dismiss" in console_page and "journey-restore-btn" in console_page)
+check("and no longer the customer-side request list",
+      "my-request-list" not in console_page and "my-request-count" not in console_page)
+check("the save button has its own state line", "flow-save-hint" in console_page)
+
 # --- the browser layout self-check -------------------------------------------
 status, page = admin.request("/console-check")
 check("the layout self-check is served to a signed-in operator", status == 200 and "Console layout check" in page, str(status))

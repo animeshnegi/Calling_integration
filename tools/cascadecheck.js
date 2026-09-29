@@ -255,6 +255,30 @@ function check(label, ok, detail) {
     summaryPadding ? `${summaryPadding.selector} -> ${summaryPadding.value}` : 'none');
 }
 
+/* ============================ the flow toolbar folds, it does not clip ==== */
+/* Inside the workspace drawer - or on a phone - the two pickers and the save
+   button cannot share one line. The row wraps, the pickers shrink, and the
+   button keeps its size instead of being pushed out of the panel. */
+{
+  const toolbar = [element('body'), element('div', 'page'), element('div', 'flow-toolbar')];
+  const wrap = winners(toolbar, 'flex-wrap').filter(rule => !rule.inert).pop();
+  check('the flow toolbar folds onto a second line when it must',
+    wrap && wrap.value === 'wrap', wrap ? `${wrap.selector} -> ${wrap.value}` : 'none');
+
+  const tools = [element('body'), element('div', 'flow-toolbar'), element('div', 'tools')];
+  const toolsWrap = winners(tools, 'flex-wrap').filter(rule => !rule.inert).pop();
+  check('the pickers inside it fold too', toolsWrap && toolsWrap.value === 'wrap',
+    toolsWrap ? `${toolsWrap.selector} -> ${toolsWrap.value}` : 'none');
+
+  const button = [element('body'), element('div', 'flow-toolbar'), element('div', 'tools'), element('button', '', ['save-route'])];
+  const flex = winners(button, 'flex').filter(rule => !rule.inert).pop();
+  check('and the save button keeps its own size',
+    flex && /^0 0 auto/.test(flex.value), flex ? `${flex.selector} -> ${flex.value}` : 'none');
+  const height = winners(button, 'min-height').filter(rule => !rule.inert).pop();
+  check('level with the pickers beside it',
+    height && height.value === '40px', height ? height.value : 'none');
+}
+
 console.log(`\n${failures.length ? `${failures.length} CASCADE CHECK(S) FAILED` : 'CASCADE CHECK PASSED'}`);
 console.log(`${passed} checks passed`);
 if (failures.length) failures.forEach(name => console.log(`  - ${name}`));
