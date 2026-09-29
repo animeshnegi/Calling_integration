@@ -532,7 +532,6 @@ function renderAll() {
   renderSettings();
   renderRecordingSwitch();
   renderServiceAddress();
-  renderCallDefaults();
   renderSystemBoard();
   if (state.is_admin) loadSystem();
   renderEmailSettings();
@@ -949,6 +948,10 @@ function renderRequests() {
    number-request button that starts it. Requests themselves are the operator's
    list now, so there is no customer-side timeline to paint. */
 function renderMyRequests() {
+  // The journey is the customer's own checklist, and the request button it sits
+  // beside is the customer's too - an administrator has the Requests page for
+  // that. Nothing is computed or painted for them.
+  if (state.is_admin) return;
   const rows = state.requests || [];
   const pendingNumber = rows.some(r => r.request_type === 'number' && r.status === 'pending');
   const button = $('request-number');
@@ -1012,9 +1015,15 @@ function renderJourneyVisibility() {
   const hero = $('journey-hero');
   const restore = $('journey-restore');
   if (!hero || !restore) return;
-  const hidden = journeyHidden();
+  // One place decides this, and the role comes first: the journey is the
+  // customer's own checklist, so an administrator sees neither it nor the panel
+  // that offers to bring it back. (Setting `hidden` here used to outlive the
+  // role pass in loadState, which is how it reached the administrator's
+  // Overview in the first place.)
+  const customerView = !state.is_admin;
+  const hidden = !customerView || journeyHidden();
   hero.hidden = hidden;
-  restore.hidden = !hidden;
+  restore.hidden = !customerView || !hidden;
 }
 function setJourneyHidden(hidden) {
   try {
@@ -1130,18 +1139,6 @@ function renderServiceAddress() {
       <span class="row-icon">${glyph}</span>
       <div><h3>${esc(title)}</h3><p>${value}</p></div>
     </div>`).join(''), true);
-}
-
-function renderCallDefaults() {
-  const form = $('call-defaults-form');
-  if (!form) return;
-  const options = state.extensions.filter(x => x.active);
-  const defaults = state.call_defaults || {};
-  const list = selected => `<option value="">First available extension</option>` + options
-    .map(x => `<option value="${esc(x.extension)}" ${String(selected) === String(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`).join('');
-  paint('default-extension', list(defaults.outbound));
-  paint('inbound-fallback', list(defaults.fallback));
-  $('call-defaults-count').textContent = `${options.length} extension${options.length === 1 ? '' : 's'}`;
 }
 
 /* The platform's recording switch: the one control that can stop recording
@@ -3172,6 +3169,12 @@ wire('save-route', 'click', async () => {
 /* ------------------------------------------------------------- 28. Forms */
 /* The customer's own call defaults. An administrator never writes these: the
    endpoint refuses them, and the form is customer-only markup. */
+/* The customer's Numbers page no longer carries a call-defaults editor: how a
+   line answers is designed in Call Routing, and the stored defaults stay in the
+   payload for the API. The endpoint below is kept because the promise it makes -
+   a customer may save their own defaults, an administrator may not - is still
+   the contract; there is simply no second form fighting the flow builder.
+   Re-enable by restoring the form in the Numbers markup and this wire.
 wire('call-defaults-form', 'submit', async event => {
   event.preventDefault();
   try {
@@ -3182,6 +3185,7 @@ wire('call-defaults-form', 'submit', async event => {
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
+*/
 /* The platform recording switch. Flipping it is the whole interaction: it saves,
    then reloads state so both consoles show the same rule. */
 wire('platform-recording', 'change', async event => {

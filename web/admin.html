@@ -196,16 +196,6 @@
           <button class="btn primary" data-open="number" data-admin-only>＋ Add phone number</button>
         </div>
         <article class="notice"><span class="glyph">☎</span><div><b>Number ownership</b>Each number is assigned to one extension. Outbound calls present that number, and customer callbacks ring only its assigned employee.</div></article>
-        <form class="panel" id="call-defaults-form" data-customer-only>
-          <div class="panel-head"><div><h2>Call defaults</h2><p>Where your calls go when nothing more specific is chosen</p></div><span class="count" id="call-defaults-count">0 extensions</span></div>
-          <div class="panel-body">
-            <div class="field-row">
-              <label class="field">Default outbound extension<select id="default-extension"></select><small>Used when an API request omits the extension.</small></label>
-              <label class="field">Inbound fallback extension<select id="inbound-fallback"></select><small>Used when one of your numbers has no valid destination.</small></label>
-            </div>
-            <div class="btn-row" style="margin-top:14px"><button class="btn primary" type="submit">Save call defaults</button></div>
-          </div>
-        </form>
         <article class="panel">
           <div class="panel-head"><div><h2>Phone numbers &amp; DIDs</h2><p>Assignment, status and outbound caller ID</p></div><span class="count" id="number-count">0 numbers</span></div>
           <div class="panel-body flush"><div id="number-list" class="rows"></div></div>

@@ -279,14 +279,14 @@ refresh keeps the page where it was. `resolvePickedOwner()` keeps a valid select
 otherwise falls back to the first customer that actually has rows, so a page never
 opens on an empty customer by accident.
 
-## Routing defaults belong to the customer
+## Routing defaults: stored, no longer a second editor
 
 `settings.call_defaults` is a per-customer map (`{user_id: {outbound, fallback}}`):
 
 * `GET /admin/api/call-defaults` — the customer reads their own; an administrator must
   name `?customer_id=`, otherwise `400` (unknown customer: `404`).
-* `POST /admin/api/call-defaults` — the customer saves `{outbound, fallback}` from
-  **Numbers → Call defaults**; an administrator gets `403` ("call defaults belong to
+* `POST /admin/api/call-defaults` — the customer saves `{outbound, fallback}`; an
+  administrator gets `403` ("call defaults belong to
   the customer").
 * Resolution order when nothing is chosen: the customer's stored defaults, then the
   legacy platform `default_extension`/`inbound_fallback_extension`, then their first
@@ -324,6 +324,14 @@ the viewport on small screens and `.ws-body` is the single scroll region inside 
 long tabs scroll inside the panel while the page behind stays put. The standalone pages
 remain available for cross-customer work.
 
+The **Numbers → Call defaults** panel is gone: how a line answers is designed in
+Call Routing, and a second editor for the same decision invited conflicting edits. The
+stored defaults and their endpoint are untouched - `GET`/`POST /admin/api/call-defaults`
+still work exactly as before, the customer can still save their own and an administrator
+still cannot - and the values keep being applied; the console simply stops offering a
+competing form. The commented-out wire in `admin.js` names the markup to restore if it
+is ever wanted back.
+
 ## The customer Overview
 
 The setup journey is advice, not the page, so it can be put away: `#journey-dismiss`
@@ -331,6 +339,13 @@ hides `#journey-hero` and shows a slim `#journey-restore` panel with the way bac
 choice is stored per account (`eip-journey-hidden:<user_id>`, so one customer hiding
 their checklist does not hide the next person's), and the journey keeps being computed
 while it is hidden - closing it does not pause the count.
+
+The journey is the customer's and only the customer's. `renderMyRequests()` returns
+before it computes or paints anything for an administrator, and `renderJourneyVisibility()`
+decides visibility with the role first (`customerView`) because deciding it afterwards
+once un-hid the hero for the operator on the next state refresh: that pass runs after
+the `[data-customer-only]` sweep in `loadState`, so anything that writes `hidden` later
+wins.
 
 Requests are the operator's list. The customer Overview used to carry a "My requests"
 timeline of `state.requests`; it is gone, and only the number-request button and the
@@ -399,6 +414,18 @@ pages are linkable.
   a class applied in markup but absent from the stylesheet renders unstyled, and a
   class in the stylesheet that nothing applies is dead weight. Status values come from
   the API, so they are checked against captured fixtures instead of guessed.
+
+## No travelling highlights
+
+Hover used to start a sweep: a diagonal highlight that entered from off-canvas left and
+left the same way, on primary buttons (`.btn.primary::after`), glass cards
+(`.glass-card::before`), `.ws-card`, the drawer's quick actions (`.ws-quick button`) and
+every `.sheen` surface (`.panel`, `.hero`, `.flow-toolbar`). It read as "a small thing
+coming from the left", so it is gone: `sheenSweep` no longer exists, and each surface
+keeps a still gloss painted once at the top edge - light in the dark skin, a whisper of
+indigo in the light one. Hover still lifts a card, a button or a quick action and lets
+its shadow settle; nothing travels. `csscheck` asserts the absence of the keyframes,
+the button shine and the card sweeps, and that the lift survives.
 
 ## Dropdowns
 

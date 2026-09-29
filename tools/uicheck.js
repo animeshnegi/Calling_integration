@@ -552,34 +552,37 @@ async function main() {
   }
 
   /* ------------------------------------------------------- call defaults */
-  section('Call defaults belong to the customer');
+  section('One way to decide how a line answers');
   {
+    // Call routing is where a line's behaviour is designed; the Numbers page no
+    // longer offers a second, competing editor for the same decision.
     const customer = boot({ isAdmin: false, state: customerState });
     await settle(360);
     customer.w.eval("showPage('numbers')");
     await settle(260);
-    const form = customer.d.getElementById('call-defaults-form');
-    check('the customer has a call defaults form', !!form && form.hidden === false);
-    check('its outbound select offers the customer’s extensions',
-      customer.d.getElementById('default-extension').value === '101',
-      customer.d.getElementById('default-extension').value);
-    check('its fallback select keeps its own choice',
-      customer.d.getElementById('inbound-fallback').value === '102',
-      customer.d.getElementById('inbound-fallback').value);
-    check('it names how many extensions are available', /extension/.test(customer.d.getElementById('call-defaults-count').textContent));
+    check('the customer Numbers page has no call defaults panel',
+      !customer.d.getElementById('call-defaults-form')
+      && !customer.d.getElementById('default-extension')
+      && !customer.d.getElementById('inbound-fallback'),
+      'no form, no selects');
+    check('and nothing on it is called Call defaults',
+      !/Call defaults/.test(customer.d.getElementById('page-numbers').textContent));
+    check('the numbers themselves are still managed there',
+      !!customer.d.getElementById('number-list'));
 
     const admin = boot();
     await settle(340);
     admin.w.eval("showPage('numbers')");
     await settle(260);
-    check('the administrator gets no call defaults form', admin.d.getElementById('call-defaults-form').hidden === true);
+    check('the administrator gets no call defaults form either',
+      !admin.d.getElementById('call-defaults-form'));
 
     admin.w.eval("showPage('settings')");
     await settle(220);
     check('the recording policy controls are gone', !admin.d.getElementById('rec-enabled') && !admin.d.getElementById('rec-format'));
-    check('the platform routing-defaults controls are gone', !!admin.d.getElementById('default-extension')
-      && admin.d.getElementById('default-extension').closest('form')?.id === 'call-defaults-form');
-    check('the settings page says where those settings went',
+    check('and the platform routing-defaults controls with them',
+      !admin.d.getElementById('default-extension'));
+    check('the settings page still says where those decisions live',
       /customer/i.test(admin.d.getElementById('platform-policy').textContent));
   }
 
@@ -687,6 +690,29 @@ async function main() {
     check('the number request that starts the journey is still there',
       /Request a number/.test(d.getElementById('customer-journey').textContent)
       || !!d.getElementById('request-number'));
+
+    // The administrator never sees the customer's checklist - not the panel, and
+    // not the "bring it back" panel either. This regressed once: visibility was
+    // decided after the role pass, so the hero came back for the operator.
+    const admin = boot();
+    await settle(340);
+    admin.w.eval("showPage('dashboard')");
+    await settle(260);
+    check('an administrator sees no setup journey anywhere',
+      admin.d.getElementById('journey-hero').hidden === true
+      && admin.d.getElementById('journey-restore').hidden === true,
+      `hero hidden=${admin.d.getElementById('journey-hero').hidden}, restore hidden=${admin.d.getElementById('journey-restore').hidden}`);
+    check('and none of it is even painted for them',
+      admin.d.getElementById('customer-journey').children.length === 0,
+      `${admin.d.getElementById('customer-journey').children.length} nodes in the journey host`);
+
+    // ...and it stays away when state refreshes underneath them.
+    admin.w.eval("loadState()");
+    await settle(300);
+    check('and a state refresh does not bring it back',
+      admin.d.getElementById('journey-hero').hidden === true
+      && admin.d.getElementById('journey-restore').hidden === true,
+      `hero hidden=${admin.d.getElementById('journey-hero').hidden}`);
   }
 
   /* ------------------------------------------------- Documentation is linked */

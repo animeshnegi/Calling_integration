@@ -461,13 +461,9 @@ body.theme-light .btn.danger{background:#fff1f2;color:#be123c;border-color:#fecd
 .btn.danger:not(:disabled):hover{background:#f43f5e2e;transform:translateY(-2px)}
 .btn.sm{padding:7px 11px;font-size:11.5px;border-radius:9px}
 .btn.block{width:100%}
-/* Sheen sweep on the primary action. */
-.btn.primary::after{
-  content:"";position:absolute;inset:0;transform:translateX(-120%);
-  background:linear-gradient(100deg,transparent 35%,#ffffff45 50%,transparent 65%);
-  transition:transform .65s var(--ease);
-}
-.btn.primary:not(:disabled):hover::after{transform:translateX(120%)}
+/* The primary action used to carry a shine that swept across it on hover. It was
+   the same left-to-right streak as the panels': gone, so hovering a button does
+   only what a button should - it lifts, and its shadow settles. */
 
 .btn-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 
@@ -656,12 +652,10 @@ table.data tbody tr:last-child td{border-bottom:0}
 body.theme-light .glass-card{background:linear-gradient(150deg,#ffffff,#fdfdff);box-shadow:var(--shadow-sm)}
 .glass-card:hover{transform:translateY(-4px);box-shadow:var(--shadow-md);border-color:var(--line-strong)}
 .glass-card::before{
-  content:"";position:absolute;inset:0;pointer-events:none;transform:translateX(-120%);
-  background:linear-gradient(112deg,transparent 30%,#ffffff26 48%,transparent 66%);
-  transition:transform .8s var(--ease);
+  content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+  background:linear-gradient(180deg,#ffffff10,transparent 42%);
 }
-body.theme-light .glass-card::before{background:linear-gradient(112deg,transparent 30%,#6366f117 48%,transparent 66%)}
-.glass-card:hover::before{transform:translateX(120%)}
+body.theme-light .glass-card::before{background:linear-gradient(180deg,#4f46e508,transparent 42%)}
 .glass-card-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:13px}
 .glass-card-head > div{flex:1;min-width:0}
 .glass-card-head h3{font-size:13.5px;font-weight:730;letter-spacing:-.015em;word-break:break-word}
@@ -1190,7 +1184,6 @@ body.theme-dark :focus-visible{outline-color:#67e8f9}
 @keyframes fadeUp{from{opacity:0;transform:translateY(13px)}to{opacity:1;transform:none}}
 @keyframes fadeSoft{from{opacity:0}to{opacity:1}}
 @keyframes popIn{from{opacity:0;transform:scale(.955)}to{opacity:1;transform:none}}
-@keyframes sheenSweep{from{transform:translateX(-130%)}to{transform:translateX(130%)}}
 @keyframes hairlineSlide{to{background-position:220% 0}}
 @keyframes statusPulse{0%{transform:scale(1)}38%{transform:scale(1.13)}100%{transform:scale(1)}}
 @keyframes rowIn{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
@@ -1249,20 +1242,19 @@ body.updating .ws-avatar{animation:none!important;opacity:1!important;transform:
 .page.entering > *:nth-child(6){animation-delay:130ms}
 .page.entering > *:nth-child(n+7){animation-delay:150ms}
 
-/* Glass reflections: a slow diagonal highlight across large surfaces. */
+/* A still reflection, not a travelling one. The sweep that used to cross these
+   surfaces on hover entered from off-canvas left and left the same way - read as
+   "a little thing coming from the left" - so it is gone. The gloss that stays is
+   painted once, at the top edge, and never moves. */
 .panel,.glass-card,.hero,.ws-head,.flow-toolbar,.stat{isolation:isolate}
 .panel > .sheen,.glass-card > .sheen{display:none}
 .panel.sheen::after,.hero.sheen::after,.flow-toolbar.sheen::after{
   content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;
-  background:linear-gradient(102deg,transparent 38%,#ffffff14 48%,transparent 58%);
-  transform:translateX(-130%);
-}
-.panel.sheen:hover::after,.hero.sheen:hover::after,.flow-toolbar.sheen:hover::after{
-  animation:sheenSweep 1.05s var(--ease) 1;
+  background:linear-gradient(180deg,#ffffff12,transparent 44%);
 }
 body.theme-light .panel.sheen::after,body.theme-light .hero.sheen::after,
 body.theme-light .flow-toolbar.sheen::after{
-  background:linear-gradient(102deg,transparent 38%,#ffffff8f 48%,transparent 58%);
+  background:linear-gradient(180deg,#4f46e50a,transparent 44%);
 }
 
 /* Animated hairline along the top edge of featured surfaces. */
@@ -1366,10 +1358,9 @@ body.theme-light .ws-quick button{background:#fff;box-shadow:var(--shadow-sm)}
 .ws-quick button .glyph{font-size:13.5px;color:var(--acc-2)}
 .ws-quick button:hover{transform:translateY(-2px);border-color:var(--acc-1);box-shadow:0 10px 24px #6366f12e}
 .ws-quick button::after{
-  content:"";position:absolute;inset:0;transform:translateX(-130%);
-  background:linear-gradient(100deg,transparent 40%,#ffffff30 50%,transparent 60%);
+  content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  background:linear-gradient(180deg,#ffffff10,transparent 46%);
 }
-.ws-quick button:hover::after{animation:sheenSweep .8s var(--ease) 1}
 
 /* Recent activity folded into the header. */
 .ws-recent{position:relative;z-index:1;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
@@ -1417,11 +1408,10 @@ body.theme-light .ws-quick button{background:#fff;box-shadow:var(--shadow-sm)}
 .ws-section{animation:wsSectionIn .4s var(--ease-out) both}
 .ws-card{transition:transform var(--t-mid),border-color var(--t-mid),background var(--t-mid),box-shadow var(--t-mid)}
 .ws-card::after{
-  content:"";position:absolute;inset:0;pointer-events:none;transform:translateX(-130%);
-  background:linear-gradient(100deg,transparent 42%,#ffffff1a 50%,transparent 58%);
+  content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+  background:linear-gradient(180deg,#ffffff10,transparent 46%);
 }
-body.theme-light .ws-card::after{background:linear-gradient(100deg,transparent 42%,#ffffffb8 50%,transparent 58%)}
-.ws-card:hover::after{animation:sheenSweep .9s var(--ease) 1}
+body.theme-light .ws-card::after{background:linear-gradient(180deg,#4f46e508,transparent 46%)}
 .ws-card:hover{transform:translateY(-3px)}
 
 /* Modal and drawer contents settle in just behind the card itself. */
@@ -1801,6 +1791,5 @@ a.nav-item{
   .load-bar i{transition:none}
   .empty-icon,.canvas-empty .glyph,.journey-step.current,.device.online i,
   .aurora b,.ws-avatar::after,.ws-head::before{animation:none!important}
-  .panel.sheen::after,.ws-card::after,.ws-quick button::after{display:none}
   .ws-tab-ink{transition:none}
 }

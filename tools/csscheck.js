@@ -99,6 +99,22 @@ check('the public pages wear the console light surface',
   && login.includes('theme-light login-body'),
   'landing, documentation and sign-in');
 
+/* The "little thing coming from the left" was a sheen: a highlight that started
+   off-canvas left and swept across a surface on hover. Every one of them is gone
+   - the keyframes, the button shine, the card sweeps and the panel sweeps - and
+   what replaced them is a still gloss that never moves. */
+check('no sheen sweep survives',
+  !/sheenSweep/.test(css) && !/hover::after\s*\{[^}]*translateX/.test(css)
+  && !/\.glass-card:hover::before\s*\{[^}]*translateX/.test(css),
+  'keyframes, button shine and card sweeps removed');
+check('and the surfaces keep a still gloss instead',
+  /\.panel\.sheen::after[^{]*\{[^}]*linear-gradient\(180deg/.test(css)
+  && /\.ws-card::after\{[^}]*linear-gradient\(180deg/.test(css),
+  'painted once at the top edge');
+check('hover still lifts what it should',
+  /\.ws-card:hover\{transform:translateY/.test(css) && /\.btn\.primary:not\(:disabled\):hover\{transform:translateY/.test(css),
+  'lift and shadow, no streak');
+
 check('the entrance cascade is keyed on .page.entering', css.includes('.page.entering > *'));
 check('no cascade is keyed on .page.active', !/\.page\.active\s*>/.test(css));
 check('both skins define their own tokens', css.includes('body.theme-dark{') && css.includes('body.theme-light{'));

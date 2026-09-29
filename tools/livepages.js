@@ -158,6 +158,14 @@ async function main() {
   show('ADMIN · APIs & Webhooks — whose keys, and what he may do',
     `picker: ${text(d.getElementById('integration-picker')).slice(0, 200)}\nkeys: ${text(d.getElementById('api-key-list')).slice(0, 220)}\nwebhooks: ${text(d.getElementById('webhook-list')).slice(0, 220)}\ncreate buttons: ${[...d.querySelectorAll('[data-open="apikey"],[data-open="webhook"]')].map(x => `${x.dataset.open}:hidden=${x.hidden}`).join(' ')}`);
 
+  // The administrator's Overview: the customer's checklist must not appear here.
+  await page(w, d, 'dashboard');
+  show('ADMIN · Overview — no customer setup journey',
+    `journey hero hidden: ${d.getElementById('journey-hero').hidden}\n`
+    + `restore panel hidden: ${d.getElementById('journey-restore').hidden}\n`
+    + `heading text in the DOM (inside the hidden panel, never drawn): ${/Your setup journey/.test(d.getElementById('page-dashboard').textContent)}\n`
+    + `journey steps drawn: ${d.querySelectorAll('#customer-journey .journey-step').length}`);
+
   await page(w, d, 'routing');
   show('ADMIN · Call flows — which customer, and can he build',
     `owner selector: ${[...d.querySelectorAll('#route-owner option')].map(o => `${o.value}:${o.textContent}`).join(', ')} (value ${d.getElementById('route-owner').value})\nsave button hidden=${d.getElementById('save-route').hidden}, disabled=${d.getElementById('save-route').disabled}\nblocks offered: ${[...d.querySelectorAll('[data-node-type]')].length}\ntargets: ${text(d.getElementById('route-target')).slice(0, 200)}\ncanvas: ${text(d.getElementById('flow-nodes')).slice(0, 200)}\ngroups: ${text(d.getElementById('group-list')).slice(0, 200)}`);
@@ -187,8 +195,11 @@ async function main() {
     `${text(cust.d.querySelector('#page-webhooks .doc-link'))}`);
 
   await page(cust.w, cust.d, 'numbers');
-  show('CUSTOMER · Numbers — their own call defaults',
-    `${text(cust.d.getElementById('call-defaults-form'))}\nform hidden=${cust.d.getElementById('call-defaults-form').hidden}`);
+  show('CUSTOMER · Numbers — numbers only, no second call-defaults editor',
+    `call-defaults form present: ${!!cust.d.getElementById('call-defaults-form')}\n`
+    + `selects present: ${!!cust.d.getElementById('default-extension')} / ${!!cust.d.getElementById('inbound-fallback')}\n`
+    + `panel headings: ${[...cust.d.querySelectorAll('#page-numbers .panel-head h2')].map(x => x.textContent).join(' | ')}\n`
+    + `number rows: ${cust.d.querySelectorAll('#number-list .row').length}`);
   await page(cust.w, cust.d, 'dashboard');
   const bar = cust.d.querySelector('#customer-journey .journey-bar');
   const fill = cust.d.querySelector('#customer-journey .journey-bar i');
