@@ -373,7 +373,9 @@ check("the console ships no call-defaults editor for any role",
       and "inbound-fallback" not in console_page)
 status, sheet = Client().request("/admin-assets/admin.css")
 check("the stylesheet the browser is served draws no bar down a hovered row",
-      status == 200 and "inset 3px 0 0 0" not in sheet and "translateY(-1px);box-shadow:var(--shadow-sm)" in sheet,
+      status == 200 and "inset 3px 0 0 0" not in sheet
+      and "translateY(-3px);box-shadow:var(--shadow-md);background:#0b1220" in sheet
+      and "body.theme-light .row:hover{background:#e7ebf7}" in sheet,
       str(status))
 check("the stylesheet the browser is served has no hover sweep left",
       status == 200 and "sheenSweep" not in sheet and "linear-gradient(180deg,#ffffff12" in sheet,

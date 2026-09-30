@@ -124,9 +124,14 @@ check('no hovered row grows a bar down its left edge',
   !/inset 3px 0 0 0/.test(cssDeclarations) && !/:hover[^{]*\{[^}]*inset\s+3px/.test(cssDeclarations),
   'no inset left strip anywhere');
 check('and rows pop out instead',
-  /\.row:hover\{[^}]*translateY\(-1px\)/.test(css)
-  && /\.row:hover\{[^}]*box-shadow:var\(--shadow-sm\)/.test(css),
-  'one pixel up, soft shadow');
+  /\.row:hover\{[^}]*translateY\(-3px\)/.test(css)
+  && /\.row:hover\{[^}]*box-shadow:var\(--shadow-md\)/.test(css),
+  'three pixels up, medium shadow');
+check('with a deeper fill in both skins',
+  /\.row:hover\{[^}]*background:#0b1220/.test(css)
+  && /\.theme-light \.row:hover\{[^}]*background:#e7ebf7/.test(css)
+  && /\.theme-light table\.data tbody tr:hover\{[^}]*background:#e7ebf7/.test(css),
+  'dark navy on dark, indigo-grey on light');
 check('while a hovered table row highlights without moving',
   /table\.data tbody tr:hover\{background:/.test(css)
   && !/table\.data tbody tr:hover[^{]*\{[^}]*box-shadow/.test(css),
