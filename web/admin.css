@@ -1426,12 +1426,19 @@ body.theme-light .ws-card::after{background:linear-gradient(180deg,#4f46e508,tra
    31. Lists, tables and rows
    ========================================================================== */
 table.data tbody tr{animation:rowIn .34s var(--ease-out) both;animation-delay:calc(var(--i,0) * 20ms)}
-table.data tbody tr:hover{background:#8b93a816}
-table.data tbody tr:hover td:first-child{box-shadow:inset 3px 0 0 0 var(--acc-1)}
-table.data td{transition:box-shadow var(--t-fast),background var(--t-fast)}
+/* A hovered row used to grow an indigo strip down its left edge - a bar that
+   appeared from nowhere and, along the row's rounded corner, curved at both
+   ends. Rows now lift instead: the highlight stays in the background where it
+   belongs. */
+table.data tbody tr:hover{background:#8b93a820}
+table.data td{transition:background var(--t-fast)}
 .rows .row{animation:rowIn .34s var(--ease-out) both;animation-delay:calc(var(--i,0) * 20ms)}
 .row{border-radius:11px;transition:background var(--t-fast),transform var(--t-fast),box-shadow var(--t-fast)}
-.row:hover{transform:translateX(2px);box-shadow:inset 3px 0 0 0 var(--acc-1)}
+/* Pop out, just a little: one pixel up and a soft shadow. The old rule slid the
+   row sideways and drew a bar on its left edge - the artefact that kept being
+   reported on hover. */
+.row:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm);background:#8b93a816}
+body.theme-light .row:hover{background:#fff}
 .card-enter{animation:fadeUp .4s var(--ease-out) both;animation-delay:calc(var(--i,0) * 34ms)}
 
 /* Status pills settle in and animate when their value changes. */

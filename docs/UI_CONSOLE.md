@@ -415,7 +415,7 @@ pages are linkable.
   class in the stylesheet that nothing applies is dead weight. Status values come from
   the API, so they are checked against captured fixtures instead of guessed.
 
-## No travelling highlights
+## No travelling highlights, no bars on hover
 
 Hover used to start a sweep: a diagonal highlight that entered from off-canvas left and
 left the same way, on primary buttons (`.btn.primary::after`), glass cards
@@ -423,7 +423,11 @@ left the same way, on primary buttons (`.btn.primary::after`), glass cards
 every `.sheen` surface (`.panel`, `.hero`, `.flow-toolbar`). It read as "a small thing
 coming from the left", so it is gone: `sheenSweep` no longer exists, and each surface
 keeps a still gloss painted once at the top edge - light in the dark skin, a whisper of
-indigo in the light one. Hover still lifts a card, a button or a quick action and lets
+indigo in the light one. A hovered row has the same rule: `.row:hover` used to slide
+sideways and draw an indigo strip down its left edge (`inset 3px 0 0 0 var(--acc-1)`),
+and a table row did the same on its first cell. Both strips are gone; a row now lifts a
+single pixel with a soft shadow, and a table row simply brightens. `csscheck` refuses any
+`inset 3px` strip and requires the lift. Hover still lifts a card, a button or a quick action and lets
 its shadow settle; nothing travels. `csscheck` asserts the absence of the keyframes,
 the button shine and the card sweeps, and that the lift survives.
 

@@ -115,6 +115,23 @@ check('hover still lifts what it should',
   /\.ws-card:hover\{transform:translateY/.test(css) && /\.btn\.primary:not\(:disabled\):hover\{transform:translateY/.test(css),
   'lift and shadow, no streak');
 
+/* The bar on the left of a hovered row is the same artefact as the sweep: a
+   highlight that appears on hover where there was nothing, this time as an inset
+   shadow on the row's own edge. Comments are stripped first, so explaining the
+   rule in prose never trips it. */
+const cssDeclarations = css.replace(/\/\*[\s\S]*?\*\//g, '');
+check('no hovered row grows a bar down its left edge',
+  !/inset 3px 0 0 0/.test(cssDeclarations) && !/:hover[^{]*\{[^}]*inset\s+3px/.test(cssDeclarations),
+  'no inset left strip anywhere');
+check('and rows pop out instead',
+  /\.row:hover\{[^}]*translateY\(-1px\)/.test(css)
+  && /\.row:hover\{[^}]*box-shadow:var\(--shadow-sm\)/.test(css),
+  'one pixel up, soft shadow');
+check('while a hovered table row highlights without moving',
+  /table\.data tbody tr:hover\{background:/.test(css)
+  && !/table\.data tbody tr:hover[^{]*\{[^}]*box-shadow/.test(css),
+  'background only');
+
 check('the entrance cascade is keyed on .page.entering', css.includes('.page.entering > *'));
 check('no cascade is keyed on .page.active', !/\.page\.active\s*>/.test(css));
 check('both skins define their own tokens', css.includes('body.theme-dark{') && css.includes('body.theme-light{'));
