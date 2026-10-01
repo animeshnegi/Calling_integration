@@ -217,8 +217,26 @@ deployment rather than a placeholder - and it links back to the console.
 
 ## Call flows: one builder, three kinds of target
 
-A flow can belong to a number, an extension or a group, and the builder treats them
-identically (`#route-target` groups the options by kind):
+A flow can belong to a number, an extension or a group. An administrator picks the
+target directly (`#route-target` groups the options by kind, over the whole customer they
+are working on). A **customer** navigates instead: `#route-number` lists their assigned
+numbers and `#route-extension` lists the extensions wired to the chosen one - the number's
+`inbound_extension` first, then any device registered against it (`extensionsForNumber`),
+marked "Answers <number>" against "Other extensions". A number with nothing wired to it
+still offers the customer's own extensions, so the picker is never empty. A number is not
+an editable target for them: a number's workflow is the flow of the extension that answers
+it, and `POST /admin/api/call-routes` is refused with a message if a number target ever
+reaches the customer's save path.
+
+`currentFlowKey()` holds what the builder is editing, however it was reached - the
+administrator's picker, the customer's two pickers, or a group's own "Call flow" row -
+and the save button, the group highlight and the canvas's incoming-call label all read it.
+That is what keeps a group flow saveable while the customer's pickers still name an
+extension. The numbers page follows the same rule: a customer's "Call flow" button opens
+the workflow of the extension answering that number, while an operator's still opens the
+number's own flow.
+
+The builder's storage is unchanged:
 
 * **Numbers** — stored in `call_routes`, keyed by the number, as they always were.
 * **Extensions** and **groups** — stored in `routing_flows`, keyed by
@@ -278,6 +296,12 @@ The choice lives in `numberOwner`/`sipOwner`/`integrationOwner`, not in the DOM,
 refresh keeps the page where it was. `resolvePickedOwner()` keeps a valid selection and
 otherwise falls back to the first customer that actually has rows, so a page never
 opens on an empty customer by accident.
+
+**A number's own flow still decides who rings when the number is called.** Provisioning
+writes one for every line (the "main line rings every device" default) and `inbound_plan()`
+consults it first, falling back to the number's extension and that extension's voicemail
+switch when there is none. The customer's tab no longer edits it - it is the operator's -
+but nothing about how a call is routed changed in this pass.
 
 ## Routing defaults: stored, no longer a second editor
 
@@ -394,6 +418,11 @@ pages are linkable.
 * `node tools/cascadecheck.js` — resolves which rule wins for a given element path
   (specificity and source order, with state and media rules kept inert) so a rule the
   console depends on cannot be silently overridden by a later one.
+* `node tools/uicheck.js` covers both navigations: the administrator's flat picker keeps
+  offering numbers, extensions and groups, and the customer's two pickers list their own
+  numbers, follow the number to its extensions, edit the extension's workflow, post an
+  extension target when saved, and still write a group target when a group's own row
+  opened the builder.
 * `node tools/cascadecheck.js` also stands over the flow toolbar: the row may fold
   (`flex-wrap:wrap`), the pickers may shrink, and the save button keeps `flex:0 0 auto`
   at the same height as the pickers, so it cannot be clipped out of the panel.

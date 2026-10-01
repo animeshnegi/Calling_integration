@@ -224,10 +224,16 @@
       <!-- ============================================================ ROUTING -->
       <section class="page" id="page-routing">
         <div class="flow-toolbar sheen">
-          <div><h2>Call flows</h2><p data-customer-only>One builder for every target: save a flow to a number, an extension or a group.</p><p data-admin-only>Edit a customer's flows exactly as their callers meet them: choose the customer, then the number, extension or group.</p></div>
+          <div><h2>Call flows</h2><p data-customer-only>Pick a number, then the extension that answers it. Groups keep their own flows, listed below.</p><p data-admin-only>Edit a customer's flows exactly as their callers meet them: choose the customer, then the number, extension or group.</p></div>
           <div class="tools">
             <select id="route-owner" aria-label="Customer" data-admin-only></select>
-            <select id="route-target" aria-label="Call flow target"></select>
+            <!-- The customer's two-step: which number, then which extension
+                 answers it. A number carries no workflow of its own, so it is
+                 never an editable target for them; the administrator's single
+                 picker (below) still reaches number flows. -->
+            <select id="route-number" aria-label="Number" data-customer-only></select>
+            <select id="route-extension" aria-label="Extension" data-customer-only></select>
+            <select id="route-target" aria-label="Call flow target" data-admin-only></select>
             <button class="btn primary" id="save-route" data-state="ready">Save flow</button>
             <span class="flow-save-hint" id="flow-save-hint" hidden></span>
           </div>
@@ -258,7 +264,7 @@
                 <li>Save the flow</li>
               </ol>
             </div>
-            <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Your assigned number</small></div><span class="step">START</span></div>
+            <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Pick a number, then an extension</small></div><span class="step">START</span></div>
             <div id="flow-nodes"></div>
             <div class="flow-drop" data-customer-only><b>＋</b><span>Drop the next routing block here</span></div>
           </section>

@@ -235,8 +235,25 @@ async function main() {
   }
 
   await page(cust.w, cust.d, 'routing');
-  show('CUSTOMER · Call flows',
-    `targets: ${text(cust.d.getElementById('route-target')).slice(0, 200)}\ncanvas: ${text(cust.d.getElementById('flow-nodes')).slice(0, 200)}\nflows in state: ${custState.payload.routing_flows.map(r => `${r.target_type} ${r.target}`).join(', ')}\nnumber flows: ${custState.payload.call_routes.map(r => r.phone_number).join(', ')}`);
+  show('CUSTOMER · Call flows — a number, then the extension that answers it',
+    `number picker: ${cust.d.getElementById('route-number').hidden ? 'hidden' : 'shown'} — ${[...cust.d.querySelectorAll('#route-number option')].map(o => o.textContent).join(' | ')}\n`
+    + `extension picker: ${cust.d.getElementById('route-extension').hidden ? 'hidden' : 'shown'} — ${[...cust.d.querySelectorAll('#route-extension option')].map(o => `${o.textContent}${o.closest('optgroup') ? ` [${o.closest('optgroup').label}]` : ''}`).join(' | ')}\n`
+    + `flat target picker: hidden=${cust.d.getElementById('route-target').hidden}, options=${cust.d.getElementById('route-target').options.length}\n`
+    + `editing: ${cust.w.eval('currentFlowKey()')} — canvas starts at "${cust.d.getElementById('flow-entry-number').textContent}"\n`
+    + `flows in state: ${custState.payload.routing_flows.map(r => `${r.target_type} ${r.target}`).join(', ')}\nnumber flows (provisioned, not edited here): ${custState.payload.call_routes.map(r => r.phone_number).join(', ')}`);
+
+  // Changing the number re-scopes the extensions beside it.
+  const numberPickerLive = cust.d.getElementById('route-number');
+  if (numberPickerLive.options.length > 1) {
+    numberPickerLive.value = numberPickerLive.options[1].value;
+    numberPickerLive.dispatchEvent(new cust.w.Event('change', { bubbles: true }));
+    await settle(240);
+    show('CUSTOMER · Call flows — the extension list follows the number',
+      `number: ${numberPickerLive.value}\nextensions: ${[...cust.d.querySelectorAll('#route-extension option')].map(o => `${o.textContent}${o.closest('optgroup') ? ` [${o.closest('optgroup').label}]` : ''}`).join(' | ')}\nediting: ${cust.w.eval('currentFlowKey()')}`);
+    numberPickerLive.value = numberPickerLive.options[0].value;
+    numberPickerLive.dispatchEvent(new cust.w.Event('change', { bubbles: true }));
+    await settle(200);
+  }
 }
 
 main().then(() => process.exit(0)).catch(error => { console.error('LIVEPAGES ERROR:', error.message); process.exit(1); });

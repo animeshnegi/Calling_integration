@@ -296,6 +296,95 @@ async function main() {
     check('the customer keeps the block palette', customer.d.querySelector('.palette').hidden === false);
     check('the customer can reorder their own steps', [...customer.d.querySelectorAll('#flow-nodes .flow-node')].every(node => node.getAttribute('draggable') === 'true'));
 
+    /* The customer navigates number → extension. A number is never an editable
+       target: its calls follow the workflow of the extension that answers it. */
+    const numberPicker = customer.d.getElementById('route-number');
+    const extensionPicker = customer.d.getElementById('route-extension');
+    check('the customer picks a number first', !!numberPicker && numberPicker.hidden === false);
+    check('then the extension that answers it', !!extensionPicker && extensionPicker.hidden === false);
+    check('and the flat target list is gone',
+      customer.d.getElementById('route-target').hidden === true
+      && customer.d.getElementById('route-target').options.length === 0);
+    check('the number picker lists only the customer\'s assigned numbers',
+      [...numberPicker.options].map(o => o.value).join(',') === '+13025550001,+13025550002,+13025550003',
+      [...numberPicker.options].map(o => o.value).join(','));
+    check('the extension picker offers the extensions wired to that number',
+      /Answers \+13025550001/.test(extensionPicker.innerHTML) && extensionPicker.value === '101',
+      extensionPicker.innerHTML.slice(0, 120));
+    check('and the builder is editing that extension\'s workflow',
+      customer.w.eval('currentFlowKey()') === 'extension:101',
+      customer.w.eval('currentFlowKey()'));
+    check('the canvas names the extension, not the number',
+      /101/.test(customer.d.getElementById('flow-entry-number').textContent),
+      customer.d.getElementById('flow-entry-number').textContent);
+
+    numberPicker.value = '+13025550002';
+    numberPicker.dispatchEvent(new customer.w.Event('change', { bubbles: true }));
+    await settle(220);
+    check('choosing another number re-scopes the extensions',
+      extensionPicker.value === '102' && customer.w.eval('currentFlowKey()') === 'extension:102',
+      `${extensionPicker.value} / ${customer.w.eval('currentFlowKey()')}`);
+    check('and its extension list follows the number',
+      /Answers \+13025550002/.test(extensionPicker.innerHTML), extensionPicker.innerHTML.slice(0, 90));
+
+    numberPicker.value = '+13025550003';   // no extension wired to it yet
+    numberPicker.dispatchEvent(new customer.w.Event('change', { bubbles: true }));
+    await settle(200);
+    check('a number with nothing wired to it still offers an editor',
+      /Your extensions/.test(extensionPicker.innerHTML) && extensionPicker.options.length === 2,
+      extensionPicker.innerHTML.slice(0, 90));
+
+    // Saving writes an extension flow - never a number flow.
+    numberPicker.value = '+13025550001';
+    numberPicker.dispatchEvent(new customer.w.Event('change', { bubbles: true }));
+    await settle(200);
+    customer.w.eval("flowNodes = [{type:'extension', extension:'101', label:'Ring 101', configured:true}]; renderFlowNodes();");
+    customer.d.getElementById('save-route').click();
+    await settle(320);
+    const routingPost = customer.seen.filter(row => row.url === '/admin/api/call-routes' && row.method === 'POST').pop();
+    const posted = routingPost ? JSON.parse(routingPost.body) : {};
+    check('saving the workflow posts an extension target',
+      posted.target_type === 'extension' && String(posted.target) === '101',
+      JSON.stringify(posted).slice(0, 140));
+    check('and never a number target',
+      posted.target_type !== 'number' && !('phone_number' in posted), JSON.stringify(posted).slice(0, 120));
+
+    // The numbers page opens the answering extension's workflow, not the number's.
+    customer.w.eval("showPage('numbers')");
+    await settle(240);
+    const numberFlowButton = customer.d.querySelector('#number-list [data-extension-flow], #number-list [data-number-flow]');
+    check('a number row opens the workflow of the extension answering it',
+      !!numberFlowButton && numberFlowButton.dataset.extensionFlow === '101'
+      && numberFlowButton.dataset.numberFlow === undefined,
+      numberFlowButton ? JSON.stringify(numberFlowButton.dataset) : 'no button');
+    numberFlowButton.click();
+    await settle(300);
+    check('and the builder lands on that extension',
+      customer.w.eval('currentFlowKey()') === 'extension:101'
+      && customer.d.getElementById('page-routing').classList.contains('active'),
+      `${customer.w.eval('currentFlowKey()')} on ${customer.w.eval('currentPage')}`);
+
+    // A group flow is reached from the group's own row, and saving it must still
+    // write a group target even though the pickers name an extension.
+    const groupFlowButton = customer.d.querySelector('#group-list [data-group-flow]');
+    check('a group opens its own flow', !!groupFlowButton);
+    groupFlowButton.click();
+    await settle(280);
+    check('and the builder edits the group, not the picker\'s extension',
+      customer.w.eval('currentFlowKey()') === 'group:1'
+      && /Front desk/.test(customer.d.getElementById('flow-entry-number').textContent),
+      `${customer.w.eval('currentFlowKey()')} — "${customer.d.getElementById('flow-entry-number').textContent}"`);
+    check('the group row shows it is the one being edited',
+      customer.d.querySelector('#group-list .row.selected') !== null);
+    customer.w.eval("flowNodes = [{type:'ring_group', group_id:1, label:'Ring Front desk', configured:true}]; renderFlowNodes();");
+    customer.d.getElementById('save-route').click();
+    await settle(320);
+    const groupPost = customer.seen.filter(row => row.url === '/admin/api/call-routes' && row.method === 'POST').pop();
+    const groupBody = groupPost ? JSON.parse(groupPost.body) : {};
+    check('saving writes the group flow the row opened',
+      groupBody.target_type === 'group' && String(groupBody.target) === '1',
+      JSON.stringify(groupBody).slice(0, 140));
+
     // Saving is the one action here with consequences, so it says when it lands.
     // The builder holds a configured step - the same shape the fixture's saved
     // flows have - and the button is pressed for real.
@@ -649,7 +738,8 @@ async function main() {
       d.querySelector('#customer-journey .journey-head b').textContent);
 
     // A brand new customer has done nothing: the bar is empty and step one is current.
-    const blank = boot({ isAdmin: false, state: { ...customerState, extensions: [], sip_accounts: [], phone_numbers: [], call_routes: [], api_keys: [], webhooks: [], requests: [], invoices: [] } });
+    // A brand new customer owns nothing at all - including flows, of either kind.
+    const blank = boot({ isAdmin: false, state: { ...customerState, extensions: [], sip_accounts: [], phone_numbers: [], call_routes: [], routing_flows: [], groups: [], api_keys: [], webhooks: [], requests: [], invoices: [] } });
     await settle(340);
     blank.w.eval("showPage('dashboard')");
     await settle(260);
@@ -660,6 +750,10 @@ async function main() {
       && blank.d.querySelector('#customer-journey .journey-step.current').dataset.journey === 'request');
     check('an unfinished step shows its number, not a tick',
       blank.d.querySelector('#customer-journey .journey-step.current .tick').textContent.trim() === '◐');
+    // Routing counts extension and group flows too: the customer builds those,
+    // number flows are provisioned for them.
+    check('routing stays unfinished until a workflow exists',
+      blank.d.querySelector('#customer-journey .journey-step[data-journey="routing"]').classList.contains('done') === false);
   }
 
   /* ------------------------------------------------- the journey can be put away */

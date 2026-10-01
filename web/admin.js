@@ -738,7 +738,9 @@ function renderNumbers() {
         </div>
       </div>
       <div class="row-actions">
-        ${x.inbound_extension ? `<button class="btn ghost sm" data-number-flow="${esc(x.number)}">Call flow</button>` : ''}
+        ${x.inbound_extension ? (state.is_admin
+          ? `<button class="btn ghost sm" data-number-flow="${esc(x.number)}">Call flow</button>`
+          : `<button class="btn ghost sm" data-extension-flow="${esc(x.inbound_extension)}">Call flow</button>`) : ''}
         ${state.is_admin
           ? `<button class="btn ghost sm" data-edit-number="${x.id}">Manage</button><button class="btn danger sm" data-delete-number="${x.id}">Delete</button>`
           : (x.active && !x.default_outbound && x.inbound_extension
@@ -975,7 +977,9 @@ function renderMyRequests() {
     ['number', 'Number assigned', !!state.phone_numbers.length, 'numbers'],
     ['sip', 'Register a device', hasDevice, 'sipaccounts'],
     ['extensions', 'Extensions', !!state.extensions.length, 'extensions'],
-    ['routing', 'Call routing', !!state.call_routes.length, 'routing'],
+    // A customer designs extension and group flows; number-level flows are
+    // provisioned for them, so either kind means routing is in place.
+    ['routing', 'Call routing', !!(state.call_routes.length || (state.routing_flows || []).length), 'routing'],
     ['api', 'APIs & webhooks', !!(state.api_keys.length || myWebhooks()), 'webhooks'],
   ];
   const currentIndex = steps.findIndex(([, , done]) => !done);
@@ -1384,6 +1388,7 @@ function routingOwner() {
 }
 
 function flowOwnerId() {
+  if (!state.is_admin) return routingOwner();
   const { type, target } = flowTargetParts($('route-target')?.value);
   if (type === 'number') return (state.phone_numbers || []).find(x => x.number === target)?.owner_user_id ?? routingOwner();
   if (type === 'extension') return (state.extensions || []).find(x => x.extension === target)?.owner_user_id ?? routingOwner();
@@ -1454,6 +1459,9 @@ function savedFlowFor(type, target) {
 function renderRouteTargets(preferred) {
   const select = $('route-target');
   if (!select) return '';
+  // A customer never sees this list: a number is not an editable target for
+  // them, and their navigation lives in the two pickers above.
+  if (!state.is_admin) { select.innerHTML = ''; return ''; }
   const targets = routeTargets();
   const prior = preferred ?? select.value;
   const sections = ['Numbers', 'Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
@@ -1469,26 +1477,60 @@ function renderRouteTargets(preferred) {
    customer that target belongs to, so saving can never write across customers. */
 function focusRouteTarget(key) {
   if (!key) return;
-  if (state.is_admin && $('route-owner')) {
-    const { type, target } = flowTargetParts(key);
-    const owner = type === 'number'
-      ? (state.phone_numbers || []).find(row => row.number === target)?.owner_user_id
-      : type === 'extension'
-        ? (state.extensions || []).find(row => row.extension === target)?.owner_user_id
-        : (state.groups || []).find(row => String(row.id) === String(target))?.owner_user_id;
-    if (owner) renderRoutingOwner(owner);
+  const { type, target } = flowTargetParts(key);
+  if (state.is_admin) {
+    if ($('route-owner')) {
+      const owner = type === 'number'
+        ? (state.phone_numbers || []).find(row => row.number === target)?.owner_user_id
+        : type === 'extension'
+          ? (state.extensions || []).find(row => row.extension === target)?.owner_user_id
+          : (state.groups || []).find(row => String(row.id) === String(target))?.owner_user_id;
+      if (owner) renderRoutingOwner(owner);
+    }
+    renderRouteTargets(key);
+    applyFlowTarget(key);
+  } else {
+    // A customer edits a workflow, never a number: a number key stands for the
+    // workflow of the extension that answers it, and the pickers follow.
+    const extension = type === 'number' ? extensionAnsweringNumber(target) : (type === 'extension' ? String(target) : '');
+    const number = type === 'number' ? String(target) : numberAnsweredBy(target);
+    renderCustomerRoutePickers(number ? flowKey('number', number) : key);
+    applyFlowTarget(extension ? flowKey('extension', extension) : key);
   }
-  renderRouteTargets(key);
-  renderFlow(key);
   renderGroups();
 }
 
-function renderFlow(preferred) {
-  const select = $('route-target');
-  if (!select) return;
-  const key = renderRouteTargets(preferred);
-  const { type, target } = flowTargetParts(key);
-  const saved = key ? savedFlowFor(type, target) : null;
+/* What the builder is editing, kept as state rather than re-read from a
+   picker: an administrator has one target picker, a customer navigates a number
+   and then an extension, and a group flow can be opened from its own row without
+   any picker changing. One value, however it was reached. */
+let flowTargetKey = '';
+
+function currentFlowKey() {
+  return flowTargetKey || (state.is_admin ? ($('route-target')?.value || '') : '');
+}
+
+/* The name shown on the canvas's incoming-call node. */
+function flowEntryLabel(type, target) {
+  if (state.is_admin) {
+    const select = $('route-target');
+    if (select && select.value === flowTargetKey) return select.selectedOptions[0]?.textContent || String(target);
+  }
+  if (type === 'extension') {
+    const row = (state.extensions || []).find(x => String(x.extension) === String(target));
+    return `${target}${row?.display_name ? ` — ${row.display_name}` : ''}`;
+  }
+  if (type === 'group') {
+    const group = (state.groups || []).find(g => String(g.id) === String(target));
+    return `${group?.name || 'Group'} (group)`;
+  }
+  return String(target || '');
+}
+
+function applyFlowTarget(key) {
+  flowTargetKey = key || '';
+  const { type, target } = flowTargetParts(flowTargetKey);
+  const saved = flowTargetKey ? savedFlowFor(type, target) : null;
   flowNodes = saved?.route?.nodes ? saved.route.nodes.map(node => ({ ...node })) : [];
   // Never re-label a button that is mid-save or showing its confirmation.
   const save = $('save-route');
@@ -1496,8 +1538,96 @@ function renderFlow(preferred) {
     setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked');
   }
   const entry = $('flow-entry-number');
-  if (entry) entry.textContent = key ? (select.selectedOptions[0]?.textContent || key) : 'Add a number, extension or group to begin';
+  if (entry) {
+    entry.textContent = flowTargetKey
+      ? (flowEntryLabel(type, target) || flowTargetKey)
+      : (state.is_admin ? 'Add a number, extension or group to begin' : 'Pick a number, then an extension');
+  }
   renderFlowNodes();
+}
+
+function renderFlow(preferred) {
+  if (state.is_admin) {
+    if (!$('route-target')) return;
+    applyFlowTarget(renderRouteTargets(preferred));
+    return;
+  }
+  applyFlowTarget(renderCustomerRoutePickers(preferred));
+}
+
+/* --- The customer's navigation: number → the extension answering it. --- */
+function numberRow(number) {
+  return (state.phone_numbers || []).find(x => String(x.number) === String(number));
+}
+
+/* Which extensions a number is wired to: the one the platform assigned as its
+   inbound extension, plus every device registered against it. */
+function extensionsForNumber(number) {
+  const linked = new Set();
+  const row = numberRow(number);
+  if (row?.inbound_extension) linked.add(String(row.inbound_extension));
+  (state.sip_accounts || []).forEach(account => {
+    if (String(account.phone_number) === String(number) && account.extension) linked.add(String(account.extension));
+  });
+  const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || x.owner_user_id === routingOwner()));
+  const linkedRows = mine.filter(x => linked.has(String(x.extension)));
+  // A number nothing is wired to yet still needs an editor: offer the customer's
+  // own extensions rather than an empty picker.
+  return { linked: linkedRows, all: mine, unlinked: !linkedRows.length };
+}
+
+/* The extension that answers a number, for a call routed from elsewhere. */
+function extensionAnsweringNumber(number) {
+  if (!number) return '';
+  const row = numberRow(number);
+  if (row?.inbound_extension) return String(row.inbound_extension);
+  const account = (state.sip_accounts || []).find(x => String(x.phone_number) === String(number) && x.extension);
+  return account ? String(account.extension) : '';
+}
+
+/* The number an extension answers, so the pickers can follow a flow opened from
+   the extensions or numbers page. */
+function numberAnsweredBy(extension) {
+  // A spare number has no extension yet, so an empty key must not match it.
+  if (!extension) return '';
+  const row = (state.phone_numbers || []).find(x => String(x.inbound_extension) === String(extension));
+  if (row) return String(row.number);
+  const account = (state.sip_accounts || []).find(x => String(x.extension) === String(extension) && x.phone_number);
+  return account ? String(account.phone_number) : '';
+}
+
+function renderCustomerRoutePickers(preferred) {
+  const numberSelect = $('route-number');
+  const extensionSelect = $('route-extension');
+  if (!numberSelect || !extensionSelect) return '';
+  const numbers = state.phone_numbers || [];
+  const wanted = flowTargetParts(preferred || '');
+  const wantedNumber = wanted.type === 'number' ? String(wanted.target) : numberAnsweredBy(wanted.target);
+  const priorNumber = numbers.some(x => String(x.number) === wantedNumber) ? wantedNumber : numberSelect.value;
+
+  numberSelect.innerHTML = numbers.map(x => `<option value="${esc(x.number)}">${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('')
+    || '<option value="">No numbers yet</option>';
+  // Never rely on the browser pre-selecting the first option: say which one is
+  // current, so the extension list below is built from the number on screen.
+  const effectiveNumber = numbers.some(x => String(x.number) === String(priorNumber))
+    ? String(priorNumber)
+    : String(numbers[0]?.number ?? '');
+  numberSelect.value = effectiveNumber;
+
+  const { linked, all, unlinked } = extensionsForNumber(effectiveNumber);
+  const option = x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`;
+  const others = all.filter(x => !linked.some(y => String(y.extension) === String(x.extension)));
+  extensionSelect.innerHTML = [
+    linked.length ? `<optgroup label="Answers ${esc(effectiveNumber)}">${linked.map(option).join('')}</optgroup>` : '',
+    others.length ? `<optgroup label="${unlinked ? 'Your extensions' : 'Other extensions'}">${others.map(option).join('')}</optgroup>` : '',
+  ].join('') || '<option value="">No extensions yet</option>';
+
+  const wantedExtension = wanted.type === 'extension' ? String(wanted.target) : extensionAnsweringNumber(effectiveNumber);
+  const effectiveExtension = all.some(x => String(x.extension) === String(wantedExtension))
+    ? String(wantedExtension)
+    : String(all[0]?.extension ?? '');
+  extensionSelect.value = effectiveExtension;
+  return effectiveExtension ? flowKey('extension', effectiveExtension) : '';
 }
 
 function renderGroups() {
@@ -1505,9 +1635,9 @@ function renderGroups() {
   if (!host) return;
   const owner = state.is_admin ? routingOwner() : null;
   const groups = (state.groups || []).filter(group => !state.is_admin || owner === null || group.owner_user_id === owner);
+  const editing = flowTargetParts(currentFlowKey());
   const rows = groups.map(group => {
-    const active = flowTargetParts($('route-target')?.value).type === 'group'
-      && String(flowTargetParts($('route-target')?.value).target) === String(group.id);
+    const active = editing.type === 'group' && String(editing.target) === String(group.id);
     const flow = savedFlowFor('group', group.id);
     return `<div class="row${active ? ' selected' : ''}">
       <span class="row-icon">◎</span>
@@ -3136,12 +3266,21 @@ if (dragSurface) {
   });
 }
 wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
+wire('route-number', 'change', () => { renderFlow(flowKey('number', $('route-number').value)); renderGroups(); });
+wire('route-extension', 'change', () => { renderFlow(flowKey('extension', $('route-extension').value)); renderGroups(); });
 wire('route-owner', 'change', () => { renderRouteTargets(); renderFlow(); renderGroups(); });
 wire('save-route', 'click', async () => {
   if (saveFlowBusy) return;                       // one save at a time
   if (!canDesignFlows()) { setSaveFlowState('blocked'); return notify(flowDesignHint(), true); }
-  const { type, target } = flowTargetParts($('route-target')?.value);
-  if (!type || !target) return notify('Add a number, extension or group first', true);
+  const { type, target } = flowTargetParts(currentFlowKey());
+  if (!type || !target) {
+    return notify(state.is_admin ? 'Add a number, extension or group first' : 'Pick a number, then the extension to edit', true);
+  }
+  // The customer's page edits workflows: a number carries none of its own, so a
+  // number target can only arrive from an administrator's picker.
+  if (!state.is_admin && type === 'number') {
+    return notify('A number has no workflow of its own — edit the extension that answers it', true);
+  }
   if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);
   const label = type === 'number' ? target : `${type} ${target}`;
   saveFlowBusy = true;

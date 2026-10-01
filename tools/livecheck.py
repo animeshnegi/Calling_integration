@@ -368,6 +368,11 @@ status, page = Client().request("/login")
 check("so does the sign-in page", status == 200 and "theme-light login-body" in page, str(status))
 
 status, console_page = admin.request("/admin")
+check("the customer's workflow tab ships the two-step pickers",
+      'id="route-number"' in console_page and 'id="route-extension"' in console_page
+      and 'aria-label="Number"' in console_page and 'aria-label="Extension"' in console_page)
+check("while the flat target picker is the administrator's alone",
+      'id="route-target" aria-label="Call flow target" data-admin-only' in console_page)
 check("the console ships no call-defaults editor for any role",
       "call-defaults-form" not in console_page and "default-extension" not in console_page
       and "inbound-fallback" not in console_page)
