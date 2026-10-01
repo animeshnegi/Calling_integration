@@ -89,6 +89,25 @@ check('the picker itself is styled where the engine hands it over',
   css.includes('@supports (appearance: base-select)')
   && css.includes('::picker(select)') && css.includes('option:hover'),
   'base-select panel, options and hover');
+/* The closed control is one row: the chosen label, then the chevron at the end.
+   A field rule used to send every select back to `display:block`, which stacked
+   the browser's own flex row - the label on one line and the arrow under it,
+   in every modal that had a picker. */
+check('the select control keeps its single-row layout',
+  /select:not\(\[multiple\]\)\s*\{[^}]*display:\s*flex/.test(css)
+  && /select:not\(\[multiple\]\)::picker-icon\s*\{[^}]*margin-left:\s*auto/.test(css),
+  'flex row, the icon pinned to the end');
+const blockLayouts = [];
+/* `select`, `select:not([multiple])`, `label.field select` - the element itself.
+   `selectedcontent` is the browser's label box and is a block on purpose. */
+const targetsSelect = part => /^select(?![a-z])/.test(part.trim().split(/\s+/).pop() || '');
+root.walkDecls('display', decl => {
+  if (String(decl.value).trim() !== 'block') return;
+  const selector = decl.parent.selector || '';
+  if (selector.split(',').some(targetsSelect)) blockLayouts.push(selector);
+});
+check('and no rule sends a select back to a block layout',
+  blockLayouts.length === 0, blockLayouts.join(', '));
 check('the flow toolbar may fold rather than push the save button out',
   /\.flow-toolbar\s*\{[^}]*flex-wrap:\s*wrap/.test(css)
   && /\.flow-toolbar \.tools\s*\{[^}]*flex-wrap:\s*wrap/.test(css),

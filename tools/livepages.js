@@ -168,7 +168,7 @@ async function main() {
 
   await page(w, d, 'routing');
   show('ADMIN · Call flows — which customer, and can he build',
-    `owner selector: ${[...d.querySelectorAll('#route-owner option')].map(o => `${o.value}:${o.textContent}`).join(', ')} (value ${d.getElementById('route-owner').value})\nsave button hidden=${d.getElementById('save-route').hidden}, disabled=${d.getElementById('save-route').disabled}\nblocks offered: ${[...d.querySelectorAll('[data-node-type]')].length} (menu: ${!!d.querySelector('[data-node-type="ivr"]')})\nmenu hint: ${text(d.getElementById('ivr-palette-hint')) || '(none at this size)'}\nvoices offered to a menu: ${d.getElementById('flow-config-fields') ? '' : 'sheet closed'}\ntargets: ${text(d.getElementById('route-target')).slice(0, 200)}\ncanvas: ${text(d.getElementById('flow-nodes')).slice(0, 200)}\ngroups: ${text(d.getElementById('group-list')).slice(0, 200)}`);
+    `owner selector: ${[...d.querySelectorAll('#route-owner option')].map(o => `${o.value}:${o.textContent}`).join(', ')} (value ${d.getElementById('route-owner').value})\nsave button hidden=${d.getElementById('save-route').hidden}, disabled=${d.getElementById('save-route').disabled}\nblocks offered: ${[...d.querySelectorAll('[data-node-type]')].length} (menu: ${!!d.querySelector('[data-node-type="ivr"]')})\nmenu hint: ${text(d.getElementById('ivr-palette-hint')) || '(none at this size)'}\nvoices offered to a menu: ${d.getElementById('flow-config-fields') ? '' : 'sheet closed'}\ntargets: ${text(d.getElementById('route-target')).slice(0, 200)}\nnumber targets offered: ${[...d.getElementById('route-target').options].filter(o => o.value.startsWith('number:')).length}\ncanvas: ${text(d.getElementById('flow-nodes')).slice(0, 200)}\ngroups: ${text(d.getElementById('group-list')).slice(0, 200)}`);
 
   // Saving: press it and read the button, the hint and the stored flow back.
   const saveButton = d.getElementById('save-route');
@@ -237,7 +237,7 @@ async function main() {
   await page(cust.w, cust.d, 'routing');
   show('CUSTOMER · Call flows — a number, then the extension that answers it',
     `number picker: ${cust.d.getElementById('route-number').hidden ? 'hidden' : 'shown'} — ${[...cust.d.querySelectorAll('#route-number option')].map(o => o.textContent).join(' | ')}\n`
-    + `extension picker: ${cust.d.getElementById('route-extension').hidden ? 'hidden' : 'shown'} — ${[...cust.d.querySelectorAll('#route-extension option')].map(o => `${o.textContent}${o.closest('optgroup') ? ` [${o.closest('optgroup').label}]` : ''}`).join(' | ')}\n`
+    + `extension picker: ${cust.d.getElementById('route-extension').hidden ? 'hidden' : 'shown'} — ${[...cust.d.querySelectorAll('#route-extension option')].map(o => `${o.textContent}${o.closest('optgroup') ? ` [${o.closest('optgroup').label}]` : ''}`).join(' | ')}\ngrouped: ${cust.d.querySelectorAll('#route-extension optgroup').length}\n`
     + `flat target picker: hidden=${cust.d.getElementById('route-target').hidden}, options=${cust.d.getElementById('route-target').options.length}\n`
     + `editing: ${cust.w.eval('currentFlowKey()')} — canvas starts at "${cust.d.getElementById('flow-entry-number').textContent}"\n`
     + `flows in state: ${custState.payload.routing_flows.map(r => `${r.target_type} ${r.target}`).join(', ')}\nnumber flows (provisioned, not edited here): ${custState.payload.call_routes.map(r => r.phone_number).join(', ')}`);
@@ -248,7 +248,7 @@ async function main() {
     numberPickerLive.value = numberPickerLive.options[1].value;
     numberPickerLive.dispatchEvent(new cust.w.Event('change', { bubbles: true }));
     await settle(240);
-    show('CUSTOMER · Call flows — the extension list follows the number',
+    show('CUSTOMER · Call flows — the number selects which extension is edited',
       `number: ${numberPickerLive.value}\nextensions: ${[...cust.d.querySelectorAll('#route-extension option')].map(o => `${o.textContent}${o.closest('optgroup') ? ` [${o.closest('optgroup').label}]` : ''}`).join(' | ')}\nediting: ${cust.w.eval('currentFlowKey()')}`);
     numberPickerLive.value = numberPickerLive.options[0].value;
     numberPickerLive.dispatchEvent(new cust.w.Event('change', { bubbles: true }));

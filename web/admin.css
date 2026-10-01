@@ -510,8 +510,17 @@ select[multiple]{background-image:none;padding-right:12px}
    with a quiet tint, options get room to breathe, the panel lifts into place by
    a few pixels - no more than that - and the chevron turns as it opens. */
 @supports (appearance: base-select){
-  select:not([multiple]){appearance:base-select;background-image:none;padding-right:11px}
-  select:not([multiple])::picker-icon{color:var(--text-3);transition:transform var(--t-fast)}
+  /* Also the one rule that keeps the chevron beside the label: the control is a
+     single row, the chosen text takes the room that is left, and the arrow holds
+     its own width at the end. `display:block` on a select stacked the two. */
+  select:not([multiple]){
+    appearance:base-select;background-image:none;padding-right:11px;
+    display:flex;align-items:center;gap:10px;
+  }
+  select:not([multiple]) selectedcontent{
+    display:block;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  select:not([multiple])::picker-icon{margin-left:auto;flex:0 0 auto;color:var(--text-3);transition:transform var(--t-fast)}
   select:not([multiple]):open::picker-icon{transform:rotate(180deg)}
   select:not([multiple])::picker(select){
     appearance:base-select;margin-top:7px;padding:6px;
@@ -541,7 +550,8 @@ select[multiple]{background-image:none;padding-right:12px}
 .toolbar select,.flow-toolbar select,.customer-picker select{transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast),transform var(--t-fast)}
 .toolbar select:hover,.flow-toolbar select:hover,.customer-picker select:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}
 .toolbar select:focus-visible,.flow-toolbar select:focus-visible,.customer-picker select:focus-visible{transform:none}
-label.field input,label.field select,label.field textarea{display:block;margin-top:6px}
+label.field input,label.field textarea{display:block}
+label.field input,label.field select,label.field textarea{margin-top:6px}
 textarea{resize:vertical;min-height:90px;line-height:1.6}
 .field-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .check{display:flex!important;align-items:center;gap:9px;font-size:12px;font-weight:600;color:var(--text-2);cursor:pointer}

@@ -81,6 +81,10 @@ function boot({ isAdmin = true, state = null, routes = {}, html = 'admin.html' }
 
 const settle = (ms = 220) => new Promise(resolve => setTimeout(resolve, ms));
 
+/* A picker that offers one flat list: no optgroups, no line-by-line labels. */
+const flatPicker = picker => picker.querySelectorAll('optgroup').length === 0
+  && !/Answers|Other extensions|Your extensions/.test(picker.innerHTML);
+
 /* Count DOM mutations inside a host while `task` runs. */
 async function mutations(d, selector, task) {
   const host = d.querySelector(selector);
@@ -272,8 +276,15 @@ async function main() {
       admin.d.getElementById('route-owner').value);
     check('their extensions are listed as flow targets',
       /optgroup label="Extensions"/.test(admin.d.getElementById('route-target').innerHTML));
-    check('their number flows load into the canvas',
-      admin.d.querySelectorAll('#flow-nodes .flow-node').length > 0 || true);
+    check('a number is never offered as a target',
+      ![...admin.d.getElementById('route-target').options].some(option => option.value.startsWith('number:')),
+      [...admin.d.getElementById('route-target').options].map(o => o.value).join(' '));
+    check('and no Numbers section is offered either',
+      !/optgroup label="Numbers"/.test(admin.d.getElementById('route-target').innerHTML));
+    check('their extension workflow loads into the canvas',
+      admin.d.querySelectorAll('#flow-nodes .flow-node').length > 0
+      && admin.w.eval('currentFlowKey()').startsWith('extension:'),
+      `${admin.w.eval('currentFlowKey()')} — ${admin.d.getElementById('flow-nodes').textContent.slice(0, 40)}`);
     admin.w.eval('openCustomer(2, "routing")');   // Meridian: the customer this fixture describes
     await settle(300);
     check('the workspace sends the administrator to the flow builder, not a summary',
@@ -308,9 +319,16 @@ async function main() {
     check('the number picker lists only the customer\'s assigned numbers',
       [...numberPicker.options].map(o => o.value).join(',') === '+13025550001,+13025550002,+13025550003',
       [...numberPicker.options].map(o => o.value).join(','));
-    check('the extension picker offers the extensions wired to that number',
-      /Answers \+13025550001/.test(extensionPicker.innerHTML) && extensionPicker.value === '101',
+    check('the extension picker offers the customer\'s own extensions',
+      [...extensionPicker.options].map(o => o.value).join(',') === '101,102'
+      && /101 — Meridian Health 101/.test(extensionPicker.innerHTML),
       extensionPicker.innerHTML.slice(0, 120));
+    check('one plain list, with no line-by-line grouping',
+      extensionPicker.querySelectorAll('optgroup').length === 0
+      && !/Answers|Other extensions|Your extensions/.test(extensionPicker.innerHTML),
+      extensionPicker.innerHTML.slice(0, 120));
+    check('and it starts on the extension answering the chosen number', extensionPicker.value === '101',
+      extensionPicker.value);
     check('and the builder is editing that extension\'s workflow',
       customer.w.eval('currentFlowKey()') === 'extension:101',
       customer.w.eval('currentFlowKey()'));
@@ -324,15 +342,16 @@ async function main() {
     check('choosing another number re-scopes the extensions',
       extensionPicker.value === '102' && customer.w.eval('currentFlowKey()') === 'extension:102',
       `${extensionPicker.value} / ${customer.w.eval('currentFlowKey()')}`);
-    check('and its extension list follows the number',
-      /Answers \+13025550002/.test(extensionPicker.innerHTML), extensionPicker.innerHTML.slice(0, 90));
+    check('and the same list of extensions is offered for the next number',
+      flatPicker(extensionPicker) && extensionPicker.value === '102',
+      `${extensionPicker.value} — ${extensionPicker.innerHTML.slice(0, 90)}`);
 
     numberPicker.value = '+13025550003';   // no extension wired to it yet
     numberPicker.dispatchEvent(new customer.w.Event('change', { bubbles: true }));
     await settle(200);
     check('a number with nothing wired to it still offers an editor',
-      /Your extensions/.test(extensionPicker.innerHTML) && extensionPicker.options.length === 2,
-      extensionPicker.innerHTML.slice(0, 90));
+      extensionPicker.options.length === 2 && extensionPicker.value === '101',
+      `${extensionPicker.value} — ${extensionPicker.innerHTML.slice(0, 90)}`);
 
     // Saving writes an extension flow - never a number flow.
     numberPicker.value = '+13025550001';
@@ -453,8 +472,10 @@ async function main() {
     owner.dispatchEvent(new w.Event('change', { bubbles: true }));
     await settle(240);
     const targets = [...d.getElementById('route-target').options].map(option => option.value);
-    check('the target list is limited to that customer', targets.every(value => /^(number|extension|group):/.test(value)) && targets.length > 0, targets.join(' '));
-    check('the main line is offered as a target', targets.includes('number:+13025550001'));
+    check('the target list is limited to that customer',
+      targets.every(value => /^(extension|group):/.test(value)) && targets.length > 0, targets.join(' '));
+    check('no number is offered as a target', !targets.some(value => value.startsWith('number:')), targets.join(' '));
+    check('their extensions are offered', targets.includes('extension:101') && targets.includes('extension:102'));
     check('group flows are offered', targets.some(value => value.startsWith('group:')));
 
     owner.value = String(state.users.find(u => u.username === 'northwind').id);
@@ -686,30 +707,36 @@ async function main() {
     // has to reach.
     d.querySelector('#number-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     await settle(220);
-    const button = d.querySelector('#number-list [data-number-flow]');
-    check('a number row links to the flow that answers it', !!button);
+    const button = d.querySelector('#number-list [data-extension-flow]');
+    check('a number row links to the workflow of the extension answering it',
+      !!button && button.dataset.extensionFlow === '101' && button.dataset.numberFlow === undefined,
+      button ? JSON.stringify(button.dataset) : 'no button');
     button.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     await settle(260);
-    check('the click lands on the flow for that number',
+    check('the click lands on the flow builder',
       d.getElementById('page-routing').classList.contains('active'), d.getElementById('page-routing').className);
-    check('the builder names the number it opened',
-      /\+1302/.test(d.getElementById('flow-entry-number').textContent),
-      d.getElementById('flow-entry-number').textContent);
-    check('and that number\'s steps are on the canvas',
+    check('and the administrator is editing that extension, not the number',
+      w.eval('currentFlowKey()') === 'extension:101' && /101/.test(d.getElementById('flow-entry-number').textContent),
+      `${w.eval('currentFlowKey()')} — ${d.getElementById('flow-entry-number').textContent}`);
+    check('whose steps are on the canvas',
       d.querySelectorAll('#flow-nodes .flow-node').length > 0,
       d.getElementById('flow-nodes').textContent.slice(0, 60));
 
-    // Adding a ring step on a number starts from every device the customer has,
-    // so the main line keeps ringing a phone the customer adds later.
+    // A ring step dropped into the workflow starts from the target the workflow
+    // belongs to: the extension whose flow the administrator opened.
     const ringBlock = d.querySelector('[data-node-type="simultaneous"]');
     ringBlock.click();
     await settle(200);
-    d.querySelector('#flow-nodes [data-flow-index]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    const dropped = [...d.querySelectorAll('#flow-nodes [data-flow-index]')].pop();
+    dropped.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     await settle(240);
     const chosen = [...d.querySelectorAll('#flow-config-fields [name=extensions] option')]
       .filter(option => option.selected).map(option => option.value);
-    check('a fresh ring step already rings every device', chosen.length >= 2 && chosen.includes('102'),
-      chosen.join(','));
+    check('a fresh ring step starts from the extension this workflow belongs to',
+      chosen.length === 1 && chosen[0] === '101', chosen.join(','));
+    check('and the sheet offers that customer\'s devices only',
+      [...d.querySelectorAll('#flow-config-fields [name=extensions] option')].every(o => ['101', '102'].includes(o.value)),
+      [...d.querySelectorAll('#flow-config-fields [name=extensions] option')].map(o => o.value).join(','));
   }
 
   /* ---------------------------------------------------------- the phone menu */
@@ -721,7 +748,7 @@ async function main() {
     await settle(260);
     d.querySelector('#number-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     await settle(220);
-    d.querySelector('#number-list [data-number-flow]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    d.querySelector('#number-list [data-extension-flow]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     await settle(280);
 
     const block = d.querySelector('.palette [data-node-type="ivr"]');
@@ -802,7 +829,7 @@ async function main() {
     await settle(260);
     big.d.querySelector('#number-picker [data-owner="2"]').dispatchEvent(new big.w.MouseEvent('click', { bubbles: true }));
     await settle(220);
-    big.d.querySelector('#number-list [data-number-flow]').dispatchEvent(new big.w.MouseEvent('click', { bubbles: true }));
+    big.d.querySelector('#number-list [data-extension-flow]').dispatchEvent(new big.w.MouseEvent('click', { bubbles: true }));
     await settle(280);
     const hint = big.d.getElementById('ivr-palette-hint');
     check('past five extensions the console says the menu is added for the customer',

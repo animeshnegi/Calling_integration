@@ -738,9 +738,9 @@ function renderNumbers() {
         </div>
       </div>
       <div class="row-actions">
-        ${x.inbound_extension ? (state.is_admin
-          ? `<button class="btn ghost sm" data-number-flow="${esc(x.number)}">Call flow</button>`
-          : `<button class="btn ghost sm" data-extension-flow="${esc(x.inbound_extension)}">Call flow</button>`) : ''}
+        ${x.inbound_extension
+          ? `<button class="btn ghost sm" data-extension-flow="${esc(x.inbound_extension)}">Call flow</button>`
+          : ''}
         ${state.is_admin
           ? `<button class="btn ghost sm" data-edit-number="${x.id}">Manage</button><button class="btn danger sm" data-delete-number="${x.id}">Delete</button>`
           : (x.active && !x.default_outbound && x.inbound_extension
@@ -1404,13 +1404,11 @@ function routeTargets() {
   const targets = [];
   const owner = routingOwner();
   // A flow belongs to one customer, so the builder only offers that customer's
-  // numbers, extensions and groups. Unassigned platform numbers stay listed as
-  // a reminder that they cannot carry a customer flow yet.
-  const mine = row => !state.is_admin || owner === null || row.owner_user_id === owner || !row.owner_user_id;
-  (state.phone_numbers || []).filter(mine).forEach(x => targets.push({
-    key: flowKey('number', x.number), section: 'Numbers', type: 'number', target: x.number,
-    label: `${x.number} — ${x.description || (x.inbound_extension ? `ext ${x.inbound_extension}` : 'unassigned')}${x.owner_user_id ? '' : ' · not assigned'}`,
-  }));
+  // own extensions and groups. A number is not a target for anyone: the
+  // workflow that answers its calls is the workflow of the extension wired to
+  // it, and the platform keeps the number's own ring plan in step with the
+  // devices a customer adds.
+  const mine = row => !state.is_admin || owner === null || row.owner_user_id === owner;
   (state.extensions || []).filter(x => x.active && mine(x)).forEach(x => targets.push({
     key: flowKey('extension', x.extension), section: 'Extensions', type: 'extension', target: x.extension,
     label: `${x.extension} — ${x.display_name || 'Extension'}`,
@@ -1469,7 +1467,7 @@ function renderRouteTargets(preferred) {
   if (!state.is_admin) { select.innerHTML = ''; return ''; }
   const targets = routeTargets();
   const prior = preferred ?? select.value;
-  const sections = ['Numbers', 'Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
+  const sections = ['Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
   select.innerHTML = sections.map(section => `<optgroup label="${section}">${targets.filter(t => t.section === section)
     .map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}</optgroup>`).join('');
   if (targets.some(t => t.key === prior)) select.value = prior;
@@ -1478,29 +1476,36 @@ function renderRouteTargets(preferred) {
   return select.value;
 }
 
-/* Open the builder on one target, from any page. An administrator lands on the
-   customer that target belongs to, so saving can never write across customers. */
+/* Who owns a target, for an administrator landing on the right customer. */
+function flowTargetOwner(type, target) {
+  if (type === 'number') return (state.phone_numbers || []).find(row => row.number === target)?.owner_user_id;
+  if (type === 'extension') return (state.extensions || []).find(row => row.extension === target)?.owner_user_id;
+  return (state.groups || []).find(row => String(row.id) === String(target))?.owner_user_id;
+}
+
+/* Open the builder on one target, from any page. A number key stands for the
+   workflow of the extension that answers it - for the administrator as much as
+   for the customer - and an administrator lands on the customer that target
+   belongs to, so saving can never write across customers. */
 function focusRouteTarget(key) {
   if (!key) return;
   const { type, target } = flowTargetParts(key);
+  const extension = type === 'number' ? extensionAnsweringNumber(target) : (type === 'extension' ? String(target) : '');
+  const number = type === 'number' ? String(target) : numberAnsweredBy(target);
+  const resolved = extension ? flowKey('extension', extension) : key;
   if (state.is_admin) {
     if ($('route-owner')) {
-      const owner = type === 'number'
-        ? (state.phone_numbers || []).find(row => row.number === target)?.owner_user_id
-        : type === 'extension'
-          ? (state.extensions || []).find(row => row.extension === target)?.owner_user_id
-          : (state.groups || []).find(row => String(row.id) === String(target))?.owner_user_id;
+      const picked = flowTargetParts(resolved);
+      const owner = flowTargetOwner(picked.type, picked.target);
       if (owner) renderRoutingOwner(owner);
     }
-    renderRouteTargets(key);
-    applyFlowTarget(key);
+    renderRouteTargets(resolved);
+    applyFlowTarget(resolved);
   } else {
-    // A customer edits a workflow, never a number: a number key stands for the
-    // workflow of the extension that answers it, and the pickers follow.
-    const extension = type === 'number' ? extensionAnsweringNumber(target) : (type === 'extension' ? String(target) : '');
-    const number = type === 'number' ? String(target) : numberAnsweredBy(target);
+    // The customer's pickers follow: the number they were sent to, then the
+    // extension's workflow.
     renderCustomerRoutePickers(number ? flowKey('number', number) : key);
-    applyFlowTarget(extension ? flowKey('extension', extension) : key);
+    applyFlowTarget(resolved);
   }
   renderGroups();
 }
@@ -1546,7 +1551,7 @@ function applyFlowTarget(key) {
   if (entry) {
     entry.textContent = flowTargetKey
       ? (flowEntryLabel(type, target) || flowTargetKey)
-      : (state.is_admin ? 'Add a number, extension or group to begin' : 'Pick a number, then an extension');
+      : (state.is_admin ? 'Add an extension or group to begin' : 'Pick a number, then an extension');
   }
   renderFlowNodes();
   renderIvrHint();
@@ -1566,20 +1571,12 @@ function numberRow(number) {
   return (state.phone_numbers || []).find(x => String(x.number) === String(number));
 }
 
-/* Which extensions a number is wired to: the one the platform assigned as its
-   inbound extension, plus every device registered against it. */
+/* Every extension the customer can edit a workflow for. A number is only the
+   way in: the workflow belongs to the extension that answers it, and the
+   customer's own list is what they choose from. */
 function extensionsForNumber(number) {
-  const linked = new Set();
-  const row = numberRow(number);
-  if (row?.inbound_extension) linked.add(String(row.inbound_extension));
-  (state.sip_accounts || []).forEach(account => {
-    if (String(account.phone_number) === String(number) && account.extension) linked.add(String(account.extension));
-  });
   const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || x.owner_user_id === routingOwner()));
-  const linkedRows = mine.filter(x => linked.has(String(x.extension)));
-  // A number nothing is wired to yet still needs an editor: offer the customer's
-  // own extensions rather than an empty picker.
-  return { linked: linkedRows, all: mine, unlinked: !linkedRows.length };
+  return { all: mine, answered: extensionAnsweringNumber(number) };
 }
 
 /* The extension that answers a number, for a call routed from elsewhere. */
@@ -1620,13 +1617,12 @@ function renderCustomerRoutePickers(preferred) {
     : String(numbers[0]?.number ?? '');
   numberSelect.value = effectiveNumber;
 
-  const { linked, all, unlinked } = extensionsForNumber(effectiveNumber);
+  // One plain list: the customer picks the extension whose workflow they are
+  // editing. Which number answers where is the number picker's job, not a
+  // label on every row.
+  const { all } = extensionsForNumber(effectiveNumber);
   const option = x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`;
-  const others = all.filter(x => !linked.some(y => String(y.extension) === String(x.extension)));
-  extensionSelect.innerHTML = [
-    linked.length ? `<optgroup label="Answers ${esc(effectiveNumber)}">${linked.map(option).join('')}</optgroup>` : '',
-    others.length ? `<optgroup label="${unlinked ? 'Your extensions' : 'Other extensions'}">${others.map(option).join('')}</optgroup>` : '',
-  ].join('') || '<option value="">No extensions yet</option>';
+  extensionSelect.innerHTML = all.map(option).join('') || '<option value="">No extensions yet</option>';
 
   const wantedExtension = wanted.type === 'extension' ? String(wanted.target) : extensionAnsweringNumber(effectiveNumber);
   const effectiveExtension = all.some(x => String(x.extension) === String(wantedExtension))
@@ -1743,9 +1739,13 @@ function flowStepDefaults(node) {
   }
   if (!['simultaneous', 'sequential', 'ring_group'].includes(node?.type)) return node;
   if ((node.extensions || []).length) return node;
-  const { type, target } = flowTargetParts($('route-target')?.value);
+  // The target is the workflow being edited, whichever picker opened it: the
+  // administrator's list or the customer's number-then-extension pair.
+  const { type, target } = flowTargetParts(currentFlowKey() || $('route-target')?.value);
   const owner = flowOwnerId();
   const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || !owner || x.owner_user_id === owner));
+  // A number has no workflow of its own, but a key for one can still arrive from
+  // a stored link: it stands for every device the customer has.
   if (type === 'number') return { ...node, extensions: mine.map(x => x.extension) };
   if (type === 'extension') return { ...node, extensions: [target] };
   const group = (state.groups || []).find(x => String(x.id) === String(target));
@@ -3103,10 +3103,6 @@ document.addEventListener('click', async event => {
     showPage('routing');
     return focusRouteTarget(flowKey('extension', d.extensionFlow));
   }
-  if (d.numberFlow) {
-    showPage('routing');
-    return focusRouteTarget(flowKey('number', d.numberFlow));
-  }
   if (d.routeTarget) {
     showPage('routing');
     return focusRouteTarget(d.routeTarget);
@@ -3338,9 +3334,9 @@ wire('save-route', 'click', async () => {
   if (!type || !target) {
     return notify(state.is_admin ? 'Add a number, extension or group first' : 'Pick a number, then the extension to edit', true);
   }
-  // The customer's page edits workflows: a number carries none of its own, so a
-  // number target can only arrive from an administrator's picker.
-  if (!state.is_admin && type === 'number') {
+  // A number carries no workflow of its own: the extension that answers it
+  // does. The pickers never offer one, and a stray key is refused the same way.
+  if (type === 'number') {
     return notify('A number has no workflow of its own — edit the extension that answers it', true);
   }
   if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);

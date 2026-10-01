@@ -228,9 +228,10 @@
           <div class="tools">
             <select id="route-owner" aria-label="Customer" data-admin-only></select>
             <!-- The customer's two-step: which number, then which extension
-                 answers it. A number carries no workflow of its own, so it is
-                 never an editable target for them; the administrator's single
-                 picker (below) still reaches number flows. -->
+                 answers it. A number carries no workflow of its own - the
+                 extensions that answer it do - so it is never an editable
+                 target for anyone, and the administrator's picker (below)
+                 lists extensions and groups only. -->
             <select id="route-number" aria-label="Number" data-customer-only></select>
             <select id="route-extension" aria-label="Extension" data-customer-only></select>
             <select id="route-target" aria-label="Call flow target" data-admin-only></select>
