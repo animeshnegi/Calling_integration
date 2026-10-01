@@ -248,6 +248,31 @@ class TelephonyService:
             if channel and channel != keep:
                 self.asterisk.hangup(channel)
 
+    # Callers being asked for an extension, keyed by the channel they are on:
+    # the prompt they are hearing, the digits collected so far and the clock.
+    # In memory on purpose - a session belongs to a live channel.
+    _ivr_sessions: dict[str, dict[str, Any]]
+
+    def _ivr_sessions_map(self) -> dict[str, dict[str, Any]]:
+        sessions = getattr(self, "_ivr_sessions", None)
+        if sessions is None:
+            sessions = {}
+            self._ivr_sessions = sessions
+        return sessions
+
+    # How long a caller has to press the next digit when what they typed could
+    # still grow into a longer extension.
+    IVR_INTERDIGIT = 1.4
+    # What to play when the chosen voice has no recording installed yet: the
+    # stock Asterisk prompt asks the caller the same thing, so the menu works
+    # before an operator drops in a custom greeting.
+    IVR_STOCK_PROMPT = "sound:vm-enter-num-to-call"
+
+    def has_ivr_sessions(self) -> bool:
+        """True while a caller is hearing a prompt, so the worker can wake
+        promptly instead of every thirty seconds."""
+        return bool(self._ivr_sessions_map())
+
     def start_inbound(self, channel: dict[str, Any], did: str, extension: str) -> Call | None:
         if not self.settings_store or not any(row["extension"] == extension and row["active"] for row in self.settings_store.list_extensions()):
             self.asterisk.hangup(str(channel.get("id") or ""))
@@ -262,9 +287,10 @@ class TelephonyService:
         caller = str((channel.get("caller") or {}).get("number") or "unknown")[:32]
         owned = next((row for row in self.settings_store.list_numbers() if row["inbound_extension"] == extension and did.lstrip("+") == row["number"].lstrip("+")), None)
         number = owned["number"] if owned else did
-        # The stored flow decides who rings: one device for an extension's own
-        # number, every device for a customer's main line, a whole group when the
-        # customer built one.
+        # The stored flow decides what happens next: a menu asks the caller for
+        # an extension, anything else rings the devices it names - one device for
+        # an extension's own number, every device for a customer's main line, a
+        # whole group when the customer built one.
         plan = self.settings_store.inbound_plan(number, extension)
         destinations = list(plan.get("destinations") or [extension])
         call = Call(
@@ -275,6 +301,10 @@ class TelephonyService:
         )
         self.store.create(call)
         self.notify_crm("call.started", call)
+        if str(plan.get("kind") or "") == "ivr":
+            # The menu answers the call; nobody rings until the caller asks for
+            # an extension, so there is no employee to report as ringing yet.
+            return self._start_ivr(call, channel, plan)
         self.notify_crm("call.employee_ringing", call)
         legs: list[tuple[str, str]] = []
         for index, destination in enumerate(destinations):
@@ -291,6 +321,162 @@ class TelephonyService:
             return self.store.get(call_id)
         self.store.update(call_id, employee_channel_id=legs[0][0], employee_channel_ids=",".join(f"{leg}|{ext}" for leg, ext in legs))
         return self.store.get(call_id)
+
+    # ---------------------------------------------------------------- the menu
+    def _start_ivr(self, call: Call, channel: dict[str, Any], plan: dict[str, Any]) -> Call | None:
+        """Answer, play the prompt, and wait for digits."""
+        channel_id = str(channel.get("id") or "")
+        if not channel_id:
+            return None
+        self._ivr_sessions_map()[channel_id] = {
+            "call_id": call.call_id, "channel_id": channel_id,
+            "extension": call.extension or "", "digits": "", "tries": 0,
+            "attempts": max(1, int(plan.get("attempts") or 2)),
+            "input_timeout": max(2, int(plan.get("input_timeout") or 6)),
+            "extensions": [str(value) for value in (plan.get("extensions") or [])],
+            "plan": plan, "resolve_after": 0.0,
+        }
+        self._ivr_prompt(channel_id)
+        return call
+
+    def _ivr_prompt(self, channel_id: str) -> None:
+        """Answer if needed, play the prompt, and start this attempt's clock."""
+        session = self._ivr_sessions_map().get(channel_id)
+        if not session:
+            return
+        media = str(session["plan"].get("media") or "sound:custom/ivr-welcome")
+        try:
+            self.asterisk.answer_channel(channel_id)
+        except Exception:
+            pass
+        playback_id = f"ivr-{session['call_id']}-{session['tries']}"
+        try:
+            self.asterisk.play_channel_media(channel_id, media, playback_id=playback_id)
+        except Exception:
+            # No recording for that voice (yet): the caller still has to hear
+            # what is expected of them, so the stock prompt stands in. If even
+            # that fails the menu stays silent - the timeout and the
+            # retry/fallback path are unchanged either way.
+            try:
+                self.asterisk.play_channel_media(channel_id, self.IVR_STOCK_PROMPT, playback_id=playback_id)
+            except Exception:
+                pass
+        session["deadline"] = time.monotonic() + session["input_timeout"]
+        session["resolve_after"] = 0.0
+
+    def _ivr_digit(self, channel_id: str, digit: str) -> None:
+        session = self._ivr_sessions_map().get(channel_id)
+        if not session or not digit or not digit.isdigit():
+            return
+        session["digits"] = (session["digits"] + digit)[:6]
+        self._ivr_resolve(session, final=False)
+
+    def _ivr_resolve(self, session: dict[str, Any], final: bool) -> None:
+        """Decide what the digits collected so far mean."""
+        digits = str(session["digits"])
+        if not digits:
+            return
+        extensions = [ext for ext in (session["extensions"] or [])]
+        if not extensions and self.settings_store:
+            row = next((item for item in self.settings_store.list_extensions() if item["extension"] == session["extension"]), None)
+            owner = row.get("owner_user_id") if row else None
+            if owner is not None:
+                extensions = [item["extension"] for item in self.settings_store.list_extensions(int(owner)) if item["active"]]
+                session["extensions"] = extensions
+        candidates = [ext for ext in extensions if ext.startswith(digits)]
+        longest = max((len(ext) for ext in extensions), default=0)
+        if digits in extensions and (len(candidates) == 1 or final or len(digits) >= longest):
+            return self._ivr_dial(session, digits)
+        if candidates and not final:
+            # "1" cannot be dialled while "101" and "106" both exist: give the
+            # caller a moment for the next digit.
+            session["resolve_after"] = time.monotonic() + self.IVR_INTERDIGIT
+            return
+        return self._ivr_retry(session, digits)
+
+    def _ivr_retry(self, session: dict[str, Any], digits: str) -> None:
+        """Nothing valid was entered: ask again, or run the fallback."""
+        if session["tries"] + 1 < session["attempts"]:
+            session["tries"] += 1
+            session["digits"] = ""
+            self._ivr_prompt(session["channel_id"])
+            return
+        return self._ivr_fallback(session, digits)
+
+    def _ivr_dial(self, session: dict[str, Any], extension: str) -> None:
+        """The caller typed an extension that exists: ring it."""
+        channel_id = session["channel_id"]
+        self._ivr_sessions_map().pop(channel_id, None)
+        self.asterisk.stop_playback(f"ivr-{session['call_id']}-{session['tries']}")
+        try:
+            leg = self.asterisk.create_inbound_employee_leg(session["call_id"], extension, channel_id, index=0)
+        except Exception:
+            updated = self.store.update(session["call_id"], status="failed", ended_at=iso_now())
+            self.notify_crm("call.failed", updated, {"reason": "ivr_extension_originate_failed"})
+            self.asterisk.hangup(channel_id)
+            return
+        self._leg_index[str(leg)] = session["call_id"]
+        self.store.update(session["call_id"], extension=extension, employee_channel_id=str(leg), employee_channel_ids=f"{leg}|{extension}")
+        self.notify_crm("call.ivr_extension_selected", self.store.get(session["call_id"]), {"digits": session["digits"], "extension": extension})
+
+    def _ivr_fallback(self, session: dict[str, Any], digits: str) -> None:
+        """No valid extension: the node's own fallback, the rest of the flow, the
+        mailbox, or a missed call."""
+        channel_id = session["channel_id"]
+        self._ivr_sessions_map().pop(channel_id, None)
+        self.asterisk.stop_playback(f"ivr-{session['call_id']}-{session['tries']}")
+        plan = session["plan"]
+        fallback = str(plan.get("fallback") or "")
+        if fallback:
+            return self._ivr_dial({**session, "digits": digits}, fallback)
+        destinations = [str(value) for value in (plan.get("fallback_destinations") or [])]
+        if destinations:
+            legs: list[tuple[str, str]] = []
+            for index, destination in enumerate(destinations):
+                try:
+                    leg = self.asterisk.create_inbound_employee_leg(session["call_id"], destination, channel_id, index=index)
+                except Exception:
+                    continue
+                legs.append((str(leg), destination))
+                self._leg_index[str(leg)] = session["call_id"]
+            if legs:
+                self.store.update(
+                    session["call_id"], extension=legs[0][1],
+                    employee_channel_id=legs[0][0], employee_channel_ids=",".join(f"{leg}|{ext}" for leg, ext in legs),
+                )
+                self.notify_crm("call.ivr_fallback", self.store.get(session["call_id"]), {"digits": digits})
+                return
+        call = self.store.get(session["call_id"])
+        mailbox = str(plan.get("voicemail") or "")
+        if mailbox:
+            self.notify_crm("call.voicemail", call, {"reason": "ivr_no_selection"})
+            try:
+                self.asterisk.continue_in_dialplan(channel_id, "voicemail-inbound", mailbox)
+            except Exception:
+                self.asterisk.hangup(channel_id)
+            self._finalize(session["call_id"], "ivr_no_selection")
+            return
+        self.notify_crm("call.missed", call, {"reason": "ivr_no_selection"})
+        self.asterisk.hangup(channel_id)
+        self._finalize(session["call_id"], "ivr_no_selection")
+
+    def process_ivr_timeouts(self, now: float | None = None) -> int:
+        """Called from the worker loop: move every waiting caller along."""
+        clock = time.monotonic() if now is None else now
+        handled = 0
+        for channel_id, session in list(self._ivr_sessions_map().items()):
+            if session.get("resolve_after") and clock >= session["resolve_after"]:
+                handled += 1
+                self._ivr_resolve(session, final=True)
+                continue
+            if clock < session.get("deadline", 0):
+                continue
+            handled += 1
+            if session["digits"]:
+                self._ivr_resolve(session, final=True)
+            else:
+                self._ivr_retry(session, "")
+        return handled
 
     def hangup(self, call_id: str) -> Call | None:
         call = self.store.get(call_id)
@@ -444,6 +630,11 @@ class TelephonyService:
         channel_id = channel.get("id")
         if not channel_id:
             return
+        if event_type == "ChannelDtmfReceived":
+            # A caller answering the menu: no call lookup needed, the session
+            # already knows which call the channel belongs to.
+            self._ivr_digit(str(channel_id), str(event.get("digit") or ""))
+            return
         call = self._call_for_channel(channel_id)
         if not call and event_type == "StasisStart":
             args = event.get("args") or []
@@ -495,6 +686,8 @@ class TelephonyService:
             return
 
         if event_type == "ChannelDestroyed":
+            # A caller who gives up during the prompt leaves nothing behind.
+            self._ivr_sessions_map().pop(str(channel_id), None)
             legs = [leg for leg, _ in self._leg_pairs(call)]
             if call.direction == "inbound" and channel_id in legs and not call.answered and call.customer_channel_id:
                 remaining = [leg for leg in self._legs_still_ringing(call) if leg != channel_id]

@@ -208,6 +208,27 @@ class AsteriskClient:
         """
         return 0
 
+    def answer_channel(self, channel_id: str) -> None:
+        """Take the call off ringing before a prompt is played to it."""
+        self._request("POST", f"/channels/{channel_id}/answer")
+
+    def play_channel_media(self, channel_id: str, media: str, playback_id: str | None = None) -> dict[str, Any]:
+        """Play a sound to one channel. `media` is an ARI media URI, e.g.
+        `sound:custom/ivr-welcome` for a prompt or `sound:tts/...` where the
+        deployment synthesises speech."""
+        params: dict[str, Any] = {"media": media}
+        if playback_id:
+            params["playbackId"] = playback_id
+        return self._request("POST", f"/channels/{channel_id}/play", params=params)
+
+    def stop_playback(self, playback_id: str) -> None:
+        """Cut a prompt short - the caller has already answered it with digits."""
+        try:
+            self._request("DELETE", f"/playbacks/{playback_id}")
+        except Exception:
+            # The playback may already have finished, which is not an error.
+            return
+
     def continue_in_dialplan(self, channel_id: str, context: str, extension: str) -> None:
         self._request("POST", f"/channels/{channel_id}/continue", params={"context": context, "extension": extension, "priority": 1})
 

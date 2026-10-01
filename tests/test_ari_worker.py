@@ -292,6 +292,7 @@ class FakeTelephonyService:
         self.events = []
         self.webhook_scans = 0
         self.cleanup_scans = 0
+        self.ivr_ticks = 0
 
     def recover_incomplete_calls(self):
         self.recovered += 1
@@ -301,6 +302,14 @@ class FakeTelephonyService:
 
     def process_webhook_deliveries(self):
         self.webhook_scans += 1
+
+    def process_ivr_timeouts(self):
+        # The worker asks every pass; only a live prompt makes it tick faster.
+        self.ivr_ticks += 1
+        return 0
+
+    def has_ivr_sessions(self):
+        return False
 
     def cleanup_recordings(self):
         self.cleanup_scans += 1

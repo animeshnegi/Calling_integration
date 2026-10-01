@@ -37,6 +37,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends libxml2 libsqlite3-0 libedit2 libcurl4 libspeex1 libspeexdsp1 libogg0 libvorbis0a libvorbisenc2 libvorbisfile3
 
 COPY config/ /etc/asterisk/
+# Recordings the operator supplies (see sounds/custom/README.md). The directory
+# may hold nothing but that note, in which case the stock prompts are used.
+COPY sounds/ /var/lib/asterisk/sounds/
 COPY entrypoint.sh /entrypoint.sh
 # Windows Git checkouts can convert shell scripts to CRLF. Normalize it in the image.
 RUN sed -i 's/\r$//' /entrypoint.sh \

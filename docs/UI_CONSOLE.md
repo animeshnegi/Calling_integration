@@ -277,7 +277,84 @@ behaviour as the customer adds phones, and removing one is easier than finding i
 > that extension, and a flow that ends in voicemail falls back to the mailbox. Answer
 > connects the caller, no answer ends the call (or takes the message). A step the
 > customer adds - hours, groups, a second ring stage - is stored and validated, and the
-> primary/extension/voicemail shape above is executed today.
+> primary/extension/voicemail shape above is executed today. A flow that starts with a
+> **phone menu** answers the call, asks for an extension and dials it; that path is
+> described in the next section.
+
+## The phone menu (IVR)
+
+The **Phone menu (IVR)** block is the first tile in the palette. It answers the call with
+the recorded prompt, waits for the caller to key in an extension, checks that extension
+against the customer's own devices and dials it:
+
+    Caller -> assigned number -> Asterisk -> play the prompt -> wait for digits
+           -> check the extension -> dial it
+
+The step is usable the moment it is dropped in (`flowStepDefaults()` fills it, and the
+store fills it again on save): the platform wording
+(`IVR_DEFAULT_PROMPT` = "Welcome to EngineerIP. Please enter the extension you wish to
+reach."), the `platform` voice, a six-second input timeout and two attempts. **Click the
+step** to edit any of it - the text (a 400-character textarea), the voice, the input
+timeout (2-30s), the attempts (1-5) and a fallback extension. The voice list comes from
+the server (`state.ivr_voices`, `IVR_VOICES`), so the labels in the picker and the sound
+files Asterisk plays are one thing:
+
+| Voice | Audio played |
+| --- | --- |
+| `platform` | `sound:custom/ivr-welcome` |
+| `en-gb` | `sound:custom/ivr-welcome-en-gb` |
+| `es-us` | `sound:custom/ivr-welcome-es-us` |
+| `fr-ca` | `sound:custom/ivr-welcome-fr-ca` |
+
+A prompt is read from one of those recordings; the text is what the operator wrote, kept
+so the step is editable without transcribing the audio. Install the recording named in
+the table on the Asterisk host (`/var/lib/asterisk/sounds/custom/`; the filenames, and the
+8 kHz mono u-law format Asterisk wants, are in `asterisk/sounds/custom/README.md`, and the
+image copies whatever is there). Until a file is installed the menu is not silent:
+`IVR_STOCK_PROMPT` (`sound:vm-enter-num-to-call`, Asterisk's stock "please enter the
+number you wish to call") stands in, and the call still reaches the extension the caller
+types.
+
+### When a menu is added for the customer
+
+The operator's rule lives in one place, `SettingsStore.auto_ivr_wanted()`:
+
+* **One extension, or five** - no menu is added. A small account has nothing to choose
+  from, and between one and five the block is the customer's own decision from the
+  palette.
+* **More than five** (`IVR_AUTO_ABOVE = 5`) - a menu is prepended to **every** call flow,
+  including each extension's own flow.
+
+`sync_auto_ivr(owner)` applies it: it prepends the default menu to every `call_routes` and
+`routing_flows` row that does not already start with one, and **never removes** a menu - a
+greeting the customer wrote is theirs. It runs when a device is created
+(`POST /admin/api/extensions`), when a number is provisioned, and when a flow is saved,
+so a workflow written after the sixth device arrives with the menu already on it. Where
+the block lives, the palette says so (`#ivr-palette-hint`) instead of letting a step
+appear unexplained.
+
+### What the engine does
+
+`inbound_plan()` returns `{"kind": "ivr", ...}` for a flow that starts with a menu, with
+the prompt, the chosen `media`, the input timeout, the attempts, the customer's active
+extensions, and the rest of the flow kept as the fallback plan
+(`fallback_destinations`, `voicemail`). `start_inbound()` then hands the call to
+`_start_ivr()`, which answers the channel and plays the recording (`answer_channel` +
+`play_channel_media` from `app/asterisk_client.py`) and opens a session keyed by the
+caller's channel.
+
+Digits arrive as `ChannelDtmfReceived` events: `_ivr_digit()` collects up to six of them
+and `_ivr_resolve()` decides what they mean. A prefix that could still grow waits
+`IVR_INTERDIGIT` (1.4s) for the next key; a key that matches nothing is answered with a
+second reading of the prompt; a complete extension that the customer owns is dialled with
+the ordinary employee leg. `_ivr_retry()` gives the caller up to `attempts` prompts, and
+then the fallback chain runs: the node's own **fallback extension**, then the rest of the
+flow, then voicemail, then a missed call with `ivr_no_selection`. A caller who gives up
+during the prompt leaves no session behind (`ChannelDestroyed`).
+
+Prompts need a second-level clock, so `process_ivr_timeouts()` is called from the ARI
+worker on every pass and `has_ivr_sessions()` shortens the worker's sleep to one second
+while somebody is listening.
 
 ## Customer-first pages: numbers, devices, integrations
 
@@ -394,7 +471,13 @@ pages are linkable.
 ## Verifying a change
 
 * `PYTHONPATH=. .venv/bin/python -m pytest -q` — the API/settings suites (the console
-  shares those endpoints, so this must stay green).
+  shares those endpoints, so this must stay green). `tests/test_services.py` also drives
+  the phone menu end to end without an Asterisk: a fake client records the answer, the
+  played prompt and the leg that was dialled, `ChannelDtmfReceived` events go in through
+  `handle_ari_event()`, and the clock is moved by hand through
+  `process_ivr_timeouts()`. It covers the prefix pause, the wrong digit, the second
+  attempt, the fallback chain, a caller hanging up mid-prompt, and the rule that keeps a
+  menu off a single-extension account and puts one on every flow past five.
 * `.venv/bin/python tools/livecheck.py` — logs into a running preview as the
   administrator and as a customer and asserts the promises above over HTTP: the system
   board answers, call defaults belong to the customer (administrator `400`/`403`), the
@@ -423,6 +506,11 @@ pages are linkable.
   numbers, follow the number to its extensions, edit the extension's workflow, post an
   extension target when saved, and still write a group target when a group's own row
   opened the builder.
+* `node tools/uicheck.js` also opens the menu: the palette tile, the step it appends, the
+  prompt box with the platform wording, the voice list from the server, the working
+  defaults for the wait and the attempts, a fallback list of that customer's own
+  extensions, the values that survive the sheet, the flow the save posts, and the hint
+  that only appears past five extensions.
 * `node tools/cascadecheck.js` also stands over the flow toolbar: the row may fold
   (`flex-wrap:wrap`), the pickers may shrink, and the save button keeps `flex:0 0 auto`
   at the same height as the pickers, so it cannot be clipped out of the panel.

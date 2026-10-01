@@ -1051,8 +1051,41 @@ class SettingsStore:
 
     ROUTE_NODE_TYPES = {
         "incoming", "simultaneous", "sequential", "ring_group", "business_hours",
-        "after_hours", "extension", "voicemail", "forward",
+        "after_hours", "extension", "voicemail", "forward", "ivr",
     }
+
+    # The menu a caller can be given, and the sound each voice plays. A voice is
+    # a recorded prompt set: the media below must exist on the deployment (or be
+    # produced by whatever text-to-speech engine it runs), and the console shows
+    # the operator's own text beside it whatever the audio was made from.
+    IVR_DEFAULT_PROMPT = "Welcome to EngineerIP. Please enter the extension you wish to reach."
+    IVR_VOICES = (
+        {"id": "platform", "label": "English (US) - platform voice", "media": "custom/ivr-welcome"},
+        {"id": "en-gb", "label": "English (UK)", "media": "custom/ivr-welcome-en-gb"},
+        {"id": "es-us", "label": "Espanol (US)", "media": "custom/ivr-welcome-es-us"},
+        {"id": "fr-ca", "label": "Francais (Canada)", "media": "custom/ivr-welcome-fr-ca"},
+    )
+    # One extension has nothing to choose from; more than five is a directory.
+    IVR_AUTO_ABOVE = 5
+
+    def ivr_voices(self) -> list[dict]:
+        return [dict(row) for row in self.IVR_VOICES]
+
+    def ivr_voice(self, voice_id: str) -> dict:
+        return next((dict(row) for row in self.IVR_VOICES if row["id"] == str(voice_id)), dict(self.IVR_VOICES[0]))
+
+    @classmethod
+    def auto_ivr_wanted(cls, active_extensions: int) -> bool:
+        """The operator's rule: never with a single extension, always past five,
+        and the customer's own decision in between."""
+        return int(active_extensions) > cls.IVR_AUTO_ABOVE
+
+    def default_ivr_node(self) -> dict:
+        return {
+            "type": "ivr", "prompt": self.IVR_DEFAULT_PROMPT, "voice": "platform",
+            "input_timeout": 6, "attempts": 2, "fallback": "",
+            "label": "Enter an extension", "configured": True,
+        }
 
     def _validate_route_nodes(self, route: dict, owner_user_id: int, target_type: str = "number") -> None:
         """One validator for every kind of call flow.
@@ -1063,6 +1096,17 @@ class SettingsStore:
         """
         if not isinstance(route, dict) or not isinstance(route.get("nodes"), list) or len(route["nodes"]) > 100:
             raise ValueError("Call route must contain a nodes array with at most 100 nodes")
+        # The step is usable the moment it is dropped in: text, voice, waits and
+        # attempts all have a working default, and editing is what changes them.
+        for node in route["nodes"]:
+            if isinstance(node, dict) and node.get("type") == "ivr":
+                default = self.default_ivr_node()
+                node["prompt"] = str(node.get("prompt") or "").strip()[:400] or default["prompt"]
+                node["voice"] = str(node.get("voice") or default["voice"])
+                node["input_timeout"] = int(node.get("input_timeout") or default["input_timeout"])
+                node["attempts"] = int(node.get("attempts") or default["attempts"])
+                node["fallback"] = str(node.get("fallback") or "")
+                node["label"] = str(node.get("label") or default["label"])[:120]
         if any(not isinstance(node, dict) or node.get("type") not in self.ROUTE_NODE_TYPES for node in route["nodes"]):
             raise ValueError("Call route contains an unsupported node")
         owned_extensions = {row["extension"] for row in self.list_extensions(int(owner_user_id))}
@@ -1090,6 +1134,20 @@ class SettingsStore:
                     raise ValueError("Forwarding destination must use E.164 format")
                 if not 5 <= int(node.get("timeout", 0)) <= 120:
                     raise ValueError("Forward timeout must be between 5 and 120 seconds")
+            elif node_type == "ivr":
+                # A menu asks for an extension that exists, and where it lands
+                # when nobody enters one must be this customer's too.
+                if len(str(node.get("prompt") or "")) > 400:
+                    raise ValueError("IVR prompt must be 400 characters or fewer")
+                if str(node.get("voice") or "platform") not in {row["id"] for row in self.IVR_VOICES}:
+                    raise ValueError("Unknown IVR voice")
+                if not 2 <= int(node.get("input_timeout", 0)) <= 30:
+                    raise ValueError("IVR input timeout must be between 2 and 30 seconds")
+                if not 1 <= int(node.get("attempts", 0)) <= 5:
+                    raise ValueError("IVR attempts must be between 1 and 5")
+                fallback = str(node.get("fallback") or "")
+                if fallback and fallback not in owned_extensions:
+                    raise ValueError("IVR fallback must be an extension owned by this customer")
             elif node_type == "business_hours":
                 if not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", str(node.get("start", ""))) or not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", str(node.get("end", ""))):
                     raise ValueError("Business hours must include valid opening and closing times")
@@ -1185,7 +1243,48 @@ class SettingsStore:
                 item["extension"] == extension and item["voicemail_enabled"] for item in self.list_extensions(int(owner) if owner else None)
             ) else ""
             return {"destinations": [extension] if extension else [], "timeout": 30, "voicemail": mailbox, "forward": "", "outside_hours": False}
-        nodes = (flow.get("route") or {}).get("nodes") or []
+        nodes = [node for node in ((flow.get("route") or {}).get("nodes") or []) if isinstance(node, dict)]
+        # A flow that carries a menu asks the caller for an extension instead of
+        # ringing anybody; whatever the flow says besides that step is where an
+        # unanswered or invalid entry goes.
+        ivr_node = next((node for node in nodes if str(node.get("type")) == "ivr"), None)
+        if ivr_node is not None:
+            answer = self._ivr_answer_plan(ivr_node, owner, extension, nodes)
+            if answer is not None:
+                return answer
+        return self._plan_nodes(nodes, owner, extension)
+
+    def _ivr_answer_plan(self, node: dict, owner, extension: str, nodes: list[dict]) -> dict | None:
+        """What happens when the caller is asked to enter an extension.
+
+        The menu itself - prompt, voice, how long to wait, how many times to ask
+        - plus everything else the flow says, kept as the fallback plan so a
+        caller who enters nothing still lands where the customer designed.
+        """
+        if owner is None:
+            return None
+        voice = self.ivr_voice(str(node.get("voice") or "platform"))
+        allowed = {row["extension"] for row in self.list_extensions(int(owner)) if row["active"]}
+        fallback = str(node.get("fallback") or "")
+        tail = self._plan_nodes([item for item in nodes if item is not node], owner, extension)
+        return {
+            "kind": "ivr",
+            "destinations": [],
+            "extensions": sorted(allowed),
+            "prompt": str(node.get("prompt") or self.IVR_DEFAULT_PROMPT),
+            "voice": voice["id"], "voice_label": voice["label"], "media": f"sound:{voice['media']}",
+            "input_timeout": int(node.get("input_timeout") or 6),
+            "attempts": int(node.get("attempts") or 2),
+            "fallback": fallback if fallback in allowed else "",
+            "fallback_destinations": list(tail.get("destinations") or []),
+            "voicemail": tail.get("voicemail") or "",
+            "timeout": int(tail.get("timeout") or 30),
+            "forward": tail.get("forward") or "",
+            "outside_hours": bool(tail.get("outside_hours")),
+        }
+
+    def _plan_nodes(self, nodes: list[dict], owner, extension: str) -> dict:
+        """The planner's body: turn a list of steps into what the engine dials."""
         allowed = {
             item["extension"] for item in self.list_extensions(int(owner))
             if item["active"]
@@ -1267,6 +1366,40 @@ class SettingsStore:
     def extension_voicemail_enabled(self, extension: str) -> bool:
         return any(row["extension"] == str(extension) and row.get("voicemail_enabled") for row in self.list_extensions())
 
+    def sync_auto_ivr(self, owner_user_id: int) -> list[str]:
+        """Give every flow a menu once a customer passes five extensions.
+
+        The operator's rule, in one place: one extension never gets a menu, past
+        five every workflow gets it, and in between it stays the customer's own
+        choice from the palette. Nothing is ever removed - a menu a customer
+        configured is theirs.
+        """
+        owner_user_id = int(owner_user_id)
+        active = [row for row in self.list_extensions(owner_user_id) if row["active"]]
+        if not self.auto_ivr_wanted(len(active)):
+            return []
+        menu = self.default_ivr_node()
+        added = []
+        for flow in self.list_call_routes(owner_user_id):
+            nodes = (flow.get("route") or {}).get("nodes") or []
+            if any(str(node.get("type")) == "ivr" for node in nodes if isinstance(node, dict)):
+                continue
+            self.save_call_route(owner_user_id, {
+                "phone_number": flow["phone_number"], "name": flow.get("name") or "Main call flow",
+                "route": {"nodes": [dict(menu), *nodes]}, "active": bool(flow.get("active", True)),
+            })
+            added.append(f"number {flow['phone_number']}")
+        for flow in self.list_routing_flows(owner_user_id):
+            nodes = (flow.get("route") or {}).get("nodes") or []
+            if any(str(node.get("type")) == "ivr" for node in nodes if isinstance(node, dict)):
+                continue
+            self.save_routing_flow(owner_user_id, {
+                "name": flow.get("name") or "", "route": {"nodes": [dict(menu), *nodes]},
+                "active": bool(flow.get("active", True)),
+            }, target_type=flow["target_type"], target=flow["target"])
+            added.append(f"{flow['target_type']} {flow['target']}")
+        return added
+
     def ensure_extension_flow(self, owner_user_id: int, extension: str, voicemail: bool = False) -> bool:
         """Write the default flow for an extension that does not have one yet."""
         owner_user_id, extension = int(owner_user_id), str(extension)
@@ -1345,6 +1478,9 @@ class SettingsStore:
             "route": self.default_number_route([extension]), "active": True,
         })
         self.ensure_extension_flow(owner_user_id, extension, voicemail=self.extension_voicemail_enabled(extension))
+        # A customer past five devices gets the menu on the flows this made too,
+        # exactly as if they had added the device from the console.
+        auto_ivr = self.sync_auto_ivr(owner_user_id)
 
         self.add_activity(
             owner_user_id, actor_user_id or owner_user_id, "number.provisioned", "phone_number", number,
@@ -1363,6 +1499,7 @@ class SettingsStore:
             "default_outbound": not has_default,
             "voicemail": self.extension_voicemail_enabled(extension),
             "flows": ["number", "extension"],
+            "auto_ivr": auto_ivr,
         }
 
     def list_routing_flows(self, owner_user_id: int | None = None, target_type: str | None = None):
@@ -2290,6 +2427,12 @@ def register_admin(app, config, on_telephony_change=None):
                 "old": sum(row["folder"] == "old" for row in voicemail_messages), "urgent": sum(row["folder"] == "urgent" for row in voicemail_messages),
             },
             "settings": store.get_settings() if is_admin else {},
+            # The menu a caller can be given: the voices this deployment can
+            # play, the default text, and the point at which the platform adds it
+            # to a customer's flows by itself.
+            "ivr_voices": store.ivr_voices(),
+            "ivr_default_prompt": store.IVR_DEFAULT_PROMPT,
+            "ivr_auto_above": store.IVR_AUTO_ABOVE,
             # The platform recording switch, so a customer's own switch can say
             # when it cannot take effect.
             "recording_platform_enabled": store.recording_platform_enabled(),
@@ -2441,6 +2584,9 @@ def register_admin(app, config, on_telephony_change=None):
                         f"Extension {result} created with SIP credentials and a default call flow",
                     )
                     credentials = store.reveal_extension_credentials(result, owner_id)
+                    # Past the fifth device a customer needs a menu more than a
+                    # list of extensions; the rule lives in the store.
+                    store.sync_auto_ivr(owner_id)
             apply_change()
             return jsonify({"ok": True, "extension": result, "created": not existed, "credentials": credentials})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
@@ -2962,10 +3108,16 @@ def register_admin(app, config, on_telephony_change=None):
             else:
                 route_id = store.save_routing_flow(owner, data, target_type=target_type, target=target or None)
                 label = f"{target_type} {target}"
+            # A flow saved by a customer who is past five devices still gets the
+            # menu: the rule is about every workflow, not only the ones that
+            # existed when the sixth device was created. What was added is
+            # reported, so the console can say it instead of changing the stored
+            # flow silently.
+            added = store.sync_auto_ivr(owner)
             who = "operator" if session.get("admin_role") == "admin" else "customer"
             kind = "call_route" if target_type == "number" else "routing_flow"
             store.add_activity(owner, int(session["admin_user_id"]), "route.saved", kind, route_id, f"Call flow for {label} updated by the {who}")
-            return jsonify({"ok": True, "route_id": route_id})
+            return jsonify({"ok": True, "route_id": route_id, "auto_ivr": added})
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
 

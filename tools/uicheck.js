@@ -712,6 +712,104 @@ async function main() {
       chosen.join(','));
   }
 
+  /* ---------------------------------------------------------- the phone menu */
+  section('The phone menu');
+  {
+    const { w, d, seen } = boot();
+    await settle(340);
+    w.eval("showPage('numbers')");
+    await settle(260);
+    d.querySelector('#number-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await settle(220);
+    d.querySelector('#number-list [data-number-flow]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await settle(280);
+
+    const block = d.querySelector('.palette [data-node-type="ivr"]');
+    check('the palette offers a phone menu block',
+      !!block && /Phone menu/.test(block.textContent) && /extension/.test(block.textContent),
+      block ? block.textContent : 'missing');
+    block.click();
+    await settle(240);
+    const steps = [...d.querySelectorAll('#flow-nodes .flow-node')];
+    check('the menu lands on the canvas as its own step',
+      steps.length > 0 && /Phone menu/.test(steps[steps.length - 1].textContent),
+      steps.length ? steps[steps.length - 1].textContent : 'no steps');
+
+    steps[steps.length - 1].dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await settle(260);
+    const fields = d.getElementById('flow-config-fields');
+    const prompt = fields.querySelector('[name=prompt]');
+    const voice = fields.querySelector('[name=voice]');
+    const timeout = fields.querySelector('[name=input_timeout]');
+    const attempts = fields.querySelector('[name=attempts]');
+    const fallback = fields.querySelector('[name=fallback]');
+    check('the sheet asks for the words the caller hears',
+      !!prompt && prompt.tagName === 'TEXTAREA' && prompt.getAttribute('maxlength') === '400',
+      prompt ? `${prompt.tagName} maxlength=${prompt.getAttribute('maxlength')}` : 'missing');
+    check('and starts from the platform wording',
+      !!prompt && prompt.value.startsWith('Welcome to EngineerIP. Please enter the extension'),
+      prompt ? prompt.value : 'missing');
+    check('the voice is chosen from the server list',
+      !!voice && voice.options.length === 4 && voice.value === 'platform',
+      voice ? `${voice.value} of ${voice.options.length}: ${voice.innerHTML.slice(0, 100)}` : 'missing');
+    check('the wait and the number of attempts work before anyone edits them',
+      !!timeout && timeout.value === '6' && !!attempts && attempts.value === '2',
+      `${timeout && timeout.value}s / ${attempts && attempts.value} attempts`);
+    check('the fallback is a list of the customer\'s own extensions',
+      !!fallback && fallback.options.length === 3
+      && [...fallback.options].some(option => option.value === '102')
+      && ![...fallback.options].some(option => option.value === '201'),
+      fallback ? fallback.innerHTML.slice(0, 140) : 'missing');
+
+    // The text and the voice belong to the customer who owns the line.
+    prompt.value = 'Meridian Health. Enter the extension you need.';
+    voice.value = 'es-us';
+    timeout.value = '8';
+    attempts.value = '3';
+    fallback.value = '102';
+    d.getElementById('flow-config-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(260);
+    check('the sheet closes when the menu is saved',
+      !d.getElementById('flow-config-modal').classList.contains('open'));
+    const menu = w.eval('JSON.stringify(flowNodes[flowNodes.length - 1])');
+    check('the menu keeps the wording, the voice, the wait, the attempts and the fallback',
+      /Meridian Health/.test(menu) && /"voice":"es-us"/.test(menu) && /"input_timeout":8/.test(menu)
+      && /"attempts":3/.test(menu) && /"fallback":"102"/.test(menu), menu);
+
+    d.getElementById('save-route').click();
+    await settle(340);
+    const post = seen.filter(row => row.url === '/admin/api/call-routes' && row.method === 'POST').pop();
+    const body = post ? JSON.parse(post.body) : {};
+    check('saving sends the menu with the flow it belongs to',
+      !!body.route && body.route.nodes.some(node => node.type === 'ivr' && node.voice === 'es-us'),
+      JSON.stringify(body).slice(0, 180));
+
+    // The operator's rule, said where the block lives.
+    check('a small account is not told a menu is added for it',
+      d.getElementById('ivr-palette-hint').hidden === true,
+      `${d.getElementById('ivr-palette-hint').hidden} ${d.getElementById('ivr-palette-hint').textContent}`);
+    const six = JSON.parse(JSON.stringify(state));
+    six.extensions = [
+      ...six.extensions.filter(row => row.owner_user_id !== 2),
+      ...[0, 1, 2, 3, 4, 5].map(offset => ({
+        extension: String(101 + offset), display_name: `Desk ${101 + offset}`, owner_user_id: 2, active: 1,
+        sip_username: `KUDGTE_${101 + offset}`, recording_enabled: 0, voicemail_enabled: 1, webrtc_enabled: 0,
+      })),
+    ];
+    const big = boot({ state: six });
+    await settle(340);
+    big.w.eval("showPage('numbers')");
+    await settle(260);
+    big.d.querySelector('#number-picker [data-owner="2"]').dispatchEvent(new big.w.MouseEvent('click', { bubbles: true }));
+    await settle(220);
+    big.d.querySelector('#number-list [data-number-flow]').dispatchEvent(new big.w.MouseEvent('click', { bubbles: true }));
+    await settle(280);
+    const hint = big.d.getElementById('ivr-palette-hint');
+    check('past five extensions the console says the menu is added for the customer',
+      hint.hidden === false && /6 extensions/.test(hint.textContent) && /automatically/.test(hint.textContent),
+      `${hint.hidden} ${hint.textContent}`);
+  }
+
   /* --------------------------------------------------------- setup journey */
   section('Setup journey');
   {

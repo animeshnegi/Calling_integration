@@ -1367,8 +1367,13 @@ async function voicemailAction(action, value) {
 }
 
 /* ---------------------------------------------------- 21. Call flow studio */
-const FLOW_ICONS = { business_hours: '◷', simultaneous: '⇉', sequential: '⇢', ring_group: '◎', extension: '⌁', voicemail: '✉', forward: '↗' };
-const FLOW_TILES = { business_hours: 'tile-hours', simultaneous: 'tile-ring', sequential: 'tile-seq', ring_group: 'tile-group', extension: 'tile-ext', voicemail: 'tile-vm', forward: 'tile-fwd' };
+const FLOW_ICONS = { ivr: '⌨', business_hours: '◷', simultaneous: '⇉', sequential: '⇢', ring_group: '◎', extension: '⌁', voicemail: '✉', forward: '↗' };
+const FLOW_TILES = { ivr: 'tile-ivr', business_hours: 'tile-hours', simultaneous: 'tile-ring', sequential: 'tile-seq', ring_group: 'tile-group', extension: 'tile-ext', voicemail: 'tile-vm', forward: 'tile-fwd' };
+const FLOW_LABELS = { ivr: 'Phone menu', business_hours: 'Business hours', simultaneous: 'Simultaneous ring', sequential: 'Sequential ring', ring_group: 'Ring group', extension: 'Extension', voicemail: 'Voicemail', forward: 'Forward number' };
+const flowLabel = type => FLOW_LABELS[type] || String(type || '').replaceAll('_', ' ');
+/* Shown if the server has not sent its own wording yet; the server default is
+   the same sentence and stays the one that reaches the caller. */
+const IVR_FALLBACK_PROMPT = 'Welcome to EngineerIP. Please enter the extension you wish to reach.';
 
 /* ------------------------------------------------- 21a. Flow targets */
 /* Numbers, extensions and groups all get a call flow. Numbers stay in
@@ -1544,6 +1549,7 @@ function applyFlowTarget(key) {
       : (state.is_admin ? 'Add a number, extension or group to begin' : 'Pick a number, then an extension');
   }
   renderFlowNodes();
+  renderIvrHint();
 }
 
 function renderFlow(preferred) {
@@ -1675,11 +1681,42 @@ function renderFlowNodes() {
   host.innerHTML = flowNodes.map((node, index) => `
     <div class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="${canDesignFlows()}" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
       <span class="icon ${FLOW_TILES[node.type] || 'tile-ext'}">${FLOW_ICONS[node.type] || '◇'}</span>
-      <div class="copy"><b>${esc(String(node.type).replaceAll('_', ' '))}</b><small>${esc(node.label || (canDesignFlows() ? 'Click to configure this step' : 'Step in this call flow'))}</small></div>
+      <div class="copy"><b>${esc(flowLabel(node.type))}</b><small>${esc(node.label || (canDesignFlows() ? 'Click to configure this step' : 'Step in this call flow'))}</small></div>
       <span class="step">${String(index + 1).padStart(2, '0')}</span>
       ${canDesignFlows() ? `<button class="remove" data-remove-node="${index}" aria-label="Remove step">✕</button>` : ''}
     </div>`).join('');
   $('flow-canvas').classList.toggle('has-nodes', flowNodes.length > 0);
+}
+
+/* The voices the platform can read a prompt in, from the server, so the list
+   and the sound files stay one thing. */
+function ivrVoiceOptions(selected) {
+  const voices = (state.ivr_voices || []).length
+    ? state.ivr_voices
+    : [{ id: 'platform', label: 'English (US) — platform voice' }];
+  return voices.map(voice => `<option value="${esc(voice.id)}" ${String(selected) === String(voice.id) ? 'selected' : ''}>${esc(voice.label)}</option>`).join('');
+}
+
+/* Past five extensions the operator's rule adds a menu to every flow; say so
+   where the block lives instead of letting it appear unexplained. */
+function renderIvrHint() {
+  const hint = $('ivr-palette-hint');
+  if (!hint) return;
+  const owner = flowOwnerId();
+  if (state.is_admin && !owner) {   // no customer chosen: nothing to count yet
+    hint.hidden = true;
+    hint.textContent = '';
+    return;
+  }
+  const extensions = (state.extensions || []).filter(x => x.active && (!owner || x.owner_user_id === owner));
+  const threshold = Number(state.ivr_auto_above || 5);
+  if (extensions.length > threshold) {
+    hint.textContent = `This account has ${extensions.length} extensions, so a phone menu is added to every call flow automatically. Edit its text and voice here whenever you like.`;
+    hint.hidden = false;
+  } else {
+    hint.hidden = true;
+    hint.textContent = '';
+  }
 }
 
 function flowExtensionOptions(selected = []) {
@@ -1696,6 +1733,14 @@ function flowExtensionOptions(selected = []) {
    behaves: add an extension and its phone joins the ring. An extension step
    rings that device; a group step rings its members. */
 function flowStepDefaults(node) {
+  if (node?.type === 'ivr' && !node.prompt) {
+    // The menu is usable the moment it is dropped in: the platform wording and
+    // voice, and editing is what changes them.
+    return {
+      ...node, prompt: state.ivr_default_prompt || IVR_FALLBACK_PROMPT, voice: node.voice || 'platform',
+      input_timeout: node.input_timeout || 6, attempts: node.attempts || 2, fallback: node.fallback || '',
+    };
+  }
   if (!['simultaneous', 'sequential', 'ring_group'].includes(node?.type)) return node;
   if ((node.extensions || []).length) return node;
   const { type, target } = flowTargetParts($('route-target')?.value);
@@ -1738,8 +1783,18 @@ function openFlowConfig(index) {
   } else if (node.type === 'forward') {
     fields = `<label class="field">Forward to E.164 number<input name="phone" type="tel" pattern="\\+[1-9][0-9]{7,14}" placeholder="+13025550123" value="${esc(node.phone || '')}" required></label>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
+  } else if (node.type === 'ivr') {
+    fields = `<label class="field">Spoken prompt<textarea name="prompt" rows="3" maxlength="400" required>${esc(node.prompt || '')}</textarea>
+        <small>Read out before the caller is asked to type an extension — 400 characters at most.</small></label>
+      <div class="field-row">
+        <label class="field">Voice<select name="voice">${ivrVoiceOptions(node.voice)}</select></label>
+        <label class="field">Input timeout (seconds)<input type="number" name="input_timeout" min="2" max="30" value="${node.input_timeout || 6}" required></label>
+        <label class="field">Attempts<input type="number" name="attempts" min="1" max="5" value="${node.attempts || 2}" required></label>
+      </div>
+      <label class="field">Fallback extension<select name="fallback"><option value="">Continue with the steps below</option>${flowExtensionOptions(node.fallback || '')}</select>
+        <small>Where a caller goes when no valid extension is entered. Leave it empty to run the rest of the flow.</small></label>`;
   }
-  $('flow-config-title').textContent = `Configure ${String(node.type).replaceAll('_', ' ')}`;
+  $('flow-config-title').textContent = `Configure ${flowLabel(node.type)}`;
   $('flow-config-fields').innerHTML = common + fields;
   openOverlay('flow-config-modal');
 }
@@ -1775,6 +1830,13 @@ function saveFlowConfig(event) {
     node.phone = form.get('phone');
     node.timeout = Number(form.get('timeout'));
     node.label = node.label || `${node.phone} · ${node.timeout}s`;
+  } else if (node.type === 'ivr') {
+    node.prompt = String(form.get('prompt') || '').trim().slice(0, 400) || state.ivr_default_prompt || IVR_FALLBACK_PROMPT;
+    node.voice = String(form.get('voice') || 'platform');
+    node.input_timeout = Number(form.get('input_timeout')) || 6;
+    node.attempts = Number(form.get('attempts')) || 2;
+    node.fallback = String(form.get('fallback') || '');
+    node.label = node.label || 'Enter an extension';
   }
   node.configured = true;
   renderFlowNodes();
@@ -3289,8 +3351,10 @@ wire('save-route', 'click', async () => {
     const payload = type === 'number'
       ? { target_type: 'number', phone_number: target, target, owner_user_id: flowOwnerId(), name: savedFlowFor('number', target)?.name || 'Main call flow' }
       : { target_type: type, target, owner_user_id: flowOwnerId(), name: savedFlowFor(type, target)?.name || (type === 'group' ? 'Group call flow' : 'Extension call flow') };
-    await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, route: { nodes: flowNodes }, active: true }) });
-    notify(`Call flow saved for ${label}`);
+    const result = await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, route: { nodes: flowNodes }, active: true }) });
+    notify((result.auto_ivr || []).length
+      ? `Call flow saved for ${label}; a phone menu was added automatically`
+      : `Call flow saved for ${label}`);
     setSaveFlowState('saved', `Saved for ${label}`);
     const id = workspace?.customer?.id, tab = wsTab;
     await loadState();

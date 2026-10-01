@@ -65,13 +65,19 @@ def main() -> None:
             except Exception:
                 app.logger.exception("Voicemail email processing failed")
             last_voicemail_scan = now
+        # Callers waiting on a prompt need a prompt clock, not a thirty-second
+        # nap: wake every second while a menu is open, and stay lazy otherwise.
+        try:
+            service.process_ivr_timeouts()
+        except Exception:
+            app.logger.exception("IVR prompt timeout processing failed")
         if now - last_cleanup >= 3600:
             try:
                 service.cleanup_recordings()
             except Exception:
                 app.logger.exception("Recording retention cleanup failed")
             last_cleanup = now
-        time.sleep(30)
+        time.sleep(1 if service.has_ivr_sessions() else 30)
 
 
 if __name__ == "__main__":

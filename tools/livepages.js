@@ -168,7 +168,7 @@ async function main() {
 
   await page(w, d, 'routing');
   show('ADMIN · Call flows — which customer, and can he build',
-    `owner selector: ${[...d.querySelectorAll('#route-owner option')].map(o => `${o.value}:${o.textContent}`).join(', ')} (value ${d.getElementById('route-owner').value})\nsave button hidden=${d.getElementById('save-route').hidden}, disabled=${d.getElementById('save-route').disabled}\nblocks offered: ${[...d.querySelectorAll('[data-node-type]')].length}\ntargets: ${text(d.getElementById('route-target')).slice(0, 200)}\ncanvas: ${text(d.getElementById('flow-nodes')).slice(0, 200)}\ngroups: ${text(d.getElementById('group-list')).slice(0, 200)}`);
+    `owner selector: ${[...d.querySelectorAll('#route-owner option')].map(o => `${o.value}:${o.textContent}`).join(', ')} (value ${d.getElementById('route-owner').value})\nsave button hidden=${d.getElementById('save-route').hidden}, disabled=${d.getElementById('save-route').disabled}\nblocks offered: ${[...d.querySelectorAll('[data-node-type]')].length} (menu: ${!!d.querySelector('[data-node-type="ivr"]')})\nmenu hint: ${text(d.getElementById('ivr-palette-hint')) || '(none at this size)'}\nvoices offered to a menu: ${d.getElementById('flow-config-fields') ? '' : 'sheet closed'}\ntargets: ${text(d.getElementById('route-target')).slice(0, 200)}\ncanvas: ${text(d.getElementById('flow-nodes')).slice(0, 200)}\ngroups: ${text(d.getElementById('group-list')).slice(0, 200)}`);
 
   // Saving: press it and read the button, the hint and the stored flow back.
   const saveButton = d.getElementById('save-route');

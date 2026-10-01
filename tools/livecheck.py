@@ -447,6 +447,51 @@ check("every extension the customer has carries a default flow", set(extensions)
 check("the main line has a flow too",
       number in {row.get("phone_number") for row in cust_state.get("call_routes", [])})
 
+# --- the phone menu: the caller is asked to type an extension ----------------
+status, state4 = customer.json("/admin/api/state")
+voices = [voice["id"] for voice in state4.get("ivr_voices", [])]
+check("the console is told which voices a prompt can be read in",
+      voices == ["platform", "en-gb", "es-us", "fr-ca"], ",".join(voices))
+check("and the wording a fresh menu starts from",
+      state4.get("ivr_default_prompt", "").startswith("Welcome to EngineerIP. Please enter the extension"))
+check("and the number of extensions past which a menu is added for the customer",
+      state4.get("ivr_auto_above") == 5, str(state4.get("ivr_auto_above")))
+
+# The operator saves a menu onto a customer's line, exactly as the studio does.
+status, body = admin.json("/admin/api/call-routes", "POST", {
+    "target_type": "number", "phone_number": number, "target": number,
+    "route": {"nodes": [{"type": "ivr", "prompt": "Meridian Health. Enter the extension you need.",
+                         "voice": "es-us", "input_timeout": 8, "attempts": 3, "fallback": extensions[0],
+                         "label": "Enter an extension", "configured": True}]},
+})
+check("the operator can put a phone menu on a customer's line", status == 200, f"{status} {str(body)[:90]}")
+status, detail = admin.json(f"/admin/api/customers/{meridian['id']}")
+menu = next((row for row in detail.get("call_routes", []) if row.get("phone_number") == number), None)
+menu_node = (menu or {}).get("route", {}).get("nodes", [{}])[0]
+check("the menu keeps the text, the voice and the timings that were set",
+      menu_node.get("type") == "ivr" and menu_node.get("prompt") == "Meridian Health. Enter the extension you need."
+      and menu_node.get("voice") == "es-us" and menu_node.get("input_timeout") == 8 and menu_node.get("attempts") == 3,
+      json.dumps(menu_node)[:180])
+
+# A voice with no recording behind it, or a stranger's extension as fallback, is refused.
+status, body = admin.json("/admin/api/call-routes", "POST", {
+    "target_type": "number", "phone_number": number, "target": number,
+    "route": {"nodes": [{"type": "ivr", "voice": "klingon"}]},
+})
+check("a menu in a voice that does not exist is refused", status == 400, f"{status} {str(body)[:90]}")
+status, body = admin.json("/admin/api/call-routes", "POST", {
+    "target_type": "number", "phone_number": number, "target": number,
+    "route": {"nodes": [{"type": "ivr", "fallback": "999"}]},
+})
+check("and so is a fallback extension the customer does not own", status == 400, f"{status} {str(body)[:90]}")
+
+# Put the line back the way the flows above expect to find it.
+admin.json("/admin/api/call-routes", "POST", {
+    "target_type": "number", "phone_number": number, "target": number,
+    "route": {"nodes": [{"type": "simultaneous", "extensions": extensions, "timeout": 25,
+                         "label": "Ring all devices", "configured": True}]},
+})
+
 failed = [label for label, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} live checks passed")
 if failed:
