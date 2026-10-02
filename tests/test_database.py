@@ -1,8 +1,10 @@
+import datetime
+import re
 from pathlib import Path
 
 from sqlalchemy import create_mock_engine
 
-from app.database import Database, MySQLConnection, metadata
+from app.database import Database, DBRow, MySQLConnection, _make_row, metadata
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,41 @@ def test_mysql_schema_compiles_all_application_tables():
     rendered = "\n".join(statements)
     assert "CREATE TABLE calls" in rendered
     assert "CREATE TABLE admin_users" in rendered
+
+
+def test_mysql_timestamp_defaults_only_appear_on_datetime_columns():
+    """MySQL error 1067: DEFAULT CURRENT_TIMESTAMP is invalid on VARCHAR/TEXT.
+
+    Every column using a CURRENT_TIMESTAMP server default must be a real
+    DATETIME column, and audit columns must keep the DDL default so the raw
+    SQL INSERTs (which omit created_at/updated_at) succeed in strict mode.
+    """
+    statements = []
+    engine = create_mock_engine("mysql+pymysql://", lambda sql, *args, **kwargs: statements.append(str(sql.compile(dialect=engine.dialect))))
+    metadata.create_all(engine)
+    rendered = "\n".join(statements)
+    for line in rendered.splitlines():
+        if "CURRENT_TIMESTAMP" in line:
+            assert "DATETIME" in line, f"non-DATETIME column uses CURRENT_TIMESTAMP default: {line.strip()}"
+    admin_users_ddl = next(stmt for stmt in statements if "CREATE TABLE admin_users" in stmt)
+    assert re.search(r"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP", admin_users_ddl)
+    assert re.search(r"updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP", admin_users_ddl)
+
+
+def test_cursor_rows_convert_mysql_datetimes_to_iso_strings():
+    row = _make_row({
+        "created_at": datetime.datetime(2026, 10, 2, 18, 5, 36),
+        "due_at": datetime.date(2026, 10, 9),
+        "username": "admin",
+        "attempts": 3,
+        "last_error": None,
+    }.items())
+    assert isinstance(row, DBRow)
+    assert row["created_at"] == "2026-10-02 18:05:36"
+    assert row["due_at"] == "2026-10-09"
+    assert row["username"] == "admin"
+    assert row["attempts"] == 3
+    assert row["last_error"] is None
 
 
 def test_existing_pymysql_uri_is_not_rewritten_or_duplicated():
