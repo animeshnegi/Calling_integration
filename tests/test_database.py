@@ -4,7 +4,7 @@ from pathlib import Path
 
 from sqlalchemy import create_mock_engine
 
-from app.database import Database, DBRow, MySQLConnection, _make_row, metadata
+from app.database import Database, DBRow, MySQLConnection, _make_row, metadata, timestamp_column_fixes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +44,49 @@ def test_mysql_timestamp_defaults_only_appear_on_datetime_columns():
     admin_users_ddl = next(stmt for stmt in statements if "CREATE TABLE admin_users" in stmt)
     assert re.search(r"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP", admin_users_ddl)
     assert re.search(r"updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP", admin_users_ddl)
+
+
+def test_timestamp_fixes_repair_varchar_columns_created_by_older_images():
+    existing = {
+        "admin_users": {
+            "created_at": {"type": "VARCHAR(40)", "default": None, "nullable": False},
+            "updated_at": {"type": "VARCHAR(40)", "default": None, "nullable": False},
+            "username": {"type": "VARCHAR(80)", "default": None, "nullable": False},
+        },
+        "webhook_deliveries": {
+            "delivered_at": {"type": "VARCHAR(40)", "default": None, "nullable": True},
+        },
+    }
+    statements = timestamp_column_fixes(existing)
+    assert "UPDATE admin_users SET created_at=CURRENT_TIMESTAMP WHERE created_at=''" in statements
+    assert "ALTER TABLE admin_users MODIFY created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP" in statements
+    assert "ALTER TABLE admin_users MODIFY updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP" in statements
+    assert "UPDATE webhook_deliveries SET delivered_at=NULL WHERE delivered_at=''" in statements
+    assert "ALTER TABLE webhook_deliveries MODIFY delivered_at DATETIME" in statements
+    assert not any("username" in statement for statement in statements)
+
+
+def test_timestamp_fixes_are_noop_for_correct_schema():
+    existing = {
+        "admin_users": {
+            "created_at": {"type": "DATETIME", "default": "CURRENT_TIMESTAMP", "nullable": False},
+            "updated_at": {"type": "DATETIME", "default": "CURRENT_TIMESTAMP", "nullable": False},
+        },
+        "notifications": {
+            "read_at": {"type": "DATETIME", "default": None, "nullable": True},
+        },
+    }
+    assert timestamp_column_fixes(existing) == []
+
+
+def test_timestamp_fixes_restore_missing_server_default_without_rewriting_data():
+    existing = {
+        "admin_users": {
+            "created_at": {"type": "DATETIME", "default": None, "nullable": False},
+        },
+    }
+    statements = timestamp_column_fixes(existing)
+    assert statements == ["ALTER TABLE admin_users MODIFY created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"]
 
 
 def test_cursor_rows_convert_mysql_datetimes_to_iso_strings():
