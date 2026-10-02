@@ -125,7 +125,10 @@ calls = Table("calls", metadata,
     Column("provider", String(80)), Column("direction", String(20), nullable=False), Column("status", String(40), nullable=False),
     Column("answered", Integer, nullable=False, server_default="0"), Column("started_at", String(40), nullable=False),
     Column("answered_at", String(40)), Column("ended_at", String(40)), Column("duration_seconds", Integer, nullable=False, server_default="0"),
-    Column("employee_channel_id", String(255)), Column("employee_channel_ids", Text, nullable=False, server_default=""),
+        # MySQL error 1101: TEXT/BLOB columns cannot carry a DEFAULT clause. Every
+    # insert supplies employee_channel_ids explicitly (models._COLUMNS), so no
+    # server-side default is needed.
+    Column("employee_channel_id", String(255)), Column("employee_channel_ids", Text, nullable=False),
     Column("customer_channel_id", String(255)), Column("bridge_id", String(255)),
     Column("recording_name", String(255)), Column("recording_format", String(20)), Column("recording_status", String(40)),
     Column("recording_path", Text), Column("disposition", String(80)), Column("notes", Text))

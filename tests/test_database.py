@@ -46,6 +46,27 @@ def test_mysql_timestamp_defaults_only_appear_on_datetime_columns():
     assert re.search(r"updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP", admin_users_ddl)
 
 
+def test_mysql_text_and_blob_columns_never_carry_defaults():
+    """MySQL error 1101: TEXT/BLOB/JSON columns cannot have a DEFAULT clause.
+
+    SQLAlchemy happily renders 'TEXT NOT NULL DEFAULT …' but the server
+    rejects it at CREATE TABLE time, so guard every table's generated DDL.
+    """
+    statements = []
+    engine = create_mock_engine("mysql+pymysql://", lambda sql, *args, **kwargs: statements.append(str(sql.compile(dialect=engine.dialect))))
+    metadata.create_all(engine)
+    for statement in statements:
+        for line in statement.splitlines():
+            upper = line.upper()
+            if "DEFAULT" not in upper:
+                continue
+            column_type = upper.split("DEFAULT")[0]
+            assert not any(
+                banned in column_type
+                for banned in (" TEXT", " BLOB", " TINYTEXT", " MEDIUMTEXT", " LONGTEXT", " JSON")
+            ), f"TEXT/BLOB column with DEFAULT is invalid in MySQL: {line.strip()}"
+
+
 def test_timestamp_fixes_repair_varchar_columns_created_by_older_images():
     existing = {
         "admin_users": {
