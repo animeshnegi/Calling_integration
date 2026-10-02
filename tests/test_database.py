@@ -141,3 +141,17 @@ def test_compose_requires_database_uri_and_env_documents_mysql():
     assert compose.count("DATABASE_URI: ${DATABASE_URI:?") == 2
     assert "DATABASE_URI=mysql+pymysql://" in env
     assert "charset=utf8mb4" in env
+
+
+def test_compose_caps_python_service_resources():
+    """A crash-restart loop must never be able to saturate the host again."""
+    compose = (ROOT / "docker-compose.yml").read_text()
+    assert compose.count("cpus:") >= 2
+    assert compose.count("memory:") >= 2
+
+
+def test_boot_failures_back_off_instead_of_hot_looping():
+    wsgi = (ROOT / "wsgi.py").read_text()
+    worker = (ROOT / "app" / "ari_worker.py").read_text()
+    assert "time.sleep(10)" in wsgi and "raise" in wsgi
+    assert "time.sleep(10)" in worker

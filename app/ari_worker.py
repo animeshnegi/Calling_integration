@@ -81,4 +81,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Same reasoning as wsgi.py: the container restarts immediately on
+        # exit, so a persistent boot failure must not become a hot loop.
+        import logging
+
+        logging.getLogger(__name__).exception("Fatal boot failure; pausing before exit to avoid a hot restart loop")
+        time.sleep(10)
+        raise
