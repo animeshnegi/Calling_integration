@@ -137,6 +137,9 @@ networks:
   telephony-internal:
     driver: bridge
     name: engineerip-telephony-internal
+  mysql-network:
+    external: true
+    name: 1panel-network
 
   mysql-network:
     external: true
