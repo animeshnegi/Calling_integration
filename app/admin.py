@@ -603,16 +603,23 @@ class SettingsStore:
     def service_address(self, fallback_host: str = "") -> dict:
         """Where this deployment answers, and the links built from it.
 
-        An administrator's `service_host` setting wins. Without one the host the
-        console is being read from is used, so even an unconfigured deployment
-        shows an address a customer can type into a phone instead of the
-        carrier's trunk address.
+        Two administrator-set addresses, because they travel different paths:
+        `service_host` is the SIP address phones register with (a DNS record
+        pointing straight at this server - SIP/UDP cannot go through a web
+        proxy), and `service_web_host` is the domain the consoles, API and
+        webhook examples are served from (typically behind a reverse proxy,
+        e.g. tel.example.com). When only one is set it serves both roles, so
+        an existing single-address deployment keeps working unchanged.
         """
         settings = self.get_settings()
         host = str(settings.get("service_host") or "").strip()
+        web_host = str(settings.get("service_web_host") or "").strip()
         configured = bool(host)
+        web_configured = bool(web_host)
         if not host:
-            host = str(fallback_host or "").strip()
+            host = web_host or str(fallback_host or "").strip()
+        if not web_host:
+            web_host = str(settings.get("service_host") or "").strip() or str(fallback_host or "").strip()
         try:
             port = int(settings.get("service_sip_port") or 5060)
         except (TypeError, ValueError):
@@ -623,8 +630,10 @@ class SettingsStore:
             "host": host,
             "port": port,
             "configured": configured,
+            "web_host": web_host,
+            "web_configured": web_configured,
             "sip": f"{host}:{port}" if host else "",
-            "api_base": f"https://{host}" if host else "",
+            "api_base": f"https://{web_host}" if web_host else "",
         }
 
     def reveal_extension_credentials(self, extension, owner_user_id: int | None = None, fallback_host: str = ""):
@@ -2040,6 +2049,7 @@ class SettingsStore:
             "inbound_fallback_extension",
             "webrtc_enabled",
             "service_host",
+            "service_web_host",
             "service_sip_port",
         }
         for key, value in values.items():
@@ -2061,10 +2071,10 @@ class SettingsStore:
                     raise ValueError("Recording retention must be between 1 and 3650 days")
                 if key == "recording_max_duration_seconds" and not 0 <= number <= 86400:
                     raise ValueError("Maximum recording duration must be between 0 and 86400 seconds")
-            if key == "service_host":
-                # An address a device registers with: no scheme, no path, no port
-                # - the port has its own setting, and a typo here breaks every
-                # phone at once.
+            if key in {"service_host", "service_web_host"}:
+                # An address a device registers with (or the web/API domain):
+                # no scheme, no path, no port - the SIP port has its own
+                # setting, and a typo here breaks every phone at once.
                 text = text.strip()
                 if text and not self.SERVICE_HOST_RE.match(text):
                     raise ValueError("Service address must be a hostname or an IP address, without a scheme, path or port")
@@ -2091,7 +2101,7 @@ class SettingsStore:
                 text = str(value)
                 if key in {"recording_enabled", "recording_announcement", "recording_beep", "webrtc_enabled"}:
                     text = "true" if text.strip().lower() in {"true", "1", "yes", "on"} else "false"
-                if key == "service_host":
+                if key in {"service_host", "service_web_host"}:
                     text = text.strip()
                 db.execute(
                     "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
@@ -2962,7 +2972,7 @@ def register_admin(app, config, on_telephony_change=None):
                 "recording_enabled", "recording_format", "recording_retention_days", "recording_announcement",
                 "recording_announcement_media", "recording_beep", "recording_max_duration_seconds",
                 "default_extension", "inbound_fallback_extension", "webrtc_enabled",
-                "service_host", "service_sip_port",
+                "service_host", "service_web_host", "service_sip_port",
             }
             store.set_settings({k: data[k] for k in data if k in allowed})
             apply_change(); return jsonify({"ok": True})

@@ -311,7 +311,7 @@ ok = hmac.compare_digest(expected, signature)</pre>
       <tbody>
         <tr><td>SIP username</td><td>Six random upper-case letters, an underscore and the extension — for example <code>KUDGTE_101</code>. The platform generates it, keeps it unique across the whole platform, and it cannot be edited: it <i>is</i> the device's identity.</td></tr>
         <tr><td>SIP password</td><td>A generated secret with upper case, lower case, digits and symbols, rotatable from the same sheet with <b>Change password</b>. A linked device account's password is what actually authenticates, so rotating changes that one.</td></tr>
-        <tr><td>Registration server</td><td><code>{{SIP_HOST}}</code> — this deployment's own address, with the port and transport (UDP, TCP or TLS). An administrator sets it once under <b>Settings → Server address</b>, as an IP address or a subdomain, and the same address builds the API and webhook URLs on this page.</td></tr>
+        <tr><td>Registration server</td><td><code>{{SIP_HOST}}</code> — this deployment's own SIP address, with the port and transport (UDP, TCP or TLS). An administrator sets it once under <b>Settings → Server addresses</b>, as an IP address or a subdomain whose DNS record points directly at this server — never through a web proxy, because SIP and call audio travel over UDP. The web &amp; API domain configured alongside it builds the API and webhook URLs on this page.</td></tr>
         <tr><td>Number</td><td>The DID the extension answers, so you can confirm the right line rings.</td></tr>
       </tbody>
     </table>

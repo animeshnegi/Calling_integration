@@ -1258,8 +1258,11 @@ function renderSelects() {
 function renderServiceAddress() {
   const service = state.service_address || {};
   const configured = state.is_admin ? String((state.settings || {}).service_host || '') : '';
+  const webConfigured = state.is_admin ? String((state.settings || {}).service_web_host || '') : '';
   const host = $('service-host');
   if (host && document.activeElement !== host) host.value = configured;
+  const webHost = $('service-web-host');
+  if (webHost && document.activeElement !== webHost) webHost.value = webConfigured;
   const port = $('service-sip-port');
   if (port && document.activeElement !== port) port.value = service.port || 5060;
   const stateTag = $('service-address-state');
@@ -1272,8 +1275,8 @@ function renderServiceAddress() {
   const preview = $('service-address-preview');
   if (!preview) return;
   const rows = [
-    ['Devices register with', service.sip ? `<code>${esc(service.sip)}</code>` : 'no address yet', '⇄'],
-    ['API base', service.api_base ? `<code>${esc(service.api_base)}/api/v1</code>` : 'no address yet', '⌘'],
+    ['Phones register with', service.sip ? `<code>${esc(service.sip)}</code> — a direct DNS record, never a web proxy` : 'no address yet', '⇄'],
+    ['Consoles & API base', service.api_base ? `<code>${esc(service.api_base)}/api/v1</code>` : 'no address yet', '⌘'],
     ['Documentation', service.api_base
       ? `<a href="/documentation" target="_blank" rel="noopener">${esc(service.api_base)}/documentation</a> — every example uses this address`
       : 'the page falls back to the address in your browser bar', '▤'],
@@ -3631,15 +3634,16 @@ wire('service-address-form', 'submit', async event => {
   try {
     await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
       service_host: val('service-host').trim(), service_sip_port: val('service-sip-port').trim() || '5060',
+      service_web_host: val('service-web-host').trim(),
     }) });
-    notify('Server address saved');
+    notify('Server addresses saved');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
 wire('service-address-reset', 'click', async () => {
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_sip_port: '5060' }) });
-    notify('Server address cleared — the console address is used');
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_web_host: '', service_sip_port: '5060' }) });
+    notify('Server addresses cleared — the console address is used');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });

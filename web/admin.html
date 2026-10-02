@@ -538,21 +538,25 @@
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><h2>Server address</h2><p>Where customers point their phones, and the host every API and webhook example is built from</p></div>
+            <div><h2>Server addresses</h2><p>Two addresses, two paths: phones register straight at the SIP address, while the consoles, API and webhooks live on the web domain behind your proxy</p></div>
             <span class="tag info" id="service-address-state">Not set</span>
           </div>
           <div class="panel-body">
             <form id="service-address-form" class="field-row">
-              <label class="field">Server IP address or subdomain
+              <label class="field">SIP domain or IP (phones register here)
                 <input id="service-host" name="service_host" placeholder="sip.your-domain.com or 203.0.113.10" autocomplete="off" spellcheck="false">
-                <small>No scheme and no path. This is the address a phone registers with, not the carrier trunk the platform dials out through.</small>
+                <small>No scheme and no path. This DNS record must point <b>directly</b> at this server's IP — never through a web proxy or CDN, because SIP and call audio use UDP, which a web proxy cannot carry.</small>
               </label>
               <label class="field">SIP port
                 <input id="service-sip-port" name="service_sip_port" type="number" min="1" max="65535" placeholder="5060">
                 <small>Usually 5060. Change it only if your SIP listener runs elsewhere.</small>
               </label>
+              <label class="field">Web &amp; API domain (consoles, API, webhooks)
+                <input id="service-web-host" name="service_web_host" placeholder="tel.your-domain.com" autocomplete="off" spellcheck="false">
+                <small>The domain this console, the REST API and every webhook example are served from — usually behind your reverse proxy. Leave empty to reuse the SIP address.</small>
+              </label>
               <div class="field-actions">
-                <button class="btn primary" type="submit">Save address</button>
+                <button class="btn primary" type="submit">Save addresses</button>
                 <button class="btn ghost" type="button" id="service-address-reset">Clear</button>
               </div>
             </form>

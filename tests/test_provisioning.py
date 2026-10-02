@@ -1004,6 +1004,63 @@ def test_the_registration_address_is_the_platforms_own_not_the_carriers(tmp_path
     assert fallback["server"] == "localhost" and fallback["managed_address"] is False
 
 
+def test_split_sip_and_web_domains_route_phones_and_api_separately(tmp_path):
+    """Phones register at the SIP domain (a direct DNS record) while the
+    consoles, API and webhooks live on the web domain behind the proxy -
+    the exact split a deployment needs when the web side sits behind a
+    reverse proxy that SIP/UDP cannot traverse."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    customer, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")            # extension 101
+
+    saved = admin.post("/admin/api/settings", json={
+        "service_host": "sip.engineerip.test", "service_sip_port": "5060",
+        "service_web_host": "tel.engineerip.test",
+    })
+    assert saved.status_code == 200, saved.json
+
+    # Phones get the SIP domain; API examples get the web domain.
+    for client in (admin, customer):
+        credentials = client.get("/admin/api/extensions/101/credentials").json["credentials"]
+        assert credentials["server"] == "sip.engineerip.test"
+        assert credentials["registration_address"] == "sip.engineerip.test:5060"
+        assert credentials["api_base"] == "https://tel.engineerip.test"
+
+    service = customer.get("/admin/api/state").json["service_address"]
+    assert service["sip"] == "sip.engineerip.test:5060"
+    assert service["api_base"] == "https://tel.engineerip.test"
+    assert service["web_host"] == "tel.engineerip.test"
+
+    # The documentation page splits the two addresses the same way.
+    page = admin.get("/documentation").data.decode()
+    assert "https://tel.engineerip.test/api/v1/calls" in page
+    assert "sip.engineerip.test:5060" in page
+
+    # The web domain obeys the same hygiene rules as the SIP one.
+    for bad in ("https://tel.test", "tel.test/app", "tel.test:443", "tel test"):
+        refused = admin.post("/admin/api/settings", json={"service_web_host": bad})
+        assert refused.status_code == 400, (bad, refused.json)
+
+    # Only administrators may change it.
+    refused = customer.post("/admin/api/settings", json={"service_web_host": "rogue.example"})
+    assert refused.status_code in (400, 403)
+
+    # Clearing the web domain falls back to the SIP address for API examples,
+    # which is exactly the old single-address behaviour.
+    assert admin.post("/admin/api/settings", json={"service_web_host": ""}).status_code == 200
+    service = customer.get("/admin/api/state").json["service_address"]
+    assert service["api_base"] == "https://sip.engineerip.test"
+    assert service["sip"] == "sip.engineerip.test:5060"
+
+    # And with only a web domain set, phones still have somewhere to register.
+    assert admin.post("/admin/api/settings", json={"service_host": "", "service_web_host": "tel.engineerip.test"}).status_code == 200
+    service = customer.get("/admin/api/state").json["service_address"]
+    assert service["api_base"] == "https://tel.engineerip.test"
+    assert service["host"] == "tel.engineerip.test"
+
+
 def test_the_documentation_page_names_this_deployment(tmp_path):
     app = make_app(tmp_path)
     admin = admin_client(app)

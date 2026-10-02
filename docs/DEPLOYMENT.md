@@ -202,7 +202,48 @@ For the current IPComms UDP test, allow only what is required:
 
 Do not open TCP 8088 for ARI or TCP 5038 for AMI to the Internet.
 
-## 14. Production hardening
+## 14. Split domains: web console vs. SIP phones
+
+Web traffic and SIP traffic must travel different paths. The consoles, REST API
+and webhooks are plain HTTPS and belong behind your reverse proxy. SIP
+registration and call audio are UDP (5060 + the RTP range) — **a web proxy or
+CDN cannot carry them**, which is why IP phones fail to register through a
+proxied domain.
+
+Use two DNS records:
+
+| Domain | DNS | Carries |
+| --- | --- | --- |
+| `tel.example.com` | points at your reverse proxy | Admin/customer consoles, `/api/v1`, webhooks |
+| `sip.example.com` | plain `A` record **directly to the server IP** (no proxy, no CDN, no Cloudflare orange cloud) | SIP 5060/udp, RTP 10000–10100/udp |
+
+Then set both under **Settings → Server addresses** in the admin console
+(`service_web_host` = `tel.example.com`, `service_host` = `sip.example.com`,
+SIP port 5060). Every customer credential sheet, API example and webhook URL
+follows automatically: phones are told to register at `sip.example.com:5060`,
+and all API documentation is built on `https://tel.example.com`.
+
+Example nginx server block for the web domain:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name tel.example.com;
+    # ssl_certificate ...; ssl_certificate_key ...;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+Nothing is proxied for `sip.example.com` — it only needs the direct DNS record
+plus open firewall ports 5060/udp and the RTP range.
+
+## 15. Production hardening
 
 - Use strong unique SIP credentials per employee.
 - Disable anonymous SIP.
