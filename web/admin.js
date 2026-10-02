@@ -639,10 +639,7 @@ function platformRecordingAllowed() {
 
 function renderExtensions() {
   const query = state.is_admin ? val('extension-search').toLowerCase() : '';
-  const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
-  const scopedExtensions = selectedNumber ? extensionsOnNumber(selectedNumber) : null;
   const rows = state.extensions
-    .filter(x => !scopedExtensions || scopedExtensions.has(String(x.extension)))
     .filter(x => `${x.extension} ${x.display_name} ${x.sip_username}`.toLowerCase().includes(query));  $('extension-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
   const card = x => `
     <div class="row">
@@ -902,12 +899,9 @@ function renderExtensionCredentials() {
   const query = val('sip-search').toLowerCase();
   const owner = state.is_admin ? sipOwner : null;
   const numbers = extension => (state.phone_numbers || []).filter(x => x.inbound_extension === extension).map(x => x.number);
-  const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
-  const scopedExtensions = selectedNumber ? extensionsOnNumber(selectedNumber) : null;
   const rows = (state.extensions || [])
     .filter(x => !state.is_admin || x.owner_user_id === owner)
     .filter(x => x.active)
-    .filter(x => !scopedExtensions || scopedExtensions.has(String(x.extension)))
     .filter(x => `${x.extension} ${x.display_name || ''} ${x.sip_username || ''} ${numbers(x.extension).join(' ')}`.toLowerCase().includes(query));  $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
   if (!state.is_admin) {
     // A customer reads cards. The extensions answering the number they picked
