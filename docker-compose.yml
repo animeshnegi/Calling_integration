@@ -141,9 +141,6 @@ networks:
     external: true
     name: 1panel-network
 
-  mysql-network:
-    external: true
-    name: 1panel-network
 
 volumes:
   telephony_data:
