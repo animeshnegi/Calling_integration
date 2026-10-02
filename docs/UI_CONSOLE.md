@@ -1,0 +1,656 @@
+# Admin & customer console UI
+
+The consoles are one static single-page app served by Flask; there is no server-side
+rendering and no build step.
+
+| File | Role |
+| --- | --- |
+| `web/admin.html` | Shell: sidebar, topbar, the 18 `.page` sections, the customer workspace overlay, the modal and the toast host. |
+| `web/admin.css` | All styling. Theme tokens, glass surfaces, components, animations, responsive rules. |
+| `web/admin.js` | All behaviour. Talks to the existing `/admin/api/*` JSON endpoints only. |
+| `web/admin-login.html` | Standalone sign-in screen. Shares `admin.css`, so it is served from `/admin-assets/admin.css`. |
+
+Flask only serves these files (`/admin`, `/login`, `/admin-assets/<file>`; 
+`/admin/login` is kept as an alias for the sign-in route), so a change to the
+interface cannot change the API, the database or the permission model.
+
+Sign-in lives at **`/login`**. `login_required` redirects there, the sign-in screen
+posts there, and the marketing page links there; nothing in the UI points at the old
+`/admin/login` path.
+
+## Who does what
+
+The console splits along one line: **an administrator manages customers, and a
+customer runs their own line.**
+
+| An administrator | A customer |
+| --- | --- |
+| Adds customers, assigns numbers, provisions devices | Chooses the extension an API call uses and where an unmatched number lands |
+| Reveals extension credentials when handing over a device | Places and receives calls, reads voicemail and recordings |
+| Edits a customer's call flows for them, one customer at a time | Owns extensions, ring groups and every call flow |
+| Sees call history read-only | Switches recording on per device |
+
+Nothing in the administrator's console dials. `POST /admin/api/calls` answers 403 for
+an administrator, and an administrator cannot create the customer's API keys or
+webhooks (`403`): those belong to the customer, and the administrator manages what
+already exists.
+
+Call flows are different: the administrator may edit a customer's flows, because a
+customer's line is the administrator's job to keep answering. The builder stays
+customer-scoped - `POST /admin/api/call-routes` resolves the owner from the *target*
+(a number, extension or group), so naming another customer in the request cannot move
+a flow across tenants, and writing under an unknown target is refused. In the console,
+`canDesignFlows()` unlocks the palette, the save button, remove controls and dragging
+only once a customer is chosen in the routing owner selector; without one, the page
+says so rather than offering a dead control.
+
+## Two experiences, one shell
+
+`GET /admin/api/state` returns `is_admin`, and the app sets a body class from it:
+
+* `body.admin-theme` — role marker. Administrators land in the dark control room.
+* `body.customer-theme` — role marker. Customers land in the light, business-facing view.
+
+The role markers carry no styling. The palette is keyed on a separate pair of skin
+classes, so either role can use either theme:
+
+* `body.theme-dark` — dark glass control room (administrators' default).
+* `body.theme-light` — light glass view (customers' default).
+
+Both skins resolve the same custom properties (`--surface`, `--line`, `--text-*`,
+`--acc-*`, `--shadow-*`) and declare their own `color-scheme`, so components are
+written once and native controls (`<select>` options, scrollbars, date pickers)
+follow the skin instead of the operating system. Role differences are then
+declared in markup with `[data-admin-only]` / `[data-customer-only]`, which
+`loadState()` toggles. Provider and carrier data is never part of a customer payload
+in the first place — the API already strips `provider` from every number and returns
+empty `providers`/`users` lists — and the UI additionally blocks those pages.
+
+`body.theme-loading` hides the shell until `loadState()` resolves, so a signed-in
+user never sees an unstyled flash of the wrong theme. Its backdrop follows the active
+skin, and a short inline script applies the remembered skin before the first paint.
+
+### Theme switch
+
+A single control in the topbar switches the skin for either role. The choice is
+remembered per role (`localStorage['eip-console-theme:<role>']`), so an administrator
+who prefers light does not drag customers onto the dark palette in a shared browser,
+and `localStorage['eip-console-role']` lets the pre-paint script restore the right skin
+on a reload.
+
+### Quiet polling
+
+The console polls `GET /admin/api/state` every 15 s while the tab is visible, checks
+`/admin/api/device-status` every 8 s and `/health` every 30 s. Polling must never look
+like a refresh:
+
+* `loadState()` hashes the payload (the CSRF token aside) and returns early when
+  nothing changed, so an idle console performs **zero** DOM mutations per poll.
+* When something did change, the repaint runs under `body.updating`, which
+  neutralises the entrance animations, and the workspace keeps its scroll position.
+* `body.updating` is cleared by the next navigation (`showPage()`), not right after
+  the repaint: clearing it sooner would give the freshly rendered nodes their
+  animations back and replay the entrance one frame later.
+* `refreshDeviceStatus()` only touches the DOM when a registration status actually
+  moved, so a device flapping shows up as its status pill changing rather than as the
+  list rebuilding.
+
+Entrances are therefore tied to actions, not to renders: `.page.entering` is added by
+`showPage()` and removed 700 ms later, so the page cascade runs once per navigation,
+while `quietly()`/`endQuiet()` decide whether a background repaint may animate at all.
+Anything the operator drives — navigation, opening the customer workspace, switching
+its tabs — calls `endQuiet()` first, so it keeps its motion.
+
+## Provisioning: assigning a number builds a working line
+
+`POST /admin/api/numbers` accepts `inbound_extension: "auto"` (what the console sends
+by default for a new number). The number is saved first, then `provision_number()`
+builds everything else in one step:
+
+| Created | Where it lives |
+| --- | --- |
+| A three-digit extension (`next_extension_number()`, 101 upwards) | `extensions`, owned by the customer |
+| Its SIP credentials (username = the extension, generated password) | `extensions.sip_password_enc`, revealed on demand |
+| The DID link, so inbound calls actually ring | `phone_numbers.inbound_extension` |
+| The default caller ID when that extension has none | `phone_numbers.default_outbound` |
+| A default flow for the number and one for the extension | `call_routes` and `routing_flows` |
+| An activity entry and a notification | `activity_history`, `notifications` |
+
+That default flow is the workflow the product promises, and `inbound_plan()` is the
+one place it is turned into a call plan, so the engine and the builder cannot drift:
+
+| Call arrives on | What rings | Nobody answers |
+| --- | --- | --- |
+| The customer's primary number | Every active device the customer owns, at once | The call ends |
+| A number tied to one extension | Just that extension | The call ends |
+| A number whose flow ends in voicemail | The ring step, then that mailbox | The caller leaves a message |
+
+Adding a device extends the primary number (`sync_primary_flows`), because a main
+line rings everyone - but only while that flow is still the generated one: a single
+ring step, the default 25s timeout, no group and only the customer's own extensions.
+The moment the customer designs something of their own, it is never rewritten.
+
+Extension numbers are the primary key and therefore unique platform-wide, so
+provisioning never hands a customer a number another customer already owns; the
+suggestion comes from `GET /admin/api/extensions/next`. The customers' own
+`POST /admin/api/extensions` behaves the same way: leave the password blank and the
+server generates one, then writes the extension's default flow.
+
+The SIP username is the identity the device authenticates with, so the platform owns
+it: it is six random upper-case letters, an underscore and the extension
+(`KUDGTE_101`), unique platform-wide through `idx_extensions_sip_username`.
+`canonical_sip_username()` keeps a value already in that shape - a row minted before
+the letters became upper case still counts, because renaming an identity would stop
+the phone holding it from registering - and mints a fresh one otherwise, so
+`save_extension()` ignores whatever a caller sends and an edit never renames a
+registered phone; both console forms show it read-only. `normalise_sip_usernames()`
+rewrites rows stored in the old bare-extension format, in `extensions` and in every
+linked `customer_sip_accounts` row, so an existing deployment converges on the same
+shape on start-up. A device account linked to an extension inherits its identity - an
+account may not take a username that is an extension number, nor one another account
+already uses. The two default flows stay editable in the builder.
+
+`generate_sip_password()` produces the secret a phone is configured with: upper case,
+lower case, digits and symbols, always at least one of each, 16 characters by default
+and never fewer than 12. `0/O` and `1/l/I` are left out so a password cannot be
+misread, and `;`, `#` and whitespace are never generated because the generated
+Asterisk configuration rejects a value containing them.
+
+`GET /admin/api/extensions/<extension>/credentials` (owner or administrator) returns
+the effective credential: if a device account is linked to the extension, that account
+is what Asterisk ends up using, so the endpoint reports it as the source. The console
+shows all of it at once in a credential sheet - the identity, five tight rows with a
+Copy button on each value, a copy-everything block for the phone, and the numbers and
+password source for reference - so nobody has to scroll or hunt for a field. The
+registration value is one string, `host:port · TRANSPORT`, ready to type.
+
+The address in that sheet is the platform's own, not the carrier trunk it dials out
+through. `POST /admin/api/settings` (administrator only) stores `service_host` - an IP
+address or a subdomain, refused if it carries a scheme, a path or a port - and
+`service_sip_port`. `service_address()` resolves what to show: the stored address
+first, the host the console is being read from otherwise, and the carrier's server
+only while neither exists, so a deployment that has never been configured still shows
+something a phone can use. The same resolution feeds `service_address` in
+`/admin/api/state` for both consoles, the `<server>` field a new device account starts
+from, and the API base printed at the top of APIs & Webhooks.
+
+`POST /admin/api/extensions/<extension>/password` (owner or administrator) rotates
+that same effective credential: send a password to set one, or a blank body to have
+one generated. It answers with the new secret and its `source`, so the sheet can show
+what the phone will actually use, and it records `extension.password_rotated` in the
+owner's activity feed.
+
+The customer workspace drawer has one scrolling region. The identity block
+(`.ws-head-top`: avatar, company, contact, status flags) keeps its natural height and
+never moves; everything below it - the account summary (chips, metrics, quick actions,
+recent activity), then the tab row and the tab's content - lives inside `.ws-scroll`,
+which takes the height the identity leaves (`flex:1;min-height:0;overflow-y:auto`). The
+tab row is `position:sticky;top:0` inside that region, drawn above the content, so
+scrolling pins it under the identity and the tab's own content continues to scroll
+underneath; switching a tab scrolls the region back to the pinned row (`renderWsTab`
+calls `revealWsTabs()`), and a background refresh restores the previous scroll position
+instead of jumping. `tools/cascadecheck.js` asserts that geometry, because a headless
+DOM cannot measure a scroll box: exactly one element may scroll, the identity block
+keeps `flex:none`, the tab row wins `position:sticky` against any later rule, and the
+tab body is no longer its own scroller.
+
+Recording has two switches, and both have to agree. Each extension carries its own
+flag, which the customer sets per device, and the platform carries
+`recording_enabled`: the administrator's master switch on Settings, wired to
+`POST /admin/api/settings`. Off stops every recording immediately - a customer's opt-in
+cannot overrule it - and on lets each device follow its own switch. A new extension is
+provisioned with its own flag off, so nothing records until a customer opts a device in;
+`Service._recording_settings()` returns `enabled` (both switches), plus
+`platform_enabled` and `extension_enabled` so the console can say which one is holding
+recording back. Both consoles receive `recording_platform_enabled` in
+`/admin/api/state`, so a customer's own switch is shown disabled, with the reason,
+while the platform switch is off. Boolean settings are stored as the canonical text
+`true`/`false` whatever a caller sends, because the generated Asterisk configuration
+compares them as text.
+
+`GET /documentation` (any signed-in account) serves `web/documentation.html`: the
+setup, REST API and webhook reference for this deployment, linked from the top of
+APIs & Webhooks (which also prints the API base) and from the sidebar. It reads no
+customer data - the only thing rendered into it is the service address, substituted
+for `{{API_BASE}}` and `{{SIP_HOST}}`, so every example on the page names this
+deployment rather than a placeholder - and it links back to the console.
+
+## Call flows: one builder, three kinds of target
+
+A flow can belong to an extension or a group. **A number is not an editable target for
+anyone**: a number's workflow does not live on the number - the extensions that answer it
+carry the flows, and the platform keeps the number's own ring plan in step with the
+devices a customer adds. An administrator picks from `#route-target`, which lists the
+chosen customer's extensions and groups; a **customer** navigates instead:
+`#route-number` lists their assigned numbers and `#route-extension` is one plain list of
+their active extensions (`extensionsForNumber`), with no line-by-line grouping - the
+number only decides which extension the builder opens on. A number with nothing wired to
+it still offers the customer's own extensions, so the picker is never empty. Every entry
+point resolves a number key to `extension:<the one that answers it>` (`focusRouteTarget`),
+so a number row on the Numbers page opens the workflow of the extension that answers it
+for both roles, and a stray number key is refused with a message on the save path.
+
+`currentFlowKey()` holds what the builder is editing, however it was reached - the
+administrator's picker, the customer's two pickers, or a group's own "Call flow" row -
+and the save button, the group highlight and the canvas's incoming-call label all read it.
+That is what keeps a group flow saveable while the customer's pickers still name an
+extension. The numbers page follows the same rule: a customer's "Call flow" button opens
+the workflow of the extension answering that number, while an operator's still opens the
+number's own flow.
+
+The builder's storage is unchanged:
+
+* **Numbers** — stored in `call_routes`, keyed by the number, as they always were.
+* **Extensions** and **groups** — stored in `routing_flows`, keyed by
+  `(owner_user_id, target_type, target)`. They live in their own table because
+  `call_routes.phone_number` carries a legacy `UNIQUE` constraint that a second kind of
+  target cannot satisfy, and rebuilding a table that holds customer data is not worth
+  the risk.
+
+The **Save flow** button in `#flow-toolbar` reports its own state rather than sitting
+greyed out with the reason in a tooltip: it stays live (`Saving…` while the request is
+in flight, `Saved ✓` for a moment afterwards, with `#flow-save-hint` naming the target),
+takes one save at a time, and when it cannot save it says so in the toolbar. Its row
+wraps (`flex-wrap`) and the pickers beside it shrink (`flex:1 1 168px`) while the button
+keeps its own size (`flex:0 0 auto`, 40px - level with the pickers), so a narrow window
+or the workspace drawer folds it onto a second line instead of pushing it out of the
+panel.
+
+A **group** (`extension_groups`) is a named set of the customer's extensions with a
+ring timeout. A group can be the target of its own flow, and it can be chosen as the
+ring destination inside any flow: the step then carries `group_id` alongside the
+resolved `extensions`, and validation rejects a step whose destinations are not the
+group's members. Deleting a group removes its flow; deleting an extension removes its
+flow and takes it out of every group.
+
+`POST /admin/api/call-routes` takes `target_type` (`number`, `extension`, `group`) and
+dispatches to the right store call. Customers can only target what they own; an
+administrator's request resolves the owner from the target itself (falling back to the
+customer named in `owner_user_id`), so a flow cannot be written across customers.
+
+A fresh ring step arrives pre-filled with what that target rings by default
+(`flowStepDefaults()`, reading `currentFlowKey()` so it follows whichever picker opened the
+builder): that device for an extension, the members for a group. A number key can still
+arrive from a stored link, and then every device of the customer is offered. The main
+line's own "rings everyone" plan is generated by provisioning and kept in step as the
+customer adds phones, because it is no longer something the console edits.
+
+> **What rings today.** Inbound calls are answered by the ARI worker through
+> `inbound_plan()`, the same planner the builder validates against: the customer's main
+> line rings every active device they own, a number tied to one extension rings just
+> that extension, and a flow that ends in voicemail falls back to the mailbox. Answer
+> connects the caller, no answer ends the call (or takes the message). A step the
+> customer adds - hours, groups, a second ring stage - is stored and validated, and the
+> primary/extension/voicemail shape above is executed today. A flow that starts with a
+> **phone menu** answers the call, asks for an extension and dials it; that path is
+> described in the next section.
+
+## The phone menu (IVR)
+
+The **Phone menu (IVR)** block is the first tile in the palette. It answers the call with
+the recorded prompt, waits for the caller to key in an extension, checks that extension
+against the customer's own devices and dials it:
+
+    Caller -> assigned number -> Asterisk -> play the prompt -> wait for digits
+           -> check the extension -> dial it
+
+The step is usable the moment it is dropped in (`flowStepDefaults()` fills it, and the
+store fills it again on save): the platform wording
+(`IVR_DEFAULT_PROMPT` = "Welcome to EngineerIP. Please enter the extension you wish to
+reach."), the `platform` voice, a six-second input timeout and two attempts. **Click the
+step** to edit any of it - the text (a 400-character textarea), the voice, the input
+timeout (2-30s), the attempts (1-5) and a fallback extension. The voice list comes from
+the server (`state.ivr_voices`, `IVR_VOICES`), so the labels in the picker and the sound
+files Asterisk plays are one thing:
+
+| Voice | Audio played |
+| --- | --- |
+| `platform` | `sound:custom/ivr-welcome` |
+| `en-gb` | `sound:custom/ivr-welcome-en-gb` |
+| `es-us` | `sound:custom/ivr-welcome-es-us` |
+| `fr-ca` | `sound:custom/ivr-welcome-fr-ca` |
+
+A prompt is read from one of those recordings; the text is what the operator wrote, kept
+so the step is editable without transcribing the audio. Install the recording named in
+the table on the Asterisk host (`/var/lib/asterisk/sounds/custom/`; the filenames, and the
+8 kHz mono u-law format Asterisk wants, are in `asterisk/sounds/custom/README.md`, and the
+image copies whatever is there). Until a file is installed the menu is not silent:
+`IVR_STOCK_PROMPT` (`sound:vm-enter-num-to-call`, Asterisk's stock "please enter the
+number you wish to call") stands in, and the call still reaches the extension the caller
+types.
+
+### When a menu is added for the customer
+
+The operator's rule lives in one place, `SettingsStore.auto_ivr_wanted()`:
+
+* **One extension, or five** - no menu is added. A small account has nothing to choose
+  from, and between one and five the block is the customer's own decision from the
+  palette.
+* **More than five** (`IVR_AUTO_ABOVE = 5`) - a menu is prepended to **every** call flow,
+  including each extension's own flow.
+
+`sync_auto_ivr(owner)` applies it: it prepends the default menu to every `call_routes` and
+`routing_flows` row that does not already start with one, and **never removes** a menu - a
+greeting the customer wrote is theirs. It runs when a device is created
+(`POST /admin/api/extensions`), when a number is provisioned, and when a flow is saved,
+so a workflow written after the sixth device arrives with the menu already on it. Where
+the block lives, the palette says so (`#ivr-palette-hint`) instead of letting a step
+appear unexplained.
+
+### What the engine does
+
+`inbound_plan()` returns `{"kind": "ivr", ...}` for a flow that starts with a menu, with
+the prompt, the chosen `media`, the input timeout, the attempts, the customer's active
+extensions, and the rest of the flow kept as the fallback plan
+(`fallback_destinations`, `voicemail`). `start_inbound()` then hands the call to
+`_start_ivr()`, which answers the channel and plays the recording (`answer_channel` +
+`play_channel_media` from `app/asterisk_client.py`) and opens a session keyed by the
+caller's channel.
+
+Digits arrive as `ChannelDtmfReceived` events: `_ivr_digit()` collects up to six of them
+and `_ivr_resolve()` decides what they mean. A prefix that could still grow waits
+`IVR_INTERDIGIT` (1.4s) for the next key; a key that matches nothing is answered with a
+second reading of the prompt; a complete extension that the customer owns is dialled with
+the ordinary employee leg. `_ivr_retry()` gives the caller up to `attempts` prompts, and
+then the fallback chain runs: the node's own **fallback extension**, then the rest of the
+flow, then voicemail, then a missed call with `ivr_no_selection`. A caller who gives up
+during the prompt leaves no session behind (`ChannelDestroyed`).
+
+Prompts need a second-level clock, so `process_ivr_timeouts()` is called from the ARI
+worker on every pass and `has_ivr_sessions()` shortens the worker's sleep to one second
+while somebody is listening.
+
+## Customer-first pages: numbers, devices, integrations
+
+### Devices & SIP: one number, then its devices
+
+The customer's Devices & SIP page answers one question: *which number, and what answers
+it*. A number picker sits in the toolbar (`#device-number`), listing their assigned numbers
+and opening on the **primary number** - the one whose extension provisioning generated.
+Below it, each extension is a card (`#extension-credential-list`, filled by
+`extensionCard()`):
+
+* the cards answering the chosen number come first and wear the accent
+  (`.ext-card.on-number`, with an `Answers <number>` tag), the rest are dashed and quiet
+  (`.ext-card.other-number`, tagged `Other extension`);
+* the extension the platform generated first is tagged **Primary** - the same fact the
+  store uses (`primary_extension`), sent with the payload instead of guessed in the
+  browser (`primaryExtensionIn()` falls back to the lowest extension only for an older
+  payload);
+* each card names the device behind it, its registration state, its SIP username and its
+  numbers, and offers **Show credentials** and **Call flow** - so there is no second box to
+  cross-reference.
+
+That second box is why the platform's own `Devices & SIP accounts` panel is marked
+`data-admin-only`: one box per extension already carries everything a customer reads, and
+`renderSipAccounts()` does not paint the list for them at all. An operator still gets it,
+because device accounts are theirs to manage.
+
+The administrator's workspace **Devices & SIP** tab reads the same way (`wsDevices()`): a
+number picker on top (`[data-ws-device-number]`, opening on `primary_extension` from the
+customer detail payload), the extensions below with the same accent/quiet split and the
+**Primary** tag, then the device accounts. Their plain extension list carries the same tag
+(`renderExtensionCredentials()`), so both sides agree on which device came first. Choosing a number re-renders the tab in place
+(`renderWsTab('devices', { keepScroll: true })`).
+
+Three other pages answer "whose?" before "what?":
+
+* **Numbers** — `#number-picker` lists every customer with how many numbers they hold.
+  Choosing one scopes `#number-list` to them; each row links to the flow that answers
+  that number (`data-number-flow` opens the builder on it).
+* **Devices & SIP** — `#sip-picker` lists extensions and devices per customer, and the
+  extension-credential list follows the choice.
+* **Integrations** — `#integration-picker` scopes API keys, webhooks and deliveries.
+  The customer keeps the create buttons; the administrator sees the same records with
+  manage actions only.
+
+The choice lives in `numberOwner`/`sipOwner`/`integrationOwner`, not in the DOM, so a
+refresh keeps the page where it was. `resolvePickedOwner()` keeps a valid selection and
+otherwise falls back to the first customer that actually has rows, so a page never
+opens on an empty customer by accident.
+
+**A number's own flow still decides who rings when the number is called.** Provisioning
+writes one for every line (the "main line rings every device" default) and `inbound_plan()`
+consults it first, falling back to the number's extension and that extension's voicemail
+switch when there is none. The customer's tab no longer edits it - it is the operator's -
+but nothing about how a call is routed changed in this pass.
+
+## Routing defaults: stored, no longer a second editor
+
+`settings.call_defaults` is a per-customer map (`{user_id: {outbound, fallback}}`):
+
+* `GET /admin/api/call-defaults` — the customer reads their own; an administrator must
+  name `?customer_id=`, otherwise `400` (unknown customer: `404`).
+* `POST /admin/api/call-defaults` — the customer saves `{outbound, fallback}`; an
+  administrator gets `403` ("call defaults belong to
+  the customer").
+* Resolution order when nothing is chosen: the customer's stored defaults, then the
+  legacy platform `default_extension`/`inbound_fallback_extension`, then their first
+  active extension.
+
+Recording is per device for the same reason: `extensions.recording_enabled` on each
+extension decides, there is no global policy panel, and a platform-level
+`recording_enabled` no longer vetoes a device that opted in.
+
+## Live system board (administrator)
+
+`#system-board` sits at the top of the administrator's Overview and is refreshed from
+`GET /admin/api/system` every five seconds by `loadSystem()`:
+
+| Tile | Source |
+| --- | --- |
+| Calls in progress | live calls with `ringing` and `connected` split out |
+| Peak at once today | highest simultaneous count from today's call events |
+| Calls today / answered | today's totals |
+| Devices registered | PJSIP endpoints that are online, out of the total |
+| Asterisk channels | active channels |
+| Recordings running | calls currently in `recording` state, plus today's count |
+| Host load | load average as a percentage of CPU count, and memory use |
+
+The tiles are updated in place (`textContent`), so polling never repaints the page.
+
+## Customer workspace (administrator)
+
+Administrators manage a customer from one place: `Open workspace` on the customers
+page loads `GET /admin/api/customers/<id>` and renders ten tabs — Overview, Numbers,
+Devices & SIP, Routing, Calls, Recordings, Requests, Billing, Integrations and
+Activity — in a centred overlay, without a page navigation. Cards inside the Overview
+tab ("needs attention") link straight to the tab that fixes the gap. The overlay fills
+the viewport on small screens and `.ws-body` is the single scroll region inside it, so
+long tabs scroll inside the panel while the page behind stays put. The standalone pages
+remain available for cross-customer work.
+
+The **Numbers → Call defaults** panel is gone: how a line answers is designed in
+Call Routing, and a second editor for the same decision invited conflicting edits. The
+stored defaults and their endpoint are untouched - `GET`/`POST /admin/api/call-defaults`
+still work exactly as before, the customer can still save their own and an administrator
+still cannot - and the values keep being applied; the console simply stops offering a
+competing form. The commented-out wire in `admin.js` names the markup to restore if it
+is ever wanted back.
+
+## The customer Overview
+
+The setup journey is advice, not the page, so it can be put away: `#journey-dismiss`
+hides `#journey-hero` and shows a slim `#journey-restore` panel with the way back. The
+choice is stored per account (`eip-journey-hidden:<user_id>`, so one customer hiding
+their checklist does not hide the next person's), and the journey keeps being computed
+while it is hidden - closing it does not pause the count.
+
+The journey is the customer's and only the customer's. `renderMyRequests()` returns
+before it computes or paints anything for an administrator, and `renderJourneyVisibility()`
+decides visibility with the role first (`customerView`) because deciding it afterwards
+once un-hid the hero for the operator on the next state refresh: that pass runs after
+the `[data-customer-only]` sweep in `loadState`, so anything that writes `hidden` later
+wins.
+
+Requests are the operator's list. The customer Overview used to carry a "My requests"
+timeline of `state.requests`; it is gone, and only the number-request button and the
+journey's request step remain on the customer side. The administrator's Requests page
+(`#page-requests`, `request-list`) is untouched.
+
+Public surface: `web/index.html` (landing), `web/documentation.html` and
+`web/admin-login.html` all wear the console's light skin - `--bg:#f4f5fa` with the same
+three soft radials the light theme paints - so the marketing pages, the reference and
+the door into the console read as one product rather than three. `csscheck` asserts the
+three files still carry it.
+
+## Adding a page
+
+1. Add an entry to `pageMeta` in `web/admin.js` (`title`, `subtitle`).
+2. Add `<section class="page" id="page-<key>">` to `web/admin.html`.
+3. Add a nav button with `data-page="<key>"` (plus `data-admin-only` if privileged).
+
+`showPage()` and `loadState()` do the rest. The page key is also the URL hash, so
+pages are linkable.
+
+## Verifying a change
+
+* `PYTHONPATH=. .venv/bin/python -m pytest -q` — the API/settings suites (the console
+  shares those endpoints, so this must stay green). `tests/test_services.py` also drives
+  the phone menu end to end without an Asterisk: a fake client records the answer, the
+  played prompt and the leg that was dialled, `ChannelDtmfReceived` events go in through
+  `handle_ari_event()`, and the clock is moved by hand through
+  `process_ivr_timeouts()`. It covers the prefix pause, the wrong digit, the second
+  attempt, the fallback chain, a caller hanging up mid-prompt, and the rule that keeps a
+  menu off a single-extension account and puts one on every flow past five.
+* `.venv/bin/python tools/livecheck.py` — logs into a running preview as the
+  administrator and as a customer and asserts the promises above over HTTP: the system
+  board answers, call defaults belong to the customer (administrator `400`/`403`), the
+  administrator cannot create keys or webhooks but can edit a customer's flows and
+  build their groups, a spoofed owner cannot move a flow, and recording is per device.
+* `node tools/uicheck.js` — boots the real console in jsdom against captured fixtures
+  and asserts the promises above: refreshes that paint nothing, only customers dial,
+  customer-first pickers, the flow builder's administrator mode, the system board, the
+  the SIP identity cannot be renamed, the
+  credential sheet shows every value once with the platform's own registration
+  address, the setup journey's bar and icons follow the data, administrators offer no
+  delete action, and provisioning reveals credentials.
+* `GET /console-check` (any signed-in account) serves `web/console-check.html`: the
+  same drawer geometry measured in the browser that actually renders it, because jsdom
+  has no layout engine. It opens the console in a frame, opens a customer workspace,
+  and reports what stays still, what scrolls, what pins and how much room the tab
+  content gets, plus the state of the platform recording switch. It writes nothing and
+  shows no customer data, so it is safe to open on a production deployment - and it is
+  the first thing to look at when a console looks like an older build, since it says so
+  when `.ws-scroll` is missing.
+* `node tools/cascadecheck.js` — resolves which rule wins for a given element path
+  (specificity and source order, with state and media rules kept inert) so a rule the
+  console depends on cannot be silently overridden by a later one.
+* `node tools/uicheck.js` covers both navigations: the administrator's picker offers the
+  chosen customer's extensions and groups and never a number, and the customer's two
+  pickers list their own numbers and one flat list of their extensions, edit the
+  extension's workflow, post an extension target when saved, and still write a group
+  target when a group's own row opened the builder.
+* `node tools/uicheck.js` covers the Devices & SIP page on both sides: a customer gets the
+  number picker (opening on the primary number), cards with the answering extension marked
+  and the platform's primary device tagged, the mark moving when another number is chosen,
+  and no platform device boxes at all - while the administrator keeps those boxes and one
+  picker of their own. The workspace tab is checked the same way: numbers on top, marked
+  cards below, `Primary` on the generated device, and the mark following the picker.
+* `node tools/uicheck.js` also opens the menu: the palette tile, the step it appends, the
+  prompt box with the platform wording, the voice list from the server, the working
+  defaults for the wait and the attempts, a fallback list of that customer's own
+  extensions, the values that survive the sheet, the flow the save posts, and the hint
+  that only appears past five extensions.
+* `node tools/cascadecheck.js` also stands over the flow toolbar: the row may fold
+  (`flex-wrap:wrap`), the pickers may shrink, and the save button keeps `flex:0 0 auto`
+  at the same height as the pickers, so it cannot be clipped out of the panel.
+* `node tools/csscheck.js` guards the dropdown fix directly: the chosen option must be
+  a solid colour in both skins, no `option` background may be a gradient (the browser
+  drops it), the `base-select` panel rules must exist, and the three public pages must
+  still carry the light surface.
+* `node tools/contrastcheck.js` — audits every text colour in `admin.css` against its
+  own skin's surfaces, so the light and dark themes both stay legible.
+* `node tools/csscheck.js` — cross-checks `.class` names between `admin.css`,
+  `admin.html` and `admin.js`: nothing styled without a user, nothing applied without
+  a rule.
+* `tools/devpreview.py` — a seeded preview (`PREVIEW_DATA`, default `/tmp/eip-preview`)
+  for looking at both consoles with real data.
+* Render both roles headlessly against captured `/admin/api/*` fixtures to catch
+  runtime errors and missing DOM nodes without a browser.
+* Parse `admin.css` and cross-check every class against `admin.html` and `admin.js`:
+  a class applied in markup but absent from the stylesheet renders unstyled, and a
+  class in the stylesheet that nothing applies is dead weight. Status values come from
+  the API, so they are checked against captured fixtures instead of guessed.
+
+## No travelling highlights, no bars on hover
+
+Hover used to start a sweep: a diagonal highlight that entered from off-canvas left and
+left the same way, on primary buttons (`.btn.primary::after`), glass cards
+(`.glass-card::before`), `.ws-card`, the drawer's quick actions (`.ws-quick button`) and
+every `.sheen` surface (`.panel`, `.hero`, `.flow-toolbar`). It read as "a small thing
+coming from the left", so it is gone: `sheenSweep` no longer exists, and each surface
+keeps a still gloss painted once at the top edge - light in the dark skin, a whisper of
+indigo in the light one. A hovered row has the same rule: `.row:hover` used to slide
+sideways and draw an indigo strip down its left edge (`inset 3px 0 0 0 var(--acc-1)`),
+and a table row did the same on its first cell. Both strips are gone; a row now lifts
+three pixels with the medium shadow and a deeper fill - `#0b1220` in the dark skin, so the
+row is darker than the card it sits on, and `#e7ebf7` in the light one, where it used to go
+brighter than the panel - and a table row takes the same deeper fill without moving.
+`csscheck` refuses any `inset 3px` strip and requires the lift and both fills. Hover still lifts a card, a button or a quick action and lets
+its shadow settle; nothing travels. `csscheck` asserts the absence of the keyframes,
+the button shine and the card sweeps, and that the lift survives.
+
+## Dropdowns
+
+A `<select>` is drawn by the browser, and only part of it can be styled. The rule that
+used to mark the chosen option asked for a gradient background - which browsers drop on
+`option` - and set the text white anyway, so the option the operator had picked came
+back as a blank row on the popup's own white background. The chosen option is now a
+solid colour per skin (`#e6e9ff` on `#1b2140` in light, `#2b2a63` on white in dark),
+which the popup honours.
+
+Where the engine hands the whole popup over (`appearance: base-select`, behind
+`@supports`), the browser also builds the closed control itself: a row holding the chosen
+label and `::picker-icon`. A field rule (`label.field select{display:block}`) overrode
+that row, so the label filled the line and the chevron was wrapped onto the next one - the
+arrow under the text, in every modal with a picker. The control now keeps its own layout
+(`display:flex; align-items:center`), the label takes the room that is left
+(`selectedcontent`, ellipsised when it is long) and the chevron holds its width at the end
+(`margin-left:auto`); `csscheck.js` fails the build if any rule sends a `select` back to a
+block layout. The rest of the list becomes part of the console: the panel is our surface with our
+shadow and radius, the platform's blue hover is replaced by our own quiet tint, the
+options get padding and a radius, the chevron turns as it opens, and the panel lifts
+into place by six pixels - a minimum of movement, on a `.16s` curve, and none at all
+under `prefers-reduced-motion`. Standalone pickers - a toolbar filter, a customer
+chooser, the flow toolbar - rise by a single pixel under the pointer; form fields in
+modals do not, because a moving row inside a dialog reads as a mistake.
+
+## Motion and interaction
+
+All animation lives in `admin.css` and follows one vocabulary, so timings stay
+consistent and nothing outruns the interface:
+
+| Concern | Rule |
+| --- | --- |
+| Entrances | `fadeUp` / `popIn` / `rowIn`; lists stagger through a `--i` index that `markStagger()` writes onto rows, cards and rows of grouped lists |
+| Page changes | `.page.entering > *` cascades its children with 26ms steps, capped at ~150ms; the marker lives for 700ms, so re-renders cannot replay it |
+| Workspace | one `.ws-tab-ink` element glides between tabs, tab bodies cross-fade with `.swapping`, header chips and metrics stage in |
+| Hover | transform-only lifts on cards, rows, metrics and quick actions, plus a one-shot glass sheen on large surfaces |
+| Live state | status pills pulse when a value changes, badges and tab dots pulse when a count changes, the workspace device chip updates in place |
+| Loading | `skeletonPanel` / `skeletonRows` placeholders and a `.panel.loading` progress hairline |
+| Feedback | toasts carry a timer bar sized by `--toast-life` |
+
+Two rules keep it feeling fast rather than busy:
+
+1. **Cascades stay under ~0.2s** and only run on real navigation or re-render.
+2. **A poll never repaints what did not change.** Three layers, strongest first:
+   `loadState()` skips the repaint entirely when the payload is unchanged;
+   `refreshDeviceStatus()` compares before touching the DOM; and every list is written
+   through `paint(id, html)`, which compares the markup with what is already there and
+   leaves the existing nodes in place when they match. Identical bytes written again
+   would still swap every child node out, which reads as a flicker on both consoles,
+   so the comparison is on the markup, not on the data. Any repaint that does happen
+   runs under `body.updating`, which suppresses entrance animations. An idle console
+   is visually static, and a changing one only moves what changed.
+
+## Keyboard and motion
+
+Every interactive element — buttons, nav items, tabs, rows, cards, journey
+milestones, quick actions and form fields — has a `:focus-visible` ring.
+
+Under `prefers-reduced-motion: reduce` all animation resolves instantly
+(duration and delay are zeroed), looping ambience such as the workspace ring,
+aurora and empty-state glyphs stops, sheen overlays are removed, and smooth
+scrolling is disabled. Entrance animations are additionally switched off for
+page cascades and list items, so nothing moves at all.

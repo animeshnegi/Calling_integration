@@ -187,6 +187,22 @@ class TelephonyConfigSync:
         inbound_fallback = self._fallback_extension(
             str(settings.get("inbound_fallback_extension", "")).strip(), active_exts
         )
+
+        def did_extension(number) -> str:
+            """Which extension answers this DID when its own link is missing or stale.
+
+            Each customer chooses their own fallback, so an unassigned DID belonging
+            to one customer can never land on another customer's phone. The
+            platform-wide values below are only a last resort for rows written
+            before customers owned this decision.
+            """
+            owner = number.get("owner_user_id")
+            if owner is not None:
+                customer = self.store.customer_call_defaults(int(owner)).get("fallback", "")
+                if customer and customer in active_exts:
+                    return customer
+            return inbound_fallback
+
         lines = [
             "; AUTO-GENERATED EngineerIP DID and voicemail routing.",
             "[from-internal]",
@@ -213,7 +229,7 @@ class TelephonyConfigSync:
             if not number["active"]:
                 continue
             did = re.sub(r"[^0-9]", "", number["number"])
-            extension = number["inbound_extension"] or inbound_fallback
+            extension = number["inbound_extension"] or did_extension(number)
             if not did or not self._valid_extension(str(extension)) or str(extension) not in active_exts:
                 extension = inbound_fallback
             for dialed_number in (did, f"+{did}"):

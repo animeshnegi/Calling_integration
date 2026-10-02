@@ -284,8 +284,9 @@ def test_extension_user_is_scoped_and_cannot_change_system_settings(tmp_path):
     )
     assert preference.status_code == 200
     assert next(row for row in settings.list_extensions() if row["extension"] == "101")["recording_enabled"] == 1
-    # The global switch remains off, so opting in does not start recording yet.
-    assert settings.get_settings()["recording_enabled"] == "false"
+    # The platform switch (the administrator's) is untouched by that: an
+    # extension user's opt-in is their own switch, nothing more.
+    assert settings.get_settings()["recording_enabled"] == "true"
 
     response = client.post(
         "/admin/api/settings", json={"recording_enabled": False},
@@ -438,6 +439,86 @@ def test_public_signup_and_customer_resources_are_tenant_isolated(tmp_path):
     assert store.authenticate_api_key(key.json["token"]) is None
 
 
+def test_administrators_manage_customer_integrations_without_creating_them(tmp_path):
+    """The customer owns their keys and endpoints; the administrator keeps the ones
+    they created working, and cannot fabricate a credential in their name."""
+    from app import admin as admin_module
+    admin_module._LOGIN_BUCKETS.clear()   # the sign-in rate limit is per-process and per-IP
+    client = app_client(tmp_path)
+    store = client.application.extensions["settings_store"]
+    for username in ("customer-one", "customer-two"):
+        store.save_user({
+            "username": username, "password": "a-secure-customer-password", "role": "user",
+            "email": f"{username}@example.test", "full_name": username.title(),
+            "company_name": f"{username.title()} Ltd", "job_role": "Owner", "phone": "+13025559999",
+        })
+    admin = client.application.test_client()
+    assert admin.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    admin_state = admin.get("/admin/api/state").json
+    admin_headers = {"X-CSRF-Token": admin_state["csrf_token"]}
+
+    customer = client.application.test_client()
+    assert customer.post("/admin/login", json={"username": "customer-one", "password": "a-secure-customer-password"}).status_code == 200
+
+    # Nobody creates on the customer's behalf.
+    assert admin.post("/admin/api/api-keys", json={"name": "Operator key", "scopes": "*"},
+                      headers=admin_headers).status_code == 403
+    assert admin.post("/admin/api/webhooks", json={"name": "Operator hook", "url": "https://ops.example/hook"},
+                      headers=admin_headers).status_code == 403
+
+    # The customer's own integration, created the ordinary way.
+    customer_state = customer.get("/admin/api/state").json
+    customer_headers = {"X-CSRF-Token": customer_state["csrf_token"]}
+    created = customer.post("/admin/api/api-keys", json={"name": "Customer CRM", "scopes": "calls:read"},
+                            headers=customer_headers)
+    assert created.status_code == 201
+    token = created.json["token"]
+    key_id = created.json["key_id"]
+    hook = customer.post("/admin/api/webhooks", json={
+        "name": "Customer CRM", "url": "https://crm.example/hooks/calls", "events": "call.started", "token": "shared-secret",
+    }, headers=customer_headers)
+    assert hook.status_code == 200
+    hook_id = hook.json["webhook_id"]
+
+    # The administrator may narrow the key's scopes and rename it; the secret is
+    # untouched by either.
+    assert admin.post(f"/admin/api/api-keys/{key_id}", json={"name": "Customer CRM (read only)", "scopes": "calls:read"},
+                      headers=admin_headers).status_code == 200
+    listed = next(row for row in store.list_api_keys() if row["id"] == key_id)
+    assert listed["name"] == "Customer CRM (read only)" and listed["scopes"] == "calls:read"
+    assert store.authenticate_api_key(token) is not None
+
+    # And may edit the endpoint itself: a broken delivery target is a broken call flow.
+    assert admin.post("/admin/api/webhooks", json={
+        "id": hook_id, "name": "Customer CRM", "url": "https://crm.example/hooks/telephony",
+        "events": "call.started,call.completed", "active": True,
+    }, headers=admin_headers).status_code == 200
+    endpoint = store.list_webhooks(include_tokens=True)[0]
+    assert endpoint["url"] == "https://crm.example/hooks/telephony"
+    assert endpoint["events"] == "call.started,call.completed"
+    assert endpoint["token"] == "shared-secret"      # editing the URL does not drop the signature
+
+    # Still no creation, however the request is dressed up.
+    assert admin.post("/admin/api/webhooks", json={"id": 9999, "name": "Nowhere", "url": "https://x.example/h"},
+                      headers=admin_headers).status_code == 403
+    assert admin.post("/admin/api/api-keys", json={"name": "Operator key", "scopes": "*"},
+                      headers=admin_headers).status_code == 403
+
+    # A customer only ever touches their own key.
+    other = client.application.test_client()
+    assert other.post("/admin/login", json={"username": "customer-two", "password": "a-secure-customer-password"}).status_code == 200
+    other_state = other.get("/admin/api/state").json
+    other_id = other_state["user_id"]
+    other_headers = {"X-CSRF-Token": other_state["csrf_token"]}
+    assert other.post(f"/admin/api/api-keys/{key_id}", json={"name": "Stolen", "scopes": "*"},
+                      headers=other_headers).status_code == 400
+    assert admin.post("/admin/api/webhooks", json={
+        "id": hook_id, "name": "Customer CRM", "url": "https://crm.example/hooks/telephony",
+        "events": "*", "owner_user_id": other_id,
+    }, headers=admin_headers).status_code == 200
+    assert store.list_webhooks()[0]["owner_user_id"] == customer_state["user_id"]   # ownership never moves
+
+
 def test_secure_customer_provisioning_upserts_without_changing_role(tmp_path):
     from app.admin import SettingsStore
     from app.manage_customer import provision_customer
@@ -450,3 +531,76 @@ def test_secure_customer_provisioning_upserts_without_changing_role(tmp_path):
     same_id, created = provision_customer(store, "engineerip", "billing@engineerip.example", "second-secure-password")
     assert same_id == user_id and created is False
     assert store.authenticate("engineerip", "second-secure-password")["email"] == "billing@engineerip.example"
+
+
+class FakeEndpointList:
+    """ARI endpoint inventory; proves live registration is overlaid on stored state."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def list_endpoints(self):
+        return self.rows
+
+
+def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
+    """Regression: /admin/api/device-status used to raise NameError (HTTP 500).
+
+    It resolved the caller through helpers that do not exist in app.admin, so
+    the live-registration badge was dead in both consoles.
+    """
+    client = app_client(tmp_path)
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    store = client.application.extensions["settings_store"]
+    service = client.application.extensions["telephony_service"]
+
+    def provision(username: str, extension: str, number: str, sip_username: str = "", linked: bool = True) -> tuple[int, int]:
+        owner_id = store.save_user({
+            "username": username, "email": f"{username}@example.com",
+            "password": f"{username}-secure-password", "role": "user",
+        })
+        store.save_extension({"extension": extension, "sip_password": f"{extension}-sip", "active": True}, owner_id)
+        store.save_number({
+            "number": number, "provider": "TestProvider", "inbound_extension": extension,
+            "owner_user_id": owner_id, "active": True,
+        })
+        account_id = store.save_sip_account({
+            "label": f"Desk phone {extension}", "sip_username": sip_username, "sip_password": f"{extension}-handset",
+            "server": "sip.example.com", "phone_number": number,
+            "extension": extension if linked else "", "active": True,
+        }, owner_id)
+        return owner_id, account_id
+
+    # An account linked to an extension authenticates as that extension; a device
+    # account with no extension keeps its own name.
+    _, account_one = provision("device-one", "301", "+13025550301")
+    _, account_two = provision("device-two", "302", "+13025550302", "device302", linked=False)
+
+    # ARI reports resources as <extension> / <sip_username> / device-<sip_username>.
+    service.asterisk = FakeEndpointList([
+        {"technology": "pjsip", "resource": "301", "state": "online"},
+        {"technology": "pjsip", "resource": "device-device302", "state": "unavailable"},
+        {"technology": "chan_sip", "resource": "302", "state": "online"},   # not pjsip: ignored
+    ])
+
+    admin = client.get("/admin/api/device-status")
+    assert admin.status_code == 200
+    assert {row["id"]: row["registration_status"] for row in admin.json["devices"]} == {
+        account_one: "online", account_two: "offline",
+    }
+
+    # When ARI cannot be reached the stored status is reported instead of failing.
+    service.asterisk = FakeAsterisk()
+    assert client.get("/admin/api/device-status").json["devices"] == [
+        {"id": account_one, "registration_status": "offline"},
+        {"id": account_two, "registration_status": "offline"},
+    ]
+
+    # A customer only ever sees their own device.
+    customer = client.application.test_client()
+    assert customer.post("/admin/login", json={
+        "username": "device-one", "password": "device-one-secure-password",
+    }).status_code == 200
+    scoped = customer.get("/admin/api/device-status")
+    assert scoped.status_code == 200
+    assert [row["id"] for row in scoped.json["devices"]] == [account_one]

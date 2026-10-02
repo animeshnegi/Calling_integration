@@ -21,22 +21,23 @@ cp .env.example .env
 nano .env
 ```
 
-Set strong random values for `SECRET_KEY`, `TELEPHONY_TOKEN`, `CRM_WEBHOOK_TOKEN`, `ASTERISK_ARI_PASSWORD`, `ASTERISK_AMI_PASSWORD`, and every extension password.
+Set strong random values for `SECRET_KEY`, `TELEPHONY_TOKEN`, `ASTERISK_ARI_PASSWORD`, `ASTERISK_AMI_PASSWORD`, and `ADMIN_PASSWORD`.
 
-Set these IPComms values from the IPComms portal:
+That is the whole file. Telephony itself is configured in the console, not in the
+environment: sign in as the administrator, add the carrier under **Carrier
+Providers**, then assign a number to a customer. The platform creates the extension,
+its SIP credentials and the default call flows, so a new line works without a
+redeploy.
 
-```text
-IPCOMMS_SIP_SERVER=<your-tenant>.s1.ipcomms.net
-IPCOMMS_SIP_PORT=5060
-IPCOMMS_SIP_USERNAME=<trunk username>
-IPCOMMS_SIP_PASSWORD=<trunk password>
-IPCOMMS_DID=+13022661626
-IPCOMMS_ALLOWED_IPS=<provider IP 1>,<provider IP 2>
-```
+`ASTERISK_EXTERNAL_ADDRESS` must be the VPS public IP or public telephony hostname
+used for SIP/RTP NAT, and `ASTERISK_RTP_START`/`ASTERISK_RTP_END` must match the UDP
+range opened in the firewall (default `10000-10100`).
 
-`IPCOMMS_ALLOWED_IPS` is required. The Asterisk entrypoint renders each provider IP/CIDR as a separate PJSIP `identify` match.
-
-Set `ASTERISK_EXTERNAL_ADDRESS` to the VPS public IP or public telephony hostname used for SIP/RTP NAT.
+The seed values `ASTERISK_EXTENSIONS`, `DEFAULT_EXTENSION`, `EXTENSION_<number>_PASSWORD`
+and the `IPCOMMS_*` block are optional and commented out in `.env.example`. They exist
+only for deployments upgrading from a version that kept telephony settings in the
+environment: set before first start, they pre-fill the database once, and the console
+owns them afterwards. New installs can leave them out entirely.
 
 **Never commit `.env` or provider credentials.**
 
@@ -86,13 +87,15 @@ If registration is rejected, check the SIP server, username, password, UDP 5060 
 
 ## 6. Test Zoiper through Asterisk
 
-Do **not** put the IPComms trunk credentials into Zoiper. Zoiper should register to Asterisk extension `101`:
+Do **not** put the IPComms trunk credentials into Zoiper. Register the phone to the
+extension the console provisioned. Open the customer in `/admin`, or the customer
+opens **Devices & SIP**, and use **Credentials** on the extension:
 
 ```text
-Username: 101
-Password: EXTENSION_101_PASSWORD
-Server: <VPS public IP or telephony hostname>
-Port: 5060
+Username: 101                     (the extension number - fixed by the platform)
+Password: shown once by Credentials in the console
+Server:   <VPS public IP or telephony hostname>
+Port:     5060
 Transport: UDP
 ```
 

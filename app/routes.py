@@ -93,7 +93,15 @@ def register_routes(app, service):
         if not service.ari_ready():
             return None, (jsonify({"error": "telephony event service is not ready"}), 503)
         phone = str(data.get("phone", "")).strip()
-        owned_default = next((row["extension"] for row in api_extensions() if row["active"]), "") if api_owner_id() is not None else _configured_default_extension(service)
+        # The customer's own default outbound extension comes first, then the
+        # platform's, then whichever active extension they own.
+        if api_owner_id() is not None:
+            owned_default = ""
+            if service.settings_store:
+                owned_default = service.settings_store.call_default_for("outbound", api_owner_id())
+            owned_default = owned_default or next((row["extension"] for row in api_extensions() if row["active"]), "")
+        else:
+            owned_default = _configured_default_extension(service)
         extension = str(data.get("extension") or owned_default).strip()
         provider = str(data.get("provider") or "").strip() or None
         if not phone:
@@ -141,7 +149,10 @@ def register_routes(app, service):
         if service.settings_store:
             rows = api_extensions()
             active = [row["extension"] for row in rows if row["active"]]
-            return jsonify({"extensions": active, "default_extension": active[0] if api_owner_id() is not None and active else _configured_default_extension(service)})
+            if api_owner_id() is not None:
+                chosen = service.settings_store.call_default_for("outbound", api_owner_id()) if service.settings_store else ""
+                return jsonify({"extensions": active, "default_extension": chosen or (active[0] if active else "")})
+            return jsonify({"extensions": active, "default_extension": _configured_default_extension(service)})
         return jsonify({"extensions": list(service.config.ASTERISK_EXTENSIONS), "default_extension": service.config.DEFAULT_EXTENSION})
 
     @app.get("/api/v1/numbers")
