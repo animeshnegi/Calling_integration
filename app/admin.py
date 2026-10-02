@@ -2427,6 +2427,9 @@ def register_admin(app, config, on_telephony_change=None):
                 "old": sum(row["folder"] == "old" for row in voicemail_messages), "urgent": sum(row["folder"] == "urgent" for row in voicemail_messages),
             },
             "settings": store.get_settings() if is_admin else {},
+            # The device provisioning generated with the customer's first
+            # number. An administrator owns none, so it is empty for them.
+            "primary_extension": store.primary_extension(user_id) if not is_admin else "",
             # The menu a caller can be given: the voices this deployment can
             # play, the default text, and the point at which the platform adds it
             # to a customer's flows by itself.
@@ -3004,6 +3007,9 @@ def register_admin(app, config, on_telephony_change=None):
         return jsonify({
             "customer": next((row for row in store.list_users() if row["id"] == customer_id), customer),
             "extensions": extensions, "numbers": numbers, "sip_accounts": store.list_sip_accounts(customer_id),
+            # Which of those extensions the platform generated first: the
+            # workspace marks it the customer's primary device.
+            "primary_extension": store.primary_extension(customer_id),
             "invoices": store.list_invoices(customer_id), "requests": store.list_requests(customer_id),
             "activity": store.list_activity(customer_id), "calls": [call.to_dict() for call in calls], "call_total": total,
             # The workspace routing tab manages this customer's flows, so it needs

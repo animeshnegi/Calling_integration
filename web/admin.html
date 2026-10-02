@@ -207,15 +207,22 @@
         <div class="customer-picker" id="sip-picker" data-admin-only></div>
         <div class="toolbar">
           <div class="search"><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
+          <!-- The customer's own page answers one question: which number, and
+               which extensions answer it. The administrator picks the customer
+               instead, in the chips above. -->
+          <select id="device-number" aria-label="Which number" data-customer-only></select>
           <span class="spacer"></span>
           <button class="btn primary" data-open="sipaccount" data-admin-only>＋ Assign SIP service</button>
         </div>
         <article class="notice"><span class="glyph">◈</span><div><b>Connected devices</b>Each SIP account is the credential set a physical phone, softphone or device uses to register. Share credentials only with the person using that device.</div></article>
         <article class="panel">
-          <div class="panel-head"><div><h2>Extension credentials</h2><p>The username and password each extension registers with</p></div><span class="count" id="extension-credential-count">0 extensions</span></div>
+          <div class="panel-head"><div><h2 id="device-extension-title">Extension credentials</h2><p id="device-extension-sub">The username and password each extension registers with</p></div><span class="count" id="extension-credential-count">0 extensions</span></div>
           <div class="panel-body flush"><div id="extension-credential-list" class="rows"></div></div>
         </article>
-        <article class="panel">
+        <!-- The platform's own device boxes are a list for whoever runs the
+             platform. A customer reads their extensions, and each of those
+             already carries its credentials, its registration and its number. -->
+        <article class="panel" data-admin-only>
           <div class="panel-head"><div><h2>Devices &amp; SIP accounts</h2><p>Ownership, registration, number and extension mapping</p></div><span class="count" id="sip-count">0 accounts</span></div>
           <div class="panel-body flush"><div id="sip-account-list" class="cards"></div></div>
         </article>

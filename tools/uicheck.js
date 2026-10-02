@@ -535,8 +535,16 @@ async function main() {
     check('choosing a customer scopes the device list to them', d.querySelectorAll('#extension-credential-list .row').length > 0);
     check('the chosen customer is marked as chosen', d.querySelector('#sip-picker [data-owner="2"]').classList.contains('active'));
     check('extension credentials can be revealed', !!d.querySelector('#extension-credential-list [data-extension-credentials]'));
+    check('the operator\'s rows tag the device the platform generated first',
+      /Primary/.test(d.querySelector('#extension-credential-list .row .tag.violet')?.textContent || ''),
+      d.querySelector('#extension-credential-list .row .tag.violet')?.textContent);
     check('the refresh callout is gone from every page', !/Live registration status refreshes automatically/.test(d.body.innerHTML));
     check('the device search filters both lists on the page', !!d.getElementById('sip-search'));
+    check('the administrator still gets the platform\'s device boxes',
+      d.getElementById('sip-account-list').closest('.panel').hidden === false);
+    check('and exactly one number picker, above, for the customer alone',
+      d.getElementById('device-number').hidden === true
+      && !!d.querySelector('#sip-picker [data-owner]'));
     d.getElementById('sip-search').value = '102';
     d.getElementById('sip-search').dispatchEvent(new w.Event('input', { bubbles: true }));
     await settle(120);
@@ -560,6 +568,28 @@ async function main() {
     await settle(200);
     const body = d.getElementById('ws-body').textContent;
     check('the routing tab lists number, extension and group flows', /Extension 101/.test(body) && /Front desk/.test(body), body.slice(0, 120));
+
+    w.eval("renderWsTab('devices')");
+    await settle(220);
+    const wsNumber = d.querySelector('#ws-body [data-ws-device-number]');
+    check('the workspace devices tab offers the customer\'s numbers on top',
+      !!wsNumber && [...wsNumber.options].map(o => o.value).join(',') === '+13025550001,+13025550002,+13025550003',
+      wsNumber ? [...wsNumber.options].map(o => o.value).join(',') : 'missing');
+    check('and opens on the primary number', wsNumber.value === '+13025550001', wsNumber.value);
+    const wsCards = [...d.querySelectorAll('#ws-body .ext-card')];
+    check('its extensions are cards, the answering one marked',
+      wsCards.length === 2 && wsCards[0].classList.contains('on-number') && wsCards[1].classList.contains('other-number'),
+      wsCards.map(card => card.className).join(' | '));
+    check('and the primary device is tagged for the operator too',
+      /Primary/.test(wsCards[0].textContent), wsCards[0].textContent.replace(/\s+/g, ' ').slice(0, 80));
+
+    wsNumber.value = '+13025550002';
+    wsNumber.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await settle(220);
+    const wsSwitched = [...d.querySelectorAll('#ws-body .ext-card')];
+    check('choosing a number in the workspace re-marks the cards',
+      /102/.test(wsSwitched[0].textContent) && wsSwitched[0].classList.contains('on-number'),
+      wsSwitched.map(card => card.textContent.replace(/\s+/g, ' ').slice(0, 26)).join(' | '));
   }
 
   /* ------------------------------------------- customer-first admin pages */
@@ -1101,7 +1131,46 @@ async function main() {
     check('the customer dashboard renders without errors', errors.length === 0, errors[0]);
     w.eval("showPage('sipaccounts')");
     await settle(240);
-    check('the customer manages devices', d.querySelectorAll('#extension-credential-list .row').length > 0);
+    check('the customer manages devices',
+      d.querySelectorAll('#extension-credential-list .ext-card, #extension-credential-list .row').length > 0);
+    const deviceNumber = d.getElementById('device-number');
+    check('the customer\'s page offers a number to look at',
+      !!deviceNumber && [...deviceNumber.options].map(o => o.value).join(',') === '+13025550001,+13025550002,+13025550003',
+      deviceNumber ? [...deviceNumber.options].map(o => o.value).join(',') : 'missing');
+    check('and starts on the primary number', deviceNumber.value === '+13025550001', deviceNumber.value);
+    check('the list is headed by the number it is showing',
+      /Extensions on \+13025550001/.test(d.getElementById('device-extension-title').textContent),
+      d.getElementById('device-extension-title').textContent);
+    const cards = [...d.querySelectorAll('#extension-credential-list .ext-card')];
+    check('every extension is a card with its credentials to hand',
+      cards.length === 2 && cards.every(card => card.querySelector('[data-extension-credentials]')),
+      `${cards.length} cards`);
+    check('the extension answering the chosen number is marked',
+      cards[0].classList.contains('on-number') && /Answers \+13025550001/.test(cards[0].textContent),
+      cards[0].className);
+    check('the others stay quiet until their number is chosen',
+      cards[1].classList.contains('other-number'), cards[1].className);
+    check('the platform\'s primary device is named as such',
+      /Primary/.test(cards[0].textContent) && !/Primary/.test(cards[1].textContent),
+      cards.map(card => card.textContent.replace(/\s+/g, ' ').slice(0, 60)).join(' | '));
+    check('the device behind an extension is named on its card',
+      /Meridian Health desk phone 101/.test(cards[0].textContent),
+      cards[0].textContent.replace(/\s+/g, ' ').slice(0, 120));
+
+    deviceNumber.value = '+13025550002';
+    deviceNumber.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await settle(200);
+    const switched = [...d.querySelectorAll('#extension-credential-list .ext-card')];
+    check('choosing another number moves the mark to its extension',
+      switched[0].dataset ? switched[0].classList.contains('on-number') && /102/.test(switched[0].textContent)
+        : false,
+      switched.map(card => card.className).join(' | '));
+    check('and the heading follows the choice',
+      /Extensions on \+13025550002/.test(d.getElementById('device-extension-title').textContent),
+      d.getElementById('device-extension-title').textContent);
+
+    check('a customer is not shown the platform\'s own device boxes',
+      d.getElementById('sip-account-list').closest('.panel').hidden === true);
 
     // The customer screen refreshes on the same poll: it must be just as still.
     w.eval("showPage('numbers')");

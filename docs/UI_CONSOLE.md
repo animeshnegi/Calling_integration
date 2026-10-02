@@ -362,7 +362,38 @@ while somebody is listening.
 
 ## Customer-first pages: numbers, devices, integrations
 
-Three pages answer "whose?" before "what?":
+### Devices & SIP: one number, then its devices
+
+The customer's Devices & SIP page answers one question: *which number, and what answers
+it*. A number picker sits in the toolbar (`#device-number`), listing their assigned numbers
+and opening on the **primary number** - the one whose extension provisioning generated.
+Below it, each extension is a card (`#extension-credential-list`, filled by
+`extensionCard()`):
+
+* the cards answering the chosen number come first and wear the accent
+  (`.ext-card.on-number`, with an `Answers <number>` tag), the rest are dashed and quiet
+  (`.ext-card.other-number`, tagged `Other extension`);
+* the extension the platform generated first is tagged **Primary** - the same fact the
+  store uses (`primary_extension`), sent with the payload instead of guessed in the
+  browser (`primaryExtensionIn()` falls back to the lowest extension only for an older
+  payload);
+* each card names the device behind it, its registration state, its SIP username and its
+  numbers, and offers **Show credentials** and **Call flow** - so there is no second box to
+  cross-reference.
+
+That second box is why the platform's own `Devices & SIP accounts` panel is marked
+`data-admin-only`: one box per extension already carries everything a customer reads, and
+`renderSipAccounts()` does not paint the list for them at all. An operator still gets it,
+because device accounts are theirs to manage.
+
+The administrator's workspace **Devices & SIP** tab reads the same way (`wsDevices()`): a
+number picker on top (`[data-ws-device-number]`, opening on `primary_extension` from the
+customer detail payload), the extensions below with the same accent/quiet split and the
+**Primary** tag, then the device accounts. Their plain extension list carries the same tag
+(`renderExtensionCredentials()`), so both sides agree on which device came first. Choosing a number re-renders the tab in place
+(`renderWsTab('devices', { keepScroll: true })`).
+
+Three other pages answer "whose?" before "what?":
 
 * **Numbers** — `#number-picker` lists every customer with how many numbers they hold.
   Choosing one scopes `#number-list` to them; each row links to the flow that answers
@@ -510,6 +541,12 @@ pages are linkable.
   pickers list their own numbers and one flat list of their extensions, edit the
   extension's workflow, post an extension target when saved, and still write a group
   target when a group's own row opened the builder.
+* `node tools/uicheck.js` covers the Devices & SIP page on both sides: a customer gets the
+  number picker (opening on the primary number), cards with the answering extension marked
+  and the platform's primary device tagged, the mark moving when another number is chosen,
+  and no platform device boxes at all - while the administrator keeps those boxes and one
+  picker of their own. The workspace tab is checked the same way: numbers on top, marked
+  cards below, `Primary` on the generated device, and the mark following the picker.
 * `node tools/uicheck.js` also opens the menu: the palette tile, the step it appends, the
   prompt box with the platform wording, the voice list from the server, the working
   defaults for the wait and the attempts, a fallback list of that customer's own

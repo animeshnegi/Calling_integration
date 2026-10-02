@@ -883,6 +883,15 @@ body.theme-light .ws-metric{background:#ffffffb8;box-shadow:var(--shadow-sm)}
 body.theme-light .ws-card{background:#fff;box-shadow:var(--shadow-sm)}
 .ws-card:hover{transform:translateY(-2px);border-color:var(--line-strong);box-shadow:var(--shadow-md);background:#8b93a81f}
 body.theme-light .ws-card:hover{background:#fff}
+/* One card per extension on the customer's Devices & SIP page: the cards that
+   answer the number chosen above wear the accent, the rest stay quiet. */
+.ext-card.on-number{border-color:var(--acc-1);box-shadow:0 0 0 1.5px var(--acc-1),var(--shadow-md)}
+body.theme-light .ext-card.on-number{box-shadow:0 0 0 1.5px var(--acc-1),var(--shadow-sm)}
+.ext-card.other-number{border-style:dashed}
+.ext-card.other-number:hover{border-style:solid}
+.ws-number-picker{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;margin:0 0 15px}
+.ws-number-picker label.field{margin-bottom:0;min-width:240px}
+.ws-number-picker small{display:block;font-size:10.5px;color:var(--text-3);padding-bottom:11px}
 .ws-card-head{display:flex;align-items:center;gap:12px}
 .ws-card-head > div{flex:1;min-width:0}
 .ws-card-head small{font-size:9px;font-weight:800;letter-spacing:.13em;color:var(--text-3);text-transform:uppercase}

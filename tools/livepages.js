@@ -194,6 +194,14 @@ async function main() {
   show('CUSTOMER · APIs & Webhooks — where the documentation is, and on what address',
     `${text(cust.d.querySelector('#page-webhooks .doc-link'))}`);
 
+  await page(cust.w, cust.d, 'sipaccounts');
+  const custNumbers = cust.d.getElementById('device-number');
+  show('CUSTOMER · Devices & SIP — a number on top, its extensions below',
+    `number picker: ${[...(custNumbers?.options || [])].map(o => o.textContent).join(' | ')} (value ${custNumbers?.value})\n`
+    + `heading: ${text(cust.d.getElementById('device-extension-title'))} — ${text(cust.d.getElementById('device-extension-sub'))}\n`
+    + `cards: ${[...cust.d.querySelectorAll('#extension-credential-list .ext-card')].map(card => `${card.className.includes('on-number') ? '[on]' : '[off]'} ${text(card).slice(0, 70)}`).join('\n        ')}\n`
+    + `platform device boxes shown to the customer: ${cust.d.getElementById('sip-account-list').closest('.panel').hidden === false}`);
+
   await page(cust.w, cust.d, 'numbers');
   show('CUSTOMER · Numbers — numbers only, no second call-defaults editor',
     `call-defaults form present: ${!!cust.d.getElementById('call-defaults-form')}\n`

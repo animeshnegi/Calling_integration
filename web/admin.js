@@ -778,6 +778,101 @@ function renderProviders() {
 }
 
 /* ------------------------------------------------ 13. Render: SIP accounts */
+/* The customer's own page answers one question: which number, and which devices
+   answer it. The platform generates the first extension with the first number,
+   and that device is the account's primary one. */
+let deviceNumber = '';
+
+function primaryExtensionIn(extensions) {
+  const declared = String(state.primary_extension || '');
+  if (declared) return declared;
+  // A payload from before the field existed: the lowest extension is the one
+  // provisioning created first, which is the rule the store itself uses.
+  return (extensions || []).map(x => String(x.extension)).sort((left, right) => Number(left) - Number(right))[0] || '';
+}
+
+function primaryNumberIn(numbers) {
+  const rows = numbers || [];
+  const primary = primaryExtensionIn(state.extensions);
+  return String((rows.find(x => primary && String(x.inbound_extension) === primary) || rows[0] || {}).number || '');
+}
+
+function chosenDeviceNumber() {
+  const numbers = state.phone_numbers || [];
+  const wanted = String(deviceNumber || $('device-number')?.value || '');
+  return numbers.some(x => String(x.number) === wanted) ? wanted : primaryNumberIn(numbers);
+}
+
+/* The extensions one number is wired to: the one it answers, plus any device
+   registered against it. */
+function extensionsOnNumber(number) {
+  const wired = new Set();
+  const row = (state.phone_numbers || []).find(x => String(x.number) === String(number));
+  if (row?.inbound_extension) wired.add(String(row.inbound_extension));
+  (state.sip_accounts || []).forEach(account => {
+    if (String(account.phone_number) === String(number) && account.extension) wired.add(String(account.extension));
+  });
+  return wired;
+}
+
+/* The picker on top of the page, and the heading that follows it. */
+function renderDeviceNumbers() {
+  const select = $('device-number');
+  const title = $('device-extension-title');
+  const sub = $('device-extension-sub');
+  const chosen = chosenDeviceNumber();
+  if (select) {
+    const numbers = state.phone_numbers || [];
+    select.innerHTML = numbers.map(x =>
+      `<option value="${esc(x.number)}">${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('')
+      || '<option value="">No numbers yet</option>';
+    select.value = chosen;
+  }
+  if (!title) return;
+  if (state.is_admin) {
+    title.textContent = 'Extension credentials';
+    if (sub) sub.textContent = 'The username and password each extension registers with';
+    return;
+  }
+  title.textContent = chosen ? `Extensions on ${chosen}` : 'Extensions';
+  if (sub) {
+    sub.textContent = chosen
+      ? 'The marked cards answer the number above. Every extension carries its own credentials.'
+      : 'Extensions are created with your phone numbers, and each one gets SIP credentials and a call flow.';
+  }
+}
+
+/* The customer's list: a card each, the ones answering the chosen number first
+   and marked, the rest quiet. The device behind an extension is named on it, so
+   there is no second box to cross-reference. */
+function extensionCard(x, { wired, primary, index }) {
+  const linked = (state.phone_numbers || []).filter(row => row.inbound_extension === x.extension).map(row => row.number);
+  const account = (state.sip_accounts || []).find(row => String(row.extension) === String(x.extension));
+  const onNumber = wired.has(String(x.extension));
+  return `
+  <article class="glass-card card-enter ext-card ${onNumber ? 'on-number' : 'other-number'}" style="--i:${Math.min(index, 10)}">
+    <div class="glass-card-head">
+      <span class="ws-glyph">${esc(x.extension)}</span>
+      <div><h3>${esc(x.display_name || `Extension ${x.extension}`)}</h3>
+        <p>Registers as ${esc(x.sip_username || x.extension)}${account?.server ? ` · ${esc(account.server)}:${esc(account.port)}` : ''}</p></div>
+      ${account ? registration(account) : ''}
+    </div>
+    <div class="tags">
+      ${String(x.extension) === primary ? tag('Primary', 'violet') : ''}
+      ${onNumber ? tag(linked.length ? `Answers ${linked.join(', ')}` : 'On this number', 'info') : tag('Other extension')}
+      ${x.voicemail_enabled ? tag('Voicemail on', 'on') : tag('Voicemail off')}
+    </div>
+    <div class="kv kv-2">
+      ${kv('Numbers', linked.join(', ') || 'None linked yet')}
+      ${kv('Device', account?.label || 'No device linked yet')}
+    </div>
+    <div class="ws-card-actions">
+      <button class="btn primary sm" data-extension-credentials="${esc(x.extension)}">Show credentials</button>
+      <button class="btn ghost sm" data-extension-flow="${esc(x.extension)}">Call flow</button>
+    </div>
+  </article>`;
+}
+
 /* The SIP identities the customer actually registers: one per extension, with the
    same reveal treatment as a device account. */
 function renderExtensionCredentials() {
@@ -789,6 +884,23 @@ function renderExtensionCredentials() {
   const rows = (state.extensions || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x => x.active).filter(x =>
     `${x.extension} ${x.display_name || ''} ${x.sip_username || ''} ${numbers(x.extension).join(' ')}`.toLowerCase().includes(query));
   $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
+  if (!state.is_admin) {
+    // A customer reads cards. The extensions answering the number they picked
+    // come first and wear the accent; the rest stay quiet but reachable.
+    const wired = extensionsOnNumber(chosenDeviceNumber());
+    const primary = primaryExtensionIn(state.extensions);
+    rows.sort((left, right) => (Number(wired.has(String(right.extension))) - Number(wired.has(String(left.extension))))
+      || Number(left.extension) - Number(right.extension));
+    host.className = 'cards';
+    host.innerHTML = rows.map((x, index) => extensionCard(x, { wired, primary, index })).join('')
+      || empty('No extensions yet', 'Extensions are created with your phone numbers, and each one gets SIP credentials and a call flow.', '⌁');
+    markStagger();
+    return;
+  }
+  host.className = 'rows';
+  // The operator's list names the primary device the same way the customer's
+  // cards do: the lowest extension of the customer being looked at.
+  const primary = primaryExtensionIn(rows);
   host.innerHTML = rows.map(x => {
     const linked = numbers(x.extension);
     const flows = (state.routing_flows || []).filter(flow => flow.target_type === 'extension' && flow.target === x.extension);
@@ -796,7 +908,7 @@ function renderExtensionCredentials() {
       <span class="row-icon">${esc(x.extension)}</span>
       <div><h3>${esc(x.display_name || `Extension ${x.extension}`)}</h3>
         <p>Register with username ${esc(x.sip_username || x.extension)} · ${linked.length ? esc(linked.join(', ')) : 'no number linked yet'}</p></div>
-      <div class="tags">${flows.length ? tag('Call flow ready', 'info') : tag('No call flow', 'off')}${x.voicemail_enabled ? tag('Voicemail on', 'on') : ''}</div>
+      <div class="tags">${String(x.extension) === primary ? tag('Primary', 'violet') : ''}${flows.length ? tag('Call flow ready', 'info') : tag('No call flow', 'off')}${x.voicemail_enabled ? tag('Voicemail on', 'on') : ''}</div>
       <div class="row-actions">
         <button class="btn primary sm" data-extension-credentials="${x.extension}">Show credentials</button>
         <button class="btn ghost sm" data-extension-flow="${x.extension}">Call flow</button>
@@ -807,6 +919,14 @@ function renderExtensionCredentials() {
 }
 
 function renderSipAccounts() {
+  renderDeviceNumbers();
+  if (!state.is_admin) {
+    // A customer reads their extensions - each one already carries its
+    // credentials and the device registered against it. The platform's device
+    // boxes are an administrator's list, so they are not painted for a customer.
+    renderExtensionCredentials();
+    return;
+  }
   const query = val('sip-search').toLowerCase();
   const owner = state.is_admin ? sipOwner : null;
   const rows = (state.sip_accounts || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x =>
@@ -2764,9 +2884,50 @@ function wsNumbers() {
 }
 
 /* --- Devices & SIP --- */
+/* One number at the top, the devices that answer it below. The primary device is
+   the extension the platform generated with the customer's first number. */
+let wsDeviceNumber = '';
+
+function wsPrimaryExtension() {
+  const declared = String(workspace.primary_extension || '');
+  if (declared) return declared;
+  return (workspace.extensions || []).map(x => String(x.extension)).sort((left, right) => Number(left) - Number(right))[0] || '';
+}
+
+function wsChosenNumber() {
+  const numbers = (workspace.numbers || []).filter(x => x.active);
+  const wanted = String(wsDeviceNumber || '');
+  if (numbers.some(x => String(x.number) === wanted)) return wanted;
+  const primary = wsPrimaryExtension();
+  return String((numbers.find(x => String(x.inbound_extension) === primary) || numbers[0] || {}).number || '');
+}
+
+function wsExtensionsOnNumber(number) {
+  const wired = new Set();
+  const row = (workspace.numbers || []).find(x => String(x.number) === String(number));
+  if (row?.inbound_extension) wired.add(String(row.inbound_extension));
+  (workspace.sip_accounts || []).forEach(account => {
+    if (String(account.phone_number) === String(number) && account.extension) wired.add(String(account.extension));
+  });
+  return wired;
+}
+
+function wsDevicePicker(number) {
+  const numbers = (workspace.numbers || []).filter(x => x.active);
+  if (!numbers.length) return '<small class="cell-sub">No number yet: assign one and the platform generates its extension.</small>';
+  return `<label class="field">Number
+      <select data-ws-device-number aria-label="Which number">
+        ${numbers.map(x => `<option value="${esc(x.number)}" ${String(x.number) === String(number) ? 'selected' : ''}>${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('')}
+      </select></label>
+    <small class="cell-sub">The marked cards answer this number.</small>`;
+}
+
 function wsDevices() {
   const c = workspace.customer;
-  const cards = workspace.sip_accounts.map(x => `
+  const number = wsChosenNumber();
+  const wired = wsExtensionsOnNumber(number);
+  const primary = wsPrimaryExtension();
+  const devices = workspace.sip_accounts.map(x => `
     <article class="ws-card">
       <div class="ws-card-head">
         <span class="ws-glyph">◈</span>
@@ -2785,24 +2946,38 @@ function wsDevices() {
         <button class="btn ghost sm" data-edit-sip="${x.id}">Edit service</button>
       </div>
     </article>`).join('');
+  const extensions = [...(workspace.extensions || [])]
+    .sort((left, right) => (Number(wired.has(String(right.extension))) - Number(wired.has(String(left.extension))))
+      || Number(left.extension) - Number(right.extension))
+    .map(x => {
+      const onNumber = wired.has(String(x.extension));
+      return `
+      <article class="ws-card ext-card ${onNumber ? 'on-number' : 'other-number'}">
+        <div class="ws-card-head">
+          <span class="ws-glyph">⌁</span>
+          <div><small>Extension ${esc(x.extension)}</small><h4>${esc(x.display_name || 'Unnamed')}</h4>
+            <div class="tags" style="margin-top:6px">
+              ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
+              ${String(x.extension) === primary ? tag('Primary', 'violet') : ''}
+              ${onNumber ? tag('On this number', 'info') : tag('Other extension')}
+              ${x.voicemail_enabled ? tag('Voicemail on', 'info') : tag('Voicemail off')}
+            </div></div>
+        </div>
+        <div class="ws-card-actions">
+          <button class="btn primary sm" data-extension-credentials="${esc(x.extension)}">Credentials</button>
+          <button class="btn ghost sm" data-edit-extension="${esc(x.extension)}">Edit</button>
+        </div>
+      </article>`;
+    }).join('');
   return `<section class="ws-section">
-    <div class="ws-section-head"><div><h3>Devices &amp; SIP accounts</h3><p>Credentials for the phones and softphones this customer connects. The customer can view these too.</p></div>
-      <button class="btn primary" data-new-for-customer="sipaccount:${c.id}">＋ Assign SIP service</button></div>
-    <div class="ws-cards">${cards || wsEmpty('No SIP service assigned', 'Assign device credentials after provisioning a number.', '◈')}</div>
-
-    <div class="ws-section-head" style="margin-top:26px"><div><h3>Extensions</h3><p>Internal destinations owned by this customer.</p></div>
+    <div class="ws-section-head"><div><h3>Extensions</h3><p>Internal destinations owned by this customer, and the number each one answers.</p></div>
       <button class="btn ghost" data-new-for-customer="extension:${c.id}">＋ Add extension</button></div>
-    <div class="ws-cards">${workspace.extensions.map(x => `
-      <article class="ws-card"><div class="ws-card-head">
-        <span class="ws-glyph">⌁</span>
-        <div><small>Extension ${esc(x.extension)}</small><h4>${esc(x.display_name || 'Unnamed')}</h4>
-          <div class="tags" style="margin-top:6px">
-            ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
-            ${x.recording_enabled ? tag('Recording on') : tag('Recording off')}
-            ${x.voicemail_enabled ? tag('Voicemail on', 'info') : tag('Voicemail off')}
-          </div></div>
-        <button class="btn ghost sm" data-edit-extension="${esc(x.extension)}">Edit</button>
-      </div></article>`).join('') || wsEmpty('No extensions', 'Add an extension to give this customer an internal destination.', '⌁')}</div>
+    <div class="ws-number-picker">${wsDevicePicker(number)}</div>
+    <div class="ws-cards">${extensions || wsEmpty('No extensions', 'Add an extension to give this customer an internal destination.', '⌁')}</div>
+
+    <div class="ws-section-head" style="margin-top:26px"><div><h3>Devices &amp; SIP accounts</h3><p>Credentials for the phones and softphones this customer connects. The customer can view these too.</p></div>
+      <button class="btn primary" data-new-for-customer="sipaccount:${c.id}">＋ Assign SIP service</button></div>
+    <div class="ws-cards">${devices || wsEmpty('No SIP service assigned', 'Assign device credentials after provisioning a number.', '◈')}</div>
   </section>`;
 }
 
@@ -2979,6 +3154,14 @@ function closeWorkspace() {
 }
 
 /* ============================================================ 26. Events */
+/* The workspace's Devices & SIP tab picks a number the same way the customer's
+   own page does, and re-renders the tab in place. */
+document.addEventListener('change', event => {
+  const picker = event.target.closest('[data-ws-device-number]');
+  if (!picker) return;
+  wsDeviceNumber = picker.value;
+  renderWsTab('devices', { keepScroll: true });
+});
 document.addEventListener('click', event => {
   const reveal = event.target.closest('[data-reveal-extension]');
   if (reveal) {
@@ -3202,6 +3385,7 @@ document.addEventListener('click', async event => {
 const wire = (id, event, handler) => $(id)?.addEventListener(event, handler);
 ['customer-search', 'extension-search', 'number-search'].forEach(id => wire(id, 'input', () => ({ 'customer-search': renderCustomers, 'extension-search': renderExtensions, 'number-search': renderNumbers }[id]())));
 wire('sip-search', 'input', () => { renderExtensionCredentials(); renderSipAccounts(); });
+wire('device-number', 'change', () => { deviceNumber = $('device-number').value; renderSipAccounts(); });
 wire('call-search', 'input', () => debounce(() => { callOffset = 0; loadCalls(); }));
 wire('recording-search', 'input', () => debounce(() => { recordingOffset = 0; loadRecordings(); }));
 wire('voicemail-search', 'input', () => debounce(loadVoicemails));

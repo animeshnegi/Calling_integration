@@ -492,6 +492,17 @@ admin.json("/admin/api/call-routes", "POST", {
                          "label": "Ring all devices", "configured": True}]},
 })
 
+# --- the device the platform generated with the first number -----------------
+status, state5 = customer.json("/admin/api/state")
+lowest = min((row["extension"] for row in state5["extensions"] if row["active"]), default="")
+check("the customer's own payload names the device the platform generated first",
+      state5.get("primary_extension") == lowest, f"{state5.get('primary_extension')} vs {lowest}")
+meridian_id = customer.json("/admin/api/state")[1]["user_id"]
+status, detail = admin.json(f"/admin/api/customers/{meridian_id}")
+lowest = min((row["extension"] for row in detail["extensions"] if row["active"]), default="")
+check("and so does the workspace payload an operator opens",
+      detail.get("primary_extension") == lowest, f"{detail.get('primary_extension')} vs {lowest}")
+
 failed = [label for label, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} live checks passed")
 if failed:
