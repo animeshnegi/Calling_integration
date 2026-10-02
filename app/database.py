@@ -16,8 +16,8 @@ metadata = MetaData()
 
 def _timestamps():
     return (
-        Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
-        Column("updated_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+        Column("created_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")),
+        Column("updated_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")),
     )
 
 
@@ -28,7 +28,7 @@ admin_users = Table("admin_users", metadata,
     Column("job_role", String(120), nullable=False, server_default=""), Column("phone", String(30), nullable=False, server_default=""),
     Column("password_hash", String(512), nullable=False), Column("role", String(20), nullable=False, server_default="user"),
     Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
-settings = Table("settings", metadata, Column("key", String(100), primary_key=True), Column("value", Text, nullable=False), Column("updated_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+settings = Table("settings", metadata, Column("key", String(100), primary_key=True), Column("value", Text, nullable=False), Column("updated_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")))
 extensions = Table("extensions", metadata,
     Column("extension", String(3), primary_key=True), Column("display_name", String(120), nullable=False, server_default=""),
     Column("sip_username", String(80), nullable=False), Column("sip_password_enc", Text, nullable=False),
@@ -57,27 +57,27 @@ webhook_deliveries = Table("webhook_deliveries", metadata,
     Column("id", String(36), primary_key=True), Column("endpoint_id", BigInteger, nullable=False), Column("event", String(80), nullable=False),
     Column("payload", Text, nullable=False), Column("status", String(20), nullable=False, server_default="pending"),
     Column("attempts", Integer, nullable=False, server_default="0"), Column("last_error", Text),
-    Column("next_attempt_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")), Column("delivered_at", String(40)), *_timestamps())
+    Column("next_attempt_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")), Column("delivered_at", String(40)), *_timestamps())
 api_keys = Table("api_keys", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("name", String(80), unique=True, nullable=False),
     Column("prefix", String(20), nullable=False), Column("key_hash", String(64), unique=True, nullable=False),
     Column("scopes", String(500), nullable=False, server_default="*"), Column("active", Integer, nullable=False, server_default="1"),
-    Column("owner_user_id", BigInteger), Column("last_used_at", String(40)), Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("owner_user_id", BigInteger), Column("last_used_at", String(40)), Column("created_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")))
 api_idempotency = Table("api_idempotency", metadata,
     Column("client", String(100), primary_key=True), Column("request_key", String(128), primary_key=True),
-    Column("call_id", String(128)), Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("call_id", String(128)), Column("created_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")))
 email_config = Table("email_config", metadata, Column("id", Integer, primary_key=True), Column("sendgrid_api_key_enc", Text, nullable=False),
     Column("from_email", String(254), nullable=False, server_default=""), Column("from_name", String(120), nullable=False, server_default="EIP Telephony Voicemail"),
-    Column("enabled", Integer, nullable=False, server_default="0"), Column("updated_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("enabled", Integer, nullable=False, server_default="0"), Column("updated_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")))
 voicemail_deliveries = Table("voicemail_deliveries", metadata,
     Column("fingerprint", String(128), primary_key=True), Column("mailbox", String(3), nullable=False), Column("recipient", String(254), nullable=False),
     Column("status", String(20), nullable=False, server_default="pending"), Column("attempts", Integer, nullable=False, server_default="0"),
-    Column("last_error", Text), Column("delivered_at", String(40)), Column("updated_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("last_error", Text), Column("delivered_at", String(40)), Column("updated_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")))
 billing_invoices = Table("billing_invoices", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("user_id", BigInteger, nullable=False), Column("number", String(16), nullable=False),
     Column("period_start", String(10), nullable=False), Column("period_end", String(10), nullable=False), Column("amount_cents", Integer, nullable=False),
     Column("status", String(20), nullable=False, server_default="open"), Column("due_at", String(10), nullable=False), Column("paid_at", String(40)),
-    Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("created_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")))
 customer_requests = Table("customer_requests", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("user_id", BigInteger, nullable=False),
     Column("request_type", String(40), nullable=False, server_default="number"), Column("details", Text, nullable=False),
@@ -109,11 +109,11 @@ activity_history = Table("activity_history", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("owner_user_id", BigInteger),
     Column("actor_user_id", BigInteger), Column("action", String(80), nullable=False), Column("resource_type", String(40), nullable=False),
     Column("resource_id", String(128)), Column("description", String(500), nullable=False),
-    Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("created_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")))
 notifications = Table("notifications", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("user_id", BigInteger, nullable=False),
     Column("kind", String(40), nullable=False), Column("title", String(160), nullable=False), Column("message", String(1000), nullable=False),
-    Column("read_at", String(40)), Column("created_at", String(40), nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("read_at", String(40)), Column("created_at", String(40), nullable=False, default=text("CURRENT_TIMESTAMP")))
 calls = Table("calls", metadata,
     Column("call_id", String(128), primary_key=True), Column("contact_id", String(255)), Column("member_id", String(255)),
     Column("extension", String(3), nullable=False), Column("phone", String(16), nullable=False), Column("caller_id_number", String(16)),
