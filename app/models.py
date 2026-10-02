@@ -166,6 +166,7 @@ class CallStore:
         status: str | None = None,
         recordings_only: bool = False,
         query: str | None = None,
+        number: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Call], int]:
@@ -184,6 +185,9 @@ class CallStore:
         if status:
             clauses.append("status=?")
             values.append(status)
+        if number:
+            clauses.append("caller_id_number=?")
+            values.append(number)
         if recordings_only:
             clauses.append("recording_name IS NOT NULL AND recording_status NOT IN ('deleted','failed')")
         if query:

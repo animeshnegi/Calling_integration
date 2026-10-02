@@ -175,8 +175,15 @@
 
       <!-- ========================================================== EXTENSIONS -->
       <section class="page" id="page-extensions">
+        <div class="customer-number-context" data-customer-only>
+  <div class="customer-number-copy">
+    <span class="glyph">☎</span>
+    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
+  </div>
+  <select class="customer-number-select" aria-label="Select phone number"></select>
+</div>
         <div class="toolbar">
-          <div class="search"><span>⌕</span><input id="extension-search" placeholder="Search extension or employee"></div>
+          <div class="search" data-admin-only><span>⌕</span><input id="extension-search" placeholder="Search extension or employee"></div>
           <span class="spacer"></span>
           <button class="btn primary" data-open="extension">＋ Add extension</button>
         </div>
@@ -205,12 +212,18 @@
       <!-- ==================================================== DEVICES & SIP -->
       <section class="page" id="page-sipaccounts">
         <div class="customer-picker" id="sip-picker" data-admin-only></div>
+        <div class="customer-number-context" data-customer-only>
+  <div class="customer-number-copy">
+    <span class="glyph">☎</span>
+    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
+  </div>
+  <select class="customer-number-select" aria-label="Select phone number"></select>
+</div>
         <div class="toolbar">
-          <div class="search"><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
+          <div class="search" data-admin-only><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
           <!-- The customer's own page answers one question: which number, and
                which extensions answer it. The administrator picks the customer
                instead, in the chips above. -->
-          <select id="device-number" aria-label="Which number" data-customer-only></select>
           <span class="spacer"></span>
           <button class="btn primary" data-open="sipaccount" data-admin-only>＋ Assign SIP service</button>
         </div>
@@ -230,6 +243,13 @@
 
       <!-- ============================================================ ROUTING -->
       <section class="page" id="page-routing">
+        <div class="customer-number-context" data-customer-only>
+  <div class="customer-number-copy">
+    <span class="glyph">☎</span>
+    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
+  </div>
+  <select class="customer-number-select" aria-label="Select phone number"></select>
+</div>
         <div class="flow-toolbar sheen">
           <div><h2>Call flows</h2><p data-customer-only>Pick a number, then the extension that answers it. Groups keep their own flows, listed below.</p><p data-admin-only>Edit a customer's flows exactly as their callers meet them: choose the customer, then the number, extension or group.</p></div>
           <div class="tools">
@@ -239,7 +259,7 @@
                  extensions that answer it do - so it is never an editable
                  target for anyone, and the administrator's picker (below)
                  lists extensions and groups only. -->
-            <select id="route-number" aria-label="Number" data-customer-only></select>
+            <select id="route-number" aria-label="Number" data-customer-only hidden></select>
             <select id="route-extension" aria-label="Extension" data-customer-only></select>
             <select id="route-target" aria-label="Call flow target" data-admin-only></select>
             <button class="btn primary" id="save-route" data-state="ready">Save flow</button>
@@ -289,8 +309,15 @@
 
       <!-- ============================================================== CALLS -->
       <section class="page" id="page-calls">
+        <div class="customer-number-context" data-customer-only>
+  <div class="customer-number-copy">
+    <span class="glyph">☎</span>
+    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
+  </div>
+  <select class="customer-number-select" aria-label="Select phone number"></select>
+</div>
         <div class="toolbar">
-          <div class="search"><span>⌕</span><input id="call-search" placeholder="Search phone, call ID, contact or member"></div>
+          <div class="search" data-admin-only><span>⌕</span><input id="call-search" placeholder="Search phone, call ID, contact or member"></div>
           <select id="call-extension"><option value="">All extensions</option></select>
           <select id="call-status"><option value="">All statuses</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="answered">Answered</option><option value="ringing">Ringing</option></select>
           <span class="spacer"></span>
@@ -306,8 +333,15 @@
 
       <!-- ========================================================= RECORDINGS -->
       <section class="page" id="page-recordings">
+        <div class="customer-number-context" data-customer-only>
+  <div class="customer-number-copy">
+    <span class="glyph">☎</span>
+    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
+  </div>
+  <select class="customer-number-select" aria-label="Select phone number"></select>
+</div>
         <div class="toolbar">
-          <div class="search"><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div>
+          <div class="search" data-admin-only><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div>
           <select id="recording-customer" data-admin-only><option value="">All customers</option></select>
           <select id="recording-extension"><option value="">All extensions</option></select>
           <input id="recording-from" type="date" title="From date" style="width:auto">
@@ -324,8 +358,15 @@
 
       <!-- =========================================================== VOICEMAIL -->
       <section class="page" id="page-voicemails">
+        <div class="customer-number-context" data-customer-only>
+  <div class="customer-number-copy">
+    <span class="glyph">☎</span>
+    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
+  </div>
+  <select class="customer-number-select" aria-label="Select phone number"></select>
+</div>
         <div class="toolbar">
-          <div class="search"><span>⌕</span><input id="voicemail-search" placeholder="Search caller or mailbox"></div>
+          <div class="search" data-admin-only><span>⌕</span><input id="voicemail-search" placeholder="Search caller or mailbox"></div>
           <select id="voicemail-extension"><option value="">All mailboxes</option></select>
           <select id="voicemail-folder"><option value="">All folders</option><option value="inbox">New</option><option value="old">Read</option><option value="urgent">Urgent</option></select>
           <span class="spacer"></span>
@@ -339,6 +380,13 @@
 
       <!-- ================================================= APIS & WEBHOOKS -->
       <section class="page" id="page-webhooks">
+        <div class="customer-number-context" data-customer-only>
+  <div class="customer-number-copy">
+    <span class="glyph">☎</span>
+    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
+  </div>
+  <select class="customer-number-select" aria-label="Select phone number"></select>
+</div>
         <div class="doc-link">
           <span>Setup guide, REST API and webhook reference for this deployment
             <b>API base</b> <code id="integration-api-base">—</code></span>
@@ -366,6 +414,13 @@
 
       <!-- ============================================================ BILLING -->
       <section class="page" id="page-billing">
+        <div class="customer-number-context" data-customer-only>
+  <div class="customer-number-copy">
+    <span class="glyph">☎</span>
+    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
+  </div>
+  <select class="customer-number-select" aria-label="Select phone number"></select>
+</div>
         <div class="notice"><span class="glyph">▣</span><div><b>$5 per number / month</b>Every assigned number includes extensions, calls, voicemail, recordings, API keys and CRM webhooks. Payments are collected externally; invoices are recorded here.</div></div>
         <article class="panel">
           <div class="panel-head"><div><h2>Subscriptions</h2><p>Monthly number billing, renewal cycles and scheduled discontinuation</p></div></div>

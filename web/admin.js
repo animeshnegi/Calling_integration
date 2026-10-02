@@ -489,6 +489,37 @@ async function loadSystem() {
 }
 
 /* ------------------------------------------------------- 8. Render: shell */
+let customerNumber = '';
+function customerNumberList() { return state.is_admin ? [] : (state.phone_numbers || []); }
+function chosenCustomerNumber() {
+  const numbers = customerNumberList();
+  const wanted = String(customerNumber || '');
+  if (numbers.some(x => String(x.number) === wanted)) return wanted;
+  return primaryNumberIn(numbers);
+}
+function renderCustomerNumberPickers() {
+  if (state.is_admin) return;
+  const numbers = customerNumberList();
+  const chosen = chosenCustomerNumber();
+  customerNumber = chosen;
+  document.querySelectorAll('.customer-number-select').forEach(select => {
+    const current = String(select.value || '');
+    select.innerHTML = numbers.map(x => `<option value="${esc(x.number)}">${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('') || '<option value="">No numbers yet</option>';
+    select.value = numbers.some(x => String(x.number) === current) ? current : chosen;
+  });
+}
+function applyCustomerNumber(number) {
+  if (state.is_admin) return;
+  const numbers = customerNumberList();
+  const next = String(number || '');
+  if (next && !numbers.some(x => String(x.number) === next)) return;
+  customerNumber = next || primaryNumberIn(numbers);
+  renderCustomerNumberPickers();
+  callOffset = 0; recordingOffset = 0;
+  renderExtensions(); renderSipAccounts(); renderBilling(); renderDeviceNumbers();
+  renderFlow(flowKey('number', customerNumber));
+  loadCalls(); loadRecordings(); loadVoicemails();
+}
 function renderAll() {
   const summary = state.call_summary || {};
   countTo($('stat-total'), summary.total);
@@ -510,6 +541,7 @@ function renderAll() {
   setBadge($('notification-badge'), (state.notifications || []).filter(n => !n.read_at).length);
 
   if (!state.is_admin) renderCustomerStatus();
+  renderCustomerNumberPickers();
   // Resolve whose numbers, devices and integrations are on screen *before* the
   // lists render, so the first paint already belongs to the chosen customer.
   renderNumberOwnerPicker();
@@ -606,9 +638,12 @@ function platformRecordingAllowed() {
 }
 
 function renderExtensions() {
-  const query = val('extension-search').toLowerCase();
-  const rows = state.extensions.filter(x => `${x.extension} ${x.display_name} ${x.sip_username}`.toLowerCase().includes(query));
-  $('extension-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
+  const query = state.is_admin ? val('extension-search').toLowerCase() : '';
+  const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
+  const scopedExtensions = selectedNumber ? extensionsOnNumber(selectedNumber) : null;
+  const rows = state.extensions
+    .filter(x => !scopedExtensions || scopedExtensions.has(String(x.extension)))
+    .filter(x => `${x.extension} ${x.display_name} ${x.sip_username}`.toLowerCase().includes(query));  $('extension-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
   const card = x => `
     <div class="row">
       <span class="row-icon">${esc(x.extension)}</span>
@@ -781,8 +816,6 @@ function renderProviders() {
 /* The customer's own page answers one question: which number, and which devices
    answer it. The platform generates the first extension with the first number,
    and that device is the account's primary one. */
-let deviceNumber = '';
-
 function primaryExtensionIn(extensions) {
   const declared = String(state.primary_extension || '');
   if (declared) return declared;
@@ -797,11 +830,7 @@ function primaryNumberIn(numbers) {
   return String((rows.find(x => primary && String(x.inbound_extension) === primary) || rows[0] || {}).number || '');
 }
 
-function chosenDeviceNumber() {
-  const numbers = state.phone_numbers || [];
-  const wanted = String(deviceNumber || $('device-number')?.value || '');
-  return numbers.some(x => String(x.number) === wanted) ? wanted : primaryNumberIn(numbers);
-}
+function chosenDeviceNumber() { return chosenCustomerNumber(); }
 
 /* The extensions one number is wired to: the one it answers, plus any device
    registered against it. */
@@ -817,17 +846,9 @@ function extensionsOnNumber(number) {
 
 /* The picker on top of the page, and the heading that follows it. */
 function renderDeviceNumbers() {
-  const select = $('device-number');
   const title = $('device-extension-title');
   const sub = $('device-extension-sub');
   const chosen = chosenDeviceNumber();
-  if (select) {
-    const numbers = state.phone_numbers || [];
-    select.innerHTML = numbers.map(x =>
-      `<option value="${esc(x.number)}">${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('')
-      || '<option value="">No numbers yet</option>';
-    select.value = chosen;
-  }
   if (!title) return;
   if (state.is_admin) {
     title.textContent = 'Extension credentials';
@@ -881,9 +902,13 @@ function renderExtensionCredentials() {
   const query = val('sip-search').toLowerCase();
   const owner = state.is_admin ? sipOwner : null;
   const numbers = extension => (state.phone_numbers || []).filter(x => x.inbound_extension === extension).map(x => x.number);
-  const rows = (state.extensions || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x => x.active).filter(x =>
-    `${x.extension} ${x.display_name || ''} ${x.sip_username || ''} ${numbers(x.extension).join(' ')}`.toLowerCase().includes(query));
-  $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
+  const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
+  const scopedExtensions = selectedNumber ? extensionsOnNumber(selectedNumber) : null;
+  const rows = (state.extensions || [])
+    .filter(x => !state.is_admin || x.owner_user_id === owner)
+    .filter(x => x.active)
+    .filter(x => !scopedExtensions || scopedExtensions.has(String(x.extension)))
+    .filter(x => `${x.extension} ${x.display_name || ''} ${x.sip_username || ''} ${numbers(x.extension).join(' ')}`.toLowerCase().includes(query));  $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
   if (!state.is_admin) {
     // A customer reads cards. The extensions answering the number they picked
     // come first and wear the accent; the rest stay quiet but reachable.
@@ -927,7 +952,7 @@ function renderSipAccounts() {
     renderExtensionCredentials();
     return;
   }
-  const query = val('sip-search').toLowerCase();
+  const query = state.is_admin ? val('sip-search').toLowerCase() : '';
   const owner = state.is_admin ? sipOwner : null;
   const rows = (state.sip_accounts || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x =>
     `${x.label} ${x.sip_username} ${x.extension || ''} ${x.phone_number || ''}`.toLowerCase().includes(query));
@@ -1184,7 +1209,8 @@ function renderNotifications() {
 
 /* --------------------------------------------------- 16. Render: billing */
 function renderBilling() {
-  const numbers = state.phone_numbers || [];
+  const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
+  const numbers = (state.phone_numbers || []).filter(x => !selectedNumber || String(x.number) === selectedNumber);
   paint('subscription-list', numbers.map(x => `
     <div class="row">
       <span class="row-icon">$</span>
@@ -1197,7 +1223,7 @@ function renderBilling() {
       <div class="row-actions">${!state.is_admin && !x.discontinue_at ? `<button class="btn danger sm" data-discontinue-number="${esc(x.number)}">Discontinue at renewal</button>` : ''}</div>
     </div>`).join('') || empty('No active subscriptions', state.is_admin ? 'Assign a number to start billing.' : 'An administrator will assign your phone numbers.', '▣'));
 
-  const invoices = state.invoices || [];
+  const invoices = (state.invoices || []).filter(x => !selectedNumber || String(x.number) === selectedNumber);
   paint('invoice-list', invoices.length ? `
     <table class="data"><thead><tr><th>Invoice</th><th>Number</th><th>Period</th><th>Amount</th><th>Status</th><th>Due</th><th>Action</th></tr></thead>
     <tbody>${invoices.map(x => `<tr>
@@ -1346,6 +1372,7 @@ async function loadCalls() {
   if (val('call-extension')) params.set('extension', val('call-extension'));
   if (val('call-status')) params.set('status', val('call-status'));
   if (val('call-search')) params.set('q', val('call-search'));
+  if (!state.is_admin && chosenCustomerNumber()) params.set('number', chosenCustomerNumber());
   if (!quietRender) {
     paint('call-list', skeletonRows(6), true);
     setLoading($('call-list'), true);
@@ -1389,6 +1416,7 @@ async function loadRecordings() {
   const params = new URLSearchParams({ limit: '50', offset: String(recordingOffset), recordings: 'true' });
   if (val('recording-extension')) params.set('extension', val('recording-extension'));
   if (val('recording-search')) params.set('q', val('recording-search'));
+  if (!state.is_admin && chosenCustomerNumber()) params.set('number', chosenCustomerNumber());
   if (!quietRender) setLoading($('recording-list'), true);
   try {
     const data = await api(`/admin/api/calls?${params}`);
@@ -1440,8 +1468,12 @@ async function loadVoicemails() {
   if (!quietRender) setLoading($('voicemail-list'), true);
   try {
     const data = await api(`/admin/api/voicemails?${params}`);
-    const query = val('voicemail-search').toLowerCase();
-    const messages = data.voicemails.filter(x => `${x.caller_id} ${x.message} ${x.mailbox}`.toLowerCase().includes(query));
+    const query = state.is_admin ? val('voicemail-search').toLowerCase() : '';
+    const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
+    const selectedMailboxes = selectedNumber ? extensionsOnNumber(selectedNumber) : null;
+    const messages = data.voicemails.filter(x =>
+      (!selectedMailboxes || selectedMailboxes.has(String(x.mailbox))) &&
+      `${x.caller_id} ${x.message} ${x.mailbox}`.toLowerCase().includes(query));
     $('voicemail-count').textContent = `${messages.length} message${messages.length === 1 ? '' : 's'}`;
     const groups = groupBy(messages, x => x.mailbox);
     paint('voicemail-list', Object.entries(groups).map(([mailbox, items]) => `
@@ -1726,7 +1758,9 @@ function renderCustomerRoutePickers(preferred) {
   const numbers = state.phone_numbers || [];
   const wanted = flowTargetParts(preferred || '');
   const wantedNumber = wanted.type === 'number' ? String(wanted.target) : numberAnsweredBy(wanted.target);
-  const priorNumber = numbers.some(x => String(x.number) === wantedNumber) ? wantedNumber : numberSelect.value;
+  const priorNumber = !state.is_admin && chosenCustomerNumber()
+    ? chosenCustomerNumber()
+    : (numbers.some(x => String(x.number) === wantedNumber) ? wantedNumber : numberSelect.value);
 
   numberSelect.innerHTML = numbers.map(x => `<option value="${esc(x.number)}">${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('')
     || '<option value="">No numbers yet</option>';
@@ -1736,6 +1770,10 @@ function renderCustomerRoutePickers(preferred) {
     ? String(priorNumber)
     : String(numbers[0]?.number ?? '');
   numberSelect.value = effectiveNumber;
+  if (!state.is_admin) {
+    customerNumber = effectiveNumber;
+    renderCustomerNumberPickers();
+  }
 
   // One plain list: the customer picks the extension whose workflow they are
   // editing. Which number answers where is the number picker's job, not a
@@ -3382,10 +3420,15 @@ document.addEventListener('click', async event => {
 });
 
 /* ------------------------------------------------------- 27. Field wiring */
+document.addEventListener('change', event => {
+  const picker = event.target.closest('.customer-number-select');
+  if (!picker || state.is_admin) return;
+  applyCustomerNumber(picker.value);
+});
+
 const wire = (id, event, handler) => $(id)?.addEventListener(event, handler);
 ['customer-search', 'extension-search', 'number-search'].forEach(id => wire(id, 'input', () => ({ 'customer-search': renderCustomers, 'extension-search': renderExtensions, 'number-search': renderNumbers }[id]())));
 wire('sip-search', 'input', () => { renderExtensionCredentials(); renderSipAccounts(); });
-wire('device-number', 'change', () => { deviceNumber = $('device-number').value; renderSipAccounts(); });
 wire('call-search', 'input', () => debounce(() => { callOffset = 0; loadCalls(); }));
 wire('recording-search', 'input', () => debounce(() => { recordingOffset = 0; loadRecordings(); }));
 wire('voicemail-search', 'input', () => debounce(loadVoicemails));

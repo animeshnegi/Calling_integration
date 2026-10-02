@@ -2697,9 +2697,16 @@ def register_admin(app, config, on_telephony_change=None):
                 return jsonify({"error": "extension not found"}), 404
         status = request.args.get("status", "").strip()
         query = request.args.get("q", "").strip()[:100]
+        number = request.args.get("number", "").strip()
         recordings_only = request.args.get("recordings", "false").lower() == "true"
         if extension and (not extension.isdigit() or not 100 <= int(extension) <= 999):
             return jsonify({"error": "invalid extension"}), 400
+        if number:
+            if not re.fullmatch(r"\+[1-9]\d{7,14}", number):
+                return jsonify({"error": "invalid number"}), 400
+            visible_numbers = store.list_numbers(None if session.get("admin_role") == "admin" else int(session["admin_user_id"]))
+            if not any(str(row["number"]) == number for row in visible_numbers):
+                return jsonify({"error": "number not found"}), 404
         if status and not re.fullmatch(r"[a-z_]{1,40}", status):
             return jsonify({"error": "invalid status"}), 400
         try:
@@ -2710,7 +2717,7 @@ def register_admin(app, config, on_telephony_change=None):
         calls, total = current_app.extensions["telephony_service"].store.search(
             extension=extension or None, extensions=owned_extensions if not extension else None,
             status=status or None, recordings_only=recordings_only,
-            query=query or None, limit=limit, offset=offset,
+            query=query or None, number=number or None, limit=limit, offset=offset,
         )
         return jsonify({"calls": [call.to_dict() for call in calls], "total": total, "limit": limit, "offset": offset})
 
