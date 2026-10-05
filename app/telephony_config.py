@@ -237,6 +237,51 @@ class TelephonyConfigSync:
                 *([f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({number}@engineerip,u))'] if number in voicemail_exts else []),
                 " same => n,Hangup()",
             ])
+        # Direct outbound dialing from a registered phone. The caller's own
+        # endpoint decides the caller ID and carrier trunk (its default
+        # outbound DID), resolved through the outbound-identity subroutine -
+        # an extension without an assigned number is politely refused instead
+        # of leaking another customer's identity.
+        for pattern in ("_+X.", "_XXXX."):
+            lines.extend([
+                f"exten => {pattern},1,NoOp(Outbound ${{EXTEN}} from endpoint ${{CHANNEL(endpoint)}})",
+                " same => n,Gosub(outbound-identity,${CHANNEL(endpoint)},1)",
+                ' same => n,GotoIf($["${OUTBOUND_TRUNK}"=""]?blocked)',
+                " same => n,Set(CALLERID(num)=${OUTBOUND_CID})",
+                " same => n,Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)",
+                " same => n,Hangup()",
+                " same => n(blocked),NoOp(No outbound number assigned to endpoint ${CHANNEL(endpoint)})",
+                " same => n,Playback(ss-noservice)",
+                " same => n,Hangup()",
+            ])
+        lines.extend(["", "[outbound-identity]"])
+        for extension in extensions:
+            ext = extension["extension"]
+            outbound = self.store.get_outbound_number(ext)
+            trunk = ""
+            caller_id = ""
+            if outbound:
+                provider = None
+                if outbound.get("provider"):
+                    provider = self.store.get_provider(str(outbound["provider"]))
+                if provider is None:
+                    provider = self.store.get_provider()
+                if provider:
+                    trunk = self._id("provider", str(provider["name"]))
+                    caller_id = self._clean(outbound["number"])
+            lines.extend([
+                f"exten => {ext},1,Set(OUTBOUND_CID={caller_id})",
+                f" same => n,Set(OUTBOUND_TRUNK={trunk})",
+                " same => n,Return()",
+            ])
+        # Any endpoint without its own entry (e.g. an unlinked customer
+        # device) gets no trunk, so the outbound attempt lands on 'blocked'.
+        for fallback in ("_X!", "_[a-z]!"):
+            lines.extend([
+                f"exten => {fallback},1,Set(OUTBOUND_CID=)",
+                " same => n,Set(OUTBOUND_TRUNK=)",
+                " same => n,Return()",
+            ])
         lines.extend(["", "[voicemail-inbound]"])
         for extension in sorted(voicemail_exts):
             lines.extend([

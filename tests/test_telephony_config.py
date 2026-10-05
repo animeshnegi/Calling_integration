@@ -80,6 +80,39 @@ def test_voicemail_mailbox_and_routes_are_rendered(tmp_path: Path):
     assert "owned by extension 101" in dialplan
 
 
+def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path):
+    """A SIP device dialling an external number must reach the carrier trunk
+    with its own DID as caller ID - before this, [from-internal] had no
+    outbound pattern at all, so direct calls from phones always failed."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    store.save_extension({"extension": "102", "sip_username": "102", "sip_password": "secret"})
+    store.save_provider({
+        "name": "Carrier", "server": "sip.example.com", "username": "user", "password": "secret",
+        "allowed_ips": "198.51.100.10/32", "codecs": "ulaw,alaw",
+    })
+    store.save_number({
+        "number": "+13025550101", "provider": "Carrier", "inbound_extension": "101",
+        "default_outbound": True,
+    })
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    dialplan = sync.render_dialplan()
+    trunk = sync._id("provider", "Carrier")
+
+    # Outbound patterns exist for E.164 and plain digit dialling.
+    assert "exten => _+X.,1,NoOp(Outbound" in dialplan
+    assert "exten => _XXXX.,1,NoOp(Outbound" in dialplan
+    assert "Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)" in dialplan
+
+    # Extension 101 dials out as its own number through its carrier...
+    assert "[outbound-identity]" in dialplan
+    assert "exten => 101,1,Set(OUTBOUND_CID=+13025550101)" in dialplan
+    assert f"same => n,Set(OUTBOUND_TRUNK={trunk})" in dialplan
+    # ...while 102, which has no number, is blocked instead of spoofing one.
+    assert "exten => 102,1,Set(OUTBOUND_CID=)" in dialplan
+    assert "Playback(ss-noservice)" in dialplan
+
+
 def test_recording_defaults_to_allowed_globally_and_off_per_extension(tmp_path: Path):
     """The platform switch allows recording; every device still starts opted out,
     so nothing is recorded until a customer switches their own device on."""

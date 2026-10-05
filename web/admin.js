@@ -2403,7 +2403,10 @@ function openModal(type, item = null) {
     const owner = $('modal-fields').querySelector('[name=owner_user_id]');
     const extension = $('modal-fields').querySelector('[name=inbound_extension]');
     owner?.addEventListener('change', () => {
-      extension.innerHTML = '<option value="">Choose an extension</option>' + state.extensions
+      // Keep auto-create selected when assigning a new number: dropping it
+      // here used to silently store an unlinked number that rang nobody.
+      const auto = editing ? '' : '<option value="auto" selected>Auto-create extension, SIP credentials and call flow</option>';
+      extension.innerHTML = auto + '<option value="">Choose an extension</option>' + state.extensions
         .filter(x => String(x.owner_user_id ?? '') === owner.value && x.active)
         .map(x => `<option value="${x.extension}">${x.extension} — ${esc(x.display_name || 'Unnamed')}</option>`).join('');
     });

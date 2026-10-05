@@ -1061,6 +1061,60 @@ def test_split_sip_and_web_domains_route_phones_and_api_separately(tmp_path):
     assert service["host"] == "tel.engineerip.test"
 
 
+def test_auto_provisioning_without_a_customer_is_refused(tmp_path):
+    """'Auto' with no owner used to silently store an unlinked number that
+    rang nobody - the console then showed 'None assigned yet' forever."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    refused = admin.post("/admin/api/numbers", json={
+        "number": "+13025550199", "provider": "TestProvider", "inbound_extension": "auto",
+    })
+    assert refused.status_code == 400
+    assert "customer" in refused.json["error"].lower()
+    store = app.extensions["settings_store"]
+    assert all(row["number"] != "+13025550199" for row in store.list_numbers())
+
+
+def test_deleting_a_number_takes_down_the_line_provisioned_for_it(tmp_path):
+    """Deleting the number removes the auto-created extension, its SIP device
+    accounts and call flows - the whole line the assignment built."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+
+    created = admin.post("/admin/api/numbers", json={
+        "number": "+13025550177", "provider": "TestProvider",
+        "inbound_extension": "auto", "owner_user_id": user_id,
+    })
+    assert created.status_code == 200, created.json
+    extension = created.json["provisioned"]["extension"]
+    assert any(row["extension"] == extension for row in store.list_extensions())
+
+    deleted = admin.delete("/admin/api/numbers/+13025550177")
+    assert deleted.status_code == 200, deleted.json
+
+    assert all(row["number"] != "+13025550177" for row in store.list_numbers())
+    assert all(row["extension"] != extension for row in store.list_extensions())
+    assert all(str(row.get("extension") or "") != extension for row in store.list_sip_accounts())
+    assert all(route["phone_number"] != "+13025550177" for route in store.list_call_routes())
+
+    # A number pointed at a shared extension must NOT delete it while another
+    # number still rings the same extension.
+    first = admin.post("/admin/api/numbers", json={
+        "number": "+13025550178", "provider": "TestProvider",
+        "inbound_extension": "auto", "owner_user_id": user_id,
+    })
+    shared_extension = first.json["provisioned"]["extension"]
+    second = admin.post("/admin/api/numbers", json={
+        "number": "+13025550179", "provider": "TestProvider",
+        "inbound_extension": shared_extension, "owner_user_id": user_id,
+    })
+    assert second.status_code == 200, second.json
+    assert admin.delete("/admin/api/numbers/+13025550178").status_code == 200
+    assert any(row["extension"] == shared_extension for row in store.list_extensions())
+
+
 def test_the_documentation_page_names_this_deployment(tmp_path):
     app = make_app(tmp_path)
     admin = admin_client(app)

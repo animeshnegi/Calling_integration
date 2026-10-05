@@ -803,13 +803,59 @@ class SettingsStore:
                 raise ValueError("Number is not assigned to this extension")
             db.execute("UPDATE phone_numbers SET default_outbound=CASE WHEN number=? THEN 1 ELSE 0 END,updated_at=CURRENT_TIMESTAMP WHERE inbound_extension=?", (number, extension))
 
-    def delete_number(self, number):
+    def delete_number(self, number, cascade: bool = True):
+        """Remove a number and, by default, the line provisioned for it.
+
+        Assigning a number builds a whole line (extension, SIP credentials,
+        device accounts, call flows), so deleting the number takes that line
+        down with it - unless another number still rings the same extension.
+        An extension that is some customer's call default is kept (only its
+        dangling default references are cleared platform-side first).
+        """
         number = str(number).strip()
         with self._connect() as db:
-            result = db.execute("DELETE FROM phone_numbers WHERE number=?", (number,))
-            if result.rowcount == 0:
+            row = db.execute("SELECT number,inbound_extension,owner_user_id FROM phone_numbers WHERE number=?", (number,)).fetchone()
+            if not row:
                 raise ValueError("Phone number not found")
+            db.execute("DELETE FROM phone_numbers WHERE number=?", (number,))
             db.execute("DELETE FROM call_routes WHERE phone_number=?", (number,))
+        extension = str(row["inbound_extension"] or "").strip()
+        if not cascade or not extension:
+            return
+        with self._connect() as db:
+            if db.execute("SELECT 1 FROM phone_numbers WHERE inbound_extension=?", (extension,)).fetchone():
+                return  # another number still rings this extension
+            db.execute("DELETE FROM customer_sip_accounts WHERE extension=?", (extension,))
+        self._drop_extension_from_call_defaults(extension)
+        try:
+            self.delete_extension(extension)
+        except ValueError:
+            # The extension is still load-bearing elsewhere (for example it is
+            # the platform-wide default); leave it in place rather than break
+            # routing - the number itself is already gone.
+            pass
+
+    def _drop_extension_from_call_defaults(self, extension: str) -> None:
+        """Clear customer call-default entries that point at this extension."""
+        extension = str(extension)
+        try:
+            stored = json.loads(self.get_settings().get(self.CALL_DEFAULTS_KEY) or "{}")
+        except (TypeError, ValueError):
+            return
+        changed = False
+        for entry in stored.values():
+            if not isinstance(entry, dict):
+                continue
+            for field in ("outbound", "fallback"):
+                if str(entry.get(field) or "") == extension:
+                    entry[field] = ""
+                    changed = True
+        if changed:
+            with self._connect() as db:
+                db.execute(
+                    "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+                    (self.CALL_DEFAULTS_KEY, json.dumps(stored)),
+                )
 
     def ensure_monthly_invoices(self):
         today = date.today()
@@ -2664,6 +2710,10 @@ def register_admin(app, config, on_telephony_change=None):
             inbound = str(data.get("inbound_extension", "")).strip()
             auto = "auto" in {inbound.lower(), str(data.get("auto_provision", "")).lower()} or bool(data.get("auto_provision"))
             if auto:
+                # Auto-provisioning builds the line for a customer; without one
+                # it would silently store an unlinked number that rings nobody.
+                if not owner:
+                    raise ValueError("Auto-provisioning needs a customer account: choose who owns this number, or pick an extension explicitly")
                 # Assign first, then provision: a carrier or format problem must
                 # not leave a half-built line behind.
                 data = {**data, "inbound_extension": "", "default_outbound": False}
