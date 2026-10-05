@@ -651,7 +651,14 @@ class SettingsStore:
         if not row or (owner_user_id is not None and row["owner_user_id"] != int(owner_user_id)):
             raise ValueError("Extension not found")
         owner = row["owner_user_id"]
-        numbers = [item for item in self.list_numbers(owner) if item["inbound_extension"] == row["extension"] and item["active"]] if owner is not None else []
+        # A customer's sheet lists their own numbers; a platform-owned
+        # extension (no customer) still lists the platform-owned DIDs that
+        # point at it instead of always claiming none are assigned.
+        numbers = [
+            item for item in self.list_numbers(owner)
+            if item["inbound_extension"] == row["extension"] and item["active"]
+            and (owner is not None or item.get("owner_user_id") is None)
+        ]
         device = next(
             (item for item in self.list_sip_accounts(owner, include_password=True)
              if str(item.get("extension") or "") == row["extension"] and item["active"]),

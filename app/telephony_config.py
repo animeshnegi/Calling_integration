@@ -95,14 +95,28 @@ class TelephonyConfigSync:
             password = self._clean(linked["sip_password"] if linked else self.store.get_extension_password(extension))
             transport = self._transport(linked["transport"] if linked else "udp")
             configured_extensions.add(extension)
+            # A phone signs in with its prefixed SIP username (e.g. AUHFZH_101)
+            # in both the account and the To header, while the endpoint keeps
+            # the extension number as its name so the dialplan can dial it.
+            # Two things make that work: an AOR named after the username (the
+            # registrar resolves the To-user against the endpoint's AOR list),
+            # and identify_by=auth_username (the endpoint is found through the
+            # username in the Authorization header rather than its own name).
+            aors = [extension]
+            alias_aor = []
+            if username != extension:
+                aors.append(username)
+                alias_aor = [f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", ""]
             lines.extend([
                 f"; Extension {extension}",
                 f"[{extension}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                *alias_aor,
                 f"[auth-{extension}]", "type=auth", "auth_type=userpass",
                 f"username={username}", f"password={password}", "supported_algorithms_uas=SHA-256,MD5", "",
-                f"[{extension}]", "type=endpoint", f"aors={extension}", f"auth=auth-{extension}",
+                f"[{extension}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{extension}",
                 "context=from-internal", "disallow=all", "allow=ulaw,alaw", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
+                "identify_by=username,auth_username",
                 f"allow_subscribe={'yes' if ext.get('voicemail_enabled') else 'no'}",
                 *([f"mailboxes={extension}@engineerip"] if ext.get("voicemail_enabled") else []), "",
             ])
@@ -115,13 +129,18 @@ class TelephonyConfigSync:
             username = self._clean(account["sip_username"])
             password = self._clean(account["sip_password"])
             transport = self._transport(account["transport"])
+            # Same registration contract as extensions: the device signs in
+            # with its SIP username, so that name must exist as an AOR and the
+            # endpoint must be identifiable through the Authorization header.
             lines.extend([
                 f"; Customer device {username}",
                 f"[{endpoint}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
                 f"[auth-{endpoint}]", "type=auth", "auth_type=userpass", f"username={username}", f"password={password}", "",
-                f"[{endpoint}]", "type=endpoint", f"aors={endpoint}", f"auth=auth-{endpoint}",
+                f"[{endpoint}]", "type=endpoint", f"aors={endpoint},{username}", f"auth=auth-{endpoint}",
                 "context=from-internal", "disallow=all", "allow=ulaw,alaw", f"transport=transport-{transport}",
-                "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes", "",
+                "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
+                "identify_by=username,auth_username", "",
             ])
 
         for provider in self.store.list_provider_details():

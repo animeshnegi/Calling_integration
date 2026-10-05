@@ -28,6 +28,30 @@ def test_provider_allowlist_renders_identify(tmp_path: Path):
     assert "match=198.51.100.0/24" in text
 
 
+def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
+    """A phone signs in as e.g. AUHFZH_101 while the endpoint is named 101.
+
+    Asterisk identifies endpoints by matching the From-user against the
+    endpoint name, so without auth_username identification and an AOR named
+    after the SIP username every registration dies with InvalidAccountID.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+    assert username != "101" and username.endswith("_101")   # prefixed credential
+
+    text = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_pjsip()
+    # The endpoint can be found through the Authorization header username.
+    assert "identify_by=username,auth_username" in text
+    # The registrar resolves the To-user against the endpoint's AOR list, so
+    # the SIP username must exist as an AOR alongside the extension number.
+    assert f"[{username}]" in text
+    assert f"aors=101,{username}" in text
+    # And the global identifier order must allow auth_username to run at all.
+    bootstrap = (Path(__file__).resolve().parents[1] / "asterisk" / "entrypoint.sh").read_text()
+    assert "endpoint_identifier_order=ip,username,auth_username,anonymous" in bootstrap
+
+
 def test_voicemail_mailbox_and_routes_are_rendered(tmp_path: Path):
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({

@@ -61,6 +61,14 @@ EOF
 # Transports are static; all endpoints, authentication objects, registrations,
 # and provider identify rules are rendered from the administration database.
 cat > "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
+[global]
+type=global
+; Phones sign in with their prefixed SIP username (e.g. AUHFZH_101) while
+; endpoints are named by extension number. auth_username lets PJSIP find the
+; endpoint through the username in the Authorization header instead of
+; requiring the From-user to equal the endpoint name.
+endpoint_identifier_order=ip,username,auth_username,anonymous
+
 [transport-udp]
 type=transport
 protocol=udp
