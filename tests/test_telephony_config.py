@@ -45,8 +45,14 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     assert "identify_by=username,auth_username" in text
     # The registrar resolves the To-user against the endpoint's AOR list, so
     # the SIP username must exist as an AOR alongside the extension number.
-    assert f"[{username}]" in text
+    assert f"[{username}]\ntype=aor" in text
     assert f"aors=101,{username}" in text
+    # PJSIP's username/auth_username identifiers match against the endpoint
+    # NAME, so an alias endpoint named after the SIP username (sharing the
+    # extension's auth and AORs) must exist or every REGISTER from the phone
+    # is challenged with a dummy auth that can never succeed.
+    assert f"[{username}]\ntype=endpoint" in text
+    assert text.count("auth=auth-101") == 2  # canonical + alias endpoint
     # And the global identifier order must allow auth_username to run at all.
     bootstrap = (Path(__file__).resolve().parents[1] / "asterisk" / "entrypoint.sh").read_text()
     assert "endpoint_identifier_order=ip,username,auth_username,anonymous" in bootstrap
@@ -97,6 +103,7 @@ def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path)
     })
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
     dialplan = sync.render_dialplan()
+    pjsip = sync.render_pjsip()
     trunk = sync._id("provider", "Carrier")
 
     # Outbound patterns exist for E.164 and plain digit dialling.
@@ -104,12 +111,13 @@ def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path)
     assert "exten => _XXXX.,1,NoOp(Outbound" in dialplan
     assert "Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)" in dialplan
 
-    # Extension 101 dials out as its own number through its carrier...
-    assert "[outbound-identity]" in dialplan
-    assert "exten => 101,1,Set(OUTBOUND_CID=+13025550101)" in dialplan
-    assert f"same => n,Set(OUTBOUND_TRUNK={trunk})" in dialplan
+    # Extension 101's endpoints carry their own DID and carrier trunk as
+    # channel variables, so any call it originates dials out as itself...
+    assert "set_var=OUTBOUND_CID=+13025550101" in pjsip
+    assert f"set_var=OUTBOUND_TRUNK={trunk}" in pjsip
     # ...while 102, which has no number, is blocked instead of spoofing one.
-    assert "exten => 102,1,Set(OUTBOUND_CID=)" in dialplan
+    assert "set_var=OUTBOUND_CID=\n" in pjsip
+    assert "set_var=OUTBOUND_TRUNK=\n" in pjsip
     assert "Playback(ss-noservice)" in dialplan
 
 
