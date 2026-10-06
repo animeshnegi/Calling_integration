@@ -1265,6 +1265,10 @@ function renderServiceAddress() {
   if (webHost && document.activeElement !== webHost) webHost.value = webConfigured;
   const port = $('service-sip-port');
   if (port && document.activeElement !== port) port.value = service.port || 5060;
+  const digest = $('service-sip-digest');
+  if (digest && document.activeElement !== digest) {
+    digest.value = String((state.settings || {}).sip_auth_digest || 'md5').toLowerCase();
+  }
   const stateTag = $('service-address-state');
   if (stateTag) {
     stateTag.textContent = service.configured ? 'Set by the platform' : (service.host ? 'Using this console\'s address' : 'Not set');
@@ -3638,6 +3642,7 @@ wire('service-address-form', 'submit', async event => {
     await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
       service_host: val('service-host').trim(), service_sip_port: val('service-sip-port').trim() || '5060',
       service_web_host: val('service-web-host').trim(),
+      sip_auth_digest: val('service-sip-digest') || 'md5',
     }) });
     notify('Server addresses saved');
     await loadState();
@@ -3645,7 +3650,7 @@ wire('service-address-form', 'submit', async event => {
 });
 wire('service-address-reset', 'click', async () => {
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_web_host: '', service_sip_port: '5060' }) });
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_web_host: '', service_sip_port: '5060', sip_auth_digest: 'md5' }) });
     notify('Server addresses cleared — the console address is used');
     await loadState();
   } catch (error) { notify(error.message, true); }

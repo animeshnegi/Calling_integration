@@ -555,6 +555,14 @@
                 <input id="service-web-host" name="service_web_host" placeholder="tel.your-domain.com" autocomplete="off" spellcheck="false">
                 <small>The domain this console, the REST API and every webhook example are served from — usually behind your reverse proxy. Leave empty to reuse the SIP address.</small>
               </label>
+              <label class="field">SIP digest authentication
+                <select id="service-sip-digest" name="sip_auth_digest">
+                  <option value="md5">MD5 only — every softphone supports it (recommended)</option>
+                  <option value="sha256">SHA-256 only — modern clients only</option>
+                  <option value="both">SHA-256 + MD5 — both challenges offered</option>
+                </select>
+                <small>How Asterisk challenges phones at sign-in. Keep MD5 unless every device supports SHA-256 digest (RFC 8760) — some softphones, including Zoiper 5, abandon a challenge that contains SHA-256.</small>
+              </label>
               <div class="field-actions">
                 <button class="btn primary" type="submit">Save addresses</button>
                 <button class="btn ghost" type="button" id="service-address-reset">Clear</button>

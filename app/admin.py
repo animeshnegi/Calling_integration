@@ -2104,6 +2104,7 @@ class SettingsStore:
             "service_host",
             "service_web_host",
             "service_sip_port",
+            "sip_auth_digest",
         }
         for key, value in values.items():
             if key not in allowed:
@@ -2131,6 +2132,8 @@ class SettingsStore:
                 text = text.strip()
                 if text and not self.SERVICE_HOST_RE.match(text):
                     raise ValueError("Service address must be a hostname or an IP address, without a scheme, path or port")
+            if key == "sip_auth_digest" and text.strip().lower() not in {"md5", "sha256", "both"}:
+                raise ValueError("SIP digest must be md5, sha256 or both")
             if key == "service_sip_port":
                 try:
                     port = int(text)
@@ -3029,7 +3032,7 @@ def register_admin(app, config, on_telephony_change=None):
                 "recording_enabled", "recording_format", "recording_retention_days", "recording_announcement",
                 "recording_announcement_media", "recording_beep", "recording_max_duration_seconds",
                 "default_extension", "inbound_fallback_extension", "webrtc_enabled",
-                "service_host", "service_web_host", "service_sip_port",
+                "service_host", "service_web_host", "service_sip_port", "sip_auth_digest",
             }
             store.set_settings({k: data[k] for k in data if k in allowed})
             apply_change(); return jsonify({"ok": True})

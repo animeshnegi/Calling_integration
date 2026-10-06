@@ -62,6 +62,32 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     assert "endpoint_identifier_order=ip,username,auth_username,anonymous" in bootstrap
 
 
+def test_admin_chooses_the_sip_digest_algorithm(tmp_path: Path):
+    """sip_auth_digest setting: md5 (default, maximum compatibility),
+    sha256, or both - rendered into every account's auth section."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+
+    # Default: plain MD5 challenge, no supported_algorithms_uas at all.
+    assert "supported_algorithms" not in sync.render_pjsip()
+
+    store.set_settings({"sip_auth_digest": "both"})
+    assert "supported_algorithms_uas=SHA-256,MD5" in sync.render_pjsip()
+
+    store.set_settings({"sip_auth_digest": "sha256"})
+    text = sync.render_pjsip()
+    assert "supported_algorithms_uas=SHA-256\n" in text
+    assert "SHA-256,MD5" not in text
+
+    store.set_settings({"sip_auth_digest": "md5"})
+    assert "supported_algorithms" not in sync.render_pjsip()
+
+    import pytest
+    with pytest.raises(ValueError):
+        store.set_settings({"sip_auth_digest": "plaintext"})
+
+
 def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypatch):
     """The admin panel's Service address is the single public-address source;
     .env's ASTERISK_EXTERNAL_ADDRESS is only a fallback until it is set."""
