@@ -55,6 +55,32 @@ The default RTP range is UDP `10000-10100`. Keep these aligned:
 
 The VPS firewall must be updated manually when the range changes.
 
+## 3b. Local testing with any MySQL (no 1panel, no CRM network)
+
+The database is never bundled in production compose: the app connects to
+whatever `DATABASE_URI` in `.env` points at, so any MySQL works - a Docker
+container, a host-installed server, or a managed cloud database.
+
+The base `docker-compose.yml` attaches to two production-only external
+networks (`crm-network` and the 1panel MySQL network), which do not exist on
+a laptop or a plain test box. For local runs add the override file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+```
+
+Pick the matching `DATABASE_URI` in `.env`:
+
+- MySQL installed on the same machine:
+  `mysql+pymysql://root:PASSWORD@host.docker.internal:3306/eip_telephony?charset=utf8mb4`
+- Any other MySQL (remote server or managed database):
+  `mysql+pymysql://USER:PASSWORD@203.0.113.5:3306/eip_telephony?charset=utf8mb4`
+- No MySQL at all - start the bundled throwaway one (testing only):
+  `docker compose -f docker-compose.yml -f docker-compose.local.yml --profile bundled-db up --build`
+  with `DATABASE_URI=mysql+pymysql://eip:eip-local-password@mysql:3306/eip_telephony?charset=utf8mb4`
+
+Production servers keep using `docker-compose.yml` alone, exactly as before.
+
 ## 4. Build/start
 
 ```bash
