@@ -53,6 +53,10 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     # is challenged with a dummy auth that can never succeed.
     assert f"[{username}]\ntype=endpoint" in text
     assert text.count("auth=auth-101") == 2  # canonical + alias endpoint
+    # Challenge with plain MD5 digest only: offering SHA-256 (RFC 8760) makes
+    # common softphones (Zoiper 5) silently abandon the challenge.
+    assert "supported_algorithms" not in text
+    assert "SHA-256" not in text
     # And the global identifier order must allow auth_username to run at all.
     bootstrap = (Path(__file__).resolve().parents[1] / "asterisk" / "entrypoint.sh").read_text()
     assert "endpoint_identifier_order=ip,username,auth_username,anonymous" in bootstrap

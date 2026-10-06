@@ -150,7 +150,11 @@ class TelephonyConfigSync:
                 f"[{extension}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
                 *alias_aor,
                 f"[auth-{extension}]", "type=auth", "auth_type=userpass",
-                f"username={username}", f"password={password}", "supported_algorithms_uas=SHA-256,MD5", "",
+                                # Challenge with MD5 only (Asterisk's default). Offering
+                # SHA-256 first (RFC 8760) breaks common softphones - Zoiper 5
+                # does not support it and silently abandons the dual-algorithm
+                # challenge instead of answering with the MD5 variant.
+                f"username={username}", f"password={password}", "",
                 f"[{extension}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{extension}",
                 *endpoint_body, "",
                 *alias_endpoint,
