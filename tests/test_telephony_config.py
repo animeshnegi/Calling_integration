@@ -62,6 +62,30 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     assert "endpoint_identifier_order=ip,username,auth_username,anonymous" in bootstrap
 
 
+def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypatch):
+    """The admin panel's Service address is the single public-address source;
+    .env's ASTERISK_EXTERNAL_ADDRESS is only a fallback until it is set."""
+    monkeypatch.setenv("ASTERISK_EXTERNAL_ADDRESS", "198.51.100.99")
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+
+    fallback = sync.render_transports()
+    assert "external_signaling_address=198.51.100.99" in fallback
+
+    store.set_settings({"service_host": "sip.example.com"})
+    text = sync.render_transports()
+    assert "[transport-udp]" in text and "[transport-tcp]" in text
+    assert text.count("external_media_address=sip.example.com") == 2
+    assert text.count("external_signaling_address=sip.example.com") == 2
+    assert "external_signaling_address=198.51.100.99" not in text
+    # Docker and LAN destinations are exempt from NAT rewriting.
+    assert "local_net=172.16.0.0/12" in text
+
+    sync.apply()
+    rendered = (tmp_path / "pjsip.transports.conf").read_text()
+    assert "external_signaling_address=sip.example.com" in rendered
+
+
 def test_voicemail_mailbox_and_routes_are_rendered(tmp_path: Path):
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({

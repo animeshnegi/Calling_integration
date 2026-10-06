@@ -29,9 +29,12 @@ Providers**, then assign a number to a customer. The platform creates the extens
 its SIP credentials and the default call flows, so a new line works without a
 redeploy.
 
-`ASTERISK_EXTERNAL_ADDRESS` must be the VPS public IP or public telephony hostname
-used for SIP/RTP NAT, and `ASTERISK_RTP_START`/`ASTERISK_RTP_END` must match the UDP
-range opened in the firewall (default `10000-10100`).
+`ASTERISK_EXTERNAL_ADDRESS` is only the first-boot fallback for the public SIP/RTP
+address: once the admin panel's **Service address** is configured it becomes the
+single source of truth (restart the `asterisk` container after changing it).
+`ASTERISK_RTP_START`/`ASTERISK_RTP_END` (default `10000-10100`) drive both
+Asterisk's RTP range and Docker's published UDP ports, so they only need to match
+the range opened in the firewall.
 
 The seed values `ASTERISK_EXTENSIONS`, `DEFAULT_EXTENSION`, `EXTENSION_<number>_PASSWORD`
 and the `IPCOMMS_*` block are optional and commented out in `.env.example`. They exist

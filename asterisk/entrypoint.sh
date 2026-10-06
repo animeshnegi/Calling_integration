@@ -5,7 +5,10 @@ set -eu
 # Static configuration is shipped in the image. Runtime credentials and
 # database-managed objects are generated into the mounted dynamic directory.
 
-: "${ASTERISK_EXTERNAL_ADDRESS:?ASTERISK_EXTERNAL_ADDRESS must be set}"
+# Optional bootstrap fallback only: once the admin panel's Service address
+# (Settings -> service_host) is configured, it is the single source of truth
+# for the public SIP/RTP address and this variable is ignored.
+: "${ASTERISK_EXTERNAL_ADDRESS:=}"
 : "${ARI_USER:?ARI_USER must be set}"
 : "${ARI_PASSWORD:?ARI_PASSWORD must be set}"
 : "${AMI_USER:?AMI_USER must be set}"
@@ -23,9 +26,50 @@ mkdir -p "$DYNAMIC_DIR" \
 
 # Database-managed includes may start empty. The ARI worker renders them after
 # Asterisk is healthy; bootstrap SIP objects would duplicate the rendered objects.
-touch "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf"
-chown asterisk:telephony "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf"
-chmod 0660 "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf"
+touch "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf" "$DYNAMIC_DIR/pjsip.transports.conf"
+chown asterisk:telephony "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf" "$DYNAMIC_DIR/pjsip.transports.conf"
+chmod 0660 "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf" "$DYNAMIC_DIR/pjsip.transports.conf"
+
+# Seed the SIP transports on first boot only. Afterwards the telephony sync
+# renders this file from the admin panel's Service address (service_host),
+# which is the single source of truth; a container restart applies changes.
+if [ ! -s "$DYNAMIC_DIR/pjsip.transports.conf" ]; then
+    {
+        for proto in udp tcp; do
+            echo "[transport-$proto]"
+            echo "type=transport"
+            echo "protocol=$proto"
+            echo "bind=0.0.0.0:5060"
+            if [ -n "$ASTERISK_EXTERNAL_ADDRESS" ]; then
+                echo "external_media_address=$ASTERISK_EXTERNAL_ADDRESS"
+                echo "external_signaling_address=$ASTERISK_EXTERNAL_ADDRESS"
+                echo "local_net=10.0.0.0/8"
+                echo "local_net=172.16.0.0/12"
+                echo "local_net=192.168.0.0/16"
+            fi
+            echo ""
+        done
+    } > "$DYNAMIC_DIR/pjsip.transports.conf"
+fi
+
+# The RTP range must match the UDP ports docker-compose publishes, so both
+# read the same ASTERISK_RTP_START/ASTERISK_RTP_END values (default
+# 10000-10100). A static rtp.conf cannot drift out of sync this way.
+RTP_START="${ASTERISK_RTP_START:-10000}"
+RTP_END="${ASTERISK_RTP_END:-10100}"
+case "$RTP_START$RTP_END" in
+    *[!0-9]*) echo "ASTERISK_RTP_START/ASTERISK_RTP_END must be numeric" >&2; exit 1 ;;
+esac
+if [ "$RTP_START" -ge "$RTP_END" ]; then
+    echo "ASTERISK_RTP_START must be lower than ASTERISK_RTP_END" >&2
+    exit 1
+fi
+cat > "$ASTERISK_CONFIG_DIR/rtp.conf" <<EOF
+[general]
+rtpstart=$RTP_START
+rtpend=$RTP_END
+icesupport=yes
+EOF
 mkdir -p /var/spool/asterisk/voicemail
 chown -R asterisk:telephony /var/spool/asterisk/voicemail
 chmod 2770 /var/spool/asterisk/voicemail
@@ -58,8 +102,9 @@ read = system,call,log,verbose,command,agent,user,config,dtmf,reporting,originat
 write = system,call,log,verbose,command,agent,user,config,dtmf,reporting,originate
 EOF
 
-# Transports are static; all endpoints, authentication objects, registrations,
-# and provider identify rules are rendered from the administration database.
+# Transports live in dynamic/pjsip.transports.conf (rendered from the admin
+# panel); all endpoints, authentication objects, registrations, and provider
+# identify rules are rendered from the administration database.
 cat > "$ASTERISK_CONFIG_DIR/pjsip.bootstrap.conf" <<EOF
 [global]
 type=global
@@ -68,20 +113,6 @@ type=global
 ; endpoint through the username in the Authorization header instead of
 ; requiring the From-user to equal the endpoint name.
 endpoint_identifier_order=ip,username,auth_username,anonymous
-
-[transport-udp]
-type=transport
-protocol=udp
-bind=0.0.0.0:5060
-external_media_address=$ASTERISK_EXTERNAL_ADDRESS
-external_signaling_address=$ASTERISK_EXTERNAL_ADDRESS
-
-[transport-tcp]
-type=transport
-protocol=tcp
-bind=0.0.0.0:5060
-external_media_address=$ASTERISK_EXTERNAL_ADDRESS
-external_signaling_address=$ASTERISK_EXTERNAL_ADDRESS
 EOF
 
 

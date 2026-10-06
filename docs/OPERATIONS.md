@@ -29,7 +29,7 @@ chmod 600 .env
 nano .env
 ```
 
-Set every `GENERATE...`/`CHANGE-ME` value. `ASTERISK_EXTERNAL_ADDRESS` must be the VM public IP or telephony hostname. Keep the same `SECRET_KEY` after first deployment because it encrypts SIP and webhook secrets in the settings database.
+Set every `GENERATE...`/`CHANGE-ME` value. `ASTERISK_EXTERNAL_ADDRESS` is the first-boot fallback for the public SIP/RTP address; after setup the admin panel's **Service address** is the single source of truth (restart the `asterisk` container after changing it). Keep the same `SECRET_KEY` after first deployment because it encrypts SIP and webhook secrets in the settings database.
 
 Generate secrets, for example:
 
@@ -161,7 +161,7 @@ Check all required `.env` values. Provider allowlists must contain real provider
 
 ### Calls connect but have no audio
 
-Confirm the public IP in `ASTERISK_EXTERNAL_ADDRESS`, UDP 10000-10100 firewall rules, VM NAT rules, and provider codecs. Do not expose ARI 8088 or AMI 5038.
+Confirm the admin panel's Service address (or the `ASTERISK_EXTERNAL_ADDRESS` fallback), UDP 10000-10100 firewall rules, VM NAT rules, and provider codecs. Do not expose ARI 8088 or AMI 5038.
 
 ### Admin change is saved but not active
 
