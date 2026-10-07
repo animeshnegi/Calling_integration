@@ -413,3 +413,33 @@ def register_routes(app, service):
         if not service.config.ENABLE_DIAGNOSTIC_UI:
             return jsonify({"error": "not found"}), 404
         return send_from_directory(str(Path(app.root_path).parent / "web"), "index.html")
+
+
+    @app.get("/phone")
+    def phone():
+        return send_from_directory(str(Path(app.root_path).parent / "web"), "phone.html")
+
+    @app.get("/phone.css")
+    def phone_css():
+        response = send_from_directory(str(Path(app.root_path).parent / "web"), "phone.css")
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
+    @app.get("/phone.js")
+    def phone_js():
+        response = send_from_directory(str(Path(app.root_path).parent / "web"), "phone.js")
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
+    @app.get("/manifest.json")
+    def phone_manifest():
+        response = send_from_directory(str(Path(app.root_path).parent / "web"), "manifest.json")
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
+    @app.get("/sw.js")
+    def phone_service_worker():
+        response = send_from_directory(str(Path(app.root_path).parent / "web"), "sw.js")
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Service-Worker-Allowed"] = "/"
+        return response
