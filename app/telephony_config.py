@@ -121,6 +121,17 @@ class TelephonyConfigSync:
                     f"external_signaling_address={external}",
                     *[f"local_net={net}" for net in self.LOCAL_NETS],
                 ])
+
+        # Browser softphones use Asterisk's HTTP/WebSocket server on 8089.
+        # The WSS transport does not bind its own TCP socket; it is carried
+        # by res_http_websocket through the HTTPS listener.
+        lines.extend([
+            "[transport-wss]",
+            "type=transport",
+            "protocol=wss",
+            "bind=0.0.0.0",
+            "",
+        ])
             lines.append("")
         return "\n".join(lines)
 
@@ -190,9 +201,22 @@ class TelephonyConfigSync:
             ]
             alias_endpoint = []
             if username != extension:
+                # The generated SIP username is already an AOR/endpoint alias.
+                # Keep the normal UDP/TCP endpoint untouched for Zoiper and
+                # hardware phones, but make the alias WebRTC-capable for the
+                # browser. Both endpoints use the same auth and AOR contacts.
+                browser_endpoint_body = [
+                    line for line in endpoint_body if not line.startswith("transport=")
+                ]
+                browser_endpoint_body = [
+                    *browser_endpoint_body,
+                    "transport=transport-wss",
+                    "webrtc=yes",
+                    "allow=ulaw,alaw",
+                ]
                 alias_endpoint = [
                     f"[{username}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{extension}",
-                    f"callerid=<{extension}>", *endpoint_body, "",
+                    f"callerid=<{extension}>", *browser_endpoint_body, "",
                 ]
             lines.extend([
                 f"; Extension {extension}",
