@@ -9,7 +9,7 @@
  * Bump CACHE on a release that changes the shell: install then replaces the
  * cached copies instead of serving the previous version forever.
  */
-const CACHE = "eip-phone-v2";
+const CACHE = "eip-phone-v3";
 const SHELL = ["/phone", "/phone.css", "/phone.js", "/manifest.json"];
 
 self.addEventListener("install", e => e.waitUntil(

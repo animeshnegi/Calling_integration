@@ -367,6 +367,18 @@ check("and its code blocks were retuned for it",
 status, page = Client().request("/login")
 check("so does the sign-in page", status == 200 and "theme-light login-body" in page, str(status))
 
+# --- the softphone the browser is served is the one this branch built --------
+status, softphone = Client().request("/phone")
+check("the softphone carries the call-quality badge",
+      status == 200 and 'id="call-quality"' in softphone, str(status))
+check("and the keyboard hint a desktop uses", 'class="dial-tip"' in softphone)
+status, phone_sheet = Client().request("/phone.css")
+check("the softphone stylesheet scrolls the dialer instead of clipping it",
+      status == 200 and ".view{display:none;flex:1;min-height:0;padding:8px 20px 100px;overflow-y:auto" in phone_sheet,
+      str(status))
+check("and keeps a layout for both phone-sized and short screens",
+      "@media(max-width:520px)" in phone_sheet and "@media(max-height:760px)" in phone_sheet)
+
 # --- every page carries the EngineerIP logo as its favicon --------------------
 LOGO = "https://engineerip.com/static/img/logo.png"
 PAGES = {

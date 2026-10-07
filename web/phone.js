@@ -17,6 +17,10 @@ function saveSettings(s){
   localStorage.setItem(storeKey,JSON.stringify(publicSettings));
   if(s.password)sessionStorage.setItem(secretKey,s.password);
 }
+/* Microphone capture for a phone call: the browser's echo canceller, noise
+   suppression and automatic gain keep the far end intelligible on a laptop or a
+   handset without a headset, which is what a softphone is judged on. */
+const MIC_CONSTRAINTS={audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false};
 const cleanNumber=v=>String(v||"").replace(/[^0-9+*#]/g,"");
 const sipDomain=()=>settings().domain||location.hostname;
 const defaultWss=domain=>"wss://"+String(domain||location.hostname).replace(/^https?:\/\//,"").replace(/\/$/,"")+"/ws";
@@ -54,6 +58,28 @@ $("clear-btn").onclick=()=>{input.value="";showNumber();input.focus()};
 $("backspace-btn").onclick=()=>{input.value=input.value.slice(0,-1);showNumber()};
 $("paste-btn").onclick=async()=>{try{input.value=cleanNumber(await navigator.clipboard.readText());showNumber();input.focus()}catch{input.focus()}};
 input.addEventListener("input",showNumber);
+/* A physical keyboard is the fastest dial pad in a desktop browser: the digits
+   behave like the on-screen keys, Enter calls and Escape hangs up. Anything
+   typed into a field - the search box, the sign-in form, the settings dialog -
+   keeps its own behaviour. */
+document.addEventListener("keydown",e=>{
+  if(e.ctrlKey||e.metaKey||e.altKey)return;
+  const target=e.target||document.body;
+  const typing=/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName||"");
+  const dialogOpen=settingsDialog.hasAttribute("open");
+  const phoneVisible=!phoneApp.classList.contains("hidden");
+  if(dialogOpen||!phoneVisible)return;
+  // Enter dials from anywhere the phone owns - but a focused button or link
+  // keeps its native Enter activation instead of being hijacked into a call.
+  if(e.key==="Enter"){
+    if(!/^(BUTTON|A|SUMMARY)$/.test(target.tagName||"")){e.preventDefault();startCall()}
+    return
+  }
+  if(e.key==="Escape"){if(currentSession){e.preventDefault();endCall("Call ended",true,"completed")}return}
+  if(typing)return;
+  if(/^[0-9*#]$/.test(e.key)){e.preventDefault();input.value+=e.key;showNumber();return}
+  if(e.key==="Backspace"){e.preventDefault();input.value=input.value.slice(0,-1);showNumber()}
+});
 input.addEventListener("paste",()=>setTimeout(()=>{input.value=cleanNumber(input.value);showNumber()},0));
 
 function showPhone(){loginScreen.classList.add("hidden");phoneApp.classList.remove("hidden")}
@@ -66,6 +92,63 @@ function showLogin(message="",error=false){
   $("login-wss").value=settings().wss||"";
 }
 function setLoginBusy(busy){$("login-btn").disabled=busy;$("login-btn").textContent=busy?"Authenticating…":"Connect & Sign In"}
+
+/* ---------------------------------------------------------------- HD audio --
+   Wideband codecs (G.722, Opus) are negotiated by the SIP stack, not by this
+   page, so the phone reports what was actually negotiated and how the network
+   is treating it. That is also the honest answer to "is this call HD": the far
+   end and the carrier have a say, and the badge names the codec in use. */
+const WIDEBAND=/g722|opus|slin16/i;
+let qualityTimer=null;
+
+function statsRows(report){
+  const rows=[];
+  if(!report)return rows;
+  if(typeof report.forEach==="function")report.forEach(row=>rows.push(row));
+  else if(Array.isArray(report))rows.push(...report);
+  else if(typeof report[Symbol.iterator]==="function")rows.push(...report);
+  return rows;
+}
+function readQuality(report){
+  const rows=statsRows(report);
+  const codecs=new Map(rows.filter(r=>r.type==="codec").map(r=>[r.id,r]));
+  const audio=r=>r.type.endsWith("-rtp")&&(r.kind==="audio"||r.mediaType==="audio");
+  const inbound=rows.filter(r=>r.type==="inbound-rtp"&&audio(r));
+  const leg=[...inbound,...rows.filter(r=>r.type==="outbound-rtp"&&audio(r))]
+    .find(r=>r.codecId&&codecs.get(r.codecId)&&!/telephone-event/i.test(codecs.get(r.codecId).mimeType||""));
+  if(!leg)return null;
+  const name=String(codecs.get(leg.codecId).mimeType||"").split("/").pop().toUpperCase();
+  const received=Number(inbound[0]?.packetsReceived)||0;
+  const lost=Number(inbound[0]?.packetsLost)||0;
+  const loss=(received+lost)>0?lost/(received+lost):0;
+  const jitter=Number(inbound[0]?.jitter)||0;
+  // Wideband is "HD" (G.722 is 16 kHz); anything else is a normal narrowband
+  // call. High loss or jitter means the network, not the codec, is the problem.
+  const hd=WIDEBAND.test(name);
+  const unstable=loss>0.05||jitter>0.04;
+  return {name,hd,unstable,label:(hd?"HD · ":"Standard · ")+name+(unstable?" · unstable network":"")};
+}
+function stopQualityWatch(){clearInterval(qualityTimer);qualityTimer=null;$("call-quality").classList.add("hidden")}
+function startQualityWatch(session){
+  stopQualityWatch();
+  const badge=$("call-quality");
+  const show=report=>{
+    const quality=readQuality(report);
+    if(!quality){badge.classList.add("hidden");return}
+    badge.textContent=quality.label;
+    badge.classList.toggle("good",quality.hd&&!quality.unstable);
+    badge.classList.toggle("warn",quality.unstable);
+    badge.classList.remove("hidden")
+  };
+  const tick=async()=>{
+    const pc=session.connection;
+    if(!pc||typeof pc.getStats!=="function"){badge.classList.add("hidden");return}
+    try{show(await pc.getStats())}catch{badge.classList.add("hidden")}
+  };
+  badge.textContent="Checking audio…";badge.classList.remove("hidden","good","warn");
+  tick();
+  qualityTimer=setInterval(tick,2000)
+}
 
 function attachRemoteAudio(session){
   session.on("peerconnection",e=>{
@@ -85,8 +168,8 @@ function attachSession(session,incoming=false){
   callStartedAt=incoming?null:Date.now();startTimer();
   $("active-status").textContent=incoming?"Incoming call":"Connecting…";
   session.on("progress",()=>{$("active-status").textContent="Ringing…"});
-  session.on("accepted",()=>{currentCallAnswered=true;$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer()});
-  session.on("confirmed",()=>{currentCallAnswered=true;$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer()});
+  session.on("accepted",()=>{currentCallAnswered=true;$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
+  session.on("confirmed",()=>{currentCallAnswered=true;$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
   session.on("ended",()=>endCall("Call ended",false,"completed"));
   session.on("failed",e=>endCall("Call failed"+(e?.cause?": "+e.cause:""),false,"failed"));
   attachRemoteAudio(session)
@@ -119,7 +202,7 @@ function endCall(message="Call ended",terminate=true,status="completed"){
   // reach here; whichever ran last decided why the call ended.
   const outcome=status==="completed"?currentCallStatus:status;
   if(number)addRecent(number,direction,outcome==="completed"&&direction==="incoming"&&!currentCallAnswered?"missed":outcome);
-  currentSession=null;clearInterval(timer);callStartedAt=null;
+  currentSession=null;clearInterval(timer);callStartedAt=null;stopQualityWatch();
   $("active-status").textContent=message;$("active-call-view").classList.add("hidden");$("call-timer").textContent="00:00";
   $("call-btn").disabled=false;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");loadRecents()
 }
@@ -156,7 +239,7 @@ async function startCall(){
   if(!ua){showLogin("Sign in to your SIP account first.");return}
   if(currentSession)return;
   try{
-    const session=ua.call(sipTarget(number),{mediaConstraints:{audio:true,video:false},pcConfig:{iceServers:[]},rtcOfferConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
+    const session=ua.call(sipTarget(number),{mediaConstraints:MIC_CONSTRAINTS,pcConfig:{iceServers:[]},rtcOfferConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
     attachSession(session,false);$("call-btn").disabled=true
   }catch(err){$("dial-hint").textContent=err.message}
 }
@@ -164,7 +247,7 @@ $("call-btn").onclick=startCall;
 
 $("answer-btn").onclick=()=>{
   if(!currentSession)return;
-  try{currentSession.answer({mediaConstraints:{audio:true,video:false},pcConfig:{iceServers:[]}});currentCallAnswered=true;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";callStartedAt=Date.now();startTimer()}catch(e){$("active-status").textContent=e.message}
+  try{currentSession.answer({mediaConstraints:MIC_CONSTRAINTS,pcConfig:{iceServers:[]}});currentCallAnswered=true;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";callStartedAt=Date.now();startTimer()}catch(e){$("active-status").textContent=e.message}
 };
 $("decline-btn").onclick=()=>endCall("Call declined",true,"declined");
 $("hangup-btn").onclick=()=>endCall("Call ended",true,"completed");

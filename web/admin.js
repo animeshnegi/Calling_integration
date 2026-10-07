@@ -2296,7 +2296,7 @@ const templates = {
       </div>
       <div class="field-row">
         <label class="field">Transport<select name="transport"><option value="udp" ${item?.transport !== 'tcp' ? 'selected' : ''}>UDP</option><option value="tcp" ${item?.transport === 'tcp' ? 'selected' : ''}>TCP</option></select></label>
-        <label class="field">Codecs<input name="codecs" value="${esc(item?.codecs || 'ulaw,alaw')}" required></label>
+        <label class="field">Codecs<input name="codecs" value="${esc(item?.codecs || 'ulaw,alaw')}" required><small>Preference order. Put <b>g722</b> first for HD (wideband) calls when the carrier supports it; always keep <b>ulaw</b> or <b>alaw</b> behind it so calls still connect.</small></label>
       </div>
       <label class="field">Allowed provider IPs / CIDRs<input name="allowed_ips" placeholder="203.0.113.10/32,203.0.113.0/24" required value="${esc(item?.allowed_ips || '')}"><small>Required. Only these networks may identify as this provider.</small></label>
       <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Provider is active</label>`,

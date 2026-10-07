@@ -97,6 +97,15 @@ class TelephonyConfigSync:
     # address (Docker networks and RFC1918 LANs).
     LOCAL_NETS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 
+    # What an extension - desk phone, softphone or the browser - may use, in
+    # Asterisk's preference order. G.722 is wideband ("HD voice", 16 kHz) and
+    # is built into Asterisk, so an internal call between two devices that both
+    # support it is HD without transcoding. PCMU/PCMA stay on the list so a
+    # device, or a carrier that cannot do wideband, still gets a normal call
+    # instead of a failed one. chan_pjsip's incoming_call_offer_pref defaults
+    # to "local", which keeps this order when the far end offers its own.
+    INTERNAL_CODECS = "g722,ulaw,alaw"
+
     def external_address(self) -> str:
         """Single source of truth for the public SIP/RTP address: the admin
         panel's Service address (service_host). ASTERISK_EXTERNAL_ADDRESS in
@@ -124,14 +133,24 @@ class TelephonyConfigSync:
 
         # Browser softphones use Asterisk's HTTP/WebSocket server on 8089.
         # The WSS transport does not bind its own TCP socket; it is carried
-        # by res_http_websocket through the HTTPS listener.
+        # by res_http_websocket through the HTTPS listener. Signalling needs no
+        # public address here (the browser is already connected through the
+        # reverse proxy), but the *media* does: ICE candidates for a WebRTC call
+        # are built from this transport, so without external_media_address the
+        # browser is told to send audio to the container's private address and
+        # the call stays silent.
         lines.extend([
             "[transport-wss]",
             "type=transport",
             "protocol=wss",
             "bind=0.0.0.0",
-            "",
         ])
+        if external:
+            lines.extend([
+                f"external_media_address={external}",
+                *[f"local_net={net}" for net in self.LOCAL_NETS],
+            ])
+        lines.append("")
         return "\n".join(lines)
 
     def _auth_digest_lines(self) -> list[str]:
@@ -191,7 +210,7 @@ class TelephonyConfigSync:
                 aors.append(username)
                 alias_aor = [f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", ""]
             endpoint_body = [
-                "context=from-internal", "disallow=all", "allow=ulaw,alaw", f"transport=transport-{transport}",
+                "context=from-internal", "disallow=all", f"allow={self.INTERNAL_CODECS}", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
                 "identify_by=username,auth_username",
                 f"set_var=OUTBOUND_CID={outbound_cid}", f"set_var=OUTBOUND_TRUNK={outbound_trunk}",
@@ -212,7 +231,7 @@ class TelephonyConfigSync:
                     *browser_endpoint_body,
                     "transport=transport-wss",
                     "webrtc=yes",
-                    "allow=ulaw,alaw",
+                    f"allow={self.INTERNAL_CODECS}",
                 ]
                 alias_endpoint = [
                     f"[{username}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{extension}",
@@ -244,7 +263,7 @@ class TelephonyConfigSync:
             # names, and this endpoint's own name is an internal hash).
             outbound_cid, outbound_trunk = self._outbound_identity(extension) if extension else ("", "")
             device_body = [
-                "context=from-internal", "disallow=all", "allow=ulaw,alaw", f"transport=transport-{transport}",
+                "context=from-internal", "disallow=all", f"allow={self.INTERNAL_CODECS}", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
                 "identify_by=username,auth_username",
                 f"set_var=OUTBOUND_CID={outbound_cid}", f"set_var=OUTBOUND_TRUNK={outbound_trunk}",

@@ -63,8 +63,12 @@ function makeFakeSip() {
   }
 
   function makeSession({ direction = 'outgoing', caller = '' } = {}) {
+    /* JsSIP exposes the RTCPeerConnection as session.connection, and the page
+       reads its stats to report call quality. */
+    const peer = { ontrack: null, _stats: null, async getStats() { return this._stats || []; } };
     const session = {
       direction,
+      connection: peer,
       remote_identity: { uri: { user: caller, toString: () => `sip:${caller}@sip.example.com` } },
       _terminated: false, _ended: false, _answered: null, _muted: null, _held: false,
       terminate() { this._terminated = true; this._ended = true; this.emit('ended'); },
@@ -77,7 +81,16 @@ function makeFakeSip() {
       ring() { this.emit('progress'); },
       connect() { this.emit('confirmed'); },
       fail(cause) { this._ended = true; this.emit('failed', { cause }); },
-      connection() { const peer = { ontrack: null }; this.emit('peerconnection', { peerconnection: peer }); return peer; },
+      sendConnection() { this.emit('peerconnection', { peerconnection: peer }); return peer; },
+      /* What the browser would report for a negotiated codec and its network. */
+      negotiates(codec, { received = 1000, lost = 0, jitter = 0 } = {}) {
+        peer._stats = [
+          { id: 'codec-1', type: 'codec', mimeType: `audio/${codec}` },
+          { id: 'codec-dtmf', type: 'codec', mimeType: 'audio/telephone-event' },
+          { id: 'in-1', type: 'inbound-rtp', kind: 'audio', codecId: 'codec-1', packetsReceived: received, packetsLost: lost, jitter },
+          { id: 'out-1', type: 'outbound-rtp', kind: 'audio', codecId: 'codec-dtmf' },
+        ];
+      },
     };
     return emitter(session);
   }
@@ -401,7 +414,12 @@ async function main() {
     check('the call is placed to the dialed number at the SIP domain',
       placed && placed.target === 'sip:15555123456@sip.engineerip.com', placed && placed.target);
     check('audio-only media is negotiated',
-      placed.options.mediaConstraints.audio === true && placed.options.mediaConstraints.video === false);
+      placed.options.mediaConstraints.video === false && placed.options.mediaConstraints.audio !== false);
+    check("the microphone is captured with the browser's own call processing",
+      placed.options.mediaConstraints.audio.echoCancellation === true
+      && placed.options.mediaConstraints.audio.noiseSuppression === true
+      && placed.options.mediaConstraints.audio.autoGainControl === true,
+      JSON.stringify(placed.options.mediaConstraints.audio));
     check('the active-call screen opens over the dialer',
       !d.getElementById('active-call-view').classList.contains('hidden')
       && d.getElementById('active-number').textContent === '15555123456');
@@ -411,7 +429,7 @@ async function main() {
     placed.session.ring();
     check('ringing is reported while the far end rings', /Ringing/.test(d.getElementById('active-status').textContent));
 
-    const peer = placed.session.connection();
+    const peer = placed.session.sendConnection();
     const stream = { id: 'remote-stream' };
     check('the page listens for the remote audio track', typeof peer.ontrack === 'function');
     peer.ontrack({ streams: [stream] });
@@ -523,8 +541,9 @@ async function main() {
 
     d.getElementById('answer-btn').click();
     await settle(20);
-    check('answering accepts the call with audio-only media',
-      incoming._answered && incoming._answered.mediaConstraints.audio === true);
+    check('answering accepts the call with the same audio-only media',
+      incoming._answered && incoming._answered.mediaConstraints.video === false
+      && incoming._answered.mediaConstraints.audio !== false);
     check('the in-call controls replace the answer buttons',
       !shown(d, 'incoming-actions') && shown(d, 'hangup-btn')
       && d.getElementById('active-label').textContent === 'Call');
@@ -569,6 +588,154 @@ async function main() {
     check('and the phone is usable again afterwards',
       missed.d.getElementById('active-call-view').classList.contains('hidden')
       && missed.d.getElementById('call-btn').disabled === false);
+  }
+
+  /* --------------------------------------------------------- HD audio */
+  section('HD audio and the quality badge');
+  {
+    const hd = boot();
+    await signIn(hd);
+    typeDigits(hd.d, '15551230001');
+    hd.d.getElementById('call-btn').click();
+    await settle(20);
+    const hdSession = session(hd);
+    check('nothing claims HD before the call connects',
+      hd.d.getElementById('call-quality').classList.contains('hidden'),
+      hd.d.getElementById('call-quality').textContent);
+    hdSession.session.connect();
+    await settle(30);
+    check('the badge stays quiet while the browser has no stats yet',
+      hd.d.getElementById('call-quality').classList.contains('hidden'));
+    hdSession.session.negotiates('G722');
+    await settle(2100);
+    const badge = hd.d.getElementById('call-quality');
+    check('a wideband codec is reported as HD, by name',
+      /HD/.test(badge.textContent) && /G722/.test(badge.textContent), badge.textContent);
+    check('and it is marked as a good call',
+      badge.classList.contains('good') && !badge.classList.contains('warn'));
+    await hangUp(hd);
+    check('the badge goes away with the call', badge.classList.contains('hidden'));
+    hd.dom.window.close();
+
+    const narrow = boot();
+    await signIn(narrow);
+    typeDigits(narrow.d, '15551230002');
+    narrow.d.getElementById('call-btn').click();
+    await settle(20);
+    session(narrow).session.connect();
+    session(narrow).session.negotiates('PCMU');
+    await settle(2100);
+    check('a narrowband codec is reported as a standard call, not as HD',
+      /Standard/.test(narrow.d.getElementById('call-quality').textContent)
+      && !/HD/.test(narrow.d.getElementById('call-quality').textContent),
+      narrow.d.getElementById('call-quality').textContent);
+
+    session(narrow).session.negotiates('G722', { received: 900, lost: 120, jitter: 0.06 });
+    await settle(2100);
+    check('a lossy network is called out even on a wideband codec',
+      /HD/.test(narrow.d.getElementById('call-quality').textContent)
+      && /unstable network/.test(narrow.d.getElementById('call-quality').textContent)
+      && narrow.d.getElementById('call-quality').classList.contains('warn'),
+      narrow.d.getElementById('call-quality').textContent);
+    narrow.dom.window.close();
+
+    const dtmf = boot();
+    await signIn(dtmf);
+    typeDigits(dtmf.d, '15551230003');
+    dtmf.d.getElementById('call-btn').click();
+    await settle(20);
+    session(dtmf).session.connect();
+    session(dtmf).session.negotiates('telephone-event');
+    await settle(2100);
+    check('the DTMF codec is never mistaken for the audio codec',
+      dtmf.d.getElementById('call-quality').classList.contains('hidden'),
+      dtmf.d.getElementById('call-quality').textContent);
+  }
+
+  /* ------------------------------------------ dialling with a real keyboard */
+  section('Dialling from a physical keyboard');
+  {
+    const env = boot();
+    await signIn(env);
+    const { d, w } = env;
+    const press = key => d.dispatchEvent(new w.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    press('1'); press('8'); press('0'); press('0');
+    check('typing digits outside a field fills the dial display',
+      d.getElementById('number-input').value === '1800', d.getElementById('number-input').value);
+    press('Backspace');
+    check('backspace deletes a digit', d.getElementById('number-input').value === '180');
+    press('*'); press('#');
+    check('the star and hash keys work from the keyboard too',
+      d.getElementById('number-input').value === '180*#', d.getElementById('number-input').value);
+    press('Enter');
+    await settle(20);
+    check('Enter places the call',
+      Boolean(session(env)) && session(env).target === 'sip:180*#@sip.engineerip.com',
+      session(env) && session(env).target);
+    press('Escape');
+    await settle(20);
+    check('Escape hangs the call up',
+      session(env).session._terminated === true
+      && env.d.getElementById('active-call-view').classList.contains('hidden'));
+    env.dom.window.close();
+
+    const focused = boot();
+    await signIn(focused);
+    focused.d.getElementById('contacts-btn').focus();
+    focused.d.dispatchEvent(new focused.w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await settle(20);
+    check('Enter on a focused button keeps the button, it does not dial',
+      focused.sip.calls.length === 0, `${focused.sip.calls.length} call(s)`);
+    focused.dom.window.close();
+
+    const login = boot();
+    login.d.getElementById('login-username').focus();
+    login.d.getElementById('login-username').dispatchEvent(
+      new login.w.KeyboardEvent('keydown', { key: '5', bubbles: true, cancelable: true }));
+    check('typing in the sign-in form never dials',
+      login.d.getElementById('number-input').value === '' && login.sip.instances.length === 0,
+      login.d.getElementById('number-input').value);
+
+    const dialog = boot();
+    await signIn(dialog);
+    dialog.d.getElementById('settings-btn').click();
+    dialog.d.getElementById('sip-username').focus();
+    dialog.d.dispatchEvent(new dialog.w.KeyboardEvent('keydown', { key: '7', bubbles: true, cancelable: true }));
+    check('and neither does typing in the settings dialog',
+      dialog.d.getElementById('number-input').value === '', dialog.d.getElementById('number-input').value);
+  }
+
+  /* ------------------------------------------- the phone's layout contract */
+  section('The layout contract, phone and browser');
+  {
+    const css = fs.readFileSync(path.join(WEB, 'phone.css'), 'utf8');
+    const html = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8');
+    const script = fs.readFileSync(path.join(WEB, 'phone.js'), 'utf8');
+    const used = new Set();
+    [...html.matchAll(/class="([^"]+)"/g)].forEach(m => m[1].split(/\s+/).forEach(name => used.add(name)));
+    [...script.matchAll(/classList\.(?:toggle|add|remove)\("([^"]+)"/g)].forEach(m => used.add(m[1]));
+    const styled = new Set([...css.matchAll(/\.([A-Za-z][\w-]*)/g)].map(m => m[1]));
+    const unstyled = [...used].filter(name => !styled.has(name));
+    check('every class the phone applies has a rule', unstyled.length === 0, unstyled.join(', '));
+
+    const view = (css.match(/\.view\{[^}]*\}/) || [''])[0];
+    check('the dialer view scrolls instead of clipping the keypad on a short window',
+      /overflow-y:auto/.test(view), view);
+    check('the in-call screen scrolls too', /\.active-call\{[^}]*overflow-y:auto/.test(css));
+    check('short windows get their own layout instead of a scrollbar',
+      /@media\(max-height:760px\)/.test(css));
+    check('keyboard users get a visible focus ring', /:focus-visible\{[^}]*outline:2px solid/.test(css));
+    check('the keyboard hint only appears where there is a keyboard',
+      /\.dial-tip\{display:none/.test(css) && /@media\(min-width:700px\)\{\.dial-tip\{display:block\}/.test(css));
+    check('the phone layout keeps its small-screen rules and safe areas',
+      /@media\(max-width:520px\)/.test(css) && /env\(safe-area-inset-bottom\)/.test(css)
+      && /env\(safe-area-inset-top\)/.test(css));
+    const keyHeights = [...css.matchAll(/\.keypad button\{[^}]*height:(\d+)px/g)].map(m => Number(m[1]));
+    check('every keypad layout keeps a finger-sized target',
+      keyHeights.length >= 2 && keyHeights.every(height => height >= 44), keyHeights.join(', '));
+    const cards = [...css.matchAll(/min-height:min\((\d+)px/g)].map(m => Number(m[1]));
+    check('the card is phone-shaped and never taller than the window',
+      cards.length > 0 && cards.every(width => width <= 900), cards.join(', '));
   }
 
   /* ----------------------------------------------------------- recents */

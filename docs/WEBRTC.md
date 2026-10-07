@@ -75,3 +75,36 @@ change:
   `dynamic/pjsip.transports.conf` and a `pjsip reload` does not add a new
   listener, so the `transport-wss` section only takes effect after Asterisk
   starts again. The phone itself needs no restart - it re-registers.
+
+## HD voice
+
+A call is "HD" when the audio is wideband - 16 kHz, roughly 7 kHz of speech
+instead of the 3.4 kHz a normal phone line carries. What this platform does
+about it, and what it cannot:
+
+* Every device the platform provisions - desk phone, softphone or the browser -
+  is offered the same codecs, in this order: **G.722, then PCMU, then PCMA**
+  (`TelephonyConfigSync.INTERNAL_CODECS`). G.722 is wideband and is built into
+  the Asterisk image, so a call between two devices that support it is HD end to
+  end and is not transcoded. PCMU/PCMA stay behind it so a device that cannot do
+  wideband gets a normal call instead of a failed one, and chan_pjsip's
+  `incoming_call_offer_pref` default (`local`) keeps this order when the far end
+  offers its own.
+* The browser phone never claims more than it negotiated: the call screen shows
+  what the live WebRTC stats say - "HD · G722" or "Standard · PCMU" - and adds
+  "· unstable network" when packet loss or jitter crosses the threshold. SIP
+  does not renegotiate a codec by itself, so the badge reports the call instead
+  of promising one.
+* Toward a carrier, HD depends on the carrier. A call to a PSTN number is only
+  wideband if the SIP trunk carries G.722: put `g722,ulaw,alaw` in the provider's
+  Codecs field (console → Providers) after confirming the carrier supports it. A
+  trunk that only does G.711 is better left on `ulaw,alaw` - the internal leg
+  would then be transcoded for no gain in the audio the caller hears.
+* Opus is not available in this image. Asterisk ships the Opus codec separately
+  from its core tarball, so `codec_opus` would have to be built and `libopus0`
+  kept at runtime before a browser's Opus offer could be accepted. G.722 is the
+  wideband codec that is always present, and it is what the badge reports.
+
+The browser captures the microphone with its own echo cancellation, noise
+suppression and automatic gain, which is what keeps a laptop or handset call
+usable without a headset.

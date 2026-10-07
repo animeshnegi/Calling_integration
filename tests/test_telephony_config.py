@@ -101,7 +101,10 @@ def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypa
     store.set_settings({"service_host": "sip.example.com"})
     text = sync.render_transports()
     assert "[transport-udp]" in text and "[transport-tcp]" in text
-    assert text.count("external_media_address=sip.example.com") == 2
+    # Media address on all three transports: the browser's ICE candidates come
+    # from the WSS transport. Signalling stays off it - that leg already came in
+    # through the reverse proxy.
+    assert text.count("external_media_address=sip.example.com") == 3
     assert text.count("external_signaling_address=sip.example.com") == 2
     assert "external_signaling_address=198.51.100.99" not in text
     # Docker and LAN destinations are exempt from NAT rewriting.
@@ -206,7 +209,7 @@ def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
     alias = text.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
     assert "transport=transport-wss" in alias
     assert "webrtc=yes" in alias
-    assert "allow=ulaw,alaw" in alias
+    assert f"allow={TelephonyConfigSync.INTERNAL_CODECS}" in alias
     assert "transport=transport-udp" not in alias
     canonical = text.split("[101]\ntype=endpoint")[1].split("\n\n")[0]
     assert "transport=transport-udp" in canonical
@@ -215,3 +218,39 @@ def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
     # The rendered transports file is what Asterisk actually includes.
     sync.apply()
     assert "[transport-wss]" in (tmp_path / "pjsip.transports.conf").read_text()
+
+def test_internal_calls_negotiate_hd_voice_first(tmp_path: Path):
+    """G.722 is wideband and built into Asterisk, so every device the platform
+    provisions offers it first; PCMU/PCMA stay behind it so a device - or a
+    carrier - that cannot do wideband still gets a call instead of a failure."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    store.save_sip_account({
+        "label": "Reception", "sip_username": "reception", "sip_password": "secret2",
+        "server": "sip.example.com", "port": 5060, "transport": "udp",
+    }, 1)
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    text = sync.render_pjsip()
+
+    assert TelephonyConfigSync.INTERNAL_CODECS == "g722,ulaw,alaw"
+    # disallow=all first, so nothing outside the policy can be negotiated.
+    assert text.count("disallow=all\nallow=g722,ulaw,alaw") == 3   # extension + alias + device
+    assert "allow=ulaw,alaw" not in text
+    # Every codec on the list has to be one Asterisk can actually translate.
+    assert TelephonyConfigSync._codecs(TelephonyConfigSync.INTERNAL_CODECS) == TelephonyConfigSync.INTERNAL_CODECS
+
+
+def test_browser_media_advertises_the_public_address(tmp_path: Path):
+    """A WebRTC call's ICE candidates come from the WSS transport, so it needs
+    the admin panel's service address just like the UDP/TCP transports - a
+    browser cannot send audio to the container's private address."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    store.set_settings({"service_host": "sip.engineerip.com"})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+
+    wss = sync.render_transports().split("[transport-wss]")[1]
+    assert "external_media_address=sip.engineerip.com" in wss
+    assert "local_net=10.0.0.0/8" in wss
+    # Signalling continues on the WebSocket the proxy already opened.
+    assert "external_signaling_address" not in wss

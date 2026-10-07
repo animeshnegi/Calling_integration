@@ -89,6 +89,7 @@
         </div>
         <button id="call-btn" class="call-btn" aria-label="Call">☎</button>
         <div class="dial-tools"><button id="backspace-btn">⌫ Delete</button><button id="contacts-btn">♙ Contacts</button></div>
+        <p class="dial-tip">Keyboard: type a number, Enter to call, Esc to hang up</p>
       </section>
 
       <section id="recents-view" class="view">
@@ -109,6 +110,7 @@
 
       <section id="active-call-view" class="active-call hidden">
         <div class="active-avatar">E</div><div class="active-label" id="active-label">Calling</div><h2 id="active-number">—</h2><div id="call-timer">00:00</div>
+        <div id="call-quality" class="call-quality hidden" role="status" aria-live="polite"></div>
         <div class="call-controls"><button id="mute-btn" class="control-btn">🎙<span>Mute</span></button><button id="speaker-btn" class="control-btn">🔊<span>Speaker</span></button><button id="hold-btn" class="control-btn">⏸<span>Hold</span></button></div>
         <div id="incoming-actions" class="incoming-actions hidden"><button id="answer-btn" class="answer-btn">☎ Answer</button><button id="decline-btn" class="decline-btn">Decline</button></div>
         <button id="hangup-btn" class="hangup-btn">●</button><div id="active-status" class="active-status">Connecting…</div>
