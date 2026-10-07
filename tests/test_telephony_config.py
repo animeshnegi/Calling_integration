@@ -185,3 +185,33 @@ def test_recording_defaults_to_allowed_globally_and_off_per_extension(tmp_path: 
     store.set_settings({"recording_enabled": "false"})
     reopened = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     assert reopened.recording_platform_enabled() is False
+
+def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
+    """The browser signs in with the same prefixed SIP username as the desk
+    phone, so the alias endpoint must carry the WSS transport and Asterisk's
+    WebRTC switch; the canonical extension endpoint stays a plain UDP/TCP
+    endpoint for Zoiper and hardware phones."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+
+    transports = sync.render_transports()
+    assert "[transport-wss]\ntype=transport\nprotocol=wss" in transports
+    # WSS is carried by Asterisk's TLS HTTP listener (http.conf), so no port is
+    # bound here and the UDP/TCP listeners stay untouched.
+    assert transports.count("bind=0.0.0.0:5060") == 2
+
+    text = sync.render_pjsip()
+    alias = text.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-wss" in alias
+    assert "webrtc=yes" in alias
+    assert "allow=ulaw,alaw" in alias
+    assert "transport=transport-udp" not in alias
+    canonical = text.split("[101]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in canonical
+    assert "webrtc=yes" not in canonical
+
+    # The rendered transports file is what Asterisk actually includes.
+    sync.apply()
+    assert "[transport-wss]" in (tmp_path / "pjsip.transports.conf").read_text()

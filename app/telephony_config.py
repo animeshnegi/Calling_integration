@@ -132,7 +132,6 @@ class TelephonyConfigSync:
             "bind=0.0.0.0",
             "",
         ])
-            lines.append("")
         return "\n".join(lines)
 
     def _auth_digest_lines(self) -> list[str]:
