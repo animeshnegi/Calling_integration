@@ -499,6 +499,11 @@ three files still carry it.
 1. Add an entry to `pageMeta` in `web/admin.js` (`title`, `subtitle`).
 2. Add `<section class="page" id="page-<key>">` to `web/admin.html`.
 3. Add a nav button with `data-page="<key>"` (plus `data-admin-only` if privileged).
+4. Link the favicon the way every other page does - `<link rel="icon" type="image/png">`
+   and `<link rel="apple-touch-icon">` pointing at the EngineerIP logo - so the tab and
+   the home-screen shortcut never fall back to a blank icon. `tests/test_pages.py` sweeps
+   `web/*.html` for exactly this and fails on a page that forgets it (or that points at a
+   `/favicon.ico` the app only redirects from).
 
 `showPage()` and `loadState()` do the rest. The page key is also the URL hash, so
 pages are linkable.
@@ -518,6 +523,15 @@ pages are linkable.
   board answers, call defaults belong to the customer (administrator `400`/`403`), the
   administrator cannot create keys or webhooks but can edit a customer's flows and
   build their groups, a spoofed owner cannot move a flow, and recording is per device.
+* `node tools/phonecheck.js` — boots the real softphone (`/phone`) in jsdom with a stub
+  JsSIP in place of the CDN build and a fake SIP session in place of the WebRTC stack, and
+  walks what the page promises: sign-in and auto-reconnect, the keypad and paste, an
+  outbound call from dialling to hangup (the target, the audio-only offer, the remote
+  audio track, the timer, mute/hold/speaker, one recents row), incoming answer/decline, a
+  caller who gives up, a second caller while busy, API-backed call history with an
+  escaped payload, contacts, the settings dialog and logout. jsdom has no media engine,
+  dialog or clipboard, so those are stubbed; what the page asks the SIP stack to do is
+  recorded instead, which is the part a browser cannot check for us.
 * `node tools/uicheck.js` — boots the real console in jsdom against captured fixtures
   and asserts the promises above: refreshes that paint nothing, only customers dial,
   customer-first pickers, the flow builder's administrator mode, the system board, the

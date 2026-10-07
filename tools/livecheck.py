@@ -367,6 +367,41 @@ check("and its code blocks were retuned for it",
 status, page = Client().request("/login")
 check("so does the sign-in page", status == 200 and "theme-light login-body" in page, str(status))
 
+# --- every page carries the EngineerIP logo as its favicon --------------------
+LOGO = "https://engineerip.com/static/img/logo.png"
+PAGES = {
+    "the landing page": Client().request("/"),
+    "the sign-in page": Client().request("/login"),
+    "the console": admin.request("/admin"),
+    "the documentation page": admin.request("/documentation"),
+    "the layout self-check": admin.request("/console-check"),
+    "the softphone": Client().request("/phone"),
+}
+for label, (status, body) in PAGES.items():
+    check(f"{label} links the EngineerIP logo as its favicon",
+          status == 200 and f'<link rel="icon" type="image/png" href="{LOGO}">' in body,
+          str(status))
+    check(f"and offers the same logo to an iOS home screen",
+          status == 200 and f'<link rel="apple-touch-icon" href="{LOGO}">' in body,
+          str(status))
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Ask for the redirect itself: the logo lives on another host, which this
+    harness must not need to reach in order to prove the answer is correct."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+try:
+    with urllib.request.build_opener(_NoRedirect()).open(BASE + "/favicon.ico", timeout=20) as res:
+        icon_status, icon_location = res.status, res.headers.get("Location", "")
+except urllib.error.HTTPError as exc:
+    icon_status, icon_location = exc.code, exc.headers.get("Location", "")
+check("a bare /favicon.ico probe is answered with the logo instead of a 404",
+      icon_status in (301, 302) and icon_location == LOGO, f"{icon_status} {icon_location}")
+check("the phone manifest installs with the same logo",
+      LOGO in Client().request("/manifest.json")[1])
+
 status, console_page = admin.request("/admin")
 check("the customer's workflow tab ships the two-step pickers",
       'id="route-number"' in console_page and 'id="route-extension"' in console_page

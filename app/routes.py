@@ -6,7 +6,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
-from flask import Response, g, jsonify, request, send_file, send_from_directory, stream_with_context
+from flask import Response, g, jsonify, redirect, request, send_file, send_from_directory, stream_with_context
 
 from .config import Config
 
@@ -414,6 +414,19 @@ def register_routes(app, service):
             return jsonify({"error": "not found"}), 404
         return send_from_directory(str(Path(app.root_path).parent / "web"), "index.html")
 
+
+    @app.get("/favicon.ico")
+    def favicon():
+        """The tab icon every page links, for the bare probes too.
+
+        Browsers, crawlers and shortcut tools ask for /favicon.ico even when a
+        page declares an icon, so this answers with the same image the pages
+        link instead of a 404. It is a redirect, not a copy: the brand lives on
+        the EngineerIP web property and stays the single source of truth.
+        """
+        response = redirect(service.config.FAVICON_URL, code=302)
+        response.headers["Cache-Control"] = "public, max-age=86400"
+        return response
 
     @app.get("/phone")
     def phone():

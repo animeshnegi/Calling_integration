@@ -1,7 +1,7 @@
 const $=id=>document.getElementById(id);
 const input=$("number-input"),display=$("dial-display"),hint=$("dial-hint"),state=$("connection-state");
 const installBtn=$("install-btn"),remoteAudio=$("remote-audio"),settingsDialog=$("settings-dialog"),loginScreen=$("login-screen"),phoneApp=$("phone-app");
-let deferredInstall=null,ua=null,currentSession=null,callStartedAt=null,timer=null,muted=false,held=false;
+let deferredInstall=null,ua=null,currentSession=null,currentCallAnswered=false,currentCallStatus="completed",callStartedAt=null,timer=null,muted=false,held=false;
 
 const storeKey="eip-phone-settings";
 const secretKey="eip-phone-sip-password";
@@ -74,7 +74,9 @@ function attachRemoteAudio(session){
   })
 }
 function attachSession(session,incoming=false){
-  currentSession=session;
+  currentSession=session;currentCallAnswered=false;currentCallStatus="completed";
+  muted=false;held=false;remoteAudio.muted=false;
+  ["mute-btn","hold-btn","speaker-btn"].forEach(id=>$(id).classList.remove("active"));
   $("active-number").textContent=input.value||"Unknown";
   $("active-call-view").classList.remove("hidden");
   $("incoming-actions").classList.toggle("hidden",!incoming);
@@ -83,10 +85,10 @@ function attachSession(session,incoming=false){
   callStartedAt=incoming?null:Date.now();startTimer();
   $("active-status").textContent=incoming?"Incoming call":"Connecting…";
   session.on("progress",()=>{$("active-status").textContent="Ringing…"});
-  session.on("accepted",()=>{$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer()});
-  session.on("confirmed",()=>{$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer()});
-  session.on("ended",()=>endCall("Call ended",false));
-  session.on("failed",e=>endCall("Call failed"+(e?.cause?": "+e.cause:""),false));
+  session.on("accepted",()=>{currentCallAnswered=true;$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer()});
+  session.on("confirmed",()=>{currentCallAnswered=true;$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer()});
+  session.on("ended",()=>endCall("Call ended",false,"completed"));
+  session.on("failed",e=>endCall("Call failed"+(e?.cause?": "+e.cause:""),false,"failed"));
   attachRemoteAudio(session)
 }
 function startTimer(){
@@ -96,10 +98,27 @@ function startTimer(){
     $("call-timer").textContent=String(Math.floor(sec/60)).padStart(2,"0")+":"+String(sec%60).padStart(2,"0")
   },500)
 }
-function endCall(message="Call ended",terminate=true){
-  const number=input.value;
-  if(currentSession&&terminate){try{if(!currentSession.isEnded?.())currentSession.terminate()}catch{}}
-  if(number)addRecent(number,currentSession?.direction==="incoming"?"incoming":"outgoing",message.toLowerCase().includes("failed")?"failed":"completed");
+/**
+ * Close the active call: end the SIP session if this call ends it, file the
+ * call in recents once, and put the dialer back.
+ *
+ * A session can also end itself - the far end hangs up, or terminate()
+ * reports back through the session's own "ended" event before this function
+ * resumes. Whichever path runs first closes the screen, and the other one
+ * finds currentSession pointing elsewhere (or at nothing) and stops, so one
+ * call can never be filed twice.
+ */
+function endCall(message="Call ended",terminate=true,status="completed"){
+  const session=currentSession;
+  if(!session)return;
+  if(terminate){currentCallStatus=status;try{if(!session.isEnded?.())session.terminate()}catch{}}
+  if(currentSession!==session)return;
+  const number=input.value.trim();
+  const direction=session.direction==="incoming"?"incoming":"outgoing";
+  // The pressing of a button and the session's own "ended" event can both
+  // reach here; whichever ran last decided why the call ended.
+  const outcome=status==="completed"?currentCallStatus:status;
+  if(number)addRecent(number,direction,outcome==="completed"&&direction==="incoming"&&!currentCallAnswered?"missed":outcome);
   currentSession=null;clearInterval(timer);callStartedAt=null;
   $("active-status").textContent=message;$("active-call-view").classList.add("hidden");$("call-timer").textContent="00:00";
   $("call-btn").disabled=false;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");loadRecents()
@@ -145,18 +164,29 @@ $("call-btn").onclick=startCall;
 
 $("answer-btn").onclick=()=>{
   if(!currentSession)return;
-  try{currentSession.answer({mediaConstraints:{audio:true,video:false},pcConfig:{iceServers:[]}});$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";callStartedAt=Date.now();startTimer()}catch(e){$("active-status").textContent=e.message}
+  try{currentSession.answer({mediaConstraints:{audio:true,video:false},pcConfig:{iceServers:[]}});currentCallAnswered=true;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";callStartedAt=Date.now();startTimer()}catch(e){$("active-status").textContent=e.message}
 };
-$("decline-btn").onclick=()=>endCall("Call declined");
-$("hangup-btn").onclick=()=>endCall("Call ended");
+$("decline-btn").onclick=()=>endCall("Call declined",true,"declined");
+$("hangup-btn").onclick=()=>endCall("Call ended",true,"completed");
 $("mute-btn").onclick=()=>{if(!currentSession)return;muted=!muted;currentSession.mute({audio:muted});$("mute-btn").classList.toggle("active",muted)};
 $("hold-btn").onclick=()=>{if(!currentSession)return;held=!held;held?currentSession.hold():currentSession.unhold();$("hold-btn").classList.toggle("active",held)};
-$("speaker-btn").onclick=()=>{remoteAudio.muted=!remoteAudio.muted;$("speaker-btn").classList.toggle("active",remoteAudio.muted)};
+$("speaker-btn").onclick=()=>{
+  const on=!$("speaker-btn").classList.contains("active");
+  $("speaker-btn").classList.toggle("active",on);
+  // Chrome can move the call to the loudspeaker; where the browser has no
+  // output routing (iOS Safari), the button falls back to muting the earpiece
+  // so the caller's own microphone is never what gets silenced.
+  if(typeof remoteAudio.setSinkId==="function"){
+    remoteAudio.setSinkId(on?"speaker":"default").catch(()=>{remoteAudio.muted=on})
+    return
+  }
+  remoteAudio.muted=on
+};
 
 $("login-form").onsubmit=async e=>{
   e.preventDefault();
   const domain=$("login-domain").value.trim().replace(/^https?:\/\//,"").replace(/\/$/,"");
-  const s={username:$("login-username").value.trim(),password:$("login-password").value,domain,wss:$("login-wss").value.trim()||defaultWss(domain),extension:"",apiToken:""};
+  const s={...settings(),username:$("login-username").value.trim(),password:$("login-password").value,domain,wss:$("login-wss").value.trim()||defaultWss(domain)};
   if(!s.username||!s.password||!s.domain)return;
   saveSettings(s);setLoginBusy(true);$("login-status").className="login-status";$("login-status").textContent="Connecting to SIP server…";
   try{await connectSip(s)}catch(err){$("login-status").className="login-status error";$("login-status").textContent=err.message||"Authentication failed.";setState("Offline");try{if(ua)ua.stop()}catch{}ua=null}
@@ -174,7 +204,8 @@ $("settings-btn").onclick=()=>{
 };
 $("connect-btn").onclick=async()=>{
   const old=settings(),domain=$("sip-domain").value.trim().replace(/^https?:\/\//,"").replace(/\/$/,"");
-  const s={...old,username:$("sip-username").value.trim(),domain,wss:$("sip-wss").value.trim()||defaultWss(domain)};
+  const s={...old,extension:$("sip-extension").value.trim(),username:$("sip-username").value.trim(),domain,
+           wss:$("sip-wss").value.trim()||defaultWss(domain),apiToken:$("api-token").value.trim()};
   saveSettings(s);$("settings-status").className="settings-status";$("settings-status").textContent="Reconnecting…";
   try{await connectSip(s);$("settings-status").className="settings-status ok";$("settings-status").textContent="Phone connected."}catch(err){$("settings-status").className="settings-status error";$("settings-status").textContent=err.message}
 };

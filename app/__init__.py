@@ -47,7 +47,11 @@ def create_app(config_class=Config, *, start_ari: bool = False, sync_config: boo
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Cache-Control"] = "no-store"
+        # API answers and pages are never cached. Static assets that declare
+        # themselves publicly cacheable (the phone shell, the console
+        # stylesheet, the favicon redirect) keep their own policy.
+        if "public" not in response.headers.get("Cache-Control", ""):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     register_routes(app, service)

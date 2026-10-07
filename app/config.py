@@ -28,6 +28,9 @@ class Config:
     ENABLE_BROWSER_API = os.getenv("ENABLE_BROWSER_API", "false").lower() == "true"
     ENABLE_DIAGNOSTIC_UI = os.getenv("ENABLE_DIAGNOSTIC_UI", "false").lower() == "true"
     ENABLE_ARI_WEBHOOK = os.getenv("ENABLE_ARI_WEBHOOK", "false").lower() == "true"
+    # Every page links this image as its favicon; /favicon.ico redirects here so
+    # a bare probe or an old bookmark gets the logo instead of a 404.
+    FAVICON_URL = os.getenv("FAVICON_URL", "https://engineerip.com/static/img/logo.png")
     RECORDING_VOLUME_PATH = os.getenv("RECORDING_VOLUME_PATH", "/recordings")
     VOICEMAIL_PATH = os.getenv("VOICEMAIL_PATH", "/app/voicemail")
     VOICEMAIL_CONTEXT = os.getenv("VOICEMAIL_CONTEXT", "engineerip")

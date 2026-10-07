@@ -51,4 +51,27 @@ Open:
 https://<your-service-host>/phone
 ```
 
+The page is installable: it ships a manifest, a versioned service worker that
+keeps the shell available offline and answers for the phone's own URLs only (it
+never touches the console, the API or the CDN build of JsSIP), and it links the
+EngineerIP logo as its favicon and iOS home-screen icon. Every other page (landing, sign-in,
+console, documentation) links the same logo, and `/favicon.ico` answers with it
+too, so no page ever falls back to a blank tab icon. Point a deployment at a
+different image with `FAVICON_URL` if the brand moves.
+
 For production, serve the page through trusted HTTPS and expose Asterisk WSS through the production reverse proxy. Do not place the ARI master credential or provider credentials in browser JavaScript.
+
+Two things are needed before a browser can register, and neither is a code
+change:
+
+* A trusted certificate. `asterisk/entrypoint.sh` generates a self-signed pair
+  in `/etc/asterisk/keys/` only so the listener can start; browsers reject it.
+  Mount a real certificate and key there, or terminate TLS at the reverse proxy
+  and forward the `/ws` path to the plain HTTP listener (`http://asterisk:8088/ws`).
+  The softphone's default WebSocket URL is `wss://<sip domain>/ws`, which is the
+  proxy path.
+* A restart of the Asterisk container once, on a deployment that predates the
+  WSS transport: transports are rendered into
+  `dynamic/pjsip.transports.conf` and a `pjsip reload` does not add a new
+  listener, so the `transport-wss` section only takes effect after Asterisk
+  starts again. The phone itself needs no restart - it re-registers.
