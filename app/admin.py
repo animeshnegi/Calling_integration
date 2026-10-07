@@ -34,6 +34,19 @@ _LOGIN_WINDOW = 15 * 60
 _LOGIN_LIMIT = 8
 
 
+def same_account(left: Any, right: Any) -> bool:
+    """Do these two owner_user_id values name the same account?
+
+    A blank value is the platform's own resources, so "no owner" and "the
+    platform" are the same thing - and extension numbers, devices and dial plans
+    all have to agree on that.
+    """
+    def normalise(value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    return normalise(left) == normalise(right)
+
+
 class SettingsStore:
     def __init__(self, path: str, secret_key: str):
         uri = path if "://" in path else f"sqlite:///{path}"
@@ -324,6 +337,16 @@ class SettingsStore:
                 (generate_password_hash(password, method="scrypt"), user_id),
             )
 
+    def _account_label(self, owner_user_id: int | None) -> str:
+        """How an account is named in a message: its company, or the platform."""
+        if owner_user_id is None:
+            return "the platform"
+        with self._connect() as db:
+            row = db.execute("SELECT username,company_name FROM admin_users WHERE id=?", (int(owner_user_id),)).fetchone()
+        if not row:
+            return "another account"
+        return str(row["company_name"] or row["username"] or "another account")
+
     def list_extensions(self, owner_user_id: int | None = None):
         with self._connect() as db:
             where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
@@ -381,8 +404,34 @@ class SettingsStore:
                 "SELECT sip_username,sip_password_enc,voicemail_enabled,voicemail_pin_enc,owner_user_id FROM extensions WHERE extension=?", (extension,)
             ).fetchone()
             created = existing is None
-            if existing and enforce_owner and owner_user_id is not None and existing["owner_user_id"] != int(owner_user_id):
+            # Who owns this number, and who is being asked to own it. A request
+            # that says nothing about the owner keeps the one the row has, so an
+            # edit - or an older caller that never sent the field - can neither
+            # take a line from another account nor orphan one into the platform's
+            # dial plan.
+            if owner_user_id is not None:
+                new_owner = int(owner_user_id)
+            elif "owner_user_id" in data:
+                new_owner = int(data["owner_user_id"]) if str(data.get("owner_user_id", "")).isdigit() else None
+            else:
+                new_owner = existing["owner_user_id"] if existing else None
+            if existing and enforce_owner and owner_user_id is not None and not same_account(existing["owner_user_id"], owner_user_id):
                 raise ValueError("Extension belongs to another customer")
+            # Extension numbers are the dial plan: whoever holds one is dialled by
+            # the phones of that account, so a number is never handed to a
+            # different account by creating a line on it. Moving a live extension
+            # is a deliberate act - the console asks for it, editing that very
+            # extension and its owner together.
+            if (
+                existing and existing["owner_user_id"] is not None
+                and not same_account(existing["owner_user_id"], new_owner)
+                and not bool(data.get("reassign"))
+            ):
+                holder = self._account_label(existing["owner_user_id"])
+                raise ValueError(
+                    f"Extension {extension} already belongs to {holder}. "
+                    "Choose a free extension number, or edit that extension to move it."
+                )
             # Devices authenticate with this name, so it is derived here and never
             # accepted from a caller: six random letters, an underscore, the
             # extension. Editing an extension keeps the identity a registered
@@ -422,10 +471,10 @@ class SettingsStore:
                     voicemail_pin_enc,
                     voicemail_email,
                     int(bool(data.get("active", True))),
-                    int(owner_user_id) if owner_user_id is not None else (int(data["owner_user_id"]) if str(data.get("owner_user_id", "")).isdigit() else None),
+                    new_owner,
                 ),
             )
-        owner = owner_user_id if owner_user_id is not None else (existing["owner_user_id"] if existing else None)
+        owner = new_owner
         # Every extension gets a working call flow of its own. It is only written
         # when the extension is created, so a flow the customer later edits is
         # never overwritten.
@@ -2640,8 +2689,25 @@ def register_admin(app, config, on_telephony_change=None):
             data = request.get_json(silent=True) or {}
             owner = data.get("owner_user_id") if session.get("admin_role") == "admin" else int(session["admin_user_id"])
             owner_id = int(owner) if str(owner or "").isdigit() else None
-            existed = any(row["extension"] == str(data.get("extension", "")).strip() for row in store.list_extensions())
+            number = str(data.get("extension", "")).strip()
+            previous_owner = store.get_extension_owner(number) if number else None
+            existed = any(row["extension"] == number for row in store.list_extensions())
             result = store.save_extension(data, owner_id, session.get("admin_role") != "admin")
+            # A moved extension changes who answers a number every phone already
+            # dials, so it is recorded for the operator and the account that lost
+            # it is told - their phones can no longer reach it.
+            new_owner = store.get_extension_owner(result)
+            if previous_owner is not None and not same_account(previous_owner, new_owner):
+                store.add_activity(
+                    new_owner or int(session["admin_user_id"]), int(session["admin_user_id"]),
+                    "extension.reassigned", "extension", result,
+                    f"Extension {result} moved from {store._account_label(previous_owner)} "
+                    f"to {store._account_label(new_owner)}",
+                )
+                store.add_notification(
+                    int(previous_owner), "extension", "Extension reassigned",
+                    f"Extension {result} was moved to another account and is no longer in your dial plan.",
+                )
             credentials = None
             if owner_id:
                 store.add_activity(owner_id, int(session["admin_user_id"]), "extension.saved", "extension", result, f"Extension {result} configured")

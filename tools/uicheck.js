@@ -439,7 +439,7 @@ async function main() {
 
   section('SIP identity');
   {
-    const { w, d } = boot();
+    const { w, d, seen } = boot();
     await settle(320);
     w.eval("showPage('extensions')");
     await settle(200);
@@ -455,6 +455,38 @@ async function main() {
     check('typing an extension fills in its SIP username', username.value === '104', username.value);
     check('the form explains that the name is fixed', /Fixed by the platform/.test(d.getElementById('modal-fields').textContent));
     check('the password is still the customer’s to set', !!d.querySelector('#modal-fields [name=sip_password]'));
+
+    // Extension numbers are unique platform-wide, so the dialog names the account
+    // that already holds the number being typed instead of letting the save fail.
+    numberField.value = '101';
+    numberField.dispatchEvent(new w.Event('input', { bubbles: true }));
+    const note = d.getElementById('extension-note');
+    check('a number another account holds is called out before saving',
+      note.hidden === false && /already belongs to Meridian/.test(note.textContent), note.textContent);
+    numberField.value = '104';
+    numberField.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('a free number says nothing', note.hidden === true && note.textContent === '', note.textContent);
+    w.eval('closeModal()');
+
+    // Editing an extension and changing its account is how a live number is
+    // moved; the console asks the API for exactly that, and nowhere else.
+    w.eval("openModal('extension', state.extensions.find(x => x.extension === '101'))");
+    await settle(160);
+    const ownerSelect = d.querySelector('#modal-fields [name=owner_user_id]');
+    const currentOwner = state.extensions.find(x => x.extension === '101').owner_user_id;
+    const newOwner = state.users.find(u => u.role === 'user' && String(u.id) !== String(currentOwner));
+    ownerSelect.value = String(newOwner.id);
+    ownerSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const moveNote = d.getElementById('extension-note');
+    check('moving an extension to another account is described as a move',
+      moveNote.hidden === false && /Saving moves extension 101/.test(moveNote.textContent), moveNote.textContent);
+    const sent = seen.length;
+    d.getElementById('modal-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(240);
+    const payload = seen.slice(sent).map(row => row.body).find(body => body && /"extension"/.test(body));
+    check('and the move is sent as a deliberate reassignment',
+      !!payload && JSON.parse(payload).reassign === true && JSON.parse(payload).owner_user_id === String(newOwner.id),
+      payload);
     w.eval('closeModal()');
   }
 
@@ -542,8 +574,11 @@ async function main() {
     check('the device search filters both lists on the page', !!d.getElementById('sip-search'));
     check('the administrator still gets the platform\'s device boxes',
       d.getElementById('sip-account-list').closest('.panel').hidden === false);
-    check('and exactly one number picker, above, for the customer alone',
-      d.getElementById('device-number').hidden === true
+    // The number picker moved into the pages' shared header, and it is a
+    // customer's control: the operator picks a customer instead.
+    const numberContexts = [...d.querySelectorAll('#page-sipaccounts .customer-number-context')];
+    check('and no number picker of its own: the operator picks a customer instead',
+      numberContexts.length > 0 && numberContexts.every(el => el.hidden)
       && !!d.querySelector('#sip-picker [data-owner]'));
     d.getElementById('sip-search').value = '102';
     d.getElementById('sip-search').dispatchEvent(new w.Event('input', { bubbles: true }));
@@ -1082,8 +1117,12 @@ async function main() {
     check('APIs & Webhooks links to the documentation at the top', !!link && link.getAttribute('href') === '/documentation',
       link ? link.getAttribute('href') : 'missing');
     check('it opens outside the console', link.getAttribute('target') === '_blank');
+    // The first thing the reader sees: role-scoped headers (the shared number
+    // picker, the customer picker) come before it, but no panel does.
+    const firstContent = [...d.getElementById('page-webhooks').children]
+      .find(el => !el.hasAttribute('data-customer-only') && !el.hasAttribute('data-admin-only'));
     check('the link is the first thing on the page',
-      d.getElementById('page-webhooks').firstElementChild.classList.contains('doc-link'));
+      firstContent?.classList.contains('doc-link'), firstContent?.className);
     check('the sidebar offers the same documentation',
       !!d.querySelector('.nav-item[href="/documentation"]'));
     const customer = boot({ isAdmin: false, state: customerState });
@@ -1133,7 +1172,7 @@ async function main() {
     await settle(240);
     check('the customer manages devices',
       d.querySelectorAll('#extension-credential-list .ext-card, #extension-credential-list .row').length > 0);
-    const deviceNumber = d.getElementById('device-number');
+    const deviceNumber = d.querySelector('#page-sipaccounts .customer-number-select');
     check('the customer\'s page offers a number to look at',
       !!deviceNumber && [...deviceNumber.options].map(o => o.value).join(',') === '+13025550001,+13025550002,+13025550003',
       deviceNumber ? [...deviceNumber.options].map(o => o.value).join(',') : 'missing');

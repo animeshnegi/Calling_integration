@@ -254,3 +254,129 @@ def test_browser_media_advertises_the_public_address(tmp_path: Path):
     assert "local_net=10.0.0.0/8" in wss
     # Signalling continues on the WebSocket the proxy already opened.
     assert "external_signaling_address" not in wss
+
+
+def test_each_organisation_dials_its_own_extensions(tmp_path: Path):
+    """Dial-by-extension is scoped to the account that owns the phone.
+
+    A customer with two numbers keeps one extension set: every extension of the
+    account is dialled by 3-digit number from any of its devices, whichever DID
+    the extension belongs to. Another customer's extension is not in that dial
+    plan at all, so a misdial cannot land on a different organisation's desk.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_user({"username": "meridian", "password": "customer-password-1", "role": "user",
+                     "email": "m@example.com", "company_name": "Meridian"})
+    store.save_user({"username": "northwind", "password": "customer-password-1", "role": "user",
+                     "email": "n@example.com", "company_name": "Northwind"})
+    meridian = next(row["id"] for row in store.list_users() if row["username"] == "meridian")
+    northwind = next(row["id"] for row in store.list_users() if row["username"] == "northwind")
+    store.save_extension({"extension": "101", "active": True}, meridian)
+    store.save_extension({"extension": "102", "active": True}, meridian)
+    store.save_extension({"extension": "105", "active": True}, meridian)
+    store.save_extension({"extension": "117", "active": True}, northwind)
+    store.save_extension({"extension": "118", "active": True}, northwind)
+    store.save_extension({"extension": "900", "active": True})                 # the platform's own line
+    store.set_settings({"service_host": "sip.engineerip.com"})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+
+    dialplan = sync.render_dialplan()
+    meridian_context = dialplan.split(f"\n[{TelephonyConfigSync.tenant_context(meridian)}]\n")[1].split("\n\n")[0]
+    northwind_context = dialplan.split(f"\n[{TelephonyConfigSync.tenant_context(northwind)}]\n")[1].split("\n\n")[0]
+    platform_context = dialplan.split("\n[from-internal]\n")[1].split("\n\n")[0]
+
+    # Every extension of the account - from either of its numbers - is dialable.
+    for extension in ("101", "102", "105", "900"):
+        assert f"exten => {extension},1" in meridian_context
+        assert f"Dial(PJSIP/{extension},30)" in meridian_context
+    # ...and the other organisation's extensions are nowhere in it.
+    assert "117" not in meridian_context and "118" not in meridian_context
+    assert "101" not in northwind_context and "105" not in northwind_context
+    assert "exten => 117,1" in northwind_context
+
+    # The platform's own devices reach every extension, the way the operator's
+    # line always has.
+    for extension in ("101", "117", "900"):
+        assert f"exten => {extension},1" in platform_context
+
+    # Nothing falls through to the carrier: an unknown three-digit number is
+    # answered with "not in service", which is what another organisation's
+    # extension is from inside this context.
+    assert "exten => _XXX,1" in meridian_context and "Playback(ss-noservice)" in meridian_context
+    # Voicemail login and outbound dialling keep working in every context.
+    for context in (meridian_context, northwind_context, platform_context):
+        assert "VoiceMailMain(@engineerip)" in context
+        assert "exten => _XXXX.,1,NoOp(Outbound" in context
+        assert "Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)" in context
+
+
+def test_endpoints_answer_in_the_context_of_the_account_that_owns_them(tmp_path: Path):
+    """The endpoint's context is written where the device registers."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_user({"username": "meridian", "password": "customer-password-1", "role": "user",
+                     "email": "m@example.com", "company_name": "Meridian"})
+    meridian = next(row["id"] for row in store.list_users() if row["username"] == "meridian")
+    store.save_extension({"extension": "101", "active": True}, meridian)
+    store.save_extension({"extension": "102", "active": True}, meridian)
+    store.save_extension({"extension": "900", "active": True})
+    # A device account that is not linked to an extension still answers in its own
+    # account's context instead of the platform's shared one.
+    store.save_sip_account({"label": "Reception", "sip_username": "meridian-reception-device",
+                            "sip_password": "secret", "server": "sip.example.com",
+                            "extension": "", "active": True}, meridian)
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    text = sync.render_pjsip()
+    context = TelephonyConfigSync.tenant_context(meridian)
+
+    extension_101 = text.split("[101]\ntype=endpoint")[1].split("\n\n")[0]
+    extension_102 = text.split("[102]\ntype=endpoint")[1].split("\n\n")[0]
+    assert f"context={context}" in extension_101 and f"context={context}" in extension_102
+    # The alias endpoint a browser signs in with carries the same context.
+    username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+    alias = text.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert f"context={context}" in alias
+    # The platform's own extension stays in the platform context.
+    platform = text.split("[900]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "context=from-internal\n" in platform
+
+
+def test_a_did_only_rings_an_extension_of_its_own_account(tmp_path: Path):
+    """A number routes to its account's extensions: a DID must never ring another
+    organisation's phone, not even through a stale inbound link."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_user({"username": "meridian", "password": "customer-password-1", "role": "user",
+                     "email": "m@example.com", "company_name": "Meridian"})
+    store.save_user({"username": "northwind", "password": "customer-password-1", "role": "user",
+                     "email": "n@example.com", "company_name": "Northwind"})
+    meridian = next(row["id"] for row in store.list_users() if row["username"] == "meridian")
+    northwind = next(row["id"] for row in store.list_users() if row["username"] == "northwind")
+    store.save_extension({"extension": "101", "active": True}, meridian)
+    store.save_extension({"extension": "117", "active": True}, northwind)
+    store.save_user({"username": "bluewave", "password": "customer-password-1", "role": "user",
+                     "email": "b@example.com", "company_name": "Bluewave"})
+    bluewave = next(row["id"] for row in store.list_users() if row["username"] == "bluewave")
+    store.save_number({"number": "+13025550098", "inbound_extension": "101",
+                       "owner_user_id": meridian, "active": True})
+    store.save_number({"number": "+13025550011", "inbound_extension": "117",
+                       "owner_user_id": northwind, "active": True})
+    store.save_number({"number": "+13025550022", "owner_user_id": bluewave, "active": True})
+    # A row written before ownership was enforced: a northwind DID pointing at
+    # meridian's extension. It rings northwind's own line instead.
+    with store._connect() as db:
+        db.execute("UPDATE phone_numbers SET inbound_extension='101' WHERE number='+13025550011'")
+    # ...and the operator's platform-wide fallback points at northwind too.
+    store.set_settings({"inbound_fallback_extension": "117"})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    dialplan = sync.render_dialplan()
+
+    assert "exten => 13025550098,1,NoOp(Inbound DID 13025550098 owned by extension 101)" in dialplan
+    stale = dialplan.split("exten => 13025550011,1,")[1].split("\nexten")[0]
+    assert "owned by extension 117" in stale
+    assert "Stasis(engineerip,inbound,13025550011,101)" not in dialplan
+
+    # A number whose account has no reachable extension rings nobody: it never
+    # borrows another organisation's phone, not even through the platform-wide
+    # fallback that points at one.
+    unreachable = dialplan.split("exten => 13025550022,1,")[1].split("\nexten")[0]
+    assert "has no reachable extension" in unreachable and "Playback(ss-noservice)" in unreachable
+    assert "Stasis(engineerip,inbound,13025550022,117)" not in dialplan

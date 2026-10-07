@@ -1216,3 +1216,77 @@ def test_administrators_cannot_place_calls(tmp_path):
     response = admin.post("/admin/api/calls", json={"phone": "+13025550123", "extension": "101"})
     assert response.status_code == 403, response.json
     assert "do not place calls" in response.json["error"]
+
+
+def test_an_extension_number_is_never_taken_from_another_customer(tmp_path):
+    """An extension number is a customer's line: creating a new one on a number
+    another account holds is refused, so a mistyped number cannot move somebody
+    else's desk - and a request that forgets the owner keeps it instead of
+    dropping the line into the platform's dial plan."""
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, meridian = customer_client(app, "meridian")
+    northwind_client, northwind = customer_client(app, "northwind")
+    store.save_extension({"extension": "101", "sip_password": "meridian-secret", "active": True}, meridian)
+
+    # The administrator tries to give the same three-digit number to another
+    # customer: refused, with the account that holds it named.
+    taken = admin.post("/admin/api/extensions", json={
+        "extension": "101", "display_name": "Northwind sales", "owner_user_id": northwind,
+    })
+    assert taken.status_code == 400, taken.json
+    assert "Meridian" in taken.json["error"] and "101" in taken.json["error"], taken.json
+    assert store.get_extension_owner("101") == meridian
+    assert [row["extension"] for row in store.list_extensions(northwind)] == []
+
+    # The customer cannot take it either, and neither can a request that sends no
+    # owner at all: the owner on the row is kept.
+    response = northwind_client.post("/admin/api/extensions",
+                                     json={"extension": "101", "sip_password": "northwind-secret"})
+    assert response.status_code == 400, response.json
+    assert store.get_extension_owner("101") == meridian
+
+    ownerless = admin.post("/admin/api/extensions", json={"extension": "101", "display_name": "Renamed"})
+    assert ownerless.status_code == 200, ownerless.json
+    assert store.get_extension_owner("101") == meridian
+    assert next(row["display_name"] for row in store.list_extensions() if row["extension"] == "101") == "Renamed"
+
+    # Moving a live extension is a deliberate act: the console asks for it when
+    # the administrator edits that extension and changes its account, it is
+    # recorded, and the account that lost it is told.
+    moved = admin.post("/admin/api/extensions", json={
+        "extension": "101", "owner_user_id": northwind, "reassign": True,
+    })
+    assert moved.status_code == 200, moved.json
+    assert store.get_extension_owner("101") == northwind
+    actions = [row["action"] for row in store.list_activity(northwind)]
+    assert "extension.reassigned" in actions, actions
+    notices = store.list_notifications(meridian)
+    assert any("no longer in your dial plan" in row["message"] for row in notices), notices
+
+
+def test_a_did_is_refused_when_it_points_at_another_customers_extension(tmp_path):
+    """The engine checks the same rule as the dial plan: a number belongs to one
+    organisation, and a stale link to another's extension is a missed call, not a
+    crossed line."""
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, meridian = customer_client(app, "meridian")
+    _, northwind = customer_client(app, "northwind")
+    store.save_extension({"extension": "101", "sip_password": "meridian-secret", "active": True}, meridian)
+    store.save_extension({"extension": "117", "sip_password": "northwind-secret", "active": True}, northwind)
+    assign_number(store, northwind, "+13025550011")
+    # A row written before ownership was enforced, pointing northwind's DID at
+    # meridian's extension.
+    with store._connect() as db:
+        db.execute("UPDATE phone_numbers SET inbound_extension='101' WHERE number='+13025550011'")
+
+    service, asterisk = ring_engine(app)
+    service.handle_ari_event({
+        "type": "StasisStart", "args": ["inbound", "+13025550011", "101"],
+        "channel": {"id": "carrier-crossed", "state": "Up", "caller": {"number": "+919999999999"}},
+    })
+    assert service.store.all() == []           # no call was created
+    assert asterisk.legs == []                 # and nobody's phone rang
+    assert "carrier-crossed" in asterisk.hangups

@@ -1,8 +1,10 @@
 """Live proof against the running preview: every claim this batch makes, checked
 over HTTP the way a browser would."""
 import json
+import os
 import re
 import sys
+from pathlib import Path
 import urllib.error
 import urllib.request
 from http.cookiejar import CookieJar
@@ -120,6 +122,59 @@ check("a customer can add a device of their own", status == 200, f"{status} {str
 status, cust_state = customer.json("/admin/api/state")
 fresh = next((row for row in cust_state["extensions"] if row["extension"] == made), None)
 check("it gets SIP credentials automatically", bool(fresh) and bool(fresh.get("sip_username")), json.dumps(fresh)[:120] if fresh else "missing")
+
+# --- an extension number belongs to one customer, and only that customer's ---
+# --- phones can dial it -----------------------------------------------------
+status, console = admin.json("/admin/api/state")
+other_customer = next(c for c in console["customers"] if c["username"] != "meridian")
+mine = next(row for row in console["extensions"] if row["extension"] == devices[0])
+status, body = admin.json("/admin/api/extensions", "POST", {
+    "extension": devices[0], "display_name": "Taken", "owner_user_id": other_customer["id"],
+})
+check("an extension number cannot be taken from the customer who holds it",
+      status == 400 and "already belongs" in str(body), f"{status} {str(body)[:110]}")
+status, after = admin.json("/admin/api/state")
+still = next(row["owner_user_id"] for row in after["extensions"] if row["extension"] == devices[0])
+check("and its owner is unchanged", still == mine["owner_user_id"], f"{still} vs {mine['owner_user_id']}")
+
+# The preview renders the files Asterisk includes, so read the dial plan the
+# running app just wrote: each account gets its own context holding its own
+# extensions - from every number it owns - and nobody else's.
+dialplan_path = Path(os.environ.get("PREVIEW_DATA", "/tmp/eip-preview")) / "extensions.dynamic.conf"
+dialplan = dialplan_path.read_text() if dialplan_path.exists() else ""
+
+
+def context_block(name):
+    if f"\n[{name}]\n" not in dialplan:
+        return ""
+    return dialplan.split(f"\n[{name}]\n")[1].split("\n\n")[0]
+
+
+mine_context = context_block(f"from-internal-{mine['owner_user_id']}")
+theirs_context = context_block(f"from-internal-{other_customer['id']}")
+check("the customer's dial plan is its own context", bool(mine_context), dialplan_path.name)
+mine_all = [row["extension"] for row in after["extensions"] if row["owner_user_id"] == mine["owner_user_id"]]
+theirs_all = [row["extension"] for row in after["extensions"] if row["owner_user_id"] == other_customer["id"]]
+check("every extension of the account is dialable in it - from either number",
+      all(f"Dial(PJSIP/{extension},30)" in mine_context for extension in mine_all),
+      ", ".join(mine_all))
+check("the other customer's extensions are not in it",
+      all(f"exten => {extension},1" not in mine_context for extension in theirs_all),
+      ", ".join(theirs_all))
+check("and this customer's extensions are not in the other context",
+      all(f"exten => {extension},1" not in theirs_context for extension in mine_all),
+      ", ".join(mine_all))
+check("an unknown three-digit number says so instead of ringing somebody else",
+      "exten => _XXX,1" in mine_context and "Playback(ss-noservice)" in mine_context)
+own_numbers = [row for row in after["phone_numbers"] if row.get("owner_user_id") == mine["owner_user_id"]]
+check("each number rings an extension of the account that owns it",
+      all(f"Stasis(engineerip,inbound,{row['number'].lstrip('+')},{row['inbound_extension']})" in dialplan
+          for row in own_numbers if row.get("inbound_extension")),
+      json.dumps([(row["number"], row.get("inbound_extension")) for row in own_numbers])[:140])
+check("and no number routes to another account's extension",
+      all(f"Stasis(engineerip,inbound,{row['number'].lstrip('+')},{extension})" not in dialplan
+          for row in own_numbers for extension in theirs_all),
+      json.dumps(theirs_all))
 flows = [row for row in cust_state["routing_flows"] if row["target"] == made]
 check("and a default call flow of its own", bool(flows), ",".join(row["target"] for row in cust_state["routing_flows"]))
 if flows:

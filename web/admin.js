@@ -2199,7 +2199,7 @@ const templates = {
       .map(x => `<option value="${x.id}" ${item?.owner_user_id === x.id ? 'selected' : ''}>${esc(x.username)} — ${esc(x.email)}</option>`).join('')}</select>
       <small>The customer will be able to manage this extension.</small></label>` : ''}
       <div class="field-row">
-        <label class="field">Extension<input name="extension" inputmode="numeric" maxlength="3" ${item ? 'readonly' : ''} placeholder="102" required value="${esc(item?.extension || '')}"></label>
+        <label class="field">Extension<input name="extension" inputmode="numeric" maxlength="3" ${item ? 'readonly' : ''} placeholder="102" required value="${esc(item?.extension || '')}"><small id="extension-note" class="warn" hidden></small></label>
         <label class="field">Employee / display name<input name="display_name" maxlength="120" placeholder="Sales desk" value="${esc(item?.display_name || '')}"></label>
       </div>
       <div class="field-row">
@@ -2396,12 +2396,38 @@ function openModal(type, item = null) {
     extension?.addEventListener('change', update);
     update();
   }
-  if (type === 'extension' && !editing) {
+  if (type === 'extension') {
     const number = $('modal-fields').querySelector('[name=extension]');
     const username = $('modal-fields').querySelector('[name=sip_username]');
-    const mirror = () => { username.value = number.value; };
-    number.addEventListener('input', mirror);
-    mirror();
+    if (!editing) {
+      const mirror = () => { username.value = number.value; };
+      number.addEventListener('input', mirror);
+      mirror();
+    }
+    // Extension numbers are unique platform-wide, so the dialog says who holds
+    // the number being typed instead of letting the save surprise the operator.
+    const owner = $('modal-fields').querySelector('[name=owner_user_id]');
+    const note = $('modal-fields').querySelector('#extension-note');
+    const accountName = id => {
+      const account = state.users.find(u => String(u.id) === String(id));
+      return account?.company_name || account?.username || 'the platform';
+    };
+    const describe = () => {
+      if (!note) return;
+      const held = state.extensions.find(x => x.extension === number.value.trim());
+      const chosenOwner = String(owner?.value ?? '');
+      if (!held || String(held.owner_user_id ?? '') === chosenOwner) { note.hidden = true; note.textContent = ''; return; }
+      note.hidden = false;
+      note.textContent = editing
+        // Editing this very extension and its account together is how a live
+        // number is moved, and the API is asked to do exactly that.
+        ? `Saving moves extension ${held.extension} from ${accountName(held.owner_user_id)} to ${accountName(chosenOwner)}.`
+        : `Extension ${held.extension} already belongs to ${accountName(held.owner_user_id)}. `
+          + 'An extension number is never taken from another account — pick a free one.';
+    };
+    number?.addEventListener('input', describe);
+    owner?.addEventListener('change', describe);
+    describe();
   }
   if (type === 'number') {
     const owner = $('modal-fields').querySelector('[name=owner_user_id]');
@@ -2476,6 +2502,12 @@ async function saveModal(event) {
   if (modalType === 'webhook') data.events = [...event.target.querySelector('[name=events]').selectedOptions].map(x => x.value).join(',');
   if (['webhook', 'user', 'group', 'apikey'].includes(modalType) && editing) data.id = editing.id;
   if (modalType === 'sipaccount' && editing) data.id = editing.id;
+  // Moving an extension number changes who answers it for every phone that
+  // already dials it, so the move must be the administrator's deliberate edit of
+  // that extension - never a side effect of creating a new line on a number
+  // another account holds.
+  if (modalType === 'extension' && editing && state.is_admin
+      && String(editing.owner_user_id ?? '') !== String(data.owner_user_id ?? '')) data.reassign = true;
   if (modalType === 'group') data.members = [...event.target.querySelector('[name=members]').selectedOptions].map(x => x.value);
   if (modalType === 'group' && state.is_admin && !data.owner_user_id) data.owner_user_id = String(routingOwner() || '');
   try {
@@ -3555,7 +3587,15 @@ if (dragSurface) {
   });
 }
 wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
-wire('route-number', 'change', () => { renderFlow(flowKey('number', $('route-number').value)); renderGroups(); });
+wire('route-number', 'change', () => {
+  const chosen = $('route-number').value;
+  // This picker and the page header's are the same choice, so switching here
+  // re-scopes the whole page - the extensions below, the flow and the header -
+  // instead of being overridden by the header on the next render.
+  if (state.is_admin) renderFlow(flowKey('number', chosen));
+  else applyCustomerNumber(chosen);
+  renderGroups();
+});
 wire('route-extension', 'change', () => { renderFlow(flowKey('extension', $('route-extension').value)); renderGroups(); });
 wire('route-owner', 'change', () => { renderRouteTargets(); renderFlow(); renderGroups(); });
 wire('save-route', 'click', async () => {

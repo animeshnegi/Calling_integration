@@ -274,7 +274,26 @@ class TelephonyService:
         return bool(self._ivr_sessions_map())
 
     def start_inbound(self, channel: dict[str, Any], did: str, extension: str) -> Call | None:
-        if not self.settings_store or not any(row["extension"] == extension and row["active"] for row in self.settings_store.list_extensions()):
+        current = next(
+            (row for row in (self.settings_store.list_extensions() if self.settings_store else []) if row["extension"] == extension and row["active"]),
+            None,
+        )
+        if current is None:
+            self.asterisk.hangup(str(channel.get("id") or ""))
+            return None
+        # The DID decides which organisation this call belongs to, and it may only
+        # ring that organisation's phones. A stale link pointing a number at
+        # another customer's extension is refused here as well as in the dialplan,
+        # so a mis-routed DID is a missed call and never a crossed line.
+        number = next(
+            (row for row in (self.settings_store.list_numbers() if self.settings_store else [])
+             if str(row["number"]).lstrip("+") == str(did).lstrip("+")),
+            None,
+        )
+        if (
+            number and number.get("owner_user_id") is not None and current.get("owner_user_id") is not None
+            and int(number["owner_user_id"]) != int(current["owner_user_id"])
+        ):
             self.asterisk.hangup(str(channel.get("id") or ""))
             return None
         channel_id = str(channel.get("id") or "")

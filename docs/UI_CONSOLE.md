@@ -523,6 +523,9 @@ pages are linkable.
   board answers, call defaults belong to the customer (administrator `400`/`403`), the
   administrator cannot create keys or webhooks but can edit a customer's flows and
   build their groups, a spoofed owner cannot move a flow, and recording is per device.
+* `PYTHONPATH=. .venv/bin/python tools/dialcheck.py` — renders the dial plan and PJSIP
+  endpoints for a two-number customer with 35 extensions and shows what each
+  organisation can dial (see [`NUMBER_OWNERSHIP.md`](NUMBER_OWNERSHIP.md)).
 * `node tools/phonecheck.js` — boots the real softphone (`/phone`) in jsdom with a stub
   JsSIP in place of the CDN build and a fake SIP session in place of the WebRTC stack, and
   walks what the page promises: sign-in and auto-reconnect, the keypad and paste, an
