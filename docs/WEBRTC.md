@@ -35,3 +35,20 @@ For remote clients behind NAT, configure STUN/TURN appropriate to your deploymen
 ## Browser limitations
 
 Microphone permission, HTTPS, firewall rules, NAT behavior, and SIP provider compatibility cannot be validated from a Git-only environment. These must be tested on the actual deployed hostname/network with a real SIP account.
+
+
+## EngineerIP Phone PWA
+
+The `feature/softphone-pwa` branch adds `/phone`, a responsive phone-style PWA using JsSIP. It provides a keypad, direct paste, recent calls, contacts, a Messages area, active-call controls, and an install button when the browser exposes the PWA install prompt.
+
+The browser softphone connects directly to Asterisk over SIP WebSocket and WebRTC media. The Flask API is not in the audio path.
+
+Asterisk renders a `transport-wss` PJSIP transport and makes the generated prefixed SIP username alias (for example `KUDGTE_101`) WebRTC-capable while leaving the canonical UDP/TCP extension endpoint unchanged for existing Zoiper and hardware phones. This follows Asterisk's WebRTC configuration model: a WSS transport plus an endpoint with `webrtc=yes`, which enables the required DTLS-SRTP, ICE, RTCP-mux and AVPF settings. See the official Asterisk WebRTC guidance.
+
+Open:
+
+```text
+https://<your-service-host>/phone
+```
+
+For production, serve the page through trusted HTTPS and expose Asterisk WSS through the production reverse proxy. Do not place the ARI master credential or provider credentials in browser JavaScript.
