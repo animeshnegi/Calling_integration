@@ -206,7 +206,8 @@ class TelephonyConfigSync:
                 # hardware phones, but make the alias WebRTC-capable for the
                 # browser. Both endpoints use the same auth and AOR contacts.
                 browser_endpoint_body = [
-                    line for line in endpoint_body if not line.startswith("transport=")
+                    line for line in endpoint_body
+                    if not line.startswith(("transport=", "allow="))
                 ]
                 browser_endpoint_body = [
                     *browser_endpoint_body,
