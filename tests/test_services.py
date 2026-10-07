@@ -13,6 +13,7 @@ class DummyAsterisk:
         self.played = []
         self.stopped_playbacks = []
         self.inbound_legs = []
+        self.inbound_endpoints = []
         self.customer_legs = []
         self.local_legs = []
 
@@ -26,13 +27,15 @@ class DummyAsterisk:
     def stop_playback(self, playback_id):
         self.stopped_playbacks.append(playback_id)
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None):
         leg = f"{call_id}-leg-{extension}-{index}"
         self.inbound_legs.append((call_id, extension))
+        self.inbound_endpoints.append(endpoint)
         return leg
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata, endpoint=None):
         self.created_call = call_id
+        self.outbound_endpoint = endpoint
         return call_id
 
     def create_customer_leg(self, *args):
@@ -547,3 +550,99 @@ def test_a_stale_link_on_an_own_number_rings_the_accounts_own_extension(tmp_path
 
     assert asterisk.local_legs == [("stale-1", "105")]
     assert asterisk.customer_legs == []
+
+
+def test_the_panel_calls_out_on_the_accounts_line_when_the_extension_has_none(tmp_path):
+    """The console/API path for the same case: an extension added later.
+
+    It has no number of its own, so the account's main line is presented - the
+    panel does not refuse the call, and it does not borrow another account's
+    number either.
+    """
+    from app.admin import SettingsStore
+
+    service, asterisk, _ = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "single-line", "Single Line")
+    other = make_customer(settings, "other-line", "Other Line")
+    settings.save_extension({"extension": "101", "active": True}, owner)
+    settings.save_extension({"extension": "102", "active": True}, owner)
+    settings.save_extension({"extension": "201", "active": True}, other)
+    settings.save_number({"number": "+13022661626", "provider": "TestCarrier", "inbound_extension": "101",
+                          "owner_user_id": owner, "default_outbound": True, "active": True})
+    settings.save_number({"number": "+13025550011", "provider": "TestCarrier", "inbound_extension": "201",
+                          "owner_user_id": other, "active": True})
+
+    call = service.start_outbound(phone="+13025559999", extension="102")
+
+    assert call.caller_id_number == "+13022661626"
+    assert asterisk.created_call == call.call_id
+    # Another account's number is never presented, requested or not.
+    assert settings.get_outbound_number("102", "+13025550011") is None
+
+
+def test_endpoint_states_are_read_once_per_few_seconds_and_never_guessed(tmp_path):
+    """Console refreshes must not hammer Asterisk, and must not invent states.
+
+    A phone that is not registered is the first thing to check when a call does
+    not ring, so the answer is cached briefly - and when Asterisk cannot be
+    asked, the console is told nothing rather than "nothing is registered".
+    """
+    service, _, _ = make_service(tmp_path)
+    calls = []
+
+    class Endpoints:
+        def list_endpoints(self):
+            calls.append(1)
+            return [
+                {"technology": "pjsip", "resource": "101", "state": "online"},
+                {"technology": "chan_sip", "resource": "999", "state": "online"},
+            ]
+
+    service.asterisk = Endpoints()
+    assert service.endpoint_states() == {"101": "online"}
+    assert service.endpoint_states() == {"101": "online"}
+    assert len(calls) == 1                       # served from the cache
+
+    service._endpoint_states = (0.0, {})         # ...until the window passes
+    assert service.endpoint_states() == {"101": "online"}
+    assert len(calls) == 2
+
+    class Broken:
+        def list_endpoints(self):
+            raise RuntimeError("ARI down")
+
+    service._endpoint_states = (0.0, {})
+    service.asterisk = Broken()
+    assert service.endpoint_states() == {}
+
+
+def test_an_extension_answering_in_the_browser_is_rung_on_its_webRTC_endpoint(tmp_path):
+    """The panel follows the same rule the dial plan does.
+
+    Media is decided by the endpoint a call is placed towards, so an extension
+    marked as answering in the browser is rung on its WebRTC endpoint - both
+    when the panel dials out for it and when a caller rings it.
+    """
+    from app.admin import SettingsStore
+
+    service, asterisk, _ = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "browser-co", "Browser Co")
+    settings.save_extension({"extension": "101", "active": True, "webrtc_enabled": True}, owner)
+    settings.save_extension({"extension": "102", "active": True}, owner)
+    settings.save_number({"number": "+13025550077", "provider": "TestCarrier", "inbound_extension": "101",
+                          "owner_user_id": owner, "default_outbound": True, "active": True})
+    web = next(row["sip_username"] for row in settings.list_extensions() if row["extension"] == "101")
+
+    assert service.dial_endpoint("101") == f"PJSIP/{web}"
+    assert service.dial_endpoint("102") == "PJSIP/102"
+
+    service.start_outbound(phone="+13025559999", extension="101")
+    assert asterisk.outbound_endpoint == f"PJSIP/{web}"
+
+    asterisk.inbound_endpoints.clear()
+    service.start_inbound({"id": "channel-browser", "caller": {"number": "+13025550000"}}, "+13025550077", "101")
+    assert asterisk.inbound_endpoints == [f"PJSIP/{web}"]

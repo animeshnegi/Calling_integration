@@ -59,14 +59,20 @@ class AsteriskClient:
         phone: str,
         provider_endpoint: str,
         metadata: dict[str, Any] | None = None,
+        endpoint: str | None = None,
     ) -> str:
-        """Ring the employee first; the customer leg is created after answer."""
+        """Ring the employee first; the customer leg is created after answer.
+
+        `endpoint` overrides the channel to ring: media is negotiated by the
+        endpoint a call is placed towards, so an extension that answers in the
+        browser is rung on its WebRTC endpoint instead of its plain one.
+        """
         employee_channel = f"{call_id}-employee"
         self._request(
             "POST",
             "/channels",
             params={
-                "endpoint": f"PJSIP/{extension}",
+                "endpoint": endpoint or f"PJSIP/{extension}",
                 "app": self.app,
                 "appArgs": f"employee,{call_id},{provider_endpoint},{phone}",
                 "channelId": employee_channel,
@@ -76,17 +82,22 @@ class AsteriskClient:
         )
         return call_id
 
-    def create_inbound_employee_leg(self, call_id: str, extension: str, customer_channel_id: str, index: int = 0) -> str:
+    def create_inbound_employee_leg(
+        self, call_id: str, extension: str, customer_channel_id: str, index: int = 0, endpoint: str | None = None,
+    ) -> str:
         """Ring one device for an inbound call.
 
         A main line rings several devices at once, so each leg gets its own
         channel id: the first keeps the historical name and the rest are numbered.
+        `endpoint` overrides the channel to ring, the same way it does for an
+        outbound call - a device signed in on the browser answers on the WebRTC
+        endpoint only.
         """
         employee_channel = f"{call_id}-employee" if int(index) <= 0 else f"{call_id}-employee-{int(index)}"
         self._request(
             "POST", "/channels",
             params={
-                "endpoint": f"PJSIP/{extension}", "app": self.app,
+                "endpoint": endpoint or f"PJSIP/{extension}", "app": self.app,
                 "appArgs": f"inbound_employee,{call_id}", "channelId": employee_channel,
                 "originator": customer_channel_id, "timeout": 30,
             },

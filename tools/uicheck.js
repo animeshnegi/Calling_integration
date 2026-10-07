@@ -1225,6 +1225,65 @@ async function main() {
     check('a customer refresh does not rebuild the visited list either', customerChurn === 0, `${customerChurn} mutations`);
   }
 
+  /* ---------------------------------------------------- extension with no line */
+  section('An extension added later still calls');
+  {
+    // The field report: 101 answers +13025550001, then 102 is created from the
+    // console and answers nothing inbound. 102 calls out as the account's line,
+    // so its card must say that - not "None linked yet", which reads as "this
+    // extension cannot call". Its phone's registration comes from the same poll
+    // the device boxes use.
+    const unlinked = {
+      ...customerState,
+      phone_numbers: customerState.phone_numbers.map(row => (
+        String(row.inbound_extension) === '102' ? { ...row, inbound_extension: '' } : row
+      )),
+      sip_accounts: (customerState.sip_accounts || []).filter(row => String(row.extension) !== '102'),
+    };
+    const { w, d, errors } = boot({
+      isAdmin: false, state: unlinked,
+      routes: { '/admin/api/device-status': { devices: [], extensions: [{ extension: '102', registration_status: 'online' }] } },
+    });
+    w.eval("showPage('sipaccounts')");
+    await settle(320);
+    const cards = () => [...d.querySelectorAll('#extension-credential-list .ext-card')];
+    const card = () => cards().find(node => /102/.test(node.querySelector('h3')?.textContent || '')) || cards()[0];
+    const text = () => card().textContent.replace(/\s+/g, ' ');
+    check('the customer console renders the extension card without errors', errors.length === 0 && !!card(), errors[0]);
+    check('an extension with no line of its own says what it calls out as',
+      /Numbers\s*Calls out as \+13025550001/.test(text()), text().slice(0, 240));
+    check('and does not read as if it could not call at all',
+      !/None linked yet/.test(text()), text().slice(0, 240));
+    check('nobody signed in yet is said in plain words',
+      /Sign in as QWERTY_102/.test(text()) && !/No device linked yet/.test(text()), text().slice(0, 240));
+
+    await w.eval('refreshDeviceStatus()');
+    await settle(240);
+    // The device-status poll carries each extension's own registration state,
+    // which is what tells a customer their phone really is signed in.
+    check('the registration poll reaches the extension card',
+      /Phone registered/.test(text()), text().slice(0, 240));
+
+    // An extension that answers in the browser is dialled on its WebRTC
+    // endpoint, and the card says so rather than leaving it to the credentials.
+    const browserState = {
+      ...customerState,
+      extensions: customerState.extensions.map(row => (
+        row.extension === '102' ? { ...row, webrtc_enabled: 1 } : row
+      )),
+    };
+    const web = boot({ isAdmin: false, state: browserState });
+    w.eval("showPage('sipaccounts')");
+    await settle(320);
+    const webCard = [...web.d.querySelectorAll('#extension-credential-list .ext-card')]
+      .find(node => /102/.test(node.querySelector('h3')?.textContent || ''));
+    check('an extension answering in the browser is marked as one',
+      !!webCard && /Browser phone/.test(webCard.textContent), webCard?.textContent.replace(/\s+/g, ' ').slice(0, 200));
+    check('and the extensions that do not are not',
+      ![...web.d.querySelectorAll('#extension-credential-list .ext-card')]
+        .some(node => /101/.test(node.querySelector('h3')?.textContent || '') && /Browser phone/.test(node.textContent)));
+  }
+
   output += `\n${failures.length ? `${failures.length} CHECK(S) FAILED\n${failures.map(f => `  - ${f}`).join('\n')}\n` : 'ALL CHECKS PASSED'}\n`;
   output += `${passed} checks passed\n`;
   process.stdout.write(output);

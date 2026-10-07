@@ -34,6 +34,38 @@ _LOGIN_WINDOW = 15 * 60
 _LOGIN_LIMIT = 8
 
 
+def device_registration(account: dict, live: dict[str, str]) -> str:
+    """Is this device account signed in?
+
+    A phone registers under one of three names, depending on how it was set up:
+    the extension it answers, the SIP username it authenticates as, or the
+    generated device identity.
+    """
+    username = str(account.get("sip_username") or "")
+    safe_username = re.sub(r"[^A-Za-z0-9_-]", "-", username).strip("-")[:64]
+    for resource in (str(account.get("extension") or ""), username, f"device-{safe_username}"):
+        if resource and resource in live:
+            return "online" if live[resource] in {"online", "available"} else "offline"
+    return str(account.get("registration_status") or "offline")
+
+
+def extension_registration(extension: dict, live: dict[str, str], accounts: list[dict]) -> str:
+    """Is any phone signed in as this extension, or as a device that answers it?"""
+    names = [str(extension.get("extension") or ""), str(extension.get("sip_username") or "")]
+    names.extend(
+        str(account.get("sip_username") or "") for account in accounts
+        if str(account.get("extension") or "") == str(extension.get("extension") or "")
+    )
+    for name in names:
+        if name and name in live:
+            return "online" if live[name] in {"online", "available"} else "offline"
+    # Asterisk answered and none of this extension's endpoints is signed in:
+    # that is a phone that is not registered, which is the usual reason a call
+    # does not ring. Asterisk not answering at all is a different case, and the
+    # callers of this function leave the field out entirely for it.
+    return "offline"
+
+
 def same_account(left: Any, right: Any) -> bool:
     """Do these two owner_user_id values name the same account?
 
@@ -839,11 +871,39 @@ class SettingsStore:
         return number
 
     def get_outbound_number(self, extension: str, requested: str | None = None):
+        """The line an extension calls out on: its own number, or the account's main one.
+
+        A number belongs to the account, so an extension without a line of its
+        own still calls out as the company - the number marked as the account
+        default, or its oldest active number. That is what makes an extension the
+        platform provisioned on its own (no DID) able to place calls at all, and
+        it is the usual PBX behaviour: every desk presents the main line unless
+        it has a direct one. A requested number is still validated: it has to be
+        active and one of *this account's* lines, so nothing can ever present
+        another customer's number - and a number another account holds stays
+        unpresentable even when the caller asks for it by name.
+        """
         with self._connect() as db:
             if requested:
-                row = db.execute("SELECT number,provider FROM phone_numbers WHERE number=? AND inbound_extension=? AND active=1", (requested, extension)).fetchone()
+                # A number of this same account may be presented by any of its
+                # extensions, but never another account's.
+                row = db.execute(
+                    """SELECT n.number,n.provider FROM phone_numbers n
+                    JOIN extensions e ON e.extension=?
+                    WHERE n.number=? AND n.active=1
+                      AND (n.inbound_extension=? OR (e.owner_user_id IS NOT NULL AND n.owner_user_id=e.owner_user_id))""",
+                    (extension, requested, extension),
+                ).fetchone()
             else:
                 row = db.execute("SELECT number,provider FROM phone_numbers WHERE inbound_extension=? AND active=1 ORDER BY default_outbound DESC,id LIMIT 1", (extension,)).fetchone()
+                if row is None:
+                    row = db.execute(
+                        """SELECT n.number,n.provider FROM phone_numbers n
+                        JOIN extensions e ON e.extension=?
+                        WHERE n.active=1 AND e.owner_user_id IS NOT NULL AND n.owner_user_id=e.owner_user_id
+                        ORDER BY n.default_outbound DESC,n.id LIMIT 1""",
+                        (extension,),
+                    ).fetchone()
         return dict(row) if row else None
 
     def set_default_outbound_number(self, extension: str, number: str):
@@ -2500,6 +2560,15 @@ def register_admin(app, config, on_telephony_change=None):
                 number.pop("provider", None)
         all_users = store.list_users() if is_admin else []
         all_sip = store.list_sip_accounts(None if is_admin else user_id)
+        # Whether a phone is signed in right now. A phone that is not registered
+        # is the first thing to check when a call does not go through, so every
+        # extension and device carries it.
+        endpoint_states = current_app.extensions["telephony_service"].endpoint_states()
+        if endpoint_states:
+            for row in all_sip:
+                row["registration_status"] = device_registration(row, endpoint_states)
+            for row in extensions:
+                row["registration_status"] = extension_registration(row, endpoint_states, all_sip)
         customer_metrics = []
         if is_admin:
             all_numbers = store.list_numbers()
@@ -3212,24 +3281,22 @@ def register_admin(app, config, on_telephony_change=None):
         # Use the same session-derived identity as the other endpoints: an
         # administrator sees every device, a customer only their own.
         is_admin = session.get("admin_role") == "admin"
-        accounts = store.list_sip_accounts(None if is_admin else int(session["admin_user_id"]))
-        try:
-            endpoints = current_app.extensions["telephony_service"].asterisk.list_endpoints()
-            live = {
-                str(row.get("resource") or ""): str(row.get("state") or "offline").lower()
-                for row in endpoints if str(row.get("technology") or "").lower() == "pjsip"
-            }
-        except Exception:
-            live = {}
-        def registration(row):
-            username = str(row["sip_username"])
-            safe_username = re.sub(r"[^A-Za-z0-9_-]", "-", username).strip("-")[:64]
-            for resource in (str(row.get("extension") or ""), username, f"device-{safe_username}"):
-                if resource and resource in live:
-                    return "online" if live[resource] in {"online", "available"} else "offline"
-            return row["registration_status"]
-
-        return jsonify({"devices": [{"id": row["id"], "registration_status": registration(row)} for row in accounts]})
+        owner = None if is_admin else int(session["admin_user_id"])
+        accounts = store.list_sip_accounts(owner)
+        live = current_app.extensions["telephony_service"].endpoint_states()
+        extensions = store.list_extensions(owner)
+        return jsonify({
+            "devices": [
+                {"id": row["id"], "registration_status": device_registration(row, live) if live else row["registration_status"]}
+                for row in accounts
+            ],
+            # The extensions a customer actually signs in with - most phones
+            # register as the extension itself rather than as a device account.
+            "extensions": [
+                {"extension": row["extension"], "registration_status": extension_registration(row, live, accounts)}
+                for row in extensions if live
+            ],
+        })
 
     @app.get("/admin/api/sip-accounts/<int:account_id>/credentials")
     @login_required

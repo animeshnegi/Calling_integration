@@ -190,10 +190,16 @@ def test_recording_defaults_to_allowed_globally_and_off_per_extension(tmp_path: 
     assert reopened.recording_platform_enabled() is False
 
 def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
-    """The browser signs in with the same prefixed SIP username as the desk
-    phone, so the alias endpoint must carry the WSS transport and Asterisk's
-    WebRTC switch; the canonical extension endpoint stays a plain UDP/TCP
-    endpoint for Zoiper and hardware phones."""
+    """Both endpoints of an extension have to be ready for a browser.
+
+    The browser signs in with the extension's generated SIP username, so the
+    endpoint named after that username carries the WSS transport, Asterisk's
+    WebRTC switch and mandatory encryption. Calls are placed *towards* an
+    extension through the canonical endpoint - which is therefore
+    WebRTC-capable too, with media_encryption_optimistic so a hardware phone or
+    softphone that only speaks plain RTP still connects. Without that, a call to
+    a phone signed in on the browser rings and then has no audio, because a
+    browser cannot accept an unencrypted media offer."""
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
     username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
@@ -213,7 +219,11 @@ def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
     assert "transport=transport-udp" not in alias
     canonical = text.split("[101]\ntype=endpoint")[1].split("\n\n")[0]
     assert "transport=transport-udp" in canonical
+    # The endpoint the dial plan rings by default stays plain RTP: a WebRTC
+    # offer is refused by a hardware phone, so the two media modes live on two
+    # endpoints and an extension picks between them (see the dial-plan test).
     assert "webrtc=yes" not in canonical
+    assert "media_encryption_optimistic" not in canonical
 
     # The rendered transports file is what Asterisk actually includes.
     sync.apply()
@@ -481,3 +491,105 @@ def test_a_number_that_cannot_ring_one_of_its_accounts_extensions_is_external(tm
     # fallback, exactly as an inbound call on it would - and 201 stays absent.
     assert "local number 13025550033 rings extension 105" in meridian_context
     assert "exten => 201,1" not in meridian_context
+
+
+def test_an_extension_without_a_number_of_its_own_calls_out_as_the_account(tmp_path: Path):
+    """The field case: one number, and extensions added afterwards.
+
+    101 answers +13022661626. 102 was created from the console and has no number
+    of its own, so when someone dials out from 102 the account's main line is
+    presented and the carrier's trunk is used - rather than the call being
+    refused because "no number is linked yet". An extension of an account with
+    no number at all is still refused, so nothing is ever presented that the
+    account does not own.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "Carrier", "server": "sip.example.com", "username": "user", "password": "secret",
+        "allowed_ips": "198.51.100.10/32", "codecs": "ulaw,alaw",
+    })
+    for username in ("single-line", "no-numbers"):
+        store.save_user({"username": username, "password": "customer-password-1", "role": "user",
+                         "email": f"{username[0]}@example.com", "company_name": username.title()})
+    owner = next(row["id"] for row in store.list_users() if row["username"] == "single-line")
+    bare = next(row["id"] for row in store.list_users() if row["username"] == "no-numbers")
+    store.save_extension({"extension": "101", "active": True}, owner)
+    store.save_extension({"extension": "102", "active": True}, owner)
+    store.save_extension({"extension": "201", "active": True}, bare)
+    store.save_number({"number": "+13022661626", "provider": "Carrier", "inbound_extension": "101",
+                       "owner_user_id": owner, "default_outbound": True, "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    pjsip = sync.render_pjsip()
+    trunk = sync._id("provider", "Carrier")
+
+    def endpoint(extension: str) -> str:
+        return pjsip.split(f"[{extension}]\ntype=endpoint")[1].split("\n\n")[0]
+
+    assert "set_var=OUTBOUND_CID=+13022661626" in endpoint("101")
+    # 102 has no line of its own: it calls out as the account's main line.
+    assert "set_var=OUTBOUND_CID=+13022661626" in endpoint("102")
+    assert f"set_var=OUTBOUND_TRUNK={trunk}" in endpoint("102")
+    # An account with no numbers has nothing to present.
+    assert "set_var=OUTBOUND_CID=\n" in endpoint("201")
+    assert "set_var=OUTBOUND_TRUNK=\n" in endpoint("201")
+
+    # The store agrees, and it never lends another account's number.
+    assert store.get_outbound_number("102")["number"] == "+13022661626"
+    assert store.get_outbound_number("102", "+13022661626")["number"] == "+13022661626"
+    assert store.get_outbound_number("201") is None
+    assert store.get_outbound_number("201", "+13022661626") is None
+
+
+def test_dialling_an_extension_nobody_is_signed_in_as_says_so(tmp_path: Path):
+    """A failed Dial leaves silence behind, which reads as "calling is broken".
+
+    An extension with no registered phone now answers with "not in service"
+    instead; an extension with voicemail still gets its voicemail, which is the
+    better answer when it has one.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "active": True})
+    store.save_extension({"extension": "102", "active": True, "voicemail_enabled": True, "voicemail_pin": "1234"})
+    dialplan = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_dialplan()
+
+    reachable = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
+    assert "Dial(PJSIP/101,30)" in reachable
+    assert 'ExecIf($["${DIALSTATUS}" = "CHANUNAVAIL"]?Playback(ss-noservice))' in reachable
+    assert "VoiceMail(101@engineerip,u)" not in reachable
+
+    voicemail = dialplan.split("exten => 102,1,")[1].split("\nexten")[0]
+    assert "VoiceMail(102@engineerip,u)" in voicemail
+    assert "CHANUNAVAIL" not in voicemail
+
+
+def test_an_extension_that_answers_in_the_browser_is_dialled_on_its_webRTC_endpoint(tmp_path: Path):
+    """Media is decided by the endpoint a call is placed towards.
+
+    A browser cannot answer the plain endpoint's RTP offer (no audio at all),
+    and a hardware phone refuses the WebRTC endpoint's DTLS-SRTP offer. So the
+    extension an operator marked as answering in the browser is dialled on its
+    WebRTC endpoint - and every other extension keeps the plain one, which is
+    what the credentials a customer is given are written for.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_password": "secret", "webrtc_enabled": True, "active": True})
+    store.save_extension({"extension": "102", "sip_password": "secret", "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    # The platform mints the SIP username an extension signs in with; that name
+    # is the WebRTC endpoint, so the test reads it back rather than assuming it.
+    web_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+    desk_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "102")
+    assert web_username != desk_username
+
+    dialplan = sync.render_dialplan()
+    browser = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
+    assert f"Dial(PJSIP/{web_username},30)" in browser
+    assert "Dial(PJSIP/101,30)" not in browser
+    desk = dialplan.split("exten => 102,1,")[1].split("\nexten")[0]
+    assert "Dial(PJSIP/102,30)" in desk
+    assert f"PJSIP/{desk_username}" not in desk
+
+    # The WebRTC settings really are on the endpoint that is now dialled.
+    endpoint = sync.render_pjsip().split(f"[{web_username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-wss" in endpoint
+    assert "webrtc=yes" in endpoint

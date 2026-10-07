@@ -27,7 +27,7 @@ class FakeAsterisk:
     def health(self):
         return {"system": "Asterisk Test"}
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
         return call_id
 
     def hangup(self, channel_id):
@@ -570,7 +570,7 @@ class RingingAsterisk(FakeAsterisk):
     def start_bridge_recording(self, *args, **kwargs):
         return None
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None):
         leg = f"{call_id}-employee" if index == 0 else f"{call_id}-employee-{index}"
         self.legs.append((leg, extension))
         self.live.append(leg)

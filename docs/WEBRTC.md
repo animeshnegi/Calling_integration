@@ -45,6 +45,34 @@ The browser softphone connects directly to Asterisk over SIP WebSocket and WebRT
 
 Asterisk renders a `transport-wss` PJSIP transport and makes the generated prefixed SIP username alias (for example `KUDGTE_101`) WebRTC-capable while leaving the canonical UDP/TCP extension endpoint unchanged for existing Zoiper and hardware phones. This follows Asterisk's WebRTC configuration model: a WSS transport plus an endpoint with `webrtc=yes`, which enables the required DTLS-SRTP, ICE, RTCP-mux and AVPF settings. See the official Asterisk WebRTC guidance.
 
+## Answering in the browser
+
+The two endpoints hold two media modes, and the endpoint a call is placed
+towards is what decides the media it is set up with - so a browser and a
+hardware phone cannot share one:
+
+| Device | Endpoint | Media |
+| --- | --- | --- |
+| Hardware phone, Zoiper, desk phone | `PJSIP/<extension>` (UDP/TCP) | plain RTP, G.722 first |
+| Browser PWA | `PJSIP/<generated username>` (WSS, `webrtc=yes`) | DTLS-SRTP, ICE, RTCP-mux |
+
+A browser refuses an unencrypted RTP offer, and a hardware phone refuses a
+DTLS-SRTP offer (`UDP/TLS/RTP/SAVPF`). So calls are dialled towards the endpoint
+that fits the device that answers them:
+
+* An extension ticked **Answers in the browser (WebRTC)** is dialled on its
+  WebRTC endpoint - dialling extension, ringing a group, an IVR selection, a
+  call flow and the console's click-to-call all follow it. The extension card
+  then shows a *Browser phone* tag.
+* Every other extension is dialled on its plain endpoint, which is what the
+  credentials in the sheet are written for.
+* Anything else - a customer calling another customer's number, or an outside
+  caller - arrives from the carrier and the number's own call flow decides.
+
+Give a browser extension its own extension number rather than sharing one with a
+desk phone: the switch belongs to the extension, so a plain phone registered on
+a WebRTC-enabled extension is offered media it cannot accept.
+
 Open:
 
 ```text

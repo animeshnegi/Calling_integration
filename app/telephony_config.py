@@ -246,6 +246,11 @@ class TelephonyConfigSync:
             if username != extension:
                 aors.append(username)
                 alias_aor = [f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", ""]
+            # The endpoint the dial plan rings by default: plain RTP, so the
+            # hardware phones and softphones the credentials are shared with can
+            # answer it. A browser cannot use this media at all, which is why an
+            # extension that answers in the browser is dialled on its WebRTC
+            # endpoint instead - see `web_endpoints` in render_dialplan.
             endpoint_body = [
                 f"context={context}", "disallow=all", f"allow={self.INTERNAL_CODECS}", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
@@ -258,8 +263,10 @@ class TelephonyConfigSync:
             if username != extension:
                 # The generated SIP username is already an AOR/endpoint alias.
                 # Keep the normal UDP/TCP endpoint untouched for Zoiper and
-                # hardware phones, but make the alias WebRTC-capable for the
-                # browser. Both endpoints use the same auth and AOR contacts.
+                # hardware phones, and make the alias WebRTC-capable for the
+                # browser. Both endpoints use the same auth and AOR contacts, so
+                # a phone signed in on the browser is reached whichever of the
+                # two is dialled - but only this one carries the WebRTC media.
                 browser_endpoint_body = [
                     line for line in endpoint_body
                     if not line.startswith(("transport=", "allow="))
@@ -446,11 +453,37 @@ class TelephonyConfigSync:
                     return candidate
             return ""
 
+        # An extension that answers in the browser (WebRTC enabled) has to be
+        # dialled on its WebRTC endpoint: media is negotiated by the endpoint the
+        # call is dialled *towards*, so a plain RTP offer to a browser arrives
+        # with no audio, and a WebRTC offer sent to a hardware phone is refused.
+        # Only extensions the operator marked are affected; everything else is
+        # dialled exactly as before.
+        web_endpoints: dict[str, str] = {}
+        for row in self.store.list_extensions():
+            username = self._clean(row.get("sip_username"))
+            if row.get("active") and row.get("webrtc_enabled") and username and username != str(row["extension"]):
+                web_endpoints[str(row["extension"])] = username
+
         def ring_extension(extension: str) -> list[str]:
-            """What it takes to ring one extension, wherever it was reached from."""
+            """What it takes to ring one extension, wherever it was reached from.
+
+            A registered phone that does not answer is left to ring out, or to
+            that extension's voicemail. An extension with nobody signed in gets a
+            spoken answer instead of the silence a failed Dial leaves behind -
+            which is what a caller otherwise hears when the phone they are
+            dialling is simply not registered yet.
+            """
+            target = web_endpoints.get(str(extension), extension)
+            if extension in voicemail_exts:
+                return [
+                    f" same => n,Dial(PJSIP/{target},30)",
+                    f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({extension}@engineerip,u))',
+                    " same => n,Hangup()",
+                ]
             return [
-                f" same => n,Dial(PJSIP/{extension},30)",
-                *([f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({extension}@engineerip,u))'] if extension in voicemail_exts else []),
+                f" same => n,Dial(PJSIP/{target},30)",
+                ' same => n,ExecIf($["${DIALSTATUS}" = "CHANUNAVAIL"]?Playback(ss-noservice))',
                 " same => n,Hangup()",
             ]
 

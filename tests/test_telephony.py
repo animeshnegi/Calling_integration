@@ -35,7 +35,7 @@ class FakeAsterisk:
         self.hangups = []
         self.destroyed_bridges = []
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
         assert self.service.store.get(call_id) is not None
         self.created_call_id = call_id
         return call_id

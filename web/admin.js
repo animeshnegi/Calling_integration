@@ -410,15 +410,33 @@ async function refreshDeviceStatus() {
       return true;
     }, false);
     const ownChanged = apply(state.sip_accounts);
+    // Most phones sign in as the extension itself rather than as a device
+    // account, so the same poll carries each extension's own state. It is the
+    // honest answer to "is my phone connected?" when a call does not ring.
+    const liveExtensions = new Map((data.extensions || []).map(row => [String(row.extension), row.registration_status]));
+    const applyExtensions = rows => (rows || []).reduce((changed, row) => {
+      const next = liveExtensions.get(String(row.extension));
+      if (next === undefined || next === row.registration_status) return changed;
+      row.registration_status = next;
+      return true;
+    }, false);
+    const extensionsChanged = applyExtensions(state.extensions);
     // A registration change is worth showing, but it must arrive as a status
     // pill flipping over, not as the whole list rebuilding itself.
     quietly(() => {
       if (ownChanged && currentPage === 'sipaccounts') renderSipAccounts();
+      // The extensions page paints rows, the device page paints the customer's
+      // extension cards: a registration change has to reach whichever is open.
+      if (extensionsChanged) {
+        if (currentPage === 'sipaccounts') renderSipAccounts();
+        if (currentPage === 'extensions') renderExtensions();
+      }
       if (workspace && $('workspace').classList.contains('open')) {
         const changed = apply(workspace.sip_accounts);
+        const workspaceExtensionsChanged = applyExtensions(workspace.extensions);
         updateWsDeviceChip();
         syncDeviceChip('#customer-status', state.sip_accounts);
-        if (changed && (wsTab === 'devices' || wsTab === 'overview')) renderWsTab(wsTab);
+        if ((changed || workspaceExtensionsChanged) && (wsTab === 'devices' || wsTab === 'overview')) renderWsTab(wsTab);
       } else if (ownChanged) {
         syncDeviceChip('#customer-status', state.sip_accounts);
       }
@@ -651,6 +669,7 @@ function renderExtensions() {
           ? (platformRecordingAllowed() ? tag('Recording on', 'on') : tag('Recording paused', 'warn'))
           : tag('Recording off')}
         ${x.voicemail_enabled ? tag('Voicemail on', 'info') : tag('Voicemail off')}
+        ${x.webrtc_enabled ? tag('Browser phone', 'info') : ''}
       </div>
       <div class="row-actions">
         <button class="btn ghost sm" data-extension-credentials="${x.extension}">Credentials</button>
@@ -867,6 +886,18 @@ function extensionCard(x, { wired, primary, index }) {
   const linked = (state.phone_numbers || []).filter(row => row.inbound_extension === x.extension).map(row => row.number);
   const account = (state.sip_accounts || []).find(row => String(row.extension) === String(x.extension));
   const onNumber = wired.has(String(x.extension));
+  // What this extension calls out as. An extension without a number of its own
+  // still calls: the account's main line is presented, exactly as the dial plan
+  // gives its phone. "None linked yet" alone read as "this extension cannot
+  // call", which is not what the platform does.
+  const accountNumbers = (state.phone_numbers || []).filter(row => row.active);
+  const accountLine = (accountNumbers.find(row => row.default_outbound) || accountNumbers[0] || {}).number || '';
+  // Whether a phone is signed in as this extension, from Asterisk's own view of
+  // its endpoints. A phone that is not registered is the usual reason a call
+  // does not ring, so the card says it rather than leaving the customer to
+  // guess - and it says which username to sign in with when there is no answer.
+  const registered = { online: 'Phone registered', offline: 'No phone registered yet' }[x.registration_status] || '';
+  const deviceLine = account?.label || registered || `Sign in as ${x.sip_username || x.extension}`;
   return `
   <article class="glass-card card-enter ext-card ${onNumber ? 'on-number' : 'other-number'}" style="--i:${Math.min(index, 10)}">
     <div class="glass-card-head">
@@ -879,10 +910,11 @@ function extensionCard(x, { wired, primary, index }) {
       ${String(x.extension) === primary ? tag('Primary', 'violet') : ''}
       ${onNumber ? tag(linked.length ? `Answers ${linked.join(', ')}` : 'On this number', 'info') : tag('Other extension')}
       ${x.voicemail_enabled ? tag('Voicemail on', 'on') : tag('Voicemail off')}
+      ${x.webrtc_enabled ? tag('Browser phone', 'info') : ''}
     </div>
     <div class="kv kv-2">
-      ${kv('Numbers', linked.join(', ') || 'None linked yet')}
-      ${kv('Device', account?.label || 'No device linked yet')}
+      ${kv('Numbers', linked.join(', ') || (accountLine ? `Calls out as ${accountLine}` : 'None linked yet'))}
+      ${kv('Device', deviceLine)}
     </div>
     <div class="ws-card-actions">
       <button class="btn primary sm" data-extension-credentials="${esc(x.extension)}">Show credentials</button>
@@ -2184,7 +2216,7 @@ const templates = {
       <div class="field-row">
         <label class="field">Extension<select name="extension" ${state.is_admin ? '' : 'disabled'}>${state.extensions.filter(x => x.active)
           .map(x => `<option value="${x.extension}">${x.extension} — ${esc(x.display_name || 'Unnamed')}</option>`).join('')}</select></label>
-        <label class="field">Callback / caller ID<select name="caller_id_number"><option value="">Use default assigned number</option>${state.phone_numbers.filter(x => x.active)
+        <label class="field">Callback / caller ID<select name="caller_id_number"><option value="">Automatic - this extension's line, else the account's main line</option>${state.phone_numbers.filter(x => x.active)
           .map(x => `<option value="${esc(x.number)}" ${x.default_outbound ? 'selected' : ''}>${esc(x.number)} — ${esc(x.description || '')}</option>`).join('')}</select></label>
       </div>
       <div class="field-row">
@@ -2216,7 +2248,7 @@ const templates = {
         <label class="field">Voicemail PIN<input name="voicemail_pin" type="password" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="${item ? 'Leave blank to keep existing' : '4 to 10 digits'}"></label>
       </div>
       <label class="field">Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(item?.voicemail_email || '')}"><small>New messages are sent here when SendGrid is enabled.</small></label>
-      <label class="check"><input name="webrtc_enabled" type="checkbox" ${item?.webrtc_enabled ? 'checked' : ''}> WebRTC enabled</label>`,
+      <label class="check"><input name="webrtc_enabled" type="checkbox" ${item?.webrtc_enabled ? 'checked' : ''}> Answers in the browser (WebRTC)<small>Calls to this extension are set up as WebRTC media, which is what a browser needs. Register a hardware phone or softphone on its own extension: a plain phone refuses a WebRTC call.</small></label>`,
   }),
   group: item => ({
     title: item ? `Edit group ${item.name}` : 'Add a ring group',
@@ -2386,11 +2418,23 @@ function openModal(type, item = null) {
   if (type === 'call') {
     const extension = $('modal-fields').querySelector('[name=extension]');
     const number = $('modal-fields').querySelector('[name=caller_id_number]');
+    // Any number of the same account can be presented, which is what lets an
+    // extension without a line of its own make a call at all; another account's
+    // number is never offered.
     const update = () => {
-      [...number.options].forEach((option, index) => {
-        if (index) option.hidden = state.phone_numbers.find(x => x.number === option.value)?.inbound_extension !== extension.value;
-      });
-      const preferred = [...number.options].find(o => !o.hidden && state.phone_numbers.find(x => x.number === o.value)?.default_outbound);
+      const chosen = state.extensions.find(x => String(x.extension) === String(extension.value));
+      const visible = option => {
+        const row = state.phone_numbers.find(x => x.number === option.value);
+        if (!row) return false;
+        if (String(row.inbound_extension || '') === String(extension.value)) return true;
+        return Boolean(row.owner_user_id && chosen?.owner_user_id
+          && String(row.owner_user_id) === String(chosen.owner_user_id));
+      };
+      [...number.options].forEach((option, index) => { if (index) option.hidden = !visible(option); });
+      const shown = [...number.options].filter(o => !o.hidden && o.value);
+      const own = shown.find(o => state.phone_numbers.find(x => x.number === o.value)?.inbound_extension === extension.value
+        && state.phone_numbers.find(x => x.number === o.value)?.default_outbound);
+      const preferred = own || shown.find(o => state.phone_numbers.find(x => x.number === o.value)?.default_outbound);
       number.value = preferred?.value || '';
     };
     extension?.addEventListener('change', update);

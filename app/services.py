@@ -44,6 +44,8 @@ class TelephonyService:
         # Channel id -> call id for every leg of a call that is ringing several
         # devices; rebuilt from the stored call record after a worker restart.
         self._leg_index: dict[str, str] = {}
+        # When the endpoint states below were fetched, and what came back.
+        self._endpoint_states: tuple[float, dict[str, str]] = (0.0, {})
 
     def ari_ready(self) -> bool:
         try:
@@ -51,6 +53,60 @@ class TelephonyService:
             return ready.exists() and (datetime.now(timezone.utc).timestamp() - ready.stat().st_mtime) <= ARI_READY_STALE_SECONDS
         except OSError:
             return False
+
+    # How long an answer from Asterisk about registered endpoints is reused.
+    # Every console refresh asks, and Asterisk should not be asked twice for the
+    # same state.
+    ENDPOINT_STATE_SECONDS = 5
+
+    def endpoint_states(self) -> dict[str, str]:
+        """Which PJSIP endpoints are signed in right now, from ARI.
+
+        Registration is what makes a phone ring, so the console shows it against
+        every extension and device. An empty answer means Asterisk could not be
+        asked - which callers must not read as "nothing is registered".
+        """
+        now = time.monotonic()
+        stamped, states = self._endpoint_states
+        if now - stamped < self.ENDPOINT_STATE_SECONDS:
+            return states
+        collected: dict[str, str] = {}
+        if self.ari_ready():
+            try:
+                collected = {
+                    str(row.get("resource") or ""): str(row.get("state") or "offline").lower()
+                    for row in self.asterisk.list_endpoints()
+                    if str(row.get("technology") or "").lower() == "pjsip"
+                }
+            except Exception:
+                collected = {}
+        self._endpoint_states = (now, collected)
+        return collected
+
+    def dial_endpoint(self, extension: str) -> str:
+        """The PJSIP endpoint a call to this extension is placed towards.
+
+        Media is negotiated by the endpoint a call is dialled on, so this is what
+        decides whether a device can answer with audio: a browser needs the
+        WebRTC endpoint (DTLS-SRTP, ICE, RTCP-mux) and a hardware phone or
+        softphone the plain one - a WebRTC offer sent to a hardware phone is
+        refused. An extension the operator marked as answering in the browser is
+        dialled on the WebRTC endpoint; everything else keeps the plain one.
+        """
+        plain = f"PJSIP/{extension}"
+        if not self.settings_store or not extension:
+            return plain
+        try:
+            row = next(
+                (item for item in self.settings_store.list_extensions() if str(item["extension"]) == str(extension)),
+                None,
+            )
+        except Exception:
+            return plain
+        username = str(row.get("sip_username") or "") if row else ""
+        if row and row.get("active") and row.get("webrtc_enabled") and username and username != str(extension):
+            return f"PJSIP/{username}"
+        return plain
 
     def _provider_endpoint(self, provider_name: str | None) -> tuple[str, str]:
         if not self.settings_store:
@@ -199,6 +255,7 @@ class TelephonyService:
             self.asterisk.create_outbound_call(
                 call_id, extension, phone, provider_endpoint,
                 {"contact_id": contact_id, "member_id": member_id},
+                endpoint=self.dial_endpoint(extension),
             )
         except Exception:
             current = self.store.get(call_id)
@@ -329,7 +386,9 @@ class TelephonyService:
         legs: list[tuple[str, str]] = []
         for index, destination in enumerate(destinations):
             try:
-                leg = self.asterisk.create_inbound_employee_leg(call_id, destination, channel_id, index=index)
+                leg = self.asterisk.create_inbound_employee_leg(
+                    call_id, destination, channel_id, index=index, endpoint=self.dial_endpoint(destination),
+                )
             except Exception:
                 continue
             legs.append((str(leg), destination))
@@ -429,7 +488,9 @@ class TelephonyService:
         self._ivr_sessions_map().pop(channel_id, None)
         self.asterisk.stop_playback(f"ivr-{session['call_id']}-{session['tries']}")
         try:
-            leg = self.asterisk.create_inbound_employee_leg(session["call_id"], extension, channel_id, index=0)
+            leg = self.asterisk.create_inbound_employee_leg(
+                session["call_id"], extension, channel_id, index=0, endpoint=self.dial_endpoint(extension),
+            )
         except Exception:
             updated = self.store.update(session["call_id"], status="failed", ended_at=iso_now())
             self.notify_crm("call.failed", updated, {"reason": "ivr_extension_originate_failed"})
@@ -454,7 +515,9 @@ class TelephonyService:
             legs: list[tuple[str, str]] = []
             for index, destination in enumerate(destinations):
                 try:
-                    leg = self.asterisk.create_inbound_employee_leg(session["call_id"], destination, channel_id, index=index)
+                    leg = self.asterisk.create_inbound_employee_leg(
+                        session["call_id"], destination, channel_id, index=index, endpoint=self.dial_endpoint(destination),
+                    )
                 except Exception:
                     continue
                 legs.append((str(leg), destination))

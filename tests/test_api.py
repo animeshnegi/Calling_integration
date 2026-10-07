@@ -9,10 +9,10 @@ class FakeAsterisk:
     def health(self):
         return {"system": "Asterisk Test"}
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
         return call_id
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, endpoint=None):
         return f"{call_id}-employee"
 
     def continue_in_dialplan(self, channel_id, context, extension):
@@ -590,6 +590,9 @@ def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
     }
 
     # When ARI cannot be reached the stored status is reported instead of failing.
+    # Endpoint states are cached for a few seconds so console refreshes do not
+    # hammer Asterisk, so the test drops that cache and asks again.
+    service._endpoint_states = (0.0, {})
     service.asterisk = FakeAsterisk()
     assert client.get("/admin/api/device-status").json["devices"] == [
         {"id": account_one, "registration_status": "offline"},
@@ -604,3 +607,19 @@ def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
     scoped = customer.get("/admin/api/device-status")
     assert scoped.status_code == 200
     assert [row["id"] for row in scoped.json["devices"]] == [account_one]
+
+
+def test_registration_helpers_read_the_endpoint_names_a_phone_uses():
+    """The names a phone can register under, and no guessing without Asterisk."""
+    from app.admin import device_registration, extension_registration
+
+    live = {"101": "online", "AUMPNO_101": "offline", "device-desk302": "unavailable"}
+    # A device account registers as its own username or as the generated device id.
+    assert device_registration({"sip_username": "desk302", "extension": ""}, live) == "offline"
+    # An extension is online when its number or its SIP username is.
+    assert extension_registration({"extension": "101", "sip_username": "AUMPNO_101"}, live, []) == "online"
+    # A device account that answers the extension counts as well.
+    accounts = [{"extension": "105", "sip_username": "AUMPNO_105"}]
+    assert extension_registration({"extension": "105", "sip_username": "X_105"}, {"AUMPNO_105": "online"}, accounts) == "online"
+    # Asterisk answered, and nothing of this extension is signed in.
+    assert extension_registration({"extension": "105", "sip_username": "X_105"}, live, []) == "offline"
