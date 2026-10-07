@@ -1258,10 +1258,17 @@ function renderSelects() {
 function renderServiceAddress() {
   const service = state.service_address || {};
   const configured = state.is_admin ? String((state.settings || {}).service_host || '') : '';
+  const webConfigured = state.is_admin ? String((state.settings || {}).service_web_host || '') : '';
   const host = $('service-host');
   if (host && document.activeElement !== host) host.value = configured;
+  const webHost = $('service-web-host');
+  if (webHost && document.activeElement !== webHost) webHost.value = webConfigured;
   const port = $('service-sip-port');
   if (port && document.activeElement !== port) port.value = service.port || 5060;
+  const digest = $('service-sip-digest');
+  if (digest && document.activeElement !== digest) {
+    digest.value = String((state.settings || {}).sip_auth_digest || 'md5').toLowerCase();
+  }
   const stateTag = $('service-address-state');
   if (stateTag) {
     stateTag.textContent = service.configured ? 'Set by the platform' : (service.host ? 'Using this console\'s address' : 'Not set');
@@ -1272,8 +1279,8 @@ function renderServiceAddress() {
   const preview = $('service-address-preview');
   if (!preview) return;
   const rows = [
-    ['Devices register with', service.sip ? `<code>${esc(service.sip)}</code>` : 'no address yet', '⇄'],
-    ['API base', service.api_base ? `<code>${esc(service.api_base)}/api/v1</code>` : 'no address yet', '⌘'],
+    ['Phones register with', service.sip ? `<code>${esc(service.sip)}</code> — a direct DNS record, never a web proxy` : 'no address yet', '⇄'],
+    ['Consoles & API base', service.api_base ? `<code>${esc(service.api_base)}/api/v1</code>` : 'no address yet', '⌘'],
     ['Documentation', service.api_base
       ? `<a href="/documentation" target="_blank" rel="noopener">${esc(service.api_base)}/documentation</a> — every example uses this address`
       : 'the page falls back to the address in your browser bar', '▤'],
@@ -2400,7 +2407,10 @@ function openModal(type, item = null) {
     const owner = $('modal-fields').querySelector('[name=owner_user_id]');
     const extension = $('modal-fields').querySelector('[name=inbound_extension]');
     owner?.addEventListener('change', () => {
-      extension.innerHTML = '<option value="">Choose an extension</option>' + state.extensions
+      // Keep auto-create selected when assigning a new number: dropping it
+      // here used to silently store an unlinked number that rang nobody.
+      const auto = editing ? '' : '<option value="auto" selected>Auto-create extension, SIP credentials and call flow</option>';
+      extension.innerHTML = auto + '<option value="">Choose an extension</option>' + state.extensions
         .filter(x => String(x.owner_user_id ?? '') === owner.value && x.active)
         .map(x => `<option value="${x.extension}">${x.extension} — ${esc(x.display_name || 'Unnamed')}</option>`).join('');
     });
@@ -3631,15 +3641,17 @@ wire('service-address-form', 'submit', async event => {
   try {
     await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
       service_host: val('service-host').trim(), service_sip_port: val('service-sip-port').trim() || '5060',
+      service_web_host: val('service-web-host').trim(),
+      sip_auth_digest: val('service-sip-digest') || 'md5',
     }) });
-    notify('Server address saved');
+    notify('Server addresses saved');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
 wire('service-address-reset', 'click', async () => {
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_sip_port: '5060' }) });
-    notify('Server address cleared — the console address is used');
+    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_web_host: '', service_sip_port: '5060', sip_auth_digest: 'md5' }) });
+    notify('Server addresses cleared — the console address is used');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });

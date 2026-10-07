@@ -1,0 +1,56 @@
+# Local / test override. Use it TOGETHER with the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#
+# The base file attaches to two production-only external networks (the CRM
+# reverse-proxy network and the 1panel MySQL network), which do not exist on
+# a laptop or a plain test server. This override replaces them with local
+# bridges so the stack starts anywhere.
+#
+# The database is whatever DATABASE_URI in .env points at - any MySQL works:
+#
+#   MySQL installed on this machine (host-gateway resolves it from Docker):
+#     DATABASE_URI=mysql+pymysql://root:PASSWORD@host.docker.internal:3306/eip_telephony?charset=utf8mb4
+#
+#   Any other MySQL (another server, managed cloud database, ...):
+#     DATABASE_URI=mysql+pymysql://USER:PASSWORD@203.0.113.5:3306/eip_telephony?charset=utf8mb4
+#
+#   No MySQL anywhere? Start the bundled throwaway one (local testing only):
+#     docker compose -f docker-compose.yml -f docker-compose.local.yml --profile bundled-db up --build
+#     DATABASE_URI=mysql+pymysql://eip:eip-local-password@mysql:3306/eip_telephony?charset=utf8mb4
+#
+# Production deployments keep using docker-compose.yml alone, exactly as before.
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: engineerip-local-mysql
+    # Opt-in only: started with --profile bundled-db. Never use in production.
+    profiles: ["bundled-db"]
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: eip_telephony
+      MYSQL_USER: eip
+      MYSQL_PASSWORD: eip-local-password
+      MYSQL_ROOT_PASSWORD: eip-local-root-password
+    networks:
+      - mysql-network
+    volumes:
+      - mysql_local_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-peip-local-root-password"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  # Override the production external networks with local throwaway bridges.
+  crm-network:
+    external: false
+    name: engineerip-local-crm
+  mysql-network:
+    external: false
+    name: engineerip-local-mysql-net
+
+volumes:
+  mysql_local_data:

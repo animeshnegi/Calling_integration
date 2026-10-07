@@ -29,9 +29,12 @@ Providers**, then assign a number to a customer. The platform creates the extens
 its SIP credentials and the default call flows, so a new line works without a
 redeploy.
 
-`ASTERISK_EXTERNAL_ADDRESS` must be the VPS public IP or public telephony hostname
-used for SIP/RTP NAT, and `ASTERISK_RTP_START`/`ASTERISK_RTP_END` must match the UDP
-range opened in the firewall (default `10000-10100`).
+`ASTERISK_EXTERNAL_ADDRESS` is only the first-boot fallback for the public SIP/RTP
+address: once the admin panel's **Service address** is configured it becomes the
+single source of truth (restart the `asterisk` container after changing it).
+`ASTERISK_RTP_START`/`ASTERISK_RTP_END` (default `10000-10100`) drive both
+Asterisk's RTP range and Docker's published UDP ports, so they only need to match
+the range opened in the firewall.
 
 The seed values `ASTERISK_EXTENSIONS`, `DEFAULT_EXTENSION`, `EXTENSION_<number>_PASSWORD`
 and the `IPCOMMS_*` block are optional and commented out in `.env.example`. They exist
@@ -51,6 +54,32 @@ The default RTP range is UDP `10000-10100`. Keep these aligned:
 - VPS firewall UDP `10000:10100`
 
 The VPS firewall must be updated manually when the range changes.
+
+## 3b. Local testing with any MySQL (no 1panel, no CRM network)
+
+The database is never bundled in production compose: the app connects to
+whatever `DATABASE_URI` in `.env` points at, so any MySQL works - a Docker
+container, a host-installed server, or a managed cloud database.
+
+The base `docker-compose.yml` attaches to two production-only external
+networks (`crm-network` and the 1panel MySQL network), which do not exist on
+a laptop or a plain test box. For local runs add the override file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+```
+
+Pick the matching `DATABASE_URI` in `.env`:
+
+- MySQL installed on the same machine:
+  `mysql+pymysql://root:PASSWORD@host.docker.internal:3306/eip_telephony?charset=utf8mb4`
+- Any other MySQL (remote server or managed database):
+  `mysql+pymysql://USER:PASSWORD@203.0.113.5:3306/eip_telephony?charset=utf8mb4`
+- No MySQL at all - start the bundled throwaway one (testing only):
+  `docker compose -f docker-compose.yml -f docker-compose.local.yml --profile bundled-db up --build`
+  with `DATABASE_URI=mysql+pymysql://eip:eip-local-password@mysql:3306/eip_telephony?charset=utf8mb4`
+
+Production servers keep using `docker-compose.yml` alone, exactly as before.
 
 ## 4. Build/start
 
@@ -202,7 +231,48 @@ For the current IPComms UDP test, allow only what is required:
 
 Do not open TCP 8088 for ARI or TCP 5038 for AMI to the Internet.
 
-## 14. Production hardening
+## 14. Split domains: web console vs. SIP phones
+
+Web traffic and SIP traffic must travel different paths. The consoles, REST API
+and webhooks are plain HTTPS and belong behind your reverse proxy. SIP
+registration and call audio are UDP (5060 + the RTP range) — **a web proxy or
+CDN cannot carry them**, which is why IP phones fail to register through a
+proxied domain.
+
+Use two DNS records:
+
+| Domain | DNS | Carries |
+| --- | --- | --- |
+| `tel.example.com` | points at your reverse proxy | Admin/customer consoles, `/api/v1`, webhooks |
+| `sip.example.com` | plain `A` record **directly to the server IP** (no proxy, no CDN, no Cloudflare orange cloud) | SIP 5060/udp, RTP 10000–10100/udp |
+
+Then set both under **Settings → Server addresses** in the admin console
+(`service_web_host` = `tel.example.com`, `service_host` = `sip.example.com`,
+SIP port 5060). Every customer credential sheet, API example and webhook URL
+follows automatically: phones are told to register at `sip.example.com:5060`,
+and all API documentation is built on `https://tel.example.com`.
+
+Example nginx server block for the web domain:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name tel.example.com;
+    # ssl_certificate ...; ssl_certificate_key ...;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+Nothing is proxied for `sip.example.com` — it only needs the direct DNS record
+plus open firewall ports 5060/udp and the RTP range.
+
+## 15. Production hardening
 
 - Use strong unique SIP credentials per employee.
 - Disable anonymous SIP.

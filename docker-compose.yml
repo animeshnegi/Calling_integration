@@ -15,6 +15,14 @@ services:
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env
+    # Cap the container so a crash-restart loop or a runaway worker can never
+    # starve the host: boots are CPU-heavy (imports + password hashing), and
+    # without a limit each restart burns every available core.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
     # Docker Desktop resolves this automatically; host-gateway also makes it
     # work on modern Linux Docker when MySQL runs on the Docker host.
     extra_hosts:
@@ -59,6 +67,12 @@ services:
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env
+    # Single-process event worker; it never needs more than one core.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 384M
     # Docker Desktop resolves this automatically; host-gateway also makes it
     # work on modern Linux Docker when MySQL runs on the Docker host.
     extra_hosts:
@@ -114,7 +128,9 @@ services:
       - telephony-internal
     ports:
       - "5060:5060/udp"
-      - "${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}:${ASTERISK_RTP_START:?ASTERISK_RTP_START must be set}-${ASTERISK_RTP_END:?ASTERISK_RTP_END must be set}/udp"
+      # Must match Asterisk's rtp.conf - the entrypoint renders it from the
+      # same two variables, so published ports and RTP range cannot drift.
+      - "${ASTERISK_RTP_START:-10000}-${ASTERISK_RTP_END:-10100}:${ASTERISK_RTP_START:-10000}-${ASTERISK_RTP_END:-10100}/udp"
     security_opt:
       - no-new-privileges:true
     # Asterisk file logs are intentionally ephemeral; durable operational logs

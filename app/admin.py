@@ -603,16 +603,23 @@ class SettingsStore:
     def service_address(self, fallback_host: str = "") -> dict:
         """Where this deployment answers, and the links built from it.
 
-        An administrator's `service_host` setting wins. Without one the host the
-        console is being read from is used, so even an unconfigured deployment
-        shows an address a customer can type into a phone instead of the
-        carrier's trunk address.
+        Two administrator-set addresses, because they travel different paths:
+        `service_host` is the SIP address phones register with (a DNS record
+        pointing straight at this server - SIP/UDP cannot go through a web
+        proxy), and `service_web_host` is the domain the consoles, API and
+        webhook examples are served from (typically behind a reverse proxy,
+        e.g. tel.example.com). When only one is set it serves both roles, so
+        an existing single-address deployment keeps working unchanged.
         """
         settings = self.get_settings()
         host = str(settings.get("service_host") or "").strip()
+        web_host = str(settings.get("service_web_host") or "").strip()
         configured = bool(host)
+        web_configured = bool(web_host)
         if not host:
-            host = str(fallback_host or "").strip()
+            host = web_host or str(fallback_host or "").strip()
+        if not web_host:
+            web_host = str(settings.get("service_host") or "").strip() or str(fallback_host or "").strip()
         try:
             port = int(settings.get("service_sip_port") or 5060)
         except (TypeError, ValueError):
@@ -623,8 +630,10 @@ class SettingsStore:
             "host": host,
             "port": port,
             "configured": configured,
+            "web_host": web_host,
+            "web_configured": web_configured,
             "sip": f"{host}:{port}" if host else "",
-            "api_base": f"https://{host}" if host else "",
+            "api_base": f"https://{web_host}" if web_host else "",
         }
 
     def reveal_extension_credentials(self, extension, owner_user_id: int | None = None, fallback_host: str = ""):
@@ -642,7 +651,14 @@ class SettingsStore:
         if not row or (owner_user_id is not None and row["owner_user_id"] != int(owner_user_id)):
             raise ValueError("Extension not found")
         owner = row["owner_user_id"]
-        numbers = [item for item in self.list_numbers(owner) if item["inbound_extension"] == row["extension"] and item["active"]] if owner is not None else []
+        # A customer's sheet lists their own numbers; a platform-owned
+        # extension (no customer) still lists the platform-owned DIDs that
+        # point at it instead of always claiming none are assigned.
+        numbers = [
+            item for item in self.list_numbers(owner)
+            if item["inbound_extension"] == row["extension"] and item["active"]
+            and (owner is not None or item.get("owner_user_id") is None)
+        ]
         device = next(
             (item for item in self.list_sip_accounts(owner, include_password=True)
              if str(item.get("extension") or "") == row["extension"] and item["active"]),
@@ -787,13 +803,59 @@ class SettingsStore:
                 raise ValueError("Number is not assigned to this extension")
             db.execute("UPDATE phone_numbers SET default_outbound=CASE WHEN number=? THEN 1 ELSE 0 END,updated_at=CURRENT_TIMESTAMP WHERE inbound_extension=?", (number, extension))
 
-    def delete_number(self, number):
+    def delete_number(self, number, cascade: bool = True):
+        """Remove a number and, by default, the line provisioned for it.
+
+        Assigning a number builds a whole line (extension, SIP credentials,
+        device accounts, call flows), so deleting the number takes that line
+        down with it - unless another number still rings the same extension.
+        An extension that is some customer's call default is kept (only its
+        dangling default references are cleared platform-side first).
+        """
         number = str(number).strip()
         with self._connect() as db:
-            result = db.execute("DELETE FROM phone_numbers WHERE number=?", (number,))
-            if result.rowcount == 0:
+            row = db.execute("SELECT number,inbound_extension,owner_user_id FROM phone_numbers WHERE number=?", (number,)).fetchone()
+            if not row:
                 raise ValueError("Phone number not found")
+            db.execute("DELETE FROM phone_numbers WHERE number=?", (number,))
             db.execute("DELETE FROM call_routes WHERE phone_number=?", (number,))
+        extension = str(row["inbound_extension"] or "").strip()
+        if not cascade or not extension:
+            return
+        with self._connect() as db:
+            if db.execute("SELECT 1 FROM phone_numbers WHERE inbound_extension=?", (extension,)).fetchone():
+                return  # another number still rings this extension
+            db.execute("DELETE FROM customer_sip_accounts WHERE extension=?", (extension,))
+        self._drop_extension_from_call_defaults(extension)
+        try:
+            self.delete_extension(extension)
+        except ValueError:
+            # The extension is still load-bearing elsewhere (for example it is
+            # the platform-wide default); leave it in place rather than break
+            # routing - the number itself is already gone.
+            pass
+
+    def _drop_extension_from_call_defaults(self, extension: str) -> None:
+        """Clear customer call-default entries that point at this extension."""
+        extension = str(extension)
+        try:
+            stored = json.loads(self.get_settings().get(self.CALL_DEFAULTS_KEY) or "{}")
+        except (TypeError, ValueError):
+            return
+        changed = False
+        for entry in stored.values():
+            if not isinstance(entry, dict):
+                continue
+            for field in ("outbound", "fallback"):
+                if str(entry.get(field) or "") == extension:
+                    entry[field] = ""
+                    changed = True
+        if changed:
+            with self._connect() as db:
+                db.execute(
+                    "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+                    (self.CALL_DEFAULTS_KEY, json.dumps(stored)),
+                )
 
     def ensure_monthly_invoices(self):
         today = date.today()
@@ -2040,7 +2102,9 @@ class SettingsStore:
             "inbound_fallback_extension",
             "webrtc_enabled",
             "service_host",
+            "service_web_host",
             "service_sip_port",
+            "sip_auth_digest",
         }
         for key, value in values.items():
             if key not in allowed:
@@ -2061,13 +2125,15 @@ class SettingsStore:
                     raise ValueError("Recording retention must be between 1 and 3650 days")
                 if key == "recording_max_duration_seconds" and not 0 <= number <= 86400:
                     raise ValueError("Maximum recording duration must be between 0 and 86400 seconds")
-            if key == "service_host":
-                # An address a device registers with: no scheme, no path, no port
-                # - the port has its own setting, and a typo here breaks every
-                # phone at once.
+            if key in {"service_host", "service_web_host"}:
+                # An address a device registers with (or the web/API domain):
+                # no scheme, no path, no port - the SIP port has its own
+                # setting, and a typo here breaks every phone at once.
                 text = text.strip()
                 if text and not self.SERVICE_HOST_RE.match(text):
                     raise ValueError("Service address must be a hostname or an IP address, without a scheme, path or port")
+            if key == "sip_auth_digest" and text.strip().lower() not in {"md5", "sha256", "both"}:
+                raise ValueError("SIP digest must be md5, sha256 or both")
             if key == "service_sip_port":
                 try:
                     port = int(text)
@@ -2091,7 +2157,7 @@ class SettingsStore:
                 text = str(value)
                 if key in {"recording_enabled", "recording_announcement", "recording_beep", "webrtc_enabled"}:
                     text = "true" if text.strip().lower() in {"true", "1", "yes", "on"} else "false"
-                if key == "service_host":
+                if key in {"service_host", "service_web_host"}:
                     text = text.strip()
                 db.execute(
                     "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
@@ -2647,6 +2713,10 @@ def register_admin(app, config, on_telephony_change=None):
             inbound = str(data.get("inbound_extension", "")).strip()
             auto = "auto" in {inbound.lower(), str(data.get("auto_provision", "")).lower()} or bool(data.get("auto_provision"))
             if auto:
+                # Auto-provisioning builds the line for a customer; without one
+                # it would silently store an unlinked number that rings nobody.
+                if not owner:
+                    raise ValueError("Auto-provisioning needs a customer account: choose who owns this number, or pick an extension explicitly")
                 # Assign first, then provision: a carrier or format problem must
                 # not leave a half-built line behind.
                 data = {**data, "inbound_extension": "", "default_outbound": False}
@@ -2962,7 +3032,7 @@ def register_admin(app, config, on_telephony_change=None):
                 "recording_enabled", "recording_format", "recording_retention_days", "recording_announcement",
                 "recording_announcement_media", "recording_beep", "recording_max_duration_seconds",
                 "default_extension", "inbound_fallback_extension", "webrtc_enabled",
-                "service_host", "service_sip_port",
+                "service_host", "service_web_host", "service_sip_port", "sip_auth_digest",
             }
             store.set_settings({k: data[k] for k in data if k in allowed})
             apply_change(); return jsonify({"ok": True})
