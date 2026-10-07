@@ -13,6 +13,8 @@ class DummyAsterisk:
         self.played = []
         self.stopped_playbacks = []
         self.inbound_legs = []
+        self.customer_legs = []
+        self.local_legs = []
 
     def answer_channel(self, channel_id):
         self.answered.append(channel_id)
@@ -34,7 +36,12 @@ class DummyAsterisk:
         return call_id
 
     def create_customer_leg(self, *args):
+        self.customer_legs.append((args[0], args[1], args[2]))
         return f"{args[0]}-customer"
+
+    def create_local_leg(self, call_id, extension, employee_channel_id, caller_id_number=None):
+        self.local_legs.append((call_id, extension))
+        return f"{call_id}-customer"
 
     def create_bridge(self, call_id):
         return f"bridge-{call_id}"
@@ -446,3 +453,97 @@ def test_recording_needs_both_switches_to_agree(tmp_path):
     # Switching the platform back on restores the customer's own decision.
     service.settings_store = Settings(True)
     assert service._recording_settings("101")["enabled"] is True
+
+
+def test_one_of_the_customers_own_numbers_is_called_without_a_carrier(tmp_path):
+    """The field case: a phone on +13025550098 calls +13025550067.
+
+    The number belongs to the customer making the call, so the platform looks it
+    up to the extension it is set to ring and originates that leg itself. The
+    call never reaches the carrier - which is what makes a number-to-number call
+    within one account dependable rather than a round trip that a carrier may
+    refuse, loop back or bill for.
+    """
+    from app.admin import SettingsStore
+    from app.models import Call
+
+    service, asterisk, store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "field-co", "Field Co")
+    settings.save_extension({"extension": "105", "active": True}, owner)
+    settings.save_extension({"extension": "117", "active": True}, owner)
+    settings.save_number({"number": "+13025550098", "provider": "TestCarrier", "inbound_extension": "105",
+                          "owner_user_id": owner, "active": True})
+    settings.save_number({"number": "+13025550067", "provider": "TestCarrier", "inbound_extension": "117",
+                          "owner_user_id": owner, "active": True})
+
+    store.create(Call(call_id="local-1", contact_id=None, member_id=None, extension="105",
+                      phone="+13025550067", provider="TestCarrier"))
+    service._start_customer(store.get("local-1"))
+
+    assert asterisk.local_legs == [("local-1", "117")]
+    assert asterisk.customer_legs == []
+    assert store.get("local-1").status == "dialing_customer"
+
+
+def test_a_number_that_is_not_the_customers_own_still_leaves_through_the_carrier(tmp_path):
+    """Nothing about the local shortcut changes ordinary outbound calls.
+
+    A number that belongs to somebody else - including another organisation on
+    this platform - is an external call and is dialled over the customer's
+    carrier, with the customer's caller ID.
+    """
+    from app.admin import SettingsStore
+    from app.models import Call
+
+    service, asterisk, store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "field-co", "Field Co")
+    other = make_customer(settings, "other-co", "Other Co")
+    settings.save_extension({"extension": "105", "active": True}, owner)
+    settings.save_extension({"extension": "201", "active": True}, other)
+    settings.save_number({"number": "+13025550098", "provider": "TestCarrier", "inbound_extension": "105",
+                          "owner_user_id": owner, "default_outbound": True, "active": True})
+    settings.save_number({"number": "+13025550011", "provider": "TestCarrier", "inbound_extension": "201",
+                          "owner_user_id": other, "active": True})
+
+    for call_id, phone in (("outside-1", "+13025559999"), ("outside-2", "+13025550011")):
+        store.create(Call(call_id=call_id, contact_id=None, member_id=None, extension="105",
+                          phone=phone, provider="TestCarrier", caller_id_number="+13025550098"))
+        service._start_customer(store.get(call_id))
+        assert asterisk.customer_legs[-1][:2] == (call_id, phone)
+        assert asterisk.customer_legs[-1][2].startswith("provider-")
+    assert asterisk.local_legs == []
+
+
+def test_a_stale_link_on_an_own_number_rings_the_accounts_own_extension(tmp_path):
+    """A number of this account left pointing at another organisation's phone.
+
+    The panel must not take that row as a shortcut to a stranger: the account's
+    own fallback answers instead, which is what an inbound call on that number
+    would do as well.
+    """
+    from app.admin import SettingsStore
+    from app.models import Call
+
+    service, asterisk, store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "field-co", "Field Co")
+    other = make_customer(settings, "other-co", "Other Co")
+    settings.save_extension({"extension": "105", "active": True}, owner)
+    settings.save_extension({"extension": "117", "active": True}, owner)
+    settings.save_extension({"extension": "201", "active": True}, other)
+    settings.save_number({"number": "+13025550067", "provider": "TestCarrier",
+                          "owner_user_id": owner, "active": True})
+    with settings._connect() as db:
+        db.execute("UPDATE phone_numbers SET inbound_extension='201' WHERE number='+13025550067'")
+
+    store.create(Call(call_id="stale-1", contact_id=None, member_id=None, extension="105",
+                      phone="+13025550067", provider="TestCarrier"))
+    service._start_customer(store.get("stale-1"))
+
+    assert asterisk.local_legs == [("stale-1", "105")]
+    assert asterisk.customer_legs == []

@@ -41,11 +41,34 @@ def context_of(dialplan: str, name: str) -> str:
 
 
 def extensions_in(context: str) -> list[str]:
+    """The three-digit extension numbers this context can dial."""
     return sorted(
         line.split("exten => ")[1].split(",")[0]
         for line in context.splitlines()
-        if line.startswith("exten => ") and line.split("exten => ")[1].split(",")[0].isdigit()
+        if line.startswith("exten => ")
+        and line.split("exten => ")[1].split(",")[0].isdigit()
+        and len(line.split("exten => ")[1].split(",")[0]) == 3
     )
+
+
+def local_numbers_in(context: str) -> dict[str, str]:
+    """{dialled number: extension it rings} for the numbers that are local here."""
+    found: dict[str, str] = {}
+    for line in context.splitlines():
+        marker = ",1,NoOp(EngineerIP local number "
+        if not line.startswith("exten => ") or marker not in line:
+            continue
+        pattern = line.split("exten => ")[1].split(marker)[0]
+        found[pattern] = line.split(" rings extension ")[1].split(")")[0]
+    return found
+
+
+def route_of(context: str, pattern: str, marker: str) -> str:
+    """The steps Asterisk would run for one dialled pattern."""
+    lead = f"exten => {pattern},1,NoOp(EngineerIP {marker}"
+    if lead not in context:
+        return ""
+    return context.split(lead)[1].split("\nexten")[0]
 
 
 def main() -> int:
@@ -86,6 +109,9 @@ def main() -> int:
     meridian_context = context_of(dialplan, TelephonyConfigSync.tenant_context(meridian))
     northwind_context = context_of(dialplan, TelephonyConfigSync.tenant_context(northwind))
 
+    meridian_numbers = local_numbers_in(meridian_context)
+    northwind_numbers = local_numbers_in(northwind_context)
+
     print("=== what each organisation can dial ===")
     print(f"Meridian Health   (numbers +13025550098, +13025550067): "
           f"{len(meridian_exts)} extensions, {len(extensions_in(meridian_context))} dialable")
@@ -93,11 +119,28 @@ def main() -> int:
           f"{len(extensions_in(northwind_context))} dialable")
     print(f"Meridian's numbers see: {', '.join(extensions_in(meridian_context))}")
     print(f"Northwind's numbers see: {', '.join(extensions_in(northwind_context))}")
+    print("Meridian's own numbers, dialled from inside: "
+          + ", ".join(f"{pattern} rings {extension}" for pattern, extension in sorted(meridian_numbers.items())))
+    print("Northwind's own numbers, dialled from inside: "
+          + ", ".join(f"{pattern} rings {extension}" for pattern, extension in sorted(northwind_numbers.items())))
 
     print("\n=== the field example ===")
+    other_number = route_of(meridian_context, "13025550067", "local number ")
     checks = [
         ("105 dials 117 (both under +13025550098)", "117" in extensions_in(meridian_context)),
         ("108 dials 102 (under the customer's other number)", "102" in extensions_in(meridian_context)),
+        # Number to number, the way the customer's phones would: the second
+        # number is looked up and rings the extension it is set to ring.
+        ("105 dials the customer's other number 13025550067 and reaches 121",
+         meridian_numbers.get("13025550067") == "121" and "Dial(PJSIP/121,30)" in other_number),
+        ("and that call never leaves through the carrier trunk",
+         bool(other_number) and "OUTBOUND_TRUNK" not in other_number),
+        ("the + form of the number works the same way",
+         meridian_numbers.get("+13025550067") == "121"),
+        ("a Meridian phone cannot dial Northwind's number internally",
+         "13025550011" not in meridian_numbers and "13025550011" not in extensions_in(meridian_context)),
+        ("Northwind dials its own number and reaches its own extension",
+         northwind_numbers.get("13025550011") == "301"),
         ("a Meridian phone cannot dial Northwind's 301", "301" not in extensions_in(meridian_context)),
         ("a Northwind phone cannot dial Meridian's 101", "101" not in extensions_in(northwind_context)),
         ("an unknown 3-digit number is answered with \"not in service\"",

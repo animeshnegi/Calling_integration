@@ -495,3 +495,21 @@ def test_hangup_call_only_hangs_up_channels_that_exist(monkeypatch):
     client.hangup_call("employee-1", "customer-1")
 
     assert hangups == ["employee-1", "customer-1", "employee-1", "customer-1"]
+
+
+def test_a_local_leg_rings_an_extension_without_a_carrier(monkeypatch):
+    """One of the customer's own numbers resolves to an extension, not a trunk.
+
+    The endpoint is a plain PJSIP extension with no provider appended, so the
+    call is carried entirely by the platform.
+    """
+    captured = capture_request(monkeypatch)
+
+    channel = ari_client().create_local_leg("call-1", "117", "call-1-employee", "+13025550098")
+
+    assert channel == "call-1-customer"
+    assert captured["params"]["endpoint"] == "PJSIP/117"
+    assert "@" not in captured["params"]["endpoint"]
+    assert captured["params"]["originator"] == "call-1-employee"
+    assert captured["params"]["appArgs"] == "customer,call-1"
+    assert captured["params"]["callerId"] == "+13025550098"

@@ -430,13 +430,71 @@ class TelephonyConfigSync:
             if owner not in (None, "") and str(owner).strip().isdigit() and int(owner) not in tenant_exts:
                 tenant_exts[int(owner)] = []
 
-        def extension_route(number: str) -> list[str]:
+        def number_extension(number) -> str:
+            """Which extension answers when this number is called.
+
+            One answer for both ways in: a call arriving from the carrier and a
+            call dialled internally reach the same extension - the number's own
+            link, that customer's fallback, or the platform's last resort - and
+            never an extension the number's own account may not reach.
+            """
+            for candidate in (str(number["inbound_extension"] or ""), did_extension(number), inbound_fallback):
+                if (
+                    candidate and self._valid_extension(candidate) and candidate in active_exts
+                    and self._extension_reachable_by(candidate, number.get("owner_user_id"), owners)
+                ):
+                    return candidate
+            return ""
+
+        def ring_extension(extension: str) -> list[str]:
+            """What it takes to ring one extension, wherever it was reached from."""
             return [
-                f"exten => {number},1,NoOp(EngineerIP extension {number})",
-                f" same => n,Dial(PJSIP/{number},30)",
-                *([f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({number}@engineerip,u))'] if number in voicemail_exts else []),
+                f" same => n,Dial(PJSIP/{extension},30)",
+                *([f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({extension}@engineerip,u))'] if extension in voicemail_exts else []),
                 " same => n,Hangup()",
             ]
+
+        def extension_route(extension: str) -> list[str]:
+            return [
+                f"exten => {extension},1,NoOp(EngineerIP extension {extension})",
+                *ring_extension(extension),
+            ]
+
+        def local_number_route(pattern: str, extension: str) -> list[str]:
+            """Dialling one of the organisation's own numbers, from inside.
+
+            The platform looks the number up when it renders this file and rings
+            the extension that number is set to ring - the same destination the
+            carrier would have reached - so a call between two of a customer's
+            own numbers never leaves through the carrier.
+            """
+            return [
+                f"exten => {pattern},1,NoOp(EngineerIP local number {pattern} rings extension {extension})",
+                *ring_extension(extension),
+            ]
+
+        local_numbers = [number for number in self.store.list_numbers() if number["active"]]
+
+        def local_number_routes(owner_id: int | None = None) -> list[str]:
+            """One account's numbers - or every number - as internal dialling.
+
+            Rendered as literals, which Asterisk prefers over the outbound
+            patterns below, so a number dialled by the organisation that owns it
+            rings that number's extension instead of being handed to the trunk.
+            Another organisation's number is not rendered here at all, so
+            dialling it is the ordinary external call it is.
+            """
+            lines: list[str] = []
+            for number in local_numbers:
+                if owner_id is not None and not self._same_owner(number.get("owner_user_id"), owner_id):
+                    continue
+                extension = number_extension(number)
+                digits = re.sub(r"[^0-9]", "", str(number["number"]))
+                if not extension or not digits:
+                    continue
+                for pattern in (digits, f"+{digits}"):
+                    lines.extend(local_number_route(pattern, extension))
+            return lines
 
         voicemail_login = [
             "exten => *97,1,NoOp(EngineerIP voicemail login)",
@@ -478,12 +536,17 @@ class TelephonyConfigSync:
             "; every extension of its own account - whichever DID that extension",
             "; belongs to - and never another account's.",
             ";",
+            "; An organisation's own phone numbers are dialled the same way: the",
+            "; literal routes below ring the extension the number is set to ring, so",
+            "; a call between two of a customer's numbers stays on the platform.",
+            ";",
             "; [from-internal]: the platform's own devices; they may ring any extension.",
             "[from-internal]",
             *voicemail_login,
         ]
         for extension in [row["extension"] for row in extensions]:
             lines.extend(extension_route(extension))
+        lines.extend(local_number_routes())
         lines.extend(unknown_extension)
         lines.extend(outbound)
         for owner_id in sorted(tenant_exts):
@@ -496,6 +559,7 @@ class TelephonyConfigSync:
             ])
             for extension in [*tenant_exts[owner_id], *platform_exts]:
                 lines.extend(extension_route(extension))
+            lines.extend(local_number_routes(owner_id))
             lines.extend(unknown_extension)
             lines.extend(outbound)
         lines.extend(["", "[voicemail-inbound]"])
@@ -513,14 +577,7 @@ class TelephonyConfigSync:
                 continue
             # A DID rings an extension of the organisation it belongs to - its own
             # link, that customer's fallback, or the platform's last resort.
-            extension = ""
-            for candidate in (str(number["inbound_extension"] or ""), did_extension(number), inbound_fallback):
-                if (
-                    candidate and self._valid_extension(candidate) and candidate in active_exts
-                    and self._extension_reachable_by(candidate, number.get("owner_user_id"), owners)
-                ):
-                    extension = candidate
-                    break
+            extension = number_extension(number)
             for dialed_number in (did, f"+{did}"):
                 if not extension:
                     lines.extend([

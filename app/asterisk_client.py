@@ -94,25 +94,41 @@ class AsteriskClient:
         )
         return employee_channel
 
-    def create_customer_leg(
-        self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str,
-        caller_id_number: str | None = None,
-    ) -> str:
+    def _customer_leg(self, call_id: str, endpoint: str, employee_channel_id: str, caller_id_number: str | None, timeout: int) -> str:
         customer_channel = f"{call_id}-customer"
         self._request(
             "POST",
             "/channels",
             params={
-                "endpoint": f"PJSIP/{phone}@{provider_endpoint}",
+                "endpoint": endpoint,
                 "app": self.app,
                 "appArgs": f"customer,{call_id}",
                 "channelId": customer_channel,
                 "originator": employee_channel_id,
                 "callerId": caller_id_number or "",
-                "timeout": 60,
+                "timeout": timeout,
             },
         )
         return customer_channel
+
+    def create_customer_leg(
+        self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str,
+        caller_id_number: str | None = None,
+    ) -> str:
+        return self._customer_leg(
+            call_id, f"PJSIP/{phone}@{provider_endpoint}", employee_channel_id, caller_id_number, 60
+        )
+
+    def create_local_leg(
+        self, call_id: str, extension: str, employee_channel_id: str, caller_id_number: str | None = None,
+    ) -> str:
+        """Ring an extension on this platform instead of a carrier number.
+
+        Used when the number being called is one of the customer's own: the
+        lookup already resolved it to the extension it is set to ring, so the
+        call is an internal one and never leaves through the trunk.
+        """
+        return self._customer_leg(call_id, f"PJSIP/{extension}", employee_channel_id, caller_id_number, 30)
 
     def list_channels(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/channels")

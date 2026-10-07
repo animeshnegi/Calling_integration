@@ -370,13 +370,114 @@ def test_a_did_only_rings_an_extension_of_its_own_account(tmp_path: Path):
     dialplan = sync.render_dialplan()
 
     assert "exten => 13025550098,1,NoOp(Inbound DID 13025550098 owned by extension 101)" in dialplan
-    stale = dialplan.split("exten => 13025550011,1,")[1].split("\nexten")[0]
+    stale = dialplan.split("exten => 13025550011,1,NoOp(Inbound DID")[1].split("\nexten")[0]
     assert "owned by extension 117" in stale
     assert "Stasis(engineerip,inbound,13025550011,101)" not in dialplan
 
     # A number whose account has no reachable extension rings nobody: it never
     # borrows another organisation's phone, not even through the platform-wide
     # fallback that points at one.
-    unreachable = dialplan.split("exten => 13025550022,1,")[1].split("\nexten")[0]
+    unreachable = dialplan.split("exten => 13025550022,1,NoOp(Inbound DID")[1].split("\nexten")[0]
     assert "has no reachable extension" in unreachable and "Playback(ss-noservice)" in unreachable
     assert "Stasis(engineerip,inbound,13025550022,117)" not in dialplan
+
+
+def test_a_customer_dials_its_own_numbers_internally(tmp_path: Path):
+    """Dialling one of the account's own numbers reaches the extension it rings.
+
+    The field example, one customer holding two numbers: a phone on
+    +13025550098 dials +13025550067 and reaches the extension that number is
+    set to ring. The call is looked up in the account's own context and never
+    handed to the carrier trunk, which is what makes it reliable: the carrier
+    may refuse to connect a number to itself, or not deliver it at all.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "IPComms", "server": "sip.example.com", "port": 5060, "username": "trunk",
+        "password": "provider-secret", "transport": "udp", "codecs": "ulaw,alaw",
+        "allowed_ips": "203.0.113.10/32",
+    })
+    for username, company in (("meridian", "Meridian"), ("northwind", "Northwind")):
+        store.save_user({"username": username, "password": "customer-password-1", "role": "user",
+                         "email": f"{username[0]}@example.com", "company_name": company})
+    meridian = next(row["id"] for row in store.list_users() if row["username"] == "meridian")
+    northwind = next(row["id"] for row in store.list_users() if row["username"] == "northwind")
+    for extension in ("105", "117"):
+        store.save_extension({"extension": extension, "active": True}, meridian)
+    store.save_extension({"extension": "201", "active": True}, northwind)
+    store.save_number({"number": "+13025550098", "provider": "IPComms", "inbound_extension": "105",
+                       "owner_user_id": meridian, "active": True})
+    store.save_number({"number": "+13025550067", "provider": "IPComms", "inbound_extension": "117",
+                       "owner_user_id": meridian, "active": True})
+    store.save_number({"number": "+13025550011", "provider": "IPComms", "inbound_extension": "201",
+                       "owner_user_id": northwind, "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    dialplan = sync.render_dialplan()
+    meridian_context = dialplan.split(f"\n[{TelephonyConfigSync.tenant_context(meridian)}]\n")[1].split("\n\n")[0]
+    northwind_context = dialplan.split(f"\n[{TelephonyConfigSync.tenant_context(northwind)}]\n")[1].split("\n\n")[0]
+    platform_context = dialplan.split("\n[from-internal]\n")[1].split("\n\n")[0]
+
+    # 105 dials the customer's other number and lands on 117 ...
+    route = meridian_context.split("exten => 13025550067,1,")[1].split("\nexten")[0]
+    assert "local number 13025550067 rings extension 117" in route
+    assert "Dial(PJSIP/117,30)" in route
+    # ... and the carrier trunk is nowhere in that call.
+    assert "OUTBOUND_TRUNK" not in route
+    # The + form is what a phone with a country-code dial plan sends.
+    assert "exten => +13025550067,1,NoOp(EngineerIP local number +13025550067 rings extension 117)" in meridian_context
+    # Its own number is dialable the same way.
+    assert "local number 13025550098 rings extension 105" in meridian_context
+
+    # Another organisation's number is not a local number here: dialling it is
+    # the ordinary external call, and it leaves through the trunk.
+    assert "exten => 13025550011,1" not in meridian_context
+    assert "exten => 13025550098,1" not in northwind_context
+    assert "exten => 13025550067,1" not in northwind_context
+
+    # The operator's own devices can dial any customer's number internally.
+    assert "local number 13025550067 rings extension 117" in platform_context
+    assert "local number 13025550011 rings extension 201" in platform_context
+
+
+def test_a_number_that_cannot_ring_one_of_its_accounts_extensions_is_external(tmp_path: Path):
+    """Only a number that really rings an extension of its own account is local.
+
+    An inactive number, and a stale row pointing at another organisation's
+    extension, fall through to ordinary outbound dialling instead: a local
+    shortcut must never become a way to reach a stranger's desk.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "IPComms", "server": "sip.example.com", "port": 5060, "username": "trunk",
+        "password": "provider-secret", "transport": "udp", "codecs": "ulaw,alaw",
+        "allowed_ips": "203.0.113.10/32",
+    })
+    for username in ("meridian", "northwind"):
+        store.save_user({"username": username, "password": "customer-password-1", "role": "user",
+                         "email": f"{username[0]}@example.com", "company_name": username.title()})
+    meridian = next(row["id"] for row in store.list_users() if row["username"] == "meridian")
+    northwind = next(row["id"] for row in store.list_users() if row["username"] == "northwind")
+    store.save_extension({"extension": "105", "active": True}, meridian)
+    store.save_extension({"extension": "201", "active": True}, northwind)
+    store.save_number({"number": "+13025550067", "provider": "IPComms", "inbound_extension": "105",
+                       "owner_user_id": meridian, "active": True})
+    # Discontinued: an inbound call does not ring it any more either.
+    store.save_number({"number": "+13025550022", "provider": "IPComms", "inbound_extension": "105",
+                       "owner_user_id": meridian, "active": False})
+    store.save_number({"number": "+13025550033", "provider": "IPComms",
+                       "owner_user_id": meridian, "active": True})
+    # A row that survived from before ownership was enforced: meridian's number
+    # pointing at northwind's extension.
+    with store._connect() as db:
+        db.execute("UPDATE phone_numbers SET inbound_extension='201' WHERE number='+13025550033'")
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    dialplan = sync.render_dialplan()
+    meridian_context = dialplan.split(f"\n[{TelephonyConfigSync.tenant_context(meridian)}]\n")[1].split("\n\n")[0]
+
+    assert "local number 13025550067 rings extension 105" in meridian_context
+    assert "exten => 13025550022,1" not in meridian_context
+    # The stale number cannot be used to reach northwind's extension. It rings
+    # the extension it is set to ring *within its own account* - its own
+    # fallback, exactly as an inbound call on it would - and 201 stays absent.
+    assert "local number 13025550033 rings extension 105" in meridian_context
+    assert "exten => 201,1" not in meridian_context

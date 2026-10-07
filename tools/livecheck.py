@@ -175,6 +175,34 @@ check("and no number routes to another account's extension",
       all(f"Stasis(engineerip,inbound,{row['number'].lstrip('+')},{extension})" not in dialplan
           for row in own_numbers for extension in theirs_all),
       json.dumps(theirs_all))
+# Dialling one of the account's own numbers from one of its phones: the number
+# is looked up to the extension it rings, so the two numbers of one customer
+# reach each other without the call going out through the carrier.
+theirs_numbers = [row for row in after["phone_numbers"] if row.get("owner_user_id") == other_customer["id"]]
+active_own = [row for row in own_numbers if row["active"]]
+
+
+def local_route(context, digits):
+    lead = f"exten => {digits},1,NoOp(EngineerIP local number "
+    return context.split(lead)[1].split("\nexten")[0] if lead in context else ""
+
+
+check("each of the customer's numbers is dialled internally and rings one of its extensions",
+      bool(active_own) and all(
+          any(f"Dial(PJSIP/{extension},30)" in local_route(mine_context, row["number"].lstrip("+")) for extension in mine_all)
+          for row in active_own),
+      ", ".join(row["number"] for row in active_own))
+check("and that internal call is never handed to the carrier trunk",
+      all("OUTBOUND_TRUNK" not in local_route(mine_context, row["number"].lstrip("+")) for row in active_own),
+      ", ".join(row["number"] for row in active_own))
+check("another organisation's number is not a local number in this context",
+      all(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number" not in mine_context
+          for row in theirs_numbers),
+      ", ".join(row["number"] for row in theirs_numbers))
+check("the operator's own devices can dial a customer's number internally",
+      all(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number" in context_block("from-internal")
+          for row in active_own),
+      ", ".join(row["number"] for row in active_own))
 flows = [row for row in cust_state["routing_flows"] if row["target"] == made]
 check("and a default call flow of its own", bool(flows), ",".join(row["target"] for row in cust_state["routing_flows"]))
 if flows:

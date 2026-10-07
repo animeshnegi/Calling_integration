@@ -155,6 +155,84 @@ platform treats one as a customer's line:
   longer have that number in their dial plan - they hear "not in service" rather
   than reaching whoever holds it now.
 
+### Calling one of your own numbers
+
+A number is not only how the outside world reaches an employee. It is also a
+destination the organisation's own phones can dial, and that must not depend on
+the carrier:
+
+```text
+a desk on +13025550098 dials 13025550067
+        ↓
+looked up inside the account that owns the phone
+        ↓
+13025550067 belongs to this account, and its inbound extension is 121
+        ↓
+Dial(PJSIP/121)          ← the call never leaves the platform
+```
+
+* The lookup happens when the dial plan is rendered, and the result is a
+  **literal** route in the account's own context, before the outbound patterns.
+  Asterisk prefers a literal over a pattern, so the number cannot be handed to
+  the trunk. Both the plain digits and the `+` form are rendered, because the
+  phone decides which one it sends.
+* A number becomes a local shortcut only if it can really ring an extension of
+  its own account - the same rule an inbound call on it follows. An inactive
+  number, or a row left pointing at another organisation's extension, is not
+  rendered: the call falls through to normal outbound dialling, and an inbound
+  call on such a number rings that account's own fallback, never a stranger's
+  phone.
+* Another organisation's number is not a local number here either. Dialling it
+  is the ordinary external call it is, and it leaves over the customer's carrier.
+* The panel uses the same rule: when a call is about to be placed to a number,
+  `TelephonyService._start_customer` resolves it first and originates
+  `PJSIP/<extension>` instead of `PJSIP/<number>@<provider>` when the number
+  belongs to the calling account.
+
+### What the user dials, and what Asterisk dials
+
+```text
+WHAT THE USER DIALS      DATABASE LOOKUP                          ASTERISK DIALS
+117                  →   extension 117 of this account        →   PJSIP/117
+13025550067          →   number 13025550067 → inbound ext 121  →   PJSIP/121
++13025550067         →   the same number                      →   PJSIP/121
+```
+
+Nothing user-facing is ever a SIP identity. The generated identity
+(`EJEHEH_117`) is what the phone authenticates with and the AOR its contact is
+registered into; the extension number is the dial key that resolves to it.
+
+The extension number stays the name of the plain UDP/TCP PJSIP object the dial
+plan and ARI ring, and the generated identity stays the name of the WebRTC
+endpoint the browser signs in with. That is not an accident of history: Asterisk
+matches an incoming request to an endpoint **by name** against the user in its
+`From` header (`res_pjsip_endpoint_identifier_user.c`), so the identity-named
+endpoint is the one every device is matched to, and it has to keep
+`webrtc=yes` for the browser. The extension-named endpoint is the plain one that
+phones are dialled through; swapping the two names would swap the WebRTC
+settings with them.
+
+### Could two customers both have extension 102?
+
+Not today: extension numbers are unique platform-wide, which is the strongest
+form of the guarantee above. What makes the lookup unambiguous is that it always
+happens **inside the calling account's context**, so allowing the same extension
+number in two accounts would be a data-model change, not a rewiring:
+
+* `extensions.extension` is the primary key, so it - and the places that
+  reference it (a number's inbound extension, a call flow's target) - would
+  become per account;
+* the voicemail mailbox name (`<extension>@engineerip`) is the last SIP-visible
+  identifier still keyed on the extension number, so it would move to the
+  identity;
+* the dial plan and the endpoints need no change at all: contexts are already per
+  account, and every dialled key resolves inside the context of the phone that
+  dialled it.
+
+So Customer A's phone dialling `102` would reach `AUSUS_102` and Customer B's
+would reach `DJKDB_102` - the routing already works that way; what is left is the
+uniqueness constraint and the mailbox name.
+
 So the answer to "what are the chances he will not reach the other's number" is:
 within one account, zero by construction - every active extension of the account
 is in the same context, and the numbers are unique platform-wide; across
@@ -163,12 +241,13 @@ accounts, the call cannot be completed at all, which is the intended outcome.
 ### Verifying it
 
 * `python tools/dialcheck.py` renders this exact scenario (two numbers, 20 + 15
-  extensions) and prints what each organisation can dial.
+  extensions) and prints what each organisation can dial, including the two
+  numbers reaching each other internally.
 * `PYTHONPATH=. .venv/bin/python -m pytest tests/test_telephony_config.py -q`
-  covers the per-account contexts, the endpoint contexts, the DID ownership rule
-  and the takeover refusal.
+  covers the per-account contexts, the endpoint contexts, the DID ownership rule,
+  the takeover refusal and which numbers are local.
 * `.venv/bin/python tools/livecheck.py` reads the dial plan the running preview
-  just generated and checks the same promises over HTTP.
+  just generated and checks the same promises over HTTP, local numbers included.
 
 ## Verification procedure
 

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -506,19 +507,74 @@ class TelephonyService:
         self._finalize(call_id, "hangup_requested")
         return self.store.get(call_id)
 
+    def _local_target(self, extension: str, number: str) -> str:
+        """The extension that answers when this phone calls this number, or "".
+
+        A customer's own numbers belong to that customer, so dialling one of
+        them from one of its own extensions reaches the extension the number is
+        set to ring. The call then stays on the platform: no trunk, no carrier
+        round trip, and no chance of the carrier refusing to connect the
+        customer to itself. Another organisation's number is not local, so it
+        leaves the usual way.
+        """
+        store = self.settings_store
+        if not store:
+            return ""
+        digits = re.sub(r"[^0-9]", "", str(number))
+        if not digits:
+            return ""
+        try:
+            owner = store.get_extension_owner(str(extension))
+            if owner in (None, ""):
+                return ""
+            for row in store.list_numbers(int(owner)):
+                if not row.get("active") or re.sub(r"[^0-9]", "", str(row["number"])) != digits:
+                    continue
+                candidate = str(row["inbound_extension"] or "")
+                # The number's own link only counts when it really rings one of
+                # this account's extensions: a stale row pointing at another
+                # customer's phone is not a shortcut to it, so the account's own
+                # fallback answers instead.
+                if candidate and not self._is_local_extension(candidate, int(owner)):
+                    candidate = ""
+                if not candidate:
+                    candidate = str(store.customer_call_defaults(int(owner)).get("fallback") or "")
+                return candidate
+        except Exception:
+            return ""
+        return ""
+
+    def _is_local_extension(self, extension: str, owner: int) -> bool:
+        """True when this extension is active and belongs to the account (or the platform)."""
+        try:
+            rows = self.settings_store.list_extensions()
+        except Exception:
+            return False
+        row = next((item for item in rows if str(item["extension"]) == str(extension)), None)
+        if not row or not row["active"]:
+            return False
+        found = row.get("owner_user_id")
+        return found in (None, "") or str(found) == str(owner)
+
     def _start_customer(self, call: Call) -> None:
         if call.customer_channel_id or call.status in {"completed", "failed"}:
             return
-        endpoint, _ = self._provider_endpoint(call.provider)
+        local = self._local_target(call.extension, call.phone)
         customer_channel = f"{call.call_id}-customer"
         prepared = self.store.update(call.call_id, customer_channel_id=customer_channel, status="dialing_customer")
         if not prepared:
             return
         self.notify_crm("call.customer_dialing", prepared)
         try:
-            self.asterisk.create_customer_leg(
-                call.call_id, call.phone, endpoint, call.employee_channel_id or "", call.caller_id_number
-            )
+            if local:
+                self.asterisk.create_local_leg(
+                    call.call_id, local, call.employee_channel_id or "", call.caller_id_number
+                )
+            else:
+                endpoint, _ = self._provider_endpoint(call.provider)
+                self.asterisk.create_customer_leg(
+                    call.call_id, call.phone, endpoint, call.employee_channel_id or "", call.caller_id_number
+                )
         except Exception:
             self.asterisk.hangup(call.employee_channel_id or "")
             updated = self.store.update(call.call_id, status="failed", ended_at=iso_now())
