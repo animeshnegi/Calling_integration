@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f6fa">
-  <meta name="description" content="EngineerIP Phone — calls, recents, contacts and messages.">
+  <meta name="description" content="EngineerIP Phone — secure SIP calling, recents, contacts and messages.">
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="https://engineerip.com/static/img/logo.png">
   <link rel="apple-touch-icon" href="https://engineerip.com/static/img/logo.png">
@@ -14,7 +14,45 @@
 </head>
 <body>
   <main class="phone-shell">
-    <section class="phone-app" aria-label="EngineerIP Phone">
+    <section id="login-screen" class="login-screen" aria-label="EngineerIP SIP login">
+      <div class="login-card">
+        <div class="login-brand">
+          <img src="https://engineerip.com/static/img/preloder1.png" alt="EngineerIP" class="login-logo">
+          <div>
+            <strong>EngineerIP</strong>
+            <span>Secure SIP Phone</span>
+          </div>
+        </div>
+        <div class="login-heading">
+          <span class="eyebrow">SIP LOGIN</span>
+          <h1>Sign in to your phone</h1>
+          <p>Enter the SIP credentials assigned to your extension. Authentication is performed directly with the SIP server through JsSIP.</p>
+        </div>
+        <form id="login-form" class="login-form">
+          <label>SIP username
+            <input id="login-username" required autocomplete="username" placeholder="KUDGTE_101" spellcheck="false">
+          </label>
+          <label>SIP password
+            <input id="login-password" required type="password" autocomplete="current-password" placeholder="SIP password">
+          </label>
+          <label>SIP domain
+            <input id="login-domain" required autocomplete="url" placeholder="sip.engineerip.com" spellcheck="false">
+          </label>
+          <label class="advanced-field">WebSocket server
+            <input id="login-wss" autocomplete="url" placeholder="wss://sip.engineerip.com/ws" spellcheck="false">
+            <small>Leave blank to use <b>wss://domain/ws</b>.</small>
+          </label>
+          <button id="login-btn" class="login-btn" type="submit">Connect &amp; Sign In</button>
+          <div id="login-status" class="login-status" role="status"></div>
+        </form>
+        <div class="login-security">
+          <span>●</span>
+          <div><strong>SIP authentication</strong><small>Your password is kept in this browser session and is not sent to the EngineerIP Flask API.</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="phone-app" class="phone-app hidden" aria-label="EngineerIP Phone">
       <header class="topbar">
         <div class="brand">
           <img src="https://engineerip.com/static/img/preloder1.png" alt="EngineerIP" class="brand-logo">
@@ -44,24 +82,13 @@
           <div id="dial-hint" class="dial-hint">Direct paste is supported</div>
         </div>
         <div class="keypad" aria-label="Dial pad">
-          <button data-key="1"><b>1</b></button>
-          <button data-key="2"><b>2</b><small>ABC</small></button>
-          <button data-key="3"><b>3</b><small>DEF</small></button>
-          <button data-key="4"><b>4</b><small>GHI</small></button>
-          <button data-key="5"><b>5</b><small>JKL</small></button>
-          <button data-key="6"><b>6</b><small>MNO</small></button>
-          <button data-key="7"><b>7</b><small>PQRS</small></button>
-          <button data-key="8"><b>8</b><small>TUV</small></button>
-          <button data-key="9"><b>9</b><small>WXYZ</small></button>
-          <button data-key="*"><b>*</b></button>
-          <button data-key="0"><b>0</b><small>+</small></button>
-          <button data-key="#"><b>#</b></button>
+          <button data-key="1"><b>1</b></button><button data-key="2"><b>2</b><small>ABC</small></button><button data-key="3"><b>3</b><small>DEF</small></button>
+          <button data-key="4"><b>4</b><small>GHI</small></button><button data-key="5"><b>5</b><small>JKL</small></button><button data-key="6"><b>6</b><small>MNO</small></button>
+          <button data-key="7"><b>7</b><small>PQRS</small></button><button data-key="8"><b>8</b><small>TUV</small></button><button data-key="9"><b>9</b><small>WXYZ</small></button>
+          <button data-key="*"><b>*</b></button><button data-key="0"><b>0</b><small>+</small></button><button data-key="#"><b>#</b></button>
         </div>
         <button id="call-btn" class="call-btn" aria-label="Call">☎</button>
-        <div class="dial-tools">
-          <button id="backspace-btn">⌫ Delete</button>
-          <button id="contacts-btn">♙ Contacts</button>
-        </div>
+        <div class="dial-tools"><button id="backspace-btn">⌫ Delete</button><button id="contacts-btn">♙ Contacts</button></div>
       </section>
 
       <section id="recents-view" class="view">
@@ -71,40 +98,24 @@
 
       <section id="messages-view" class="view">
         <div class="view-title"><div><span class="eyebrow">MESSAGES</span><h2>Messages</h2></div><button id="new-message" class="round-btn">＋</button></div>
-        <div class="empty-state">
-          <div class="empty-icon">✉</div>
-          <h3>Messages are ready for integration</h3>
-          <p>The calling backend currently exposes voice calling, voicemail and call history. SMS/MMS can be connected to the same phone UI when the messaging provider/API is enabled.</p>
-        </div>
+        <div class="empty-state"><div class="empty-icon">✉</div><h3>Messages are ready for integration</h3><p>The calling backend currently exposes voice calling, voicemail and call history. SMS/MMS can be connected to the same phone UI when the messaging provider/API is enabled.</p></div>
       </section>
 
       <section id="contacts-view" class="view">
         <div class="view-title"><div><span class="eyebrow">PEOPLE</span><h2>Contacts</h2></div><button id="add-contact" class="round-btn">＋</button></div>
         <div id="contacts-list" class="list"></div>
-        <div class="empty-state compact" id="contacts-empty">
-          <div class="empty-icon">♙</div><h3>No contacts yet</h3><p>Add a contact or dial a number directly.</p>
-        </div>
+        <div class="empty-state compact" id="contacts-empty"><div class="empty-icon">♙</div><h3>No contacts yet</h3><p>Add a contact or dial a number directly.</p></div>
       </section>
 
       <section id="active-call-view" class="active-call hidden">
-        <div class="active-avatar">E</div>
-        <div class="active-label">Calling</div>
-        <h2 id="active-number">—</h2>
-        <div id="call-timer">00:00</div>
-        <div class="call-controls">
-          <button id="mute-btn" class="control-btn">🎙<span>Mute</span></button>
-          <button id="speaker-btn" class="control-btn">🔊<span>Speaker</span></button>
-          <button id="hold-btn" class="control-btn">⏸<span>Hold</span></button>
-        </div>
-        <button id="hangup-btn" class="hangup-btn">●</button>
-        <div id="active-status">Connecting…</div>
+        <div class="active-avatar">E</div><div class="active-label" id="active-label">Calling</div><h2 id="active-number">—</h2><div id="call-timer">00:00</div>
+        <div class="call-controls"><button id="mute-btn" class="control-btn">🎙<span>Mute</span></button><button id="speaker-btn" class="control-btn">🔊<span>Speaker</span></button><button id="hold-btn" class="control-btn">⏸<span>Hold</span></button></div>
+        <div id="incoming-actions" class="incoming-actions hidden"><button id="answer-btn" class="answer-btn">☎ Answer</button><button id="decline-btn" class="decline-btn">Decline</button></div>
+        <button id="hangup-btn" class="hangup-btn">●</button><div id="active-status">Connecting…</div>
       </section>
 
       <nav class="bottom-nav" aria-label="Phone navigation">
-        <button class="nav-item active" data-view="dialer-view"><span>⌨</span><small>Keypad</small></button>
-        <button class="nav-item" data-view="recents-view"><span>◷</span><small>Recents</small></button>
-        <button class="nav-item" data-view="messages-view"><span>✉</span><small>Messages</small></button>
-        <button class="nav-item" data-view="contacts-view"><span>♙</span><small>Contacts</small></button>
+        <button class="nav-item active" data-view="dialer-view"><span>⌨</span><small>Keypad</small></button><button class="nav-item" data-view="recents-view"><span>◷</span><small>Recents</small></button><button class="nav-item" data-view="messages-view"><span>✉</span><small>Messages</small></button><button class="nav-item" data-view="contacts-view"><span>♙</span><small>Contacts</small></button>
       </nav>
     </section>
   </main>
@@ -112,14 +123,13 @@
   <dialog id="settings-dialog">
     <form method="dialog" class="settings-card" id="settings-form">
       <div class="dialog-head"><div><span class="eyebrow">SIP</span><h2>Phone settings</h2></div><button value="cancel" class="close-btn">×</button></div>
-      <p class="settings-note">Use the SIP identity assigned to this extension. Credentials are stored only in this browser.</p>
+      <p class="settings-note">The SIP login credentials are established on the login screen. Passwords are kept in session storage and are cleared when the browser session ends.</p>
       <label>Extension<input id="sip-extension" placeholder="101" autocomplete="username"></label>
       <label>SIP username<input id="sip-username" placeholder="KUDGTE_101" autocomplete="username"></label>
-      <label>SIP password<input id="sip-password" type="password" placeholder="SIP password" autocomplete="current-password"></label>
       <label>SIP domain<input id="sip-domain" placeholder="sip.engineerip.com"></label>
       <label>WSS server<input id="sip-wss" placeholder="wss://sip.engineerip.com/ws"></label>
       <label>API token <span class="optional">(optional, for server call history)</span><input id="api-token" type="password" placeholder="Bearer token" autocomplete="off"></label>
-      <div class="settings-actions"><button type="button" id="connect-btn" class="primary-btn">Connect phone</button><button value="cancel" class="secondary-btn">Close</button></div>
+      <div class="settings-actions"><button type="button" id="logout-btn" class="danger-btn">Log out</button><button type="button" id="connect-btn" class="primary-btn">Reconnect</button><button value="cancel" class="secondary-btn">Close</button></div>
       <div id="settings-status" class="settings-status"></div>
     </form>
   </dialog>
