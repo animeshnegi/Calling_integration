@@ -31,7 +31,11 @@ GET /api/v1/extensions
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
-Returns the configured active extension numbers and default extension. SIP passwords are never returned.
+Returns the configured active extension numbers and the default extension. SIP
+passwords are never returned. `extensions` is the digits a person dials (the same
+digits may appear twice when two of the account's lines each hold them), and `keys`
+names one device each (`101@+13025550001`) - which is what a caller sends to reach a
+particular line's 101, and what the call records carry.
 
 ## Phone numbers and ownership
 
@@ -45,8 +49,9 @@ Returns configured DIDs with provider, owning `inbound_extension`, active state 
 `default_outbound`. Use this before presenting caller-ID choices in a CRM. It never
 returns provider credentials. `inbound_extension` is the extension key
 (`101@+13025550001`), which is what tells the same digits on two of a customer's
-numbers apart; `?extension=101` narrows the list to the numbers whose extension
-carries those digits, and a key or a mailbox name works there too.
+numbers apart; `?extension=101` narrows the list to the numbers whose own extension
+set carries those digits (two such numbers are both listed - a filter, not a guess),
+while a key or a mailbox name (`101-13025550001`) narrows to that one line.
 
 ## Start outbound call
 
@@ -66,13 +71,16 @@ Idempotency-Key: <unique CRM request UUID>
 ```
 
 `phone` must be E.164 format. `extension` is the extension the call is placed as - the
-three digits the person dials (`102`), or the key (`102@+13025550001`) when a customer
-has two numbers that both hold those digits. If omitted, the account's default
-extension is used. `caller_id_number` is optional, but when supplied it must be an
-active number assigned to that extension; otherwise the extension's own line is
-presented, falling back to the account's main line for an account-wide extension.
-Calls are rejected when the extension has no number to call out as. See
-[`NUMBER_OWNERSHIP.md`](NUMBER_OWNERSHIP.md).
+three digits the person dials (`102`) while they name one extension of the account, or
+the key (`102@+13025550001`) when two of its numbers both hold them; a bare `102` with
+several matches is refused with an explicit ambiguity error rather than guessed. If
+omitted, the account's default extension is used. `caller_id_number` is optional, but
+when supplied it must be an active number of the same account; otherwise the
+extension's own line is presented - **caller ID comes from the phone number the
+extension belongs to**, never from the digits and never from the account, so two 101s
+on two lines present their own number. An extension that has no line of its own
+presents nothing, and the call is rejected with *"No active callback number is
+assigned to this extension"*. See [`NUMBER_OWNERSHIP.md`](NUMBER_OWNERSHIP.md).
 
 Send a unique `Idempotency-Key` (8–128 safe characters) for every user click/CRM job. The key is scoped to the API client for 24 hours. A successful replay returns HTTP 200 with the original call and `idempotent_replay: true`; a concurrent in-progress duplicate returns 409. This prevents network retries from originating duplicate paid calls.
 
@@ -253,12 +261,20 @@ Extension mailbox messages can be listed, played, marked read, and deleted throu
 
 ```text
 GET    /api/v1/voicemail/mailboxes
-GET    /api/v1/voicemails?extension=101&folder=inbox
-GET    /api/v1/voicemails?extension=101-13025550001&folder=inbox   (same mailbox, two lines hold a 101)
-GET    /api/v1/voicemails/101/inbox/msg0000/file
-POST   /api/v1/voicemails/101/inbox/msg0000/read
-DELETE /api/v1/voicemails/101/old/msg0000
+GET    /api/v1/voicemails?extension=101&folder=inbox               (while one extension of the key holds the digits)
+GET    /api/v1/voicemails?extension=101-13025550001&folder=inbox    (the mailbox of 101 on +13025550001)
+GET    /api/v1/voicemails?extension=101@+13025550001&folder=inbox   (the same box, named by its key)
+GET    /api/v1/voicemails/101-13025550001/inbox/msg0000/file
+POST   /api/v1/voicemails/101-13025550001/inbox/msg0000/read
+DELETE /api/v1/voicemails/101-13025550001/old/msg0000
 ```
+
+Voicemail is number-scoped, so **a three-digit extension is resolved only within the
+current phone number**: two of the token's lines that both hold 101 are two mailboxes
+(`101-13025550001` and `101-13025550002`, each listed by `/api/v1/voicemail/mailboxes`
+with its own `key`, `number` and `mailbox`), and a request that says only `101` while
+two hold it is refused with an explicit ambiguity error - never guessed. The mailbox
+name and the key are both accepted, so a CRM written against either keeps working.
 
 Valid folders are `inbox`, `old`, and `urgent`. Audio supports HTTP conditional/range delivery. Mailbox PINs are write-only admin values and are never included in responses. See [`VOICEMAIL.md`](VOICEMAIL.md) for call flow, response fields, storage, phone access, security, and troubleshooting.
 

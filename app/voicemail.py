@@ -20,16 +20,25 @@ MESSAGE_RE = re.compile(r"^msg\d{4}$")
 
 
 def mailbox_name(mailbox: Any) -> str:
-    """The folder a mailbox lives in.
+    """The folder a mailbox lives in: `<digits>-<number digits>`.
 
-    `101@+13025550001` is the extension key, `101-13025550001` is its mailbox;
-    the digits alone are what an older deployment - and a caller reading them off
-    a phone - says. All three name the same folder here.
+    `101@+13025550001` is the extension key and `101-13025550001` is its mailbox -
+    the name the renderer writes, the credentials sheet shows and the console
+    uses. A three-digit extension is resolved only within the current phone
+    number, so two lines' 101s are two mailboxes and the digits alone name a
+    mailbox only where there is one - the platform's own rows, and the folders of
+    a deployment that predates per-number extension sets.
     """
     text = str(mailbox or "").strip()
-    if "@" in text and "-" not in text.partition("@")[0]:
-        digits, _, scope = text.partition("@")
-        return f"{digits}-{scope}" if digits.isdigit() and scope else text
+    digits, _, scope = text.partition("@")
+    if scope:
+        scope_digits = re.sub(r"[^0-9]", "", scope)
+        return f"{digits}-{scope_digits}" if digits.isdigit() and scope_digits else text
+    head, sep, tail = text.partition("-")
+    if sep and head.isdigit():
+        # One spelling per mailbox: `101-+13025550001` and `101-13025550001` name
+        # the same folder, and it is the second the renderer writes.
+        return f"{head}-{re.sub(r'[^0-9]', '', tail)}"
     return text
 FOLDERS = {"inbox": "INBOX", "old": "Old", "urgent": "Urgent"}
 AUDIO_FORMATS = ("wav", "WAV", "gsm")

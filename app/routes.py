@@ -8,7 +8,9 @@ from typing import Any, Callable
 
 from flask import Response, g, jsonify, redirect, request, send_file, send_from_directory, stream_with_context
 
+from .admin import extension_digits, extension_mailbox, extension_scope
 from .config import Config
+from .voicemail import mailbox_name
 
 E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 CALL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -96,10 +98,12 @@ def register_routes(app, service):
         # The customer's own default outbound extension comes first, then the
         # platform's, then whichever active extension they own.
         if api_owner_id() is not None:
+            # The default of the account is a key - one line's 101, never digits
+            # that two lines could both mean.
             owned_default = ""
             if service.settings_store:
                 owned_default = service.settings_store.call_default_for("outbound", api_owner_id())
-            owned_default = owned_default or next((row["extension"] for row in api_extensions() if row["active"]), "")
+            owned_default = owned_default or next((row["key"] for row in api_extensions() if row["active"]), "")
         else:
             owned_default = _configured_default_extension(service)
         extension = str(data.get("extension") or owned_default).strip()
@@ -108,11 +112,25 @@ def register_routes(app, service):
             return None, (jsonify({"error": "phone is required"}), 400)
         if not E164_RE.fullmatch(phone):
             return None, (jsonify({"error": "phone must be a valid E.164 number"}), 400)
-        if not extension.isdigit() or not 100 <= int(extension) <= 999:
+        digits = extension_digits(extension)
+        if not digits.isdigit() or not 100 <= int(digits) <= 999:
             return None, (jsonify({"error": "extension must be a 3-digit number"}), 400)
-        configured = api_extensions()
-        if not any(row["extension"] == extension and row["active"] for row in configured):
+        # The digits name the number's own extension - `104` is the 104 of the line
+        # it is on - so a request that names them while two lines both hold them is
+        # refused instead of guessed, and the caller names the number (`104@+1…`).
+        configured = [row for row in api_extensions() if row["active"]]
+        matches = [
+            row for row in configured
+            if str(row["key"]) == extension or (not extension_scope(extension) and row["extension"] == digits)
+        ]
+        if not matches:
             return None, (jsonify({"error": "extension is not configured"}), 400)
+        if len(matches) > 1:
+            return None, (
+                jsonify({"error": f"{digits} is on more than one of your numbers - name the phone number as well"}),
+                400,
+            )
+        extension = str(matches[0]["key"])
         try:
             call = service.start_outbound(
                 phone=phone,
@@ -149,10 +167,20 @@ def register_routes(app, service):
         if service.settings_store:
             rows = api_extensions()
             active = [row["extension"] for row in rows if row["active"]]
+            # The keys name one device each (`101@+13025550001`), which is what a
+            # caller sends to reach a line's own 101 while another line holds the
+            # same digits. The digits stay for a caller that reads the short list.
+            keys = [row["key"] for row in rows if row["active"]]
             if api_owner_id() is not None:
                 chosen = service.settings_store.call_default_for("outbound", api_owner_id()) if service.settings_store else ""
-                return jsonify({"extensions": active, "default_extension": chosen or (active[0] if active else "")})
-            return jsonify({"extensions": active, "default_extension": _configured_default_extension(service)})
+                return jsonify({
+                    "extensions": active, "keys": keys,
+                    "default_extension": chosen or (keys[0] if keys else ""),
+                })
+            return jsonify({
+                "extensions": active, "keys": keys,
+                "default_extension": _configured_default_extension(service),
+            })
         return jsonify({"extensions": list(service.config.ASTERISK_EXTENSIONS), "default_extension": service.config.DEFAULT_EXTENSION})
 
     @app.get("/api/v1/numbers")
@@ -161,7 +189,28 @@ def register_routes(app, service):
         extension = request.args.get("extension", "").strip()
         rows = service.settings_store.list_numbers(api_owner_id()) if service.settings_store and api_owner_id() is not None else (service.settings_store.list_numbers() if service.settings_store else [])
         if extension:
-            rows = [row for row in rows if row["inbound_extension"] == extension]
+            # The link is stored as a key, so the digits are read against each
+            # number's own extension set: `?extension=101` narrows to the numbers
+            # whose own 101 answers them - two such numbers are both listed - while
+            # a key or a mailbox name names one line.
+            wanted = mailbox_name(extension)
+            digits = extension_digits(extension).partition("-")[0]
+            scope = extension_scope(extension) or (wanted.partition("-")[2] if "-" in wanted else "")
+            scope = re.sub(r"[^0-9]", "", scope)
+            carrying = {
+                str(row["number"]) for row in api_extensions()
+                if row["active"] and str(row["extension"]) == digits
+            }
+
+            def answers(row):
+                link = str(row["inbound_extension"] or "")
+                if link and link in {extension, wanted}:
+                    return True
+                if scope:
+                    return re.sub(r"[^0-9]", "", str(row["number"])) == scope
+                return str(row["number"]) in carrying
+
+            rows = [row for row in rows if answers(row)]
         if api_owner_id() is not None:
             for row in rows:
                 row.pop("provider", None)
@@ -282,8 +331,49 @@ def register_routes(app, service):
             direct_passthrough=True,
         )
 
+    def api_mailboxes() -> dict[str, dict]:
+        """The mailboxes the token's own extensions own, by mailbox name.
+
+        Voicemail is number-scoped, so every extension's mailbox is
+        `101-13025550001` and two lines' 101s are two boxes, each with its own
+        messages - never one shared `101`.
+        """
+        return {
+            extension_mailbox(str(row.get("key") or row["extension"])): row
+            for row in api_extensions()
+            if row.get("voicemail_enabled")
+        }
+
+    def api_resolve_mailbox(value: str):
+        """One mailbox name, from a mailbox name, a key or unambiguous digits.
+
+        A three-digit extension is resolved only within the current phone number,
+        so bare digits that name several of the token's own extensions are refused
+        instead of guessed: the caller names the mailbox (`101-13025550001`).
+        Returns the mailbox name and, on failure, the response to send back.
+        """
+        text = str(value or "").strip()
+        if not text:
+            return "", None
+        names = api_mailboxes()
+        wanted = mailbox_name(text)
+        if wanted in names:
+            return wanted, None
+        matches = [name for name, row in names.items() if str(row["extension"]) == text] if text.isdigit() else []
+        if len(matches) > 1:
+            return "", (
+                jsonify({"error": f"{text} is on more than one of your numbers - name the mailbox as "
+                                  "<digits>-<number>"}),
+                400,
+            )
+        if matches:
+            return matches[0], None
+        return "", (jsonify({"error": "voicemail mailbox not found"}), 404)
+
     def api_mailbox_allowed(mailbox: str) -> bool:
-        return api_owner_id() is None or mailbox in {row["extension"] for row in api_extensions()}
+        if api_owner_id() is None:
+            return True
+        return mailbox_name(mailbox) in api_mailboxes()
 
     @app.get("/api/v1/voicemail/mailboxes")
     @require_token("voicemail:read")
@@ -300,19 +390,23 @@ def register_routes(app, service):
         for extension in api_extensions():
             if not extension.get("voicemail_enabled"):
                 continue
+            mailbox = extension_mailbox(str(extension.get("key") or extension["extension"]))
             mailboxes.append({
-                "extension": extension["extension"], "display_name": extension["display_name"],
-                "active": bool(extension["active"]), "counts": counts.get(extension["extension"], {"new": 0, "old": 0, "urgent": 0, "total": 0}),
+                "extension": extension["extension"], "key": extension.get("key", extension["extension"]),
+                "number": extension.get("number", ""), "mailbox": mailbox,
+                "display_name": extension["display_name"], "active": bool(extension["active"]),
+                "counts": counts.get(mailbox, {"new": 0, "old": 0, "urgent": 0, "total": 0}),
             })
         return jsonify({"mailboxes": mailboxes})
 
     @app.get("/api/v1/voicemails")
     @require_token("voicemail:read")
     def list_voicemails():
-        mailbox = request.args.get("extension", "").strip() or None
+        requested = request.args.get("extension", "").strip()
         folder = request.args.get("folder", "").strip() or None
-        if mailbox and not any(row["extension"] == mailbox and row.get("voicemail_enabled") for row in api_extensions()):
-            return jsonify({"error": "voicemail mailbox not found"}), 404
+        mailbox, failure = api_resolve_mailbox(requested) if requested else ("", None)
+        if failure:
+            return failure
         try:
             messages = app.extensions["voicemail_store"].list_messages(mailbox, folder)
             if api_owner_id() is not None:

@@ -176,6 +176,36 @@ def make_customer(settings, username: str, company: str) -> int:
     return int(next(row["id"] for row in settings.list_users() if row["username"] == username))
 
 
+def key_on(settings, number: str, digits: str) -> str:
+    """The identity of one line's own extension: `101@+13025559901`.
+
+    Every phone number carries its own set from 101 up, so the digits alone never
+    name a device - the number they answer on is half of the identity, and it is
+    what the store, the dial plan and a call record all use.
+    """
+    return settings.extension_key_for(number, digits)
+
+
+def line_setup(settings, number: str, owner: int, extensions) -> dict:
+    """Create one line with its own extension set, in dialling order."""
+    settings.save_number({
+        "number": number, "description": "Main line", "provider": "TestCarrier",
+        "owner_user_id": owner, "active": True,
+    })
+    keys = {}
+    for extension in extensions:
+        row = settings.add_extension_to_number(
+            number, owner, {"extension": extension, "display_name": f"Desk {extension}", "active": True},
+        )
+        keys[extension] = str(row["key"])
+    # The line answers its first extension; that link is how the DID rings a desk.
+    settings.save_number({
+        "number": number, "description": "Main line", "provider": "TestCarrier",
+        "owner_user_id": owner, "inbound_extension": keys[extensions[0]], "active": True,
+    })
+    return keys
+
+
 def make_menu_service(tmp_path, extensions=("101", "102", "106"), ivr=None, plan_extra=None):
     """A customer whose main number answers with a menu, and one call already
     waiting on the inbound channel."""
@@ -186,12 +216,7 @@ def make_menu_service(tmp_path, extensions=("101", "102", "106"), ivr=None, plan
     service.settings_store = settings
     owner = make_customer(settings, "menu-co", "Menu Co")
     number = "+13025559901"
-    for extension in extensions:
-        settings.save_extension({"extension": extension, "display_name": f"Desk {extension}", "active": True}, owner)
-    settings.save_number({
-        "number": number, "description": "Main line", "provider": "TestCarrier",
-        "owner_user_id": owner, "inbound_extension": extensions[0], "active": True,
-    })
+    keys = line_setup(settings, number, owner, extensions)
     node = settings.default_ivr_node()
     node.update(ivr or {})
     settings.save_call_route(owner, {
@@ -199,7 +224,7 @@ def make_menu_service(tmp_path, extensions=("101", "102", "106"), ivr=None, plan
         "route": {"nodes": [node, *(plan_extra or [])]},
     })
     channel = {"id": "chan-inbound-1", "caller": {"number": "+13025550000"}}
-    call = service.start_inbound(channel, number, extensions[0])
+    call = service.start_inbound(channel, number, keys[extensions[0]])
     return service, asterisk, store, settings, owner, number, call
 
 
@@ -210,33 +235,38 @@ def digits(service, value, channel_id="chan-inbound-1"):
 
 
 def test_a_menu_answers_the_call_and_plays_its_prompt(tmp_path):
-    service, asterisk, store, _, _, _, call = make_menu_service(tmp_path)
+    service, asterisk, store, settings, _, number, call = make_menu_service(tmp_path)
     assert call is not None
     assert asterisk.answered == ["chan-inbound-1"]                     # taken off ringing
     assert asterisk.played and asterisk.played[0][1] == "sound:custom/ivr-welcome"
     session = service._ivr_sessions_map()["chan-inbound-1"]
     assert session["call_id"] == call.call_id
-    assert sorted(session["extensions"]) == ["101", "102", "106"]      # only this customer's desks
+    # Only this line's own desks, each named by its digits *and* this number: a
+    # 101 on another line is a different device, and another customer's desk is
+    # not offered at all.
+    assert sorted(session["keys"]) == sorted(key_on(settings, number, digits) for digits in ("101", "102", "106"))
+    assert sorted(session["extensions"]) == ["101", "102", "106"]      # the digits a caller hears about
     assert call.status == "ringing" and store.get(call.call_id)
     assert service.has_ivr_sessions() is True
 
 
 def test_the_digits_dial_the_extension_the_caller_entered(tmp_path):
-    service, asterisk, store, _, _, _, call = make_menu_service(tmp_path)
+    service, asterisk, store, settings, _, number, call = make_menu_service(tmp_path)
     digits(service, "106")
-    assert asterisk.inbound_legs == [(call.call_id, "106")]            # exactly the desk that was asked for
-    assert store.get(call.call_id).extension == "106"
+    # Exactly the desk that was asked for - on the number the call came in on.
+    assert asterisk.inbound_legs == [(call.call_id, key_on(settings, number, "106"))]
+    assert store.get(call.call_id).extension == key_on(settings, number, "106")
     assert service.has_ivr_sessions() is False                         # the menu is over
     assert asterisk.stopped_playbacks and asterisk.stopped_playbacks[0].startswith("ivr-")
 
 
 def test_a_digit_that_could_grow_waits_for_the_next_one(tmp_path):
     """"1" cannot dial while 101, 102 and 106 all exist."""
-    service, asterisk, _, _, _, _, call = make_menu_service(tmp_path)
+    service, asterisk, _, settings, _, number, call = make_menu_service(tmp_path)
     digits(service, "1")
     assert asterisk.inbound_legs == []                                 # nothing dialled yet
     digits(service, "01")
-    assert asterisk.inbound_legs == [(call.call_id, "101")]
+    assert asterisk.inbound_legs == [(call.call_id, key_on(settings, number, "101"))]
 
 
 def test_a_pause_on_an_incomplete_extension_asks_again(tmp_path):
@@ -256,42 +286,83 @@ def test_the_prompt_is_played_again_when_nothing_matches(tmp_path):
     assert asterisk.inbound_legs == []
 
 
+def test_104_is_never_dialled_from_another_line(tmp_path):
+    """A menu dials a three-digit extension against the line the call came in on.
+
+    Both of this customer's lines have their own 101; only the second has a 104.
+    Dialling 104 from the first line is NOT IN SERVICE - the call never reaches
+    across to the other line - while the same digits on the second line ring the
+    second line's own 104.
+    """
+    from app.admin import SettingsStore
+
+    service, asterisk, _ = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "cross-co", "Cross Co")
+    first, second = "+13025559901", "+13025559902"
+    keys_a = line_setup(settings, first, owner, ("101", "102"))
+    keys_b = line_setup(settings, second, owner, ("101", "104"))
+    node = settings.default_ivr_node()
+    for number in (first, second):
+        settings.save_call_route(owner, {
+            "phone_number": number, "name": "Main call flow", "active": True,
+            "route": {"nodes": [dict(node)]},
+        })
+
+    # A call on the first line: it has no 104 of its own, and 104 is not taken
+    # from the second line - which holds one - either.
+    service.start_inbound({"id": "chan-a", "caller": {"number": "+13025550000"}}, first, keys_a["101"])
+    for digit in "104":
+        service.handle_ari_event({"type": "ChannelDtmfReceived", "channel": {"id": "chan-a"}, "digit": digit})
+    assert asterisk.inbound_legs == [], asterisk.inbound_legs
+
+    # The same digits on the second line ring that line's own 104.
+    call_b = service.start_inbound({"channel": {"id": "chan-b", "caller": {"number": "+13025550000"}},
+                                    "id": "chan-b"}, second, keys_b["101"])
+    for digit in "104":
+        service.handle_ari_event({"type": "ChannelDtmfReceived", "channel": {"id": "chan-b"}, "digit": digit})
+    assert asterisk.inbound_legs == [(call_b.call_id, keys_b["104"])], asterisk.inbound_legs
+
+
 def test_a_second_customer_extension_is_never_dialled(tmp_path):
     service, asterisk, store, settings, owner, _, call = make_menu_service(tmp_path, extensions=("101", "102"))
     other = make_customer(settings, "other-co", "Other Co")
     settings.save_extension({"extension": "103", "display_name": "Their desk", "active": True}, other)
     digits(service, "103")
-    assert all(extension != "103" for _, extension in asterisk.inbound_legs), asterisk.inbound_legs
+    # 103 is not on the line the call came in on, so nothing at all is dialled -
+    # the menu never reaches into another account's desks.
+    assert asterisk.inbound_legs == [], asterisk.inbound_legs
 
 
 def test_after_the_last_attempt_the_nodes_own_fallback_wins(tmp_path):
-    service, asterisk, _, _, _, _, call = make_menu_service(
+    service, asterisk, _, settings, _, number, call = make_menu_service(
         tmp_path, ivr={"fallback": "102", "attempts": 2},
         plan_extra=[{"type": "extension", "extension": "106", "label": "Ring 106", "configured": True}])
     digits(service, "9")
     assert len(asterisk.played) == 2                                  # two chances, as configured
     service.process_ivr_timeouts(now=time.monotonic() + 60)
-    assert asterisk.inbound_legs == [(call.call_id, "102")], asterisk.inbound_legs
+    assert asterisk.inbound_legs == [(call.call_id, key_on(settings, number, "102"))], asterisk.inbound_legs
 
 
 def test_without_a_fallback_extension_the_rest_of_the_flow_answers(tmp_path):
-    service, asterisk, store, _, _, _, call = make_menu_service(
+    service, asterisk, store, settings, _, number, call = make_menu_service(
         tmp_path, plan_extra=[{"type": "extension", "extension": "106", "label": "Ring 106", "configured": True}])
     service.process_ivr_timeouts(now=time.monotonic() + 60)            # attempt one: ask again
     assert service.has_ivr_sessions() is True
     service.process_ivr_timeouts(now=time.monotonic() + 120)           # attempt two: give up
-    assert asterisk.inbound_legs == [(call.call_id, "106")]
-    assert store.get(call.call_id).extension == "106"
+    assert asterisk.inbound_legs == [(call.call_id, key_on(settings, number, "106"))]
+    assert store.get(call.call_id).extension == key_on(settings, number, "106")
     assert service.has_ivr_sessions() is False
 
 
 def test_a_menu_on_its_own_falls_back_to_the_lines_extension(tmp_path):
     """Number -> menu and nothing else: a caller who enters nothing still lands
     on the extension the number belongs to."""
-    service, asterisk, store, _, _, _, call = make_menu_service(tmp_path)
+    service, asterisk, store, settings, _, number, call = make_menu_service(tmp_path)
     service.process_ivr_timeouts(now=time.monotonic() + 60)
     service.process_ivr_timeouts(now=time.monotonic() + 120)
-    assert asterisk.inbound_legs == [(call.call_id, "101")]
+    assert asterisk.inbound_legs == [(call.call_id, key_on(settings, number, "101"))]
     assert service.has_ivr_sessions() is False
 
 
@@ -306,13 +377,15 @@ def test_a_voice_without_a_recording_still_asks_the_caller(tmp_path):
                 raise AsteriskError("Asterisk API 404")
             return super().play_channel_media(channel_id, media, playback_id)
 
-    service, _, _, _, _, _, _ = make_menu_service(tmp_path)
+    service, _, _, settings, _, number, _ = make_menu_service(tmp_path)
     # A second caller, on a client that has no custom recordings at all.
     service.asterisk = NoCustomPrompt()
-    fresh = service.start_inbound({"id": "chan-inbound-2", "caller": {"number": "+13025550001"}}, "+13025559901", "101")
+    fresh = service.start_inbound(
+        {"id": "chan-inbound-2", "caller": {"number": "+13025550001"}}, number, key_on(settings, number, "101"),
+    )
     assert [media for _, media, _ in service.asterisk.played] == [TelephonyService.IVR_STOCK_PROMPT]
     digits(service, "106", channel_id="chan-inbound-2")
-    assert service.asterisk.inbound_legs == [(fresh.call_id, "106")]
+    assert service.asterisk.inbound_legs == [(fresh.call_id, key_on(settings, number, "106"))]
 
 
 def test_a_caller_who_hangs_up_leaves_no_session_behind(tmp_path):
@@ -338,20 +411,17 @@ def test_past_five_extensions_every_flow_gains_the_menu(tmp_path):
     settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
     owner = make_customer(settings, "bigco", "Big Co")
     number = "+13025559902"
-    for extension in ("101", "102", "103", "104", "105"):
-        settings.save_extension({"extension": extension, "display_name": f"Desk {extension}", "active": True}, owner)
-    settings.save_number({"number": number, "provider": "TestCarrier", "owner_user_id": owner,
-                          "description": "Main line", "inbound_extension": "101"})
+    keys = line_setup(settings, number, owner, ("101", "102", "103", "104", "105"))
     settings.save_call_route(owner, {"phone_number": number, "name": "Main call flow",
-                                     "route": settings.default_number_route(["101"]), "active": True})
-    settings.ensure_extension_flow(owner, "101")
+                                     "route": settings.default_number_route([keys["101"]]), "active": True})
+    settings.ensure_extension_flow(owner, keys["101"])
 
     assert settings.sync_auto_ivr(owner) == []                          # five desks: the customer's choice
     assert settings.auto_ivr_wanted(6) is True
 
-    settings.save_extension({"extension": "106", "display_name": "Desk 106", "active": True}, owner)
+    sixth = settings.add_extension_to_number(number, owner, {"extension": "106", "display_name": "Desk 106"})
     added = settings.sync_auto_ivr(owner)
-    assert f"number {number}" in added and "extension 106" in added, added
+    assert f"number {number}" in added and f"extension {sixth['key']}" in added, added
     assert len(added) >= 6, added                                       # the number, and every desk, menu first
     for flow in settings.list_call_routes(owner):
         assert flow["route"]["nodes"][0]["type"] == "ivr"
@@ -376,19 +446,17 @@ def test_the_menu_keeps_the_voice_and_the_text_it_was_given(tmp_path):
     settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
     owner = make_customer(settings, "voices", "Voices")
     number = "+13025559903"
-    settings.save_extension({"extension": "101", "display_name": "Desk", "active": True}, owner)
-    settings.save_number({"number": number, "provider": "TestCarrier", "owner_user_id": owner,
-                          "description": "Line", "inbound_extension": "101"})
+    keys = line_setup(settings, number, owner, ("101",))
     node = {"type": "ivr", "prompt": "Hola, marque una extension.", "voice": "es-us",
             "input_timeout": 8, "attempts": 3, "fallback": ""}
     settings.save_call_route(owner, {"phone_number": number, "name": "Main", "route": {"nodes": [node]}, "active": True})
     stored = settings.list_call_routes(owner)[0]["route"]["nodes"][0]
     assert (stored["voice"], stored["input_timeout"], stored["attempts"]) == ("es-us", 8, 3)
-    plan = settings.inbound_plan(number, "101")
+    plan = settings.inbound_plan(number, keys["101"])
     assert plan["kind"] == "ivr"
     assert plan["media"] == "sound:custom/ivr-welcome-es-us"
     assert plan["prompt"] == "Hola, marque una extension."
-    assert plan["extensions"] == ["101"] and plan["destinations"] == []
+    assert plan["extensions"] == [keys["101"]] and plan["destinations"] == []
 
     # A pasted-over text is trimmed to what the box allows, never rejected.
     settings.save_call_route(owner, {"phone_number": number, "name": "Main",
@@ -478,18 +546,18 @@ def test_one_of_the_customers_own_numbers_is_called_without_a_carrier(tmp_path):
     settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
     service.settings_store = settings
     owner = make_customer(settings, "field-co", "Field Co")
-    settings.save_extension({"extension": "105", "active": True}, owner)
-    settings.save_extension({"extension": "117", "active": True}, owner)
-    settings.save_number({"number": "+13025550098", "provider": "TestCarrier", "inbound_extension": "105",
-                          "owner_user_id": owner, "active": True})
-    settings.save_number({"number": "+13025550067", "provider": "TestCarrier", "inbound_extension": "117",
-                          "owner_user_id": owner, "active": True})
+    a, b = "+13025550098", "+13025550067"
+    first = line_setup(settings, a, owner, ("105",))
+    second = line_setup(settings, b, owner, ("117",))
 
-    store.create(Call(call_id="local-1", contact_id=None, member_id=None, extension="105",
-                      phone="+13025550067", provider="TestCarrier"))
+    # The call comes from +13025550098's own 105 and dials the account's other
+    # number: it lands on *that* number's extension, the 117 on +13025550067.
+    store.create(Call(call_id="local-1", contact_id=None, member_id=None,
+                      extension=first["105"], phone=b, provider="TestCarrier"))
     service._start_customer(store.get("local-1"))
 
-    assert asterisk.local_legs == [("local-1", "117")]
+    assert asterisk.local_legs == [("local-1", second["117"])]
+    assert asterisk.local_endpoints == [f"PJSIP/117-13025550067"]
     assert asterisk.customer_legs == []
     assert store.get("local-1").status == "dialing_customer"
 
@@ -509,15 +577,13 @@ def test_a_number_that_is_not_the_customers_own_still_leaves_through_the_carrier
     service.settings_store = settings
     owner = make_customer(settings, "field-co", "Field Co")
     other = make_customer(settings, "other-co", "Other Co")
-    settings.save_extension({"extension": "105", "active": True}, owner)
-    settings.save_extension({"extension": "201", "active": True}, other)
-    settings.save_number({"number": "+13025550098", "provider": "TestCarrier", "inbound_extension": "105",
+    mine = line_setup(settings, "+13025550098", owner, ("105",))
+    line_setup(settings, "+13025550011", other, ("201",))
+    settings.save_number({"number": "+13025550098", "provider": "TestCarrier", "inbound_extension": mine["105"],
                           "owner_user_id": owner, "default_outbound": True, "active": True})
-    settings.save_number({"number": "+13025550011", "provider": "TestCarrier", "inbound_extension": "201",
-                          "owner_user_id": other, "active": True})
 
     for call_id, phone in (("outside-1", "+13025559999"), ("outside-2", "+13025550011")):
-        store.create(Call(call_id=call_id, contact_id=None, member_id=None, extension="105",
+        store.create(Call(call_id=call_id, contact_id=None, member_id=None, extension=mine["105"],
                           phone=phone, provider="TestCarrier", caller_id_number="+13025550098"))
         service._start_customer(store.get(call_id))
         assert asterisk.customer_legs[-1][:2] == (call_id, phone)
@@ -528,9 +594,9 @@ def test_a_number_that_is_not_the_customers_own_still_leaves_through_the_carrier
 def test_a_stale_link_on_an_own_number_rings_the_accounts_own_extension(tmp_path):
     """A number of this account left pointing at another organisation's phone.
 
-    The panel must not take that row as a shortcut to a stranger: the account's
-    own fallback answers instead, which is what an inbound call on that number
-    would do as well.
+    The panel must not take that row as a shortcut to a stranger: this line's own
+    extension answers instead, which is what an inbound call on that number would
+    do as well.
     """
     from app.admin import SettingsStore
     from app.models import Call
@@ -540,29 +606,35 @@ def test_a_stale_link_on_an_own_number_rings_the_accounts_own_extension(tmp_path
     service.settings_store = settings
     owner = make_customer(settings, "field-co", "Field Co")
     other = make_customer(settings, "other-co", "Other Co")
-    settings.save_extension({"extension": "105", "active": True}, owner)
-    settings.save_extension({"extension": "117", "active": True}, owner)
-    settings.save_extension({"extension": "201", "active": True}, other)
-    settings.save_number({"number": "+13025550067", "provider": "TestCarrier",
-                          "owner_user_id": owner, "active": True})
+    line_setup(settings, "+13025550067", owner, ("105", "117"))
+    line_setup(settings, "+13025550011", other, ("201",))
+    # A row that survived from before ownership was enforced: this account's
+    # number pointing at another organisation's extension.
     with settings._connect() as db:
         db.execute("UPDATE phone_numbers SET inbound_extension='201' WHERE number='+13025550067'")
 
-    store.create(Call(call_id="stale-1", contact_id=None, member_id=None, extension="105",
+    store.create(Call(call_id="stale-1", contact_id=None, member_id=None,
+                      extension=key_on(settings, "+13025550067", "105"),
                       phone="+13025550067", provider="TestCarrier"))
     service._start_customer(store.get("stale-1"))
 
-    assert asterisk.local_legs == [("stale-1", "105")]
+    # The number is this account's own, so the call never leaves through the
+    # carrier - and it rings this line's own desk, never the stranger's 201.
+    assert asterisk.local_legs == [("stale-1", key_on(settings, "+13025550067", "105"))]
     assert asterisk.customer_legs == []
 
 
-def test_the_panel_calls_out_on_the_accounts_line_when_the_extension_has_none(tmp_path):
-    """The console/API path for the same case: an extension added later.
+def test_an_extension_with_no_line_of_its_own_cannot_borrow_the_accounts_line(tmp_path):
+    """The panel path for the same case, and there is no account-level fallback.
 
-    It has no number of its own, so the account's main line is presented - the
-    panel does not refuse the call, and it does not borrow another account's
-    number either.
+    Caller ID comes from the phone-number context, so an extension that has no
+    number of its own has nothing to present: the panel is refused rather than
+    showing the account's main line, and it never borrows another account's
+    number either. Naming one of the account's own lines still works - that is
+    how an extension added later calls out.
     """
+    import pytest
+
     from app.admin import SettingsStore
 
     service, asterisk, _ = make_service(tmp_path)
@@ -570,20 +642,33 @@ def test_the_panel_calls_out_on_the_accounts_line_when_the_extension_has_none(tm
     service.settings_store = settings
     owner = make_customer(settings, "single-line", "Single Line")
     other = make_customer(settings, "other-line", "Other Line")
-    settings.save_extension({"extension": "101", "active": True}, owner)
-    settings.save_extension({"extension": "102", "active": True}, owner)
-    settings.save_extension({"extension": "201", "active": True}, other)
     settings.save_number({"number": "+13022661626", "provider": "TestCarrier", "inbound_extension": "101",
                           "owner_user_id": owner, "default_outbound": True, "active": True})
+    settings.save_number({"number": "+13025550099", "provider": "TestCarrier", "inbound_extension": "102",
+                          "owner_user_id": owner, "active": True})
     settings.save_number({"number": "+13025550011", "provider": "TestCarrier", "inbound_extension": "201",
                           "owner_user_id": other, "active": True})
+    settings.add_extension_to_number("+13022661626", owner, {"extension": "101", "active": True})
+    settings.add_extension_to_number("+13025550099", owner, {"extension": "102", "active": True})
+    settings.add_extension_to_number("+13025550011", other, {"extension": "201", "active": True})
+    # A device that is on a line presents that line without being asked.
+    assert settings.get_outbound_number(key_on(settings, "+13025550099", "102"))["number"] == "+13025550099"
 
-    call = service.start_outbound(phone="+13025559999", extension="102")
-
-    assert call.caller_id_number == "+13022661626"
+    # The first line is taken down, and 101 keeps its row with no number - which
+    # is what an operator sees in the console as "No number yet".
+    settings.delete_number("+13022661626", cascade=False)
+    assert settings.get_outbound_number("101") is None
+    with pytest.raises(RuntimeError):
+        service.start_outbound(phone="+13025559999", extension="101")
+    assert asterisk.created_call is None
+    # Another account's number is refused, named or not: 101 is not theirs.
+    assert settings.get_outbound_number("101", "+13025550011") is None
+    # Naming one of the extension's own account's lines is how it calls out: the
+    # line is the caller ID, and it is a deliberate choice rather than a fallback.
+    assert settings.get_outbound_number("101", "+13025550099")["number"] == "+13025550099"
+    call = service.start_outbound(phone="+13025559999", extension="101", caller_id_number="+13025550099")
+    assert call.caller_id_number == "+13025550099"
     assert asterisk.created_call == call.call_id
-    # Another account's number is never presented, requested or not.
-    assert settings.get_outbound_number("102", "+13025550011") is None
 
 
 def test_endpoint_states_are_read_once_per_few_seconds_and_never_guessed(tmp_path):
@@ -635,18 +720,22 @@ def test_an_extension_answering_in_the_browser_is_rung_on_its_webRTC_endpoint(tm
     settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
     service.settings_store = settings
     owner = make_customer(settings, "browser-co", "Browser Co")
-    settings.save_extension({"extension": "101", "active": True, "webrtc_enabled": True}, owner)
-    settings.save_extension({"extension": "102", "active": True}, owner)
-    settings.save_number({"number": "+13025550077", "provider": "TestCarrier", "inbound_extension": "101",
+    number = "+13025550077"
+    keys = line_setup(settings, number, owner, ("101", "102"))
+    settings.save_extension({"extension": keys["101"], "webrtc_enabled": True}, owner)
+    settings.save_number({"number": number, "provider": "TestCarrier", "inbound_extension": keys["101"],
                           "owner_user_id": owner, "default_outbound": True, "active": True})
-    web = next(row["sip_username"] for row in settings.list_extensions() if row["extension"] == "101")
+    web = next(row["sip_username"] for row in settings.list_extensions() if row["digits"] == "101")
 
+    # The digits name one row of this account, so they are read exactly; the row
+    # behind them is the browser one, which is dialled on its WebRTC endpoint.
+    assert service.dial_endpoint(keys["101"]) == f"PJSIP/{web}"
     assert service.dial_endpoint("101") == f"PJSIP/{web}"
-    assert service.dial_endpoint("102") == "PJSIP/102"
+    assert service.dial_endpoint(keys["102"]) == "PJSIP/102-13025550077"
 
-    service.start_outbound(phone="+13025559999", extension="101")
+    service.start_outbound(phone="+13025559999", extension=keys["101"])
     assert asterisk.outbound_endpoint == f"PJSIP/{web}"
 
     asterisk.inbound_endpoints.clear()
-    service.start_inbound({"id": "channel-browser", "caller": {"number": "+13025550000"}}, "+13025550077", "101")
+    service.start_inbound({"id": "channel-browser", "caller": {"number": "+13025550000"}}, number, keys["101"])
     assert asterisk.inbound_endpoints == [f"PJSIP/{web}"]

@@ -104,12 +104,12 @@ def seed(store):
             # The digits the line's own set starts with (101 unless it was seeded
             # differently), and the link provisioning wrote for it.
             extension = next(
-                row["extension"] for row in store.extensions_on_number(user_id, number)
+                row["key"] for row in store.extensions_on_number(user_id, number)
                 if row["digits"] == extension
             )
             for row in store.extensions_on_number(user_id, number):
                 store.save_extension({
-                    "extension": row["extension"], "number": number, "display_name": row["display_name"],
+                    "extension": row["key"], "number": number, "display_name": row["display_name"],
                     "voicemail_enabled": True, "voicemail_pin": "4321", "active": True,
                 }, user_id)
             # Linked to an extension, so the store gives the account that
@@ -135,11 +135,11 @@ def seed(store):
         plan = LAYOUT[username]
         if not plan["lines"]:
             continue
-        extensions = [row["extension"] for row in store.list_extensions(user_id)]
+        extensions = [row["key"] for row in store.list_extensions(user_id)]
         for row in store.list_numbers(user_id):
             if not row["inbound_extension"]:
                 continue
-            devices = [item["extension"] for item in store.extensions_on_number(user_id, row["number"], active_only=True)]
+            devices = [item["key"] for item in store.extensions_on_number(user_id, row["number"], active_only=True)]
             if devices:
                 store.save_call_route(user_id, {
                     "phone_number": row["number"], "name": "Main call flow",
@@ -197,7 +197,7 @@ def seed(store):
     # live deployment would be, with the key that was dialled.
     def any_extension(digits: str) -> str:
         rows = [row for row in store.list_extensions() if row["digits"] == digits]
-        return rows[0]["extension"] if rows else digits
+        return rows[0]["key"] if rows else digits
 
     history = [
         ("+919812345678", any_extension("101"), "inbound", "completed", True, 184, 2),

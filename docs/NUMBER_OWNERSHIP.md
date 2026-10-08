@@ -6,204 +6,212 @@
 EIP telephony
 ├── account "Meridian Health"                     (a customer)
 │   ├── user  a person who signs in
-│   ├── +13025550098   its own set: 101 102 103 104 …         (each set starts at 101)
-│   ├── +13025550067   its own set: 101 102 103 104 …
-│   └── +13025559999   its own set: 101 …
+│   ├── +13025550001   its own set: 101 102 104 …              (each set starts at 101)
+│   ├── +13025550002   its own set: 101 102 104 …
+│   └── +13025550098   its own set: 101 102
 ├── account "Northwind Trading"
-│   └── +13025550011   its own set: 101 102 …                 (its 101 is not Meridian's 101)
-└── the platform's own line (the operator's devices)
+│   └── +13025550011   its own set: 101 102 …                  (its 101 is not Meridian's 101)
+└── the platform's own line (the operator's devices, no number)
 ```
 
 An account has any number of users, a user has any number of numbers, and **every
 number carries its own extension set, counting from 101 up**. 101 on
-+13025550098 and 101 on +13025550067 are two different phones, and so are the
-101s of two different accounts.
++13025550001 and 101 on +13025550002 are two different phones, and so are the
+101s of two different accounts. The same digits may appear on every number of an
+account - that is the point, not a clash.
 
-Stored as a **key**, the extension's identity everywhere in the platform:
+**A three-digit extension is resolved only within the current phone number.**
+That one rule shapes everything below: dialling, inbound calls, IVR menus, call
+flows, transfers, ring groups, voicemail, recordings, the API and the rendered
+Asterisk configuration.
 
-```text
-101@+13025550001        the first device of line +13025550001
-101                     an account-wide extension (kept from before this change)
-```
+## Identity
 
-Everything else is derived from the key, so nothing has to guess:
+An extension is identified in the database by **the number it belongs to and its
+digits**:
 
 | Where | Value | Example |
 | --- | --- | --- |
-| `extensions.extension` | the key | `101@+13025550001` |
-| what a caller dials | the digits | `101` |
-| voicemail mailbox / folder | digits + number | `101-13025550001` |
-| PJSIP endpoint name | the digits, or digits + number | `101` or `101-13025550001` |
+| `extensions.id` | stable primary key (never shown to a customer) | `41` |
+| `extensions.extension` | the three digits a person dials | `101` |
+| `extensions.phone_number_id` | the line it answers on (NULL: no line yet) | `7` |
+| constraint | `UNIQUE(phone_number_id, extension)` | - |
+| the key the app speaks | digits `@` number | `101@+13025550001` |
+| PJSIP endpoint / dial plan name | digits `-` number | `101-13025550001` |
+| voicemail mailbox / folder | digits `-` number | `101-13025550001` |
+| SIP username (technical, never dialled) | tag `_` digits `_` number | `MERIDIAN_101_13025550001` |
 
 A PJSIP section name cannot contain `@` (Asterisk reads it as a key/value pair),
-so the endpoint is named with a hyphen. The one extension that owns the plain
-three-digit name keeps it - that is the name a hand-written dial plan and a
-device account already use - and every other row answers on `digits-number`.
+which is why the endpoint uses a hyphen. **Digits alone are never an endpoint
+name** while two lines can hold them: `PJSIP/101` does not exist, so it can never
+be ambiguous. Only the platform's own rows - the operator's devices, which belong
+to no customer number - keep their bare digits, because they answer in the
+operator's single context.
+
+The SIP username is a **technical identifier**: a device signs in with it, and no
+person ever dials it. The customer dials the digits; the platform resolves them
+against the number the call is on.
 
 ## What happens when somebody dials
 
 | Caller dials | On | Reaches | Why |
 | --- | --- | --- | --- |
-| `101` | any phone of the account | the account's device with those digits | the digits name one device inside one organisation |
-| `104` | a caller in +13025550098's menu | `104@+13025550098` | the menu is that line's, and a line only rings its own devices |
-| `104` | a phone that is on +13025550098 | one `104` of the account (first line that has one) | dial-by-extension is per account, not per line |
-| `13025550067` | a phone of the same account | `101@+13025550067`, that number's own 101 | the number is looked up internally, and never handed to the carrier |
-| `13025550011` | a Meridian phone | "not in service" | another organisation's number is an ordinary external call, and its extensions are not in this context |
+| `104` | a phone on +13025550001 (which has 104) | `104@+13025550001` | three digits resolve inside this number |
+| `104` | a phone on +13025550098 (which has none) | NOT IN SERVICE | the current number has no 104; nothing is borrowed from another line |
+| `104` | a caller in +13025550002's menu (which has 104) | `104@+13025550002` | the menu is that line's |
+| `13025550002` | a phone on +13025550001, same customer | `101@+13025550002`, that number's own inbound destination | the number is looked up internally, and never handed to the carrier |
+| `+13025550002` | the same phone | the same device | the `+` form works the same way |
+| `13025550011` | a Meridian phone | an ordinary external call over the carrier | another organisation's number is not the platform's to route |
+| `+919812345678` | any phone | the carrier trunk, presenting that line's own number | anything the platform does not own is outbound |
 
-**Inbound.** A call arriving on a DID rings the top of *that number's* set: the
-extension the number is linked to (`phone_numbers.inbound_extension`, the stored
-key), and the flows written for that number - which may only ring that line's own
-extensions plus the account-wide ones. So the same digits on two lines never
-collide, which is the whole point of per-number sets.
+A line that lacks the digits plays **NOT IN SERVICE** - never another number's
+104, the account's lowest line, the first match, or another customer's desk. The
+same lookup is used everywhere: normal dialling, inbound routing, IVR menus, call
+flows, internal calls triggered through the API, transfers (blind and attended),
+ring groups and voicemail.
 
-**Dial-by-extension inside an account.** The digits name exactly one device in a
-customer's context, which is what makes day-to-day PBX life work: an employee
-types 104 and reaches the 104 they mean, whichever line that desk sits on. Where
-two of the account's lines hold the same digits, the lowest line number wins, and
-the flow builder is where a caller is steered to a *specific* line's device.
+**Another customer's extensions are not reachable by their digits.** A customer's
+context contains its own numbers' sets and nothing else, so a misdial is
+`ss-noservice` and never a crossed line; customer-to-customer internal extensions
+are not exposed through three-digit dialling at all.
 
-### Reaching another number's extensions
+## Inbound calls
 
-Extensions other than the account's own are reached by dialling the other
-**number** - the way the outside world does:
+A call arriving on a DID rings the extension that **that number's own link**
+names (`phone_numbers.inbound_extension`, stored as the key), and the flows
+written for that number - which may only ring that line's own extensions. A
+number that cannot ring one of its own extensions is not in service rather than
+somebody else's.
+
+## Dialling by number and by extension
+
+There is exactly one numbering plan per line and no hidden second one:
+
+* **Three digits** - an extension of the current number, and of no other.
+* **A full phone number** - the platform's own numbers are routed internally,
+  straight to the destination number's inbound destination; a number the platform
+  does not own leaves over the carrier. Both the plain digits and the `+` form are
+  rendered as literal routes, because the phone decides which one it sends, and a
+  literal always beats the outbound patterns.
+* **The SIP username** - never customer-dialable, and never rendered as an
+  extension.
+
+## Outbound calls and caller ID
+
+The caller ID comes from **the current phone number**, not from the digits:
 
 ```text
-a desk on +13025550098 dials 13025550067
-        ↓
-the lookup happens inside the account that owns the calling phone
-        ↓
-13025550067 belongs to this account, and its inbound extension is 101@+13025550067
-        ↓
-Dial(PJSIP/101-13025550067)      ← an internal call; it never leaves the platform
+101 on +13025550001  dials out presenting +13025550001
+101 on +13025550002  dials out presenting +13025550002
 ```
 
-Both the plain digits and the `+` form are rendered as literal routes, because
-the phone decides which one it sends, and a literal always beats the outbound
-patterns. A number is only rendered as a local shortcut when it can really ring a
-device of its own account; otherwise the call is the ordinary external call it is
-and leaves over the carrier.
+Each rendered endpoint carries `set_var=OUTBOUND_CID=<its own number>` and
+`set_var=OUTBOUND_TRUNK=<carrier>`, so a device that dials a pattern in its own
+context presents its own line even when two 101s exist. A device with no number
+of its own is refused outbound dialling (`ss-noservice`) instead of borrowing
+somebody else's identity.
 
-There is no hidden second numbering plan: one set of digits per number, the
-account's digits for internal dialling, and numbers-for-numbers when a specific
-line's device is what the caller wants.
+`POST /api/v1/calls` accepts `extension` as the key (`101@+13025550001`) or as
+the digits while they are unambiguous, and the presented number must be an active
+number of the calling account.
 
-## The administration panel
+## Voicemail
+
+Voicemail is **number-scoped**: the mailbox is `101-13025550001`, so two 101s on
+two numbers have two separate boxes with their own PINs, greetings and messages.
+`*97` reaches the caller's own box, and the rendered `voicemail.conf` and
+`VoiceMail(...)` steps all use the same mailbox name.
+
+## WebRTC
+
+* **WebRTC off** - the extension registers and is dialled on its plain PJSIP
+  endpoint (UDP/TCP, plain RTP). The browser has no endpoint of its own.
+* **WebRTC on** - the browser identity is added as a second endpoint over the WSS
+  transport (`webrtc=yes`, DTLS-SRTP, ICE, RTCP-mux), and the plain endpoint is
+  left exactly as it was: **checking WebRTC never disables normal SIP.** Hardware
+  phones and softphones keep registering with the same credential.
+
+An extension whose box is ticked is dialled on its WebRTC endpoint (dialling
+extension, ring group, IVR selection, call flow and the console's click-to-call
+all follow it); everything else stays on the plain endpoint.
+
+## The administration panel and the API
 
 Open **Phone numbers** for a customer and each row is that customer's line with
-its own devices:
+its own devices: the set it holds (`101, 102, 104`), how many extensions it
+carries, which extension it answers on, and an **Add extension** action that adds
+the next free extension *of that line* (`102` on a line that has no 102, even when
+the customer's other line already has one).
 
-* the set it holds (`101, 102, 103`), how many extensions it carries, and which
-  extension it answers on;
-* **Add extension** - the next free extension *of that line* (`102` even when the
-  customer's other line already has a 102);
-* **Call flow** - the flow of the extension that answers the number.
+* `POST /admin/api/numbers/<number>/extensions` - create the next (or a named)
+  extension on that number: `{"extension": "104"}`.
+* `GET /admin/api/numbers/<number>/extensions` - that number's own set.
+* `GET /admin/api/extensions/next?number=<number>` - the next free digits on that
+  number.
 
-The extension dialog asks which number the extension belongs to (the customer's
-active numbers, plus an *account-wide* choice for older deployments), and says
-which line already holds the digits being typed. Each row on the extensions page
-reads `101 · +13025550001`, so the same digits on two lines are never confused. A
-customer's extensions page is grouped by number for the same reason.
-
-Credentials are per extension and unchanged in shape: the generated SIP username,
-a password the customer may reset, the registration server and transport. An
-extension with no line of its own calls out as the account's main line, which is
-what keeps a row written before this change working.
-
-### Call defaults and caller ID
-
-A customer's outbound and fallback extension are stored as keys
-(`{"outbound": "102@+13025550001", "fallback": "101@+13025550001"}`). Digits are
-still accepted when they are unambiguous; when two of the customer's numbers both
-hold them the request is refused with
+Creation validates the pair (number, digits), not the digits alone. Every
+password, call-flow, group, voicemail, WebRTC, recording and SIP-credential
+endpoint resolves the number-scoped extension: a key names one row exactly, and
+bare digits are accepted only while they name one extension of that account - with
+several, the request is refused with
 
 ```text
-104 is on more than one of your numbers - choose the extension on the number it belongs to
+101 is on more than one of your numbers - name the phone number as well
 ```
 
-so a default can never silently land on the wrong desk. The same message guards
-call-flow destinations and ring groups.
+so a change can never silently land on the wrong desk. The extensions page groups
+rows by number and shows `101 · +13025550001`, so the same digits on two lines are
+never confused.
 
-A number carries one default outbound extension, and an extension may be the
-default of one number: choosing a new default clears the previous one - both the
-number it pointed at and the link itself.
+## Legacy data and migration
 
-## Legacy and limits
+An install upgrading from an older release is migrated once, on startup, without
+deleting or recreating a device:
 
-* **Account-wide rows.** A bare `101` (`extension` with no `@`) answers on every
-  number of its account. That is what every row written before numbers had their
-  own sets is, so nothing was migrated and no device was lost. New rows are
-  always created on a number; the account-wide choice is offered for the
-  platform's own line and for compatibility.
-* **Digits.** Extensions are three digits, `100`-`999`, so a number can hold up
-  to 899 devices. The customer asked for "101 to infinite": four-digit extensions
-  would be a deliberate change to the validation, the dial patterns (`_XXX`) and
-  the mailbox naming, and the platform currently reads anything that is not three
-  digits as an external number.
-* **Digits are never SIP identities.** The user dials the digits and the platform
-  resolves them; the generated username (`KUDGTE_101`) is what the phone
-  authenticates with, and it is unique platform-wide (`idx_extensions_sip_username`).
-  A device account may not take a username that is an extension's digits or key.
+* rows that stored bare digits (`101`) or a key (`101@+13025550001`) are moved onto
+  `(phone_number_id, extension)`, keeping their id, credentials, mailbox,
+  recordings, owner and every flow that names them;
+* a row is placed on the number its inbound link names, then on the account's
+  primary line, and a row that has no line at all is **left unassigned** (nothing
+  dials it; the console lists it under **No number yet** and it is published in
+  `extensions_unassigned`) rather than being merged into another extension;
+* a device account keeps the key that says which line's extension it signs in as;
+  a bare legacy link becomes that key when exactly one row of that account answers
+  those digits, and is left alone when two lines could mean it;
+* two rows carrying the same digits **are never merged**: they are two devices on
+  two lines.
+
+## Limits and notes
+
+* Extensions are three digits, `100`-`999`, so a number can hold up to 899
+  devices. The customer asked for "101 to infinite": four-digit extensions would
+  be a deliberate change to the validation, the dial patterns (`_XXX`) and the
+  mailbox naming.
+* The platform's own extensions (operator devices) have no customer and no line;
+  they answer in `[from-internal]` only, and a customer's calls never reach them.
 * **Moving an extension** to another account stays a deliberate administrator
-  action (the console sends `reassign` when the *Customer account* field
-  changes): it is written to the activity log, the account that lost it is
-  notified, and its phones simply no longer have those digits in their context.
-* **Another account's digits are absent from the context**, so a misdial is
-  "not in service" (`ss-noservice`) and never a carrier call: the outbound
-  patterns are `_+X.` and `_XXXX.` (a leading `+` or five digits), so three
-  digits cannot leave the platform. The ARI engine enforces the same rule when
-  the call arrives, so a stale link is a missed call and never a crossed line.
-
-## Outbound calls and callback routing
-
-```text
-Extension 101 calls a customer using +13025550101
-Customer calls +13025550101 back
-Carrier sends the DID to Asterisk
-Asterisk rings the extension that number's own link names
-```
-
-The dial plan writes an explicit route per DID: an exact `Dial(PJSIP/<name>)`
-line for both the plain digits and the `+digits` form, because carriers differ.
-There is no ring-all group. The employee-first flow is unchanged: the extension's
-phone rings, the customer leg is created only after it is answered, the presented
-number must be an active number of that account, and both legs are bridged with
-recording decided by the extension's own switch.
-
-`POST /api/v1/calls` accepts the same inputs as before; `extension` may be the
-digits or the key, and the caller-ID number must belong to the calling account.
-An extension that belongs to a number presents that number; an account-wide or
-platform extension presents the account's main line.
-
-## Carrier requirements
-
-Asterisk can request the number, but the carrier makes the final decision about
-what the called party sees, so the platform's own checks are only half of it:
-
-* every presented number must be bought or verified for the account at the
-  carrier;
-* inbound delivery for every DID must point at this platform's SIP trunk - a
-  number that is not delivered here simply never rings;
-* P-Asserted-Identity / Remote-Party-ID must be accepted if the authenticated
-  `From` user stays the trunk username;
-* the provider's source addresses must be in the configured IP/CIDR allowlist.
-
-Never permit arbitrary caller ID input. This implementation only accepts numbers
-already stored, active, and owned by the account placing the call.
+  action (the console sends `reassign` when the *Customer account* field changes):
+  it is written to the activity log, the account that lost it is notified, and its
+  phones simply no longer have those digits in their context.
+* The outbound patterns are `_+X.` and `_XXXX.` (a leading `+` or five digits), so
+  three digits cannot leave the platform. The ARI engine enforces the same rule
+  when the call arrives, so a stale link is a missed call and never a crossed line.
 
 ## Verifying it
 
-* `PYTHONPATH=. .venv/bin/python tools/dialcheck.py` renders this exact scenario -
-  one customer with two numbers whose sets both start at 101, plus a second
-  customer - through the production renderer, and prints where each dialled
-  number lands. Every check is a promise from this document.
-* `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q` covers provisioning,
-  per-number resolution, the dial plan, the endpoint names and the refusals.
-* `.venv/bin/python tools/livecheck.py` runs the same promises over HTTP against
-  a seeded preview, including adding a device to one line through
+* `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q` - the whole suite, including
+  duplicate 101s working independently, `104` never crossing to another number,
+  the per-number caller ID and mailbox, WebRTC on/off, and the migration.
+* `PYTHONPATH=. .venv/bin/python tools/dialcheck.py` - renders the production
+  scenario (+13025550001 and +13025550002 both holding 101/102/104, +13025550098
+  holding 101/102, plus a second customer) through the production renderer and
+  prints where each dialled number lands.
+* `PYTHONPATH=. .venv/bin/python tools/livecheck.py` - runs the same promises over
+  HTTP against a seeded preview, including adding a device to one line through
   `POST /admin/api/numbers/<number>/extensions`.
-* `node tools/uicheck.js` (jsdom) checks the console: two lines with their own
-  101s are shown apart, the add-extension action lands on the right line, and the
-  dialog names the line that already holds the digits.
+* `node tools/uicheck.js` (jsdom) - the console: two lines with their own 101s are
+  shown apart, the add-extension action lands on the right line, and the dialog
+  names the line that already holds the digits.
 
 ## Verification procedure on a live platform
 
@@ -215,12 +223,13 @@ For each extension:
    number of that device's line.
 4. Call the DID from an external phone and confirm the line's own device rings -
    and that the other line's device with the same digits does not.
-5. Dial the digits from a phone of the account and confirm the expected desk
-   rings; dial the other number of the account and confirm its own device rings
-   without touching the carrier (`asterisk -rvvv` shows the `Dial(PJSIP/…)`).
-6. Repeat for every number and device.
+5. Dial `104` from a phone on a line that has one: confirm that line's 104 rings.
+   Dial `104` from a line that has none: confirm NOT IN SERVICE.
+6. Dial another number of the same account in full: confirm its own device rings
+   and `asterisk -rvvv` shows `Dial(PJSIP/101-<digits>)`, not a carrier leg.
+7. Repeat for every number and device.
 
 If the customer sees the trunk username instead of the DID, contact the carrier
-and confirm caller-ID/PAI authorization. If callbacks reach the wrong device,
+and confirm caller-ID/PAI authorization. If a call reaches the wrong device,
 check `phone_numbers.inbound_extension` - it stores the key, so `101@+1302…`
 names one line's 101 exactly.

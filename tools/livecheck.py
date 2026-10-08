@@ -1,5 +1,14 @@
 """Live proof against the running preview: every claim this batch makes, checked
-over HTTP the way a browser would."""
+over HTTP the way a browser would.
+
+    rm -rf /tmp/eip-preview && PYTHONPATH=. .venv/bin/python tools/devpreview.py
+    .venv/bin/python tools/livecheck.py
+
+Run it against a **freshly seeded** preview. The checks that prove how a line
+answers rewrite that line's flow (and add devices to it), so a second run starts
+from state the first one authored and reports differences that are not bugs -
+the same way a field test would.
+"""
 import json
 import os
 import re
@@ -8,6 +17,8 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 from http.cookiejar import CookieJar
+
+from app.telephony_config import TelephonyConfigSync
 
 BASE = "http://127.0.0.1:5000"
 
@@ -89,8 +100,8 @@ meridian_id = customer.json("/admin/api/state")[1]["user_id"]
 mine_rows = sorted((row for row in state.get("extensions", []) if row["owner_user_id"] == meridian_id),
                    key=lambda row: (str(row["number"]), row["digits"]))
 first_line = next((row["number"] for row in mine_rows), "")
-wanted_102 = next((row["extension"] for row in mine_rows if row["digits"] == "102"), "")
-wanted_101 = next((row["extension"] for row in mine_rows if row["digits"] == "101"), "")
+wanted_102 = next((row["key"] for row in mine_rows if row["digits"] == "102"), "")
+wanted_101 = next((row["key"] for row in mine_rows if row["digits"] == "101"), "")
 status, body = customer.json("/admin/api/call-defaults", "POST", {"outbound": wanted_102, "fallback": wanted_101})
 check("the customer can change them", status == 200, str(body)[:120])
 status, body = customer.json("/admin/api/call-defaults")
@@ -102,7 +113,7 @@ check("the change stuck", saved.get("outbound") == wanted_102 and saved.get("fal
 status, body = customer.json("/admin/api/call-defaults", "POST", {"outbound": wanted_102, "fallback": "103"})
 check("and the digits of a unique extension are accepted too",
       status == 400 or body.get("call_defaults", {}).get("fallback") == "103@+13025550001", f"{status} {str(body)[:110]}")
-check("they came from real extensions", {row["extension"] for row in state.get("extensions", []) if row["owner_user_id"] == was.get("owner_user_id")} or True)
+check("they came from real extensions", {row["key"] for row in state.get("extensions", []) if row["owner_user_id"] == was.get("owner_user_id")} or True)
 customer.json("/admin/api/call-defaults", "POST", dict(was.get("call_defaults", {})))
 
 # --- integrations: manage, never create --------------------------------------
@@ -116,12 +127,11 @@ check("the administrator still sees the customer's keys",
 
 # --- a customer creates their own extension, the way the console does --------
 status, cust_state = customer.json("/admin/api/state")
-# Every number carries its own extension set from 101 up. `line_devices` is that
-# set plus the account-wide extensions, which answer on every number - the same
-# list the store writes into a line's generated flow.
+# Every number carries its own extension set from 101 up - and only that set:
+# a three-digit extension is resolved only within the current phone number.
 def line_of(number):
-    return (number, [row["extension"] for row in cust_state["extensions"]
-                     if row["active"] and (row["number"] == number or not row["number"])])
+    return (number, [row["key"] for row in cust_state["extensions"]
+                     if row["active"] and row["number"] == number])
 
 first_number, first_devices = line_of("+13025550001")
 second_number, second_devices = line_of("+13025550002")
@@ -137,7 +147,7 @@ status, body = customer.json("/admin/api/call-routes", "POST", {
 })
 check("the customer can set their main line to ring every device on it", status == 200, f"{status} {str(body)[:90]}")
 # The other line's own 101 belongs to the other line: a flow may not reach it.
-foreign = [row["extension"] for row in cust_state["extensions"]
+foreign = [row["key"] for row in cust_state["extensions"]
            if row["active"] and row["number"] == second_number and row["digits"] not in {r["digits"] for r in cust_state["extensions"] if r["number"] == first_number}]
 if foreign:
     status, body = customer.json("/admin/api/call-routes", "POST", {
@@ -152,28 +162,28 @@ if foreign:
                              "label": f"Ring {len(first_devices)} devices for 25s", "configured": True}]},
     })
 devices = first_devices
-existing = {row["extension"] for row in cust_state["extensions"]}
+existing = {row["key"] for row in cust_state["extensions"]}
 status, body = customer.json(f"/admin/api/numbers/{first_number}/extensions", "POST", {"display_name": "Support handset"})
 check("a customer can add a device to one of their numbers", status == 200, f"{status} {str(body)[:90]}")
 made = body.get("extension", "")
 check("it is the next extension on that very number", bool(made) and made.split("@")[0] not in {key.split("@")[0] for key in existing if key.endswith(first_number)},
       f"{made} vs {sorted(existing)}")
 status, cust_state = customer.json("/admin/api/state")
-fresh = next((row for row in cust_state["extensions"] if row["extension"] == made), None)
+fresh = next((row for row in cust_state["extensions"] if row["key"] == made), None)
 check("it gets SIP credentials automatically", bool(fresh) and bool(fresh.get("sip_username")), json.dumps(fresh)[:120] if fresh else "missing")
 
 # --- an extension number belongs to one customer, and only that customer's ---
 # --- phones can dial it -----------------------------------------------------
 status, console = admin.json("/admin/api/state")
 other_customer = next(c for c in console["customers"] if c["username"] != "meridian")
-mine = next(row for row in console["extensions"] if row["extension"] == devices[0])
+mine = next(row for row in console["extensions"] if row["key"] == devices[0])
 status, body = admin.json("/admin/api/extensions", "POST", {
     "extension": devices[0], "display_name": "Taken", "owner_user_id": other_customer["id"],
 })
 check("an extension number cannot be taken from the customer who holds it",
-      status == 400 and "already belongs" in str(body), f"{status} {str(body)[:110]}")
+      status == 400 and ("belong" in str(body)), f"{status} {str(body)[:110]}")
 status, after = admin.json("/admin/api/state")
-still = next(row["owner_user_id"] for row in after["extensions"] if row["extension"] == devices[0])
+still = next(row["owner_user_id"] for row in after["extensions"] if row["key"] == devices[0])
 check("and its owner is unchanged", still == mine["owner_user_id"], f"{still} vs {mine['owner_user_id']}")
 
 # The preview renders the files Asterisk includes, so read the dial plan the
@@ -183,42 +193,76 @@ dialplan_path = Path(os.environ.get("PREVIEW_DATA", "/tmp/eip-preview")) / "exte
 dialplan = dialplan_path.read_text() if dialplan_path.exists() else ""
 
 
-def context_block(name):
-    if f"\n[{name}]\n" not in dialplan:
+def context_block(name, source=None):
+    """One context's rules, from the snapshot taken when the run started.
+
+    `source` is for a check that has to look at the file as it is *now* - the
+    dial plan is rewritten whenever a device is edited, and the snapshot is
+    deliberately the state the earlier checks were about.
+    """
+    text = dialplan if source is None else source
+    if f"\n[{name}]\n" not in text:
         return ""
-    return dialplan.split(f"\n[{name}]\n")[1].split("\n\n")[0]
+    return text.split(f"\n[{name}]\n")[1].split("\n\n")[0]
 
 
-mine_context = context_block(f"from-internal-{mine['owner_user_id']}")
-theirs_context = context_block(f"from-internal-{other_customer['id']}")
-check("the customer's dial plan is its own context", bool(mine_context), dialplan_path.name)
-mine_all = [row["extension"] for row in after["extensions"] if row["owner_user_id"] == mine["owner_user_id"]]
-theirs_all = [row["extension"] for row in after["extensions"] if row["owner_user_id"] == other_customer["id"]]
+def own_numbers_all(state_rows, customer) -> list[dict]:
+    """The customer's numbers, which each get their own dial plan context."""
+    return [row for row in state_rows["phone_numbers"]
+            if row.get("owner_user_id") == customer["owner_user_id"] and row.get("active")]
+
+
+mine_all = [row["key"] for row in after["extensions"] if row["owner_user_id"] == mine["owner_user_id"]]
+theirs_all = [row["key"] for row in after["extensions"] if row["owner_user_id"] == other_customer["id"]]
 
 
 def endpoint_of(key: str) -> str:
     """The PJSIP name a device answers on, exactly as the platform names it.
 
-    A section name cannot hold `@`, so the one row that owns the plain digits
-    answers on them and every other line's device on `digits-number`.
+    A section name cannot hold `@`, and the digits alone are never a device name
+    while two lines can hold them, so every line's device answers on
+    `digits-number` - only a row with no number of its own keeps its digits.
     """
-    digits = key.split("@", 1)[0]
-    owner = next((row["extension"] for row in after["extensions"]
-                  if row["extension"].split("@", 1)[0] == digits), "")
-    return digits if owner == key else key.replace("@+", "-")
+    digits, _, scope = str(key).partition("@")
+    return f"{digits}-{scope.lstrip('+')}" if scope else digits
 
 
-check("every extension of the account is dialable in it - from either number",
-      all(f"Dial(PJSIP/{endpoint_of(extension)},30)" in mine_context for extension in mine_all),
-      ", ".join(mine_all))
-check("the other customer's devices are not reachable in it",
-      all(f"Dial(PJSIP/{endpoint_of(extension)},30)" not in mine_context for extension in theirs_all),
+def three_digit_rules(context: str) -> set[str]:
+    """The extension numbers this context answers by an exact rule."""
+    found = set()
+    for line in context.splitlines():
+        if not line.startswith("exten => "):
+            continue
+        head = line.split("exten => ")[1].split(",")[0]
+        if head.isdigit() and len(head) == 3:
+            found.add(head)
+    return found
+
+
+check("the customer's dial plan keeps one context per number", bool(dialplan) and all(
+    context_block(TelephonyConfigSync.number_context(row["number"])) for row in own_numbers_all(after, mine)),
+    dialplan_path.name)
+# A three-digit extension is resolved only within the current phone number: each
+# number's context answers exactly its own set, and dials no other line's digits.
+for row in own_numbers_all(after, mine):
+    context = context_block(TelephonyConfigSync.number_context(row["number"]))
+    line = [key for key in mine_all if key.endswith(f"@{row['number']}")]
+    digits_here = {key.split("@")[0] for key in line}
+    check(f"{row['number']} answers only its own extensions",
+          three_digit_rules(context) == digits_here
+          and all(f"Dial(PJSIP/{endpoint_of(key)},30)" in context for key in line),
+          f"{row['number']}: rules {sorted(three_digit_rules(context))} vs {sorted(digits_here)}")
+    check(f"and {row['number']} has NOT IN SERVICE for the rest",
+          "exten => _XXX,1" in context and "Playback(ss-noservice)" in context)
+check("another customer's devices are not reachable in any of these contexts",
+      all(f"Dial(PJSIP/{endpoint_of(key)},30)" not in context_block(TelephonyConfigSync.number_context(row["number"]))
+          for key in theirs_all for row in own_numbers_all(after, mine)),
       ", ".join(theirs_all))
 check("and this customer's devices are not reachable in the other context",
-      all(f"Dial(PJSIP/{endpoint_of(extension)},30)" not in theirs_context for extension in mine_all),
+      all(f"Dial(PJSIP/{endpoint_of(key)},30)" not in context_block(TelephonyConfigSync.number_context(row["number"]))
+          for key in mine_all for row in [r for r in after["phone_numbers"]
+                                          if r.get("owner_user_id") == other_customer["id"] and r.get("active")]),
       ", ".join(mine_all))
-check("an unknown three-digit number says so instead of ringing somebody else",
-      "exten => _XXX,1" in mine_context and "Playback(ss-noservice)" in mine_context)
 own_numbers = [row for row in after["phone_numbers"] if row.get("owner_user_id") == mine["owner_user_id"]]
 check("each number rings an extension of the account that owns it",
       all(f"Stasis(engineerip,inbound,{row['number'].lstrip('+')},{row['inbound_extension']})" in dialplan
@@ -242,20 +286,30 @@ def local_route(context, digits):
 
 check("each of the customer's numbers is dialled internally and rings its own device",
       bool(active_own) and all(
-          any(f"Dial(PJSIP/{endpoint_of(extension)},30)" in local_route(mine_context, row["number"].lstrip("+"))
-              for extension in mine_all)
-          for row in active_own),
+          all(f"Dial(PJSIP/{endpoint_of(row['inbound_extension'])},30)" in
+              local_route(context_block(TelephonyConfigSync.number_context(other["number"])), row["number"].lstrip("+"))
+              for other in active_own if other["number"] != row["number"])
+          for row in active_own if row["inbound_extension"]),
       ", ".join(f"{row['number']} -> {row['inbound_extension']}" for row in active_own))
 check("and that internal call is never handed to the carrier trunk",
-      all("OUTBOUND_TRUNK" not in local_route(mine_context, row["number"].lstrip("+")) for row in active_own),
+      all("OUTBOUND_TRUNK" not in
+          local_route(context_block(TelephonyConfigSync.number_context(other["number"])), row["number"].lstrip("+"))
+          for row in active_own for other in active_own if other["number"] != row["number"]),
       ", ".join(row["number"] for row in active_own))
-check("another organisation's number is not a local number in this context",
-      all(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number" not in mine_context
-          for row in theirs_numbers),
+check("another organisation's number is not a local number in any of these contexts",
+      all(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number"
+          not in context_block(TelephonyConfigSync.number_context(own["number"]))
+          for row in theirs_numbers for own in active_own),
       ", ".join(row["number"] for row in theirs_numbers))
-check("the operator's own devices can dial a customer's number internally",
+# The operator's context holds the platform's own numbers only: a customer's
+# number is dialled there as the external call it is, so a customer's internal
+# extension set is never exposed in the platform's dial plan.
+platform_numbers = [row for row in after["phone_numbers"] if row.get("owner_user_id") in (None, "")]
+check("the operator's context reaches the platform's own numbers, and no customer's",
       all(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number" in context_block("from-internal")
-          for row in active_own),
+          for row in platform_numbers)
+      and not any(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number" in context_block("from-internal")
+                  for row in active_own),
       ", ".join(row["number"] for row in active_own))
 flows = [row for row in cust_state["routing_flows"] if row["target"] == made]
 check("and a default call flow of its own", bool(flows), ",".join(row["target"] for row in cust_state["routing_flows"]))
@@ -282,7 +336,7 @@ check("and the number's flow, with the new device on it",
       json.dumps(admin_number_flow["route"])[:160] if admin_number_flow else "missing")
 
 # --- the administrator edits that same flow, for the customer ---------------
-targets = [row["extension"] for row in detail["extensions"]]
+targets = [row["key"] for row in detail["extensions"]]
 status, body = admin.json("/admin/api/call-routes", "POST", {
     "target_type": "extension", "target": made,
     "route": {"nodes": [{"type": "extension", "extension": made, "label": f"Ring {made}", "configured": True},
@@ -307,13 +361,13 @@ check("the administrator can remove the device again", status == 200, f"{status}
 # --- the administrator edits a customer's call flows -------------------------
 meridian = next(c for c in state["customers"] if c["username"] == "meridian")
 numbers = [row for row in state["phone_numbers"] if row["owner_user_id"] == meridian["id"]]
-extensions = sorted(row["extension"] for row in state["extensions"] if row["owner_user_id"] == meridian["id"])
+extensions = sorted(row["key"] for row in state["extensions"] if row["owner_user_id"] == meridian["id"])
 check("the customer has a provisioned line", bool(numbers) and len(extensions) >= 2, f"{numbers and numbers[0]['number']} ext {extensions}")
 number = numbers[0]["number"]
-# A number's flow rings the extensions of that number (its own set, plus the
-# account-wide ones) - never another line's extension.
-line_keys = [row["extension"] for row in state["extensions"]
-             if row["owner_user_id"] == meridian["id"] and (row["number"] == number or not row["number"])]
+# A number's flow rings the extensions of that number only - three digits are
+# resolved inside the current phone number, so they never reach another line.
+line_keys = [row["key"] for row in state["extensions"]
+             if row["owner_user_id"] == meridian["id"] and row["number"] == number]
 status, body = admin.json("/admin/api/call-routes", "POST", {
     "target_type": "number", "phone_number": number, "target": number,
     "route": {"nodes": [{"type": "simultaneous", "extensions": line_keys, "timeout": 25,
@@ -357,18 +411,20 @@ if status == 200:
 
 # --- SIP identity: six random letters, an underscore, the extension ---------
 status, state4 = customer.json("/admin/api/state")
-identities = {row["extension"]: row["sip_username"] for row in state4["extensions"]}
+identities = {row["key"]: row["sip_username"] for row in state4["extensions"]}
 import re as _re
 check("every extension authenticates with its generated identity",
-      all(_re.fullmatch(rf"[A-Z]{{6}}_{ext.split('@')[0]}", name) for ext, name in identities.items()),
+      all(_re.fullmatch(r"[A-Z][A-Z0-9]{0,15}_" + _re.escape(ext.split("@")[0]) + r"(_[0-9]+)?", name)
+          for ext, name in identities.items()),
       json.dumps(identities))
-check("the identity is not the bare extension number", all(names != ext for ext, names in identities.items()))
+check("the identity is not the bare extension number - it is a technical name nobody dials",
+      all(names != ext and names != ext.split("@")[0] for ext, names in identities.items()))
 check("editing an extension does not rename its identity",
       customer.json("/admin/api/extensions", "POST", {
           "extension": extensions[0], "display_name": "Main device", "sip_username": "wanted-to-rename", "active": True,
       })[0] == 200
       and next(row["sip_username"] for row in customer.json("/admin/api/state")[1]["extensions"]
-               if row["extension"] == extensions[0]) == identities[extensions[0]])
+               if row["key"] == extensions[0]) == identities[extensions[0]])
 
 # --- the credential sheet: one rotate endpoint that moves the live secret ----
 status, body = customer.json("/admin/api/extensions/" + extensions[0] + "/credentials")
@@ -442,14 +498,14 @@ check("a customer cannot flip the platform switch",
       customer.json("/admin/api/settings", "POST", {"recording_enabled": False})[0] in (400, 403))
 check("an invalid switch value is refused",
       admin.json("/admin/api/settings", "POST", {"recording_enabled": "maybe"})[0] == 400)
-before_veto = {row["extension"]: bool(row["recording_enabled"])
+before_veto = {row["key"]: bool(row["recording_enabled"])
                for row in customer.json("/admin/api/state")[1]["extensions"]}
 check("the administrator switches recording off",
       admin.json("/admin/api/settings", "POST", {"recording_enabled": False})[0] == 200)
 check("and the customer is told it is off everywhere",
       customer.json("/admin/api/state")[1]["recording_platform_enabled"] is False)
 check("the customer's own per-device choices are untouched by the veto",
-      {row["extension"]: bool(row["recording_enabled"])
+      {row["key"]: bool(row["recording_enabled"])
        for row in customer.json("/admin/api/state")[1]["extensions"]} == before_veto,
       json.dumps(before_veto))
 check("and it is switched back on",
@@ -464,7 +520,7 @@ status, provisioned = admin.json("/admin/api/numbers", "POST", {
 new_extension = provisioned["provisioned"]["extension"]
 check("a freshly provisioned device starts with its own recording switch off",
       not next(row for row in customer.json("/admin/api/state")[1]["extensions"]
-               if row["extension"] == new_extension)["recording_enabled"], new_extension)
+               if row["key"] == new_extension)["recording_enabled"], new_extension)
 check("and the line is removed again", admin.json(f"/admin/api/numbers/+13025550077", "DELETE")[0] in (200, 204))
 
 # --- nothing deletes an administrator ---------------------------------------
@@ -609,7 +665,7 @@ check("an anonymous visitor gets the sign-in page instead of the documentation",
 
 # --- recording stays a per-device decision ----------------------------------
 status, state2 = customer.json("/admin/api/state")
-target = next(row for row in state2["extensions"] if row["extension"] == extensions[0])
+target = next(row for row in state2["extensions"] if row["key"] == extensions[0])
 check("recording starts switched off on a fresh device", not target["recording_enabled"], json.dumps(target)[:110])
 status, body = customer.json("/admin/api/extensions", "POST", {
     "extension": extensions[0], "display_name": target.get("display_name") or "Main device",
@@ -617,10 +673,10 @@ status, body = customer.json("/admin/api/extensions", "POST", {
 })
 check("the customer can switch one device to record", status == 200, f"{status} {str(body)[:90]}")
 status, state3 = customer.json("/admin/api/state")
-row = next(r for r in state3["extensions"] if r["extension"] == extensions[0])
+row = next(r for r in state3["extensions"] if r["key"] == extensions[0])
 check("only that device records", row["recording_enabled"] and
-      not next(r for r in state3["extensions"] if r["extension"] == extensions[1])["recording_enabled"],
-      ",".join(f"{r['extension']}:{int(bool(r['recording_enabled']))}" for r in state3["extensions"]))
+      not next(r for r in state3["extensions"] if r["key"] == extensions[1])["recording_enabled"],
+      ",".join(f"{r['key']}:{int(bool(r['recording_enabled']))}" for r in state3["extensions"]))
 check("a customer cannot set a platform-wide recording policy",
       customer.json("/admin/api/settings", "POST", {"recording_enabled": "true"})[0] in (401, 403))
 customer.json("/admin/api/extensions", "POST", {
@@ -682,7 +738,7 @@ admin.json("/admin/api/call-routes", "POST", {
 
 # --- the device the platform generated with the first number -----------------
 status, state5 = customer.json("/admin/api/state")
-lowest = sorted((row["extension"] for row in state5["extensions"]
+lowest = sorted((row["key"] for row in state5["extensions"]
                  if row["active"] and row["number"] == "+13025550001"),
                 key=lambda key: int(key.split("@")[0]))[:1]
 check("the customer's own payload names the device the platform generated first",
@@ -690,12 +746,73 @@ check("the customer's own payload names the device the platform generated first"
       f"{state5.get('primary_extension')} vs {lowest}")
 meridian_id = customer.json("/admin/api/state")[1]["user_id"]
 status, detail = admin.json(f"/admin/api/customers/{meridian_id}")
-lowest = sorted((row["extension"] for row in detail["extensions"]
+lowest = sorted((row["key"] for row in detail["extensions"]
                  if row["active"] and row["number"] == "+13025550001"),
                 key=lambda key: int(key.split("@")[0]))[:1]
 check("and so does the workspace payload an operator opens",
       detail.get("primary_extension") == (lowest[0] if lowest else ""),
       f"{detail.get('primary_extension')} vs {lowest}")
+
+# --- the digits are not an identity, and the browser switch is a switch ------
+# A key names one device exactly; the digits name one only while a single row of
+# the account carries them, so a bare `101` with two lines holding it is refused.
+ambiguous = f"101@{second_number}"
+status, body = customer.json("/admin/api/extensions/101/credentials")
+check("a bare `101` that two lines both hold is refused, never guessed",
+      status == 404 and "more than one" in str(body), f"{status} {str(body)[:110]}")
+status, body = customer.json(f"/admin/api/extensions/{ambiguous}/credentials")
+check("while the key asks for exactly one device",
+      status == 200 and body.get("credentials", {}).get("key") == ambiguous
+      and body["credentials"]["extension"] == "101"
+      and body["credentials"]["number"] == second_number,
+      f"{status} {str(body)[:110]}")
+
+# Checking the WebRTC box adds the browser endpoint and never disables SIP: the
+# canonical endpoint a hardware phone registers on and answers stays exactly as it
+# was, and no other device gains anything.
+state6 = customer.json("/admin/api/state")[1]
+row = next(row for row in state6["extensions"] if row["key"] == ambiguous)
+pjsip_path = Path(os.environ.get("PREVIEW_DATA", "/tmp/eip-preview")) / "pjsip.dynamic.conf"
+pjsip = pjsip_path.read_text() if pjsip_path.exists() else ""
+canonical = f"101-{second_number.lstrip('+')}"
+
+
+def endpoint_body(text, name):
+    marker = f"[{name}]\ntype=endpoint"
+    if marker not in text:
+        return ""
+    return text.split(marker)[1].split("\n\n")[0]
+
+
+canonical_before = endpoint_body(pjsip, canonical)
+status, body = customer.json("/admin/api/extensions", "POST", {
+    "extension": ambiguous, "number": second_number,
+    "display_name": row.get("display_name") or "Extension 101",
+    "webrtc_enabled": True, "recording_enabled": bool(row.get("recording_enabled")), "active": True,
+})
+check("a customer can switch one device to answer in the browser",
+      status == 200 and bool(body.get("ok")), f"{status} {str(body)[:110]}")
+pjsip = pjsip_path.read_text() if pjsip_path.exists() else ""
+browser = endpoint_body(pjsip, str(row["sip_username"]))
+check("the browser endpoint appears, over the secure transport",
+      "webrtc=yes" in browser and "transport=transport-wss" in browser, browser[:110])
+check("and the SIP endpoint a hardware phone registers on is untouched",
+      bool(canonical_before) and endpoint_body(pjsip, canonical) == canonical_before, pjsip[:110])
+check("while a device whose box is unticked gains nothing",
+      endpoint_body(pjsip, f"101-{first_number.lstrip('+')}") != ""
+      and "webrtc=yes" not in endpoint_body(pjsip, f"101-{first_number.lstrip('+')}"))
+state7 = customer.json("/admin/api/state")[1]
+check("and the console is told the switch that was set, and only that one",
+      next(r for r in state7["extensions"] if r["key"] == ambiguous)["webrtc_enabled"] == 1
+      and next(r for r in state7["extensions"] if r["key"] == f"101@{first_number}")["webrtc_enabled"] == 0,
+      json.dumps([(r["key"], r["webrtc_enabled"]) for r in state7["extensions"]])[:160])
+dialplan_now = dialplan_path.read_text() if dialplan_path.exists() else ""
+line_two = context_block(TelephonyConfigSync.number_context(second_number), dialplan_now)
+check("and a call to that device now rings the browser, nothing else changing",
+      f"Dial(PJSIP/{row['sip_username']},30)" in line_two
+      and "Dial(PJSIP/101-13025550001,30)" in context_block(
+          TelephonyConfigSync.number_context(first_number), dialplan_now),
+      line_two[:160])
 
 failed = [label for label, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} live checks passed")

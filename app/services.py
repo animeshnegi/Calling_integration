@@ -14,7 +14,7 @@ from typing import Any
 
 import requests
 
-from .admin import extension_digits, extension_key, extension_mailbox, extension_scope
+from .admin import endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox, extension_scope
 from .config import Config
 from .models import Call, CallStore
 
@@ -100,43 +100,45 @@ class TelephonyService:
         apart even when a row is stale.
         """
         digits = extension_digits(extension)
-        # Nothing in the store may answer, so the name is built the same way the
-        # renderer builds it - never the key, which holds an `@` a section name
-        # cannot: an account-wide row keeps its digits, a line's own extension
-        # answers on digits + number.
-        plain = f"PJSIP/{digits or extension}" if extension_scope(extension) == "" else f"PJSIP/{extension_mailbox(extension)}"
+        # The name is built the same way the renderer builds it: the extension's
+        # globally unique identity, digits plus the line they belong to
+        # (`101-13025550001`), because a PJSIP section name cannot hold the `@`
+        # the stored key has. The digits alone name nothing here.
+        plain = f"PJSIP/{extension_endpoint(extension)}" if digits else ""
         if not self.settings_store or not digits:
             return plain
         try:
-            row = next(
-                (item for item in self.settings_store.list_extensions() if str(item["extension"]) == str(extension)),
-                None,
-            )
+            row = None
+            if extension_scope(extension):
+                row = self.settings_store._extension_row(str(extension))
             if row is None and number:
-                # A reference written before this change, or one that only holds
-                # digits: resolve them on the number the call is on.
+                # Only the digits, or a stale reference: they are read against
+                # the number the call is on and nothing else.
                 row = self.settings_store.resolve_extension(number, digits)
             if row is None and not number:
-                row = next(
-                    (item for item in self.settings_store.list_extensions() if item["digits"] == digits and not item["number"]),
-                    None,
-                )
+                # No number was named: the digits are read only while exactly one
+                # extension carries them. Several mean the caller has to say
+                # which line, so nothing is guessed here.
+                matches = [
+                    item for item in self.settings_store.list_extensions()
+                    if extension_digits(item.get("key") or item.get("extension")) == digits
+                ]
+                if len(matches) > 1:
+                    # A row with no number of its own is named by its digits -
+                    # that is its key - so the plain digits are exactly that row.
+                    plain = [item for item in matches if not item.get("number")]
+                    matches = plain
+                row = matches[0] if len(matches) == 1 else None
         except Exception:
             return plain
         if row is None:
             return plain
-        key = str(row["extension"])
         username = str(row.get("sip_username") or "")
-        if row.get("active") and row.get("webrtc_enabled") and username and username != digits:
+        if row.get("active") and row.get("webrtc_enabled") and username and username != extension_endpoint(str(row["key"])):
+            # An extension that answers in the browser is dialled on its WebRTC
+            # alias; its plain endpoint keeps working for every other device.
             return f"PJSIP/{username}"
-        # The plain endpoint a phone answers on. A key holds `@`, which a PJSIP
-        # section name cannot: the extension that owns the plain digits keeps
-        # them, and the rest answer on their identity (`101-13025550098`).
-        try:
-            name = self.settings_store.endpoint_name(key)
-        except Exception:
-            name = ""
-        return f"PJSIP/{name or key}"
+        return f"PJSIP/{extension_endpoint(str(row['key']))}"
 
     def _provider_endpoint(self, provider_name: str | None) -> tuple[str, str]:
         if not self.settings_store:
@@ -171,10 +173,24 @@ class TelephonyService:
             # row is stored under its key (`101@+13025550001`). A store that only
             # holds the bare digits still answers, by exact name.
             resolver = getattr(self.settings_store, "extension_row", None)
-            row = resolver(extension) if resolver else next(
-                (item for item in self.settings_store.list_extensions() if item["extension"] == extension), None,
-            )
-            extension_enabled = bool(row and row["active"] and row["recording_enabled"])
+            row = resolver(extension) if resolver else None
+            if row is None:
+                # The digits name one extension while exactly one of them carries
+                # them; with several, the phone number has to be named.
+                rows = self.settings_store.list_extensions()
+                if extension_scope(extension):
+                    row = next(
+                        (item for item in rows
+                         if str(item.get("key") or item.get("extension")) == str(extension)),
+                        None,
+                    )
+                else:
+                    matches = [
+                        item for item in rows
+                        if extension_digits(item.get("key") or item.get("extension")) == extension_digits(extension)
+                    ]
+                    row = matches[0] if len(matches) == 1 else None
+            extension_enabled = bool(row and row.get("active") and row.get("recording_enabled"))
         platform_enabled = bool(self.settings_store and self.settings_store.recording_platform_enabled())
         return {
             "enabled": extension_enabled and platform_enabled,
@@ -381,7 +397,7 @@ class TelephonyService:
         if not wanted:
             return None
         rows = self.settings_store.list_extensions()
-        exact = next((row for row in rows if str(row["extension"]) == wanted), None)
+        exact = next((row for row in rows if str(row["key"]) == wanted), None)
         if exact is not None:
             return exact
         number = next(
@@ -390,14 +406,12 @@ class TelephonyService:
             None,
         )
         if wanted.isdigit() and number is not None:
+            # Three digits are read against the number that received the call -
+            # and only against it: another line's 104, the account's lowest line
+            # and another customer's desk are all wrong answers here.
             resolved = self.settings_store.resolve_extension(number["number"], wanted, number.get("owner_user_id"))
             if resolved is not None:
                 return resolved
-        if wanted.isdigit():
-            # Last resort: the three digits name one extension platform-wide.
-            key = self.settings_store.extension_key_for_digits(wanted)
-            if key:
-                return next((row for row in rows if str(row["extension"]) == key), None)
         return None
 
     def start_inbound(self, channel: dict[str, Any], did: str, extension: str) -> Call | None:
@@ -418,6 +432,13 @@ class TelephonyService:
             None,
         )
         if (
+            number is not None and current.get("number") not in (None, "")
+            and str(current.get("number")) != str(number.get("number"))
+        ):
+            # A call on a DID may only ring an extension of that very number.
+            self.asterisk.hangup(str(channel.get("id") or ""))
+            return None
+        if (
             number and number.get("owner_user_id") is not None and current.get("owner_user_id") is not None
             and int(number["owner_user_id"]) != int(current["owner_user_id"])
         ):
@@ -431,7 +452,15 @@ class TelephonyService:
             return existing
         call_id = str(uuid.uuid4())
         caller = str((channel.get("caller") or {}).get("number") or "unknown")[:32]
-        owned = next((row for row in self.settings_store.list_numbers() if row["inbound_extension"] == extension and did.lstrip("+") == row["number"].lstrip("+")), None)
+        # The link is stored as the key - `101@+13025550001` - so it is the key
+        # that says which line this call arrived on, and the record carries that
+        # line's own spelling of the number.
+        owned = next(
+            (row for row in self.settings_store.list_numbers()
+             if str(row["inbound_extension"]) == str(current["key"])
+             and did.lstrip("+") == row["number"].lstrip("+")),
+            None,
+        )
         number = owned["number"] if owned else did
         # The stored flow decides what happens next: a menu asks the caller for
         # an extension, anything else rings the devices it names - one device for
@@ -532,11 +561,10 @@ class TelephonyService:
             row = self._extension_row(session["extension"])
             owner = row.get("owner_user_id") if row else None
             number = str(session.get("number") or "")
-            if owner is not None:
-                keys = (
-                    self.settings_store.scoped_extension_keys(number, int(owner))
-                    if number else [item["extension"] for item in self.settings_store.list_extensions(int(owner)) if item["active"]]
-                )
+            if owner is not None and number:
+                # The menu of one line offers that line's extensions and nothing
+                # else: 104 is this number's 104.
+                keys = self.settings_store.scoped_extension_keys(number, int(owner))
                 session["keys"] = keys
                 session["extensions"] = [extension_digits(key) for key in keys]
         extensions = [extension_digits(key) for key in keys]
@@ -654,12 +682,13 @@ class TelephonyService:
     def _local_target(self, extension: str, number: str) -> str:
         """The extension that answers when this phone calls this number, or "".
 
-        A customer's own numbers belong to that customer, so dialling one of
-        them from one of its own extensions reaches the extension the number is
-        set to ring. The call then stays on the platform: no trunk, no carrier
-        round trip, and no chance of the carrier refusing to connect the
-        customer to itself. Another organisation's number is not local, so it
-        leaves the usual way.
+        A customer's own numbers belong to that customer, so dialling one of them
+        from one of its own extensions reaches the extension that very number is
+        set to ring - the same destination the carrier would have reached - and
+        the call stays on the platform instead of making a round trip. The answer
+        is read on the destination number (its own link, then that customer's own
+        fallback), so one line can never route to another line's device. Another
+        organisation's number is not local and leaves the usual way.
         """
         store = self.settings_store
         if not store:
@@ -674,28 +703,34 @@ class TelephonyService:
             for row in store.list_numbers(int(owner)):
                 if not row.get("active") or re.sub(r"[^0-9]", "", str(row["number"])) != digits:
                     continue
-                candidate = str(row["inbound_extension"] or "")
-                # The number's own link only counts when it really rings one of
-                # this account's extensions: a stale row pointing at another
-                # customer's phone is not a shortcut to it, so the account's own
-                # fallback answers instead.
-                if candidate and not self._is_local_extension(candidate, int(owner)):
-                    candidate = ""
-                if not candidate:
-                    candidate = str(store.customer_call_defaults(int(owner)).get("fallback") or "")
-                return candidate
+                candidate = store.resolve_extension(
+                    str(row["number"]), str(row["inbound_extension"] or ""), int(owner)
+                )
+                if candidate is None:
+                    candidate = store.resolve_extension(
+                        str(row["number"]),
+                        str(store.customer_call_defaults(int(owner)).get("fallback") or ""),
+                        int(owner),
+                    )
+                return str(candidate["key"]) if candidate is not None else ""
         except Exception:
             return ""
         return ""
 
-    def _is_local_extension(self, extension: str, owner: int) -> bool:
-        """True when this extension is active and belongs to the account (or the platform)."""
+    def _is_local_extension(self, extension: str, owner: int, number: str = "") -> bool:
+        """True when this extension is active, on this number, and this account's."""
         try:
             rows = self.settings_store.list_extensions()
         except Exception:
             return False
-        row = next((item for item in rows if str(item["extension"]) == str(extension)), None)
+        key = str(extension)
+        row = next((item for item in rows if str(item["key"]) == key), None)
+        if row is None and not extension_scope(key):
+            matches = [item for item in rows if item["digits"] == extension_digits(key)]
+            row = matches[0] if len(matches) == 1 else None
         if not row or not row["active"]:
+            return False
+        if number and str(row["number"]) != str(number):
             return False
         found = row.get("owner_user_id")
         return found in (None, "") or str(found) == str(owner)

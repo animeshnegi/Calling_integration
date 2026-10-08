@@ -43,7 +43,7 @@ The `feature/softphone-pwa` branch adds `/phone`, a responsive phone-style PWA u
 
 The browser softphone connects directly to Asterisk over SIP WebSocket and WebRTC media. The Flask API is not in the audio path.
 
-Asterisk renders a `transport-wss` PJSIP transport and makes the generated prefixed SIP username alias (for example `KUDGTE_101`) WebRTC-capable while leaving the canonical UDP/TCP extension endpoint unchanged for existing Zoiper and hardware phones. This follows Asterisk's WebRTC configuration model: a WSS transport plus an endpoint with `webrtc=yes`, which enables the required DTLS-SRTP, ICE, RTCP-mux and AVPF settings. See the official Asterisk WebRTC guidance.
+Asterisk renders a `transport-wss` PJSIP transport and, **only for extensions whose WebRTC switch is on**, a second WebRTC-capable endpoint under the extension's generated technical SIP username (for example `MERIDIAN_101_13025550001`) while leaving the canonical UDP/TCP endpoint - and the SIP registration hardware phones already use - unchanged. The alias exists only when `webrtc_enabled = true`: **checking WebRTC never disables normal SIP.** This follows Asterisk's WebRTC configuration model: a WSS transport plus an endpoint with `webrtc=yes`, which enables the required DTLS-SRTP, ICE, RTCP-mux and AVPF settings. See the official Asterisk WebRTC guidance.
 
 ## Answering in the browser
 
@@ -53,13 +53,18 @@ hardware phone cannot share one:
 
 | Device | Endpoint | Media |
 | --- | --- | --- |
-| Hardware phone, Zoiper, desk phone | `PJSIP/<endpoint name>` (UDP/TCP) | plain RTP, G.722 first |
+| Hardware phone, Zoiper, desk phone | `PJSIP/101-13025550001` (UDP/TCP) | plain RTP, G.722 first |
+| Browser PWA (switch on) | `PJSIP/MERIDIAN_101_13025550001` (WSS, `webrtc=yes`) | DTLS-SRTP, ICE, RTCP-mux |
 
-`<endpoint name>` is the digits (`101`) for the extension that owns the plain name,
-and `101-13025550001` for another line's 101: a PJSIP section name cannot contain
-`@`, so the key is never dialled - the store's `endpoint_name()` and the renderer's
-`_section_name()` decide the same name from the same rule.
-| Browser PWA | `PJSIP/<generated username>` (WSS, `webrtc=yes`) | DTLS-SRTP, ICE, RTCP-mux |
+**A three-digit extension is resolved only within the current phone number**, so
+the endpoint name always carries both halves: `101-13025550001` is *101 on
++13025550001*. A PJSIP section name cannot contain `@` (Asterisk reads it as a
+key/value pair), and the digits alone would be ambiguous the moment two lines
+hold 101 - `PJSIP/101` does not exist. The store's `endpoint_name()` and the
+renderer's `_section_name()` decide the same name from the same rule. Only the
+platform's own rows - devices with no number - keep their bare digits, because
+they answer in the platform's single context. SIP usernames are technical
+identifiers that devices register with; **no person ever dials one**.
 
 A browser refuses an unencrypted RTP offer, and a hardware phone refuses a
 DTLS-SRTP offer (`UDP/TLS/RTP/SAVPF`). So calls are dialled towards the endpoint
@@ -68,7 +73,8 @@ that fits the device that answers them:
 * An extension ticked **Answers in the browser (WebRTC)** is dialled on its
   WebRTC endpoint - dialling extension, ringing a group, an IVR selection, a
   call flow and the console's click-to-call all follow it. The extension card
-  then shows a *Browser phone* tag.
+  then shows a *Browser phone* tag. Its plain endpoint is still rendered, so the
+  SIP device keeps working and the tick can be removed again at any time.
 * Every other extension is dialled on its plain endpoint, which is what the
   credentials in the sheet are written for.
 * Anything else - a customer calling another customer's number, or an outside

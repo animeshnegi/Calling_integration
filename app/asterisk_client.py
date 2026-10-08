@@ -17,6 +17,23 @@ class AsteriskError(RuntimeError):
     pass
 
 
+def endpoint_name(extension: Any) -> str:
+    """The channel a leg rings when the caller did not name the endpoint.
+
+    The same identity the renderer writes: digits plus the line they belong to
+    (`PJSIP/101-13025550001`). A stored key holds an `@`, which a PJSIP section
+    name cannot - and the digits alone are never dialled, because every line
+    carries its own 101. The call engine always passes an endpoint from
+    `dial_endpoint()`; this is the safe floor under it.
+    """
+    text = str(extension or "").strip()
+    digits, _, scope = text.partition("@")
+    scope_digits = "".join(character for character in scope if character.isdigit())
+    if digits.isdigit() and scope_digits:
+        return f"PJSIP/{digits}-{scope_digits}"
+    return f"PJSIP/{digits or text}"
+
+
 class AsteriskClient:
     def __init__(self, config: type[Config] = Config):
         self.base_url = config.ASTERISK_ARI_URL.rstrip("/")
@@ -72,7 +89,7 @@ class AsteriskClient:
             "POST",
             "/channels",
             params={
-                "endpoint": endpoint or f"PJSIP/{extension}",
+                "endpoint": endpoint or endpoint_name(extension),
                 "app": self.app,
                 "appArgs": f"employee,{call_id},{provider_endpoint},{phone}",
                 "channelId": employee_channel,
@@ -97,7 +114,7 @@ class AsteriskClient:
         self._request(
             "POST", "/channels",
             params={
-                "endpoint": endpoint or f"PJSIP/{extension}", "app": self.app,
+                "endpoint": endpoint or endpoint_name(extension), "app": self.app,
                 "appArgs": f"inbound_employee,{call_id}", "channelId": employee_channel,
                 "originator": customer_channel_id, "timeout": 30,
             },
@@ -143,7 +160,7 @@ class AsteriskClient:
         - an extension that belongs to a line is reached on the PJSIP endpoint
         named after its identity, not by the key that holds `@`.
         """
-        return self._customer_leg(call_id, endpoint or f"PJSIP/{extension}", employee_channel_id, caller_id_number, 30)
+        return self._customer_leg(call_id, endpoint or endpoint_name(extension), employee_channel_id, caller_id_number, 30)
 
     def list_channels(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/channels")

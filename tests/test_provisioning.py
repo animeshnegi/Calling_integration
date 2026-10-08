@@ -5,6 +5,7 @@ These cover the behaviour the console promises: an administrator assigns a
 number and the customer immediately has an extension, SIP credentials, a DID
 link and default call flows, all of them editable afterwards.
 """
+import json
 import re
 from pathlib import Path
 
@@ -118,9 +119,15 @@ def customer_client(app, username="tenant"):
     return Session(client), int(user_id)
 
 
-def identity(extension: str) -> re.Pattern:
-    """The SIP username shape: six random letters, an underscore, the extension."""
-    return re.compile(rf"^[A-Za-z]{{6}}_{extension}$")
+def identity(extension: str, number: str = "") -> re.Pattern:
+    """The SIP username shape: a generated tag, the digits, and - for a line's own
+    extension - the number, so two 101s are two different credentials.
+
+    `MERIDIANINC_101_13025550001` is a technical identity a device signs in with;
+    it is never what a person dials.
+    """
+    suffix = re.escape(extension) + (rf"_{re.escape(number.lstrip('+'))}" if number else r"(_[0-9]+)?")
+    return re.compile(rf"^[A-Za-z][A-Za-z0-9]{{0,15}}_{suffix}$")
 
 
 def digits(key: str) -> str:
@@ -159,7 +166,7 @@ def test_assigning_a_number_provisions_extension_credentials_and_flows(tmp_path)
     # because every number numbers its extensions from 101 up independently.
     assert extension == "101@+13025550001", extension
     assert digits(extension) == "101"
-    assert identity("101").match(provisioned["sip_username"]), provisioned["sip_username"]
+    assert identity("101", "+13025550001").match(provisioned["sip_username"]), provisioned["sip_username"]
     assert len(provisioned["sip_password"]) >= 12
     assert provisioned["default_outbound"] is True
     assert provisioned["flows"] == ["number", "extension"]
@@ -172,10 +179,10 @@ def test_assigning_a_number_provisions_extension_credentials_and_flows(tmp_path)
 
     # The extension belongs to the customer, to that number, and holds its own
     # credentials.
-    extension_row = next(row for row in store.list_extensions(user_id) if row["extension"] == extension)
+    extension_row = next(row for row in store.list_extensions(user_id) if row["key"] == extension)
     assert extension_row["digits"] == "101" and extension_row["number"] == "+13025550001"
     assert extension_row["mailbox"] == "101-13025550001"
-    assert identity("101").match(extension_row["sip_username"]), extension_row["sip_username"]
+    assert identity("101", "+13025550001").match(extension_row["sip_username"]), extension_row["sip_username"]
     credentials = store.reveal_extension_credentials(extension, user_id)
     assert credentials["sip_username"] == extension_row["sip_username"]
     assert credentials["sip_password"] == provisioned["sip_password"]
@@ -214,7 +221,7 @@ def test_credentials_reveal_follows_a_linked_device_account(tmp_path):
     customer, user_id = customer_client(app, "meridian")
     assign_number(store, user_id, "+13025550001")
     key = key_on(store, user_id, "+13025550001", "101")      # the line's own 101
-    extension_identity = next(row["sip_username"] for row in store.list_extensions(user_id) if row["extension"] == key)
+    extension_identity = next(row["sip_username"] for row in store.list_extensions(user_id) if row["key"] == key)
     store.save_sip_account({
         "label": "Reception phone", "sip_username": "reception", "sip_password": "device-secret-9",
         "server": "sip.example.com", "port": 5060, "transport": "udp", "extension": key,
@@ -257,11 +264,13 @@ def test_each_additional_number_gets_its_own_extension_and_flow(tmp_path):
     assert first["extension"] == "101@+13025550011"
     assert second["extension"] == "101@+13025550012"
     assert digits(first["extension"]) == digits(second["extension"]) == "101"
-    # Caller ID is per extension, so each new line becomes its own extension's
-    # default without disturbing the first one.
-    assert second["default_outbound"] is True
+    # A line's own extension always calls out as that line - caller ID comes from
+    # the phone number the call is on, with no account-level fallback. The flag
+    # marks the line the console offers first, and which is created first.
+    assert first["default_outbound"] is True
+    assert second["default_outbound"] is False
     assert {row["number"]: row["default_outbound"] for row in store.list_numbers(user_id)} == {
-        "+13025550011": 1, "+13025550012": 1,
+        "+13025550011": 1, "+13025550012": 0,
     }
 
     flows = {flow["target"] for flow in store.list_routing_flows(user_id, target_type="extension")}
@@ -294,7 +303,7 @@ def test_auto_provision_never_reuses_another_customers_extension(tmp_path):
     })
     assert response.json["provisioned"]["extension"] == "101@+13025550021"
     assert store.get_extension_owner("101") == first_id
-    assert [row["extension"] for row in store.list_extensions(second_id)] == ["101@+13025550021"]
+    assert [row["key"] for row in store.list_extensions(second_id)] == ["101@+13025550021"]
 
 
 def test_customer_created_extension_generates_credentials_and_a_flow(tmp_path):
@@ -463,7 +472,7 @@ def test_a_device_account_cannot_take_an_extension_identity(tmp_path):
     # Linked to an extension: the account takes that extension's generated
     # identity, whatever the caller asked for. The extension is named by its key,
     # and by its digits while only that line carries them.
-    identity_of_101 = next(row["sip_username"] for row in store.list_extensions(user_id) if row["extension"] == key)
+    identity_of_101 = next(row["sip_username"] for row in store.list_extensions(user_id) if row["key"] == key)
     account_id = store.save_sip_account({
         "label": "Desk phone", "sip_username": "reception", "sip_password": "device-secret-1",
         "server": "sip.example.com", "extension": key, "phone_number": "+13025550001",
@@ -541,13 +550,15 @@ def test_administrators_edit_a_customers_call_flows(tmp_path):
 
     # The work landed on the customer the flow belongs to, not on the operator.
     kappa = admin.get(f"/admin/api/customers/{user_id}").json
-    assert {row["extension"] for row in kappa["extensions"]} == {kappa_101, "901"}   # 101 came with the number
+    # Both of kappa's extensions belong to kappa's own line: the 101 that came
+    # with the number and the 901 they already had, which the line adopted.
+    assert {row["key"] for row in kappa["extensions"]} == {kappa_101, "901@+13025550001"}
     assert {row["target"] for row in kappa["routing_flows"]} >= {"901", str(group.json["group_id"])}
     assert [row["name"] for row in kappa["groups"]] == ["Front desk"]
     lambda_ = admin.get(f"/admin/api/customers/{other_id}").json
     untouched = {row["target"] for row in lambda_["routing_flows"]}
     # 101 came with their own number; 902 is their own account-wide extension.
-    assert {kappa_101, "901"} & untouched == set() and {"902", lambda_101} <= untouched
+    assert {kappa_101, "901@+13025550001"} & untouched == set() and {"902@+13025550002", lambda_101} <= untouched
     assert {row["phone_number"] for row in lambda_["call_routes"]} == {"+13025550002"}
     assert lambda_["groups"] == []
 
@@ -755,7 +766,7 @@ def test_answering_one_device_cancels_the_other_legs(tmp_path):
     assign_number(store, user_id, "+13025550001")
     # A second device on the same line: the line rings both.
     second = store.add_extension_to_number("+13025550001", user_id, {"display_name": "Desk 2"})
-    assert store.inbound_plan("+13025550001")["destinations"] == [key_on(store, user_id, "+13025550001", "101"), second["extension"]]
+    assert store.inbound_plan("+13025550001")["destinations"] == [key_on(store, user_id, "+13025550001", "101"), second["key"]]
 
     service, asterisk = ring_engine(app)
     call = inbound(service, "+13025550001", key_on(store, user_id, "+13025550001", "101"))
@@ -764,7 +775,7 @@ def test_answering_one_device_cancels_the_other_legs(tmp_path):
     })
     updated = service.store.get(call.call_id)
     assert updated.employee_channel_id == f"{call.call_id}-employee-1"
-    assert updated.extension == second["extension"]    # the phone that picked up
+    assert updated.extension == second["key"]          # the phone that picked up
     assert updated.answered is True                    # and the call connected
     assert f"{call.call_id}-employee" in asterisk.hangups  # the other phone stops ringing
 
@@ -852,9 +863,9 @@ def test_adding_an_extension_extends_the_main_line(tmp_path):
     assign_number(store, user_id, "+13025550001")
     first_101 = key_on(store, user_id, "+13025550001", "101")
     second = store.add_extension_to_number("+13025550001", user_id, {"display_name": "Desk 2"})
-    assert digits(second["extension"]) == "102"
+    assert second["digits"] == "102"
 
-    assert store.inbound_plan("+13025550001")["destinations"] == [first_101, second["extension"]]
+    assert store.inbound_plan("+13025550001")["destinations"] == [first_101, second["key"]]
 
     # A flow the customer designed is never rewritten.
     store.save_call_route(user_id, {
@@ -862,7 +873,7 @@ def test_adding_an_extension_extends_the_main_line(tmp_path):
         "route": {"nodes": [{"type": "ring_group", "extensions": ["101"], "timeout": 15, "configured": True}]},
     })
     third = store.add_extension_to_number("+13025550001", user_id, {"display_name": "Desk 3"})
-    assert digits(third["extension"]) == "103"
+    assert third["digits"] == "103"
     assert store.inbound_plan("+13025550001")["destinations"] == [first_101]
 
 
@@ -882,7 +893,7 @@ def test_a_stale_main_line_default_catches_up_with_later_devices(tmp_path):
         "route": store.default_number_route([key_101]),
     })
     third = store.add_extension_to_number("+13025550001", user_id, {"display_name": "Desk 3"})
-    assert store.inbound_plan("+13025550001")["destinations"] == [key_101, first["extension"], third["extension"]]
+    assert store.inbound_plan("+13025550001")["destinations"] == [key_101, first["key"], third["key"]]
 
 
 def test_sip_username_is_generated_and_cannot_be_changed(tmp_path):
@@ -1050,7 +1061,7 @@ def test_the_platform_recording_switch_is_the_administrators_and_it_vetoes(tmp_p
     # they send name the line's own 101; the key names the same row.
     switched = customer.post("/admin/api/profile/recording", json={"enabled": True})
     assert switched.status_code == 200
-    assert next(row for row in store.list_extensions(user_id) if row["extension"] == key)["recording_enabled"] == 1
+    assert next(row for row in store.list_extensions(user_id) if row["key"] == key)["recording_enabled"] == 1
     assert app.extensions["telephony_service"]._recording_settings("101")["enabled"] is True
     assert app.extensions["telephony_service"]._recording_settings(key)["enabled"] is True
 
@@ -1060,7 +1071,7 @@ def test_the_platform_recording_switch_is_the_administrators_and_it_vetoes(tmp_p
     assert store.recording_platform_enabled() is False
     assert app.extensions["telephony_service"]._recording_settings("101")["enabled"] is False
     assert customer.get("/admin/api/state").json["recording_platform_enabled"] is False
-    assert next(row for row in store.list_extensions(user_id) if row["extension"] == key)["recording_enabled"] == 1
+    assert next(row for row in store.list_extensions(user_id) if row["key"] == key)["recording_enabled"] == 1
 
     # Back on: the device records again without the customer doing anything.
     assert admin.post("/admin/api/settings", json={"recording_enabled": True}).status_code == 200
@@ -1207,7 +1218,7 @@ def test_deleting_a_number_takes_down_the_line_provisioned_for_it(tmp_path):
     extension = created.json["provisioned"]["extension"]
     assert extension == "101@+13025550177"
     store.add_extension_to_number("+13025550177", user_id, {"display_name": "Desk 2"})
-    assert any(row["extension"] == extension and row["digits"] == "101" for row in store.list_extensions())
+    assert any(row["key"] == extension and row["digits"] == "101" for row in store.list_extensions())
 
     deleted = admin.delete("/admin/api/numbers/+13025550177")
     assert deleted.status_code == 200, deleted.json
@@ -1219,8 +1230,9 @@ def test_deleting_a_number_takes_down_the_line_provisioned_for_it(tmp_path):
     assert all(str(row.get("extension") or "") != extension for row in store.list_sip_accounts())
     assert all(route["phone_number"] != "+13025550177" for route in store.list_call_routes())
 
-    # An account-wide extension shared by two numbers is NOT deleted while
-    # another number still rings it.
+    # An extension belongs to one line, so 901 is 901 of the number that claimed
+    # it. The second number's link names digits it does not hold: its calls are
+    # NOT IN SERVICE - it never borrows the other line's 901.
     store.save_extension({"extension": "901", "sip_password": "shared-secret"}, user_id)
     first = admin.post("/admin/api/numbers", json={
         "number": "+13025550178", "provider": "TestProvider",
@@ -1231,9 +1243,72 @@ def test_deleting_a_number_takes_down_the_line_provisioned_for_it(tmp_path):
         "inbound_extension": "901", "owner_user_id": user_id,
     })
     assert first.status_code == 200 and second.status_code == 200, (first.json, second.json)
+    assert any(row["key"] == "901@+13025550178" for row in store.list_extensions())
+    assert any(
+        row["number"] == "+13025550179" and row["inbound_extension"] == "901@+13025550179"
+        for row in store.list_numbers()
+    )
+
+    # Deleting the line takes its own 901 with it. The other number keeps its
+    # link, which still names 901 of its own line - an extension that has not
+    # been created there, so nothing else is dialled or deleted in its place.
     assert admin.delete("/admin/api/numbers/+13025550178").status_code == 200
-    assert any(row["extension"] == "901" for row in store.list_extensions())
-    assert any(row["number"] == "+13025550179" and row["inbound_extension"] == "901" for row in store.list_numbers())
+    assert not any(row["key"] == "901@+13025550178" for row in store.list_extensions())
+    # And nothing survives as a numberless row: a bare `901` would be a second
+    # identity for the same device, and the digits are never one.
+    assert [row["key"] for row in store.list_extensions()] == []
+    assert any(
+        row["number"] == "+13025550179" and row["inbound_extension"] == "901@+13025550179"
+        for row in store.list_numbers()
+    )
+
+
+def test_a_deleted_line_leaves_no_extension_dangling(tmp_path):
+    """A default written as `101` must not keep another line's 101 alive.
+
+    It used to: the digits were compared while the line was taken down, so the
+    row survived its own number, still readable as a bare `101`, and the account
+    then answered a request for `101` with an extension that was on no line at
+    all - instead of the device the remaining line really has.
+    """
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+
+    for number in ("+13025550180", "+13025550181"):
+        created = admin.post("/admin/api/numbers", json={
+            "number": number, "provider": "TestProvider",
+            "inbound_extension": "auto", "owner_user_id": user_id,
+        })
+        assert created.status_code == 200, created.json
+    assert [row["key"] for row in store.list_extensions(user_id)] == [
+        "101@+13025550180", "101@+13025550181",
+    ]
+
+    # What an older install carries: the customer's defaults written as the
+    # digits a person reads off a phone, and the platform-wide setting beside
+    # them. Neither names a device on a line.
+    store.set_settings({
+        "default_extension": "101",
+        "call_defaults": json.dumps({
+            str(user_id): {"outbound": "101", "fallback": "101"},
+        }),
+    })
+
+    assert admin.delete("/admin/api/numbers/+13025550181").status_code == 200
+
+    # The line's own 101 is gone, and it does not survive as a numberless row.
+    assert [row["key"] for row in store.list_extensions(user_id)] == ["101@+13025550180"]
+    assert all(row["number"] for row in store.list_extensions(user_id))
+    # The digits still answer, on the line that is left: `101` is resolved
+    # inside each number, so the default names that line's device.
+    assert store.customer_call_defaults(user_id) == {
+        "outbound": "101@+13025550180", "fallback": "101@+13025550180",
+    }
+    credentials = admin.get("/admin/api/extensions/101/credentials")
+    assert credentials.status_code == 200, credentials.json
+    assert credentials.json["credentials"]["key"] == "101@+13025550180"
 
 
 def test_the_documentation_page_names_this_deployment(tmp_path):
@@ -1266,7 +1341,9 @@ def test_the_password_endpoint_rotates_the_credential_a_phone_uses(tmp_path):
     customer, user_id = customer_client(app, "meridian")
     assign_number(store, user_id, "+13025550001")            # extension 101
     key = key_on(store, user_id, "+13025550001", "101")
-    assert next(row["sip_username"] for row in store.list_extensions(user_id) if row["extension"] == key).endswith("_101")
+    assert identity("101", "+13025550001").match(
+        next(row["sip_username"] for row in store.list_extensions(user_id) if row["key"] == key)
+    )
 
     # A password the customer chose is stored and revealed afterwards - through
     # the key, and through the digits the console shows.
@@ -1420,8 +1497,8 @@ def test_two_numbers_each_start_their_own_101_and_104_stays_on_its_line(tmp_path
 
     first = "101@+13025550001"
     second = "101@+13025550002"
-    assert [row["extension"] for row in store.extensions_on_number(user_id, "+13025550001")] == [first]
-    assert [row["extension"] for row in store.extensions_on_number(user_id, "+13025550002")] == [second]
+    assert [row["key"] for row in store.extensions_on_number(user_id, "+13025550001")] == [first]
+    assert [row["key"] for row in store.extensions_on_number(user_id, "+13025550002")] == [second]
 
     # A fourth extension on each line: the same digits, told apart by the number.
     for number, wanted in (("+13025550001", first), ("+13025550002", second)):
@@ -1430,9 +1507,9 @@ def test_two_numbers_each_start_their_own_101_and_104_stays_on_its_line(tmp_path
         assert added.json["extension"] == f"102@{number}"
         # 103 and 104 on this line: the same digits exist on the other one too.
         assert admin.post(f"/admin/api/numbers/{number}/extensions", json={}).json["extension"] == f"103@{number}"
-        assert store.add_extension_to_number(number, user_id, {"display_name": "Desk 4"})["extension"] == f"104@{number}"
+        assert store.add_extension_to_number(number, user_id, {"display_name": "Desk 4"})["key"] == f"104@{number}"
         assert store.next_extension_number(user_id, number) == "105"
-        on_line = [row["extension"] for row in store.extensions_on_number(user_id, number)]
+        on_line = [row["key"] for row in store.extensions_on_number(user_id, number)]
         assert wanted in on_line and f"104@{number}" in on_line
 
     first_104 = key_on(store, user_id, "+13025550001", "104")
@@ -1451,7 +1528,7 @@ def test_two_numbers_each_start_their_own_101_and_104_stays_on_its_line(tmp_path
         })
         plan = store.inbound_plan(number)
         assert plan["kind"] == "ivr"
-        assert store.resolve_extension(number, "104", user_id)["extension"] == own
+        assert store.resolve_extension(number, "104", user_id)["key"] == own
 
     service, asterisk = ring_engine(app)
     service.handle_ari_event({
@@ -1460,7 +1537,7 @@ def test_two_numbers_each_start_their_own_101_and_104_stays_on_its_line(tmp_path
     })
     session = next(item for item in service._ivr_sessions.values())
     assert session["number"] == "+13025550001"
-    assert set(session["keys"]) == {row["extension"] for row in store.extensions_on_number(user_id, "+13025550001")}
+    assert set(session["keys"]) == {row["key"] for row in store.extensions_on_number(user_id, "+13025550001")}
 
     service.handle_ari_event({
         "type": "ChannelDtmfReceived", "channel": {"id": "carrier-+13025550001"},
@@ -1472,6 +1549,76 @@ def test_two_numbers_each_start_their_own_101_and_104_stays_on_its_line(tmp_path
         })
     assert [extension for _, extension in asterisk.legs] == [first_104], asterisk.legs
     assert [extension for _, extension in asterisk.legs] != [second_104]
+
+
+def test_three_101s_on_three_numbers_stay_three_devices(tmp_path):
+    """The hierarchy the product promises, in one fixture.
+
+    One customer holds 101 on two of its numbers, another customer holds 101 on
+    a third - three extensions that coexist, each resolved only inside its own
+    phone number, with three distinct technical identities behind them.
+    """
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, meridian = customer_client(app, "meridian")
+    _, northwind = customer_client(app, "northwind")
+
+    lines = (("+13025550001", meridian), ("+13025550002", meridian), ("+13025550003", northwind))
+    for number, owner in lines:
+        created = admin.post("/admin/api/numbers", json={
+            "number": number, "provider": "TestProvider",
+            "inbound_extension": "auto", "owner_user_id": owner,
+        })
+        assert created.status_code == 200, created.json
+    keys = {number: key_on(store, owner, number, "101") for number, owner in lines}
+    assert keys == {
+        "+13025550001": "101@+13025550001",
+        "+13025550002": "101@+13025550002",
+        "+13025550003": "101@+13025550003",
+    }
+
+    # Each line answers its own 101 and nothing else's: the digits are read
+    # inside the number the call is on, so a line without them has none - and
+    # the same digits on another number are a different device, never a fallback.
+    for number, owner in lines:
+        assert store.resolve_extension(number, "101", owner)["key"] == keys[number]
+        assert store.resolve_extension(number, "104", owner) is None
+        assert store.inbound_plan(number)["destinations"] == [keys[number]]
+
+    # Two customers: each account sees its own set, and all three rows exist.
+    assert {row["key"] for row in store.list_extensions(northwind)} == {keys["+13025550003"]}
+    assert {row["key"] for row in store.list_extensions(meridian)} == {
+        keys["+13025550001"], keys["+13025550002"],
+    }
+    assert len(store.list_extensions()) == 3
+
+    # Northwind's own console names its one device; Meridian's has to ask which
+    # line its two 101s are on rather than being handed one.
+    northwind_client = app.test_client()
+    assert northwind_client.post(
+        "/login", json={"username": "northwind", "password": "customer-password-1234"},
+    ).status_code == 200
+    own = northwind_client.get("/admin/api/extensions/101/credentials")
+    assert own.status_code == 200, own.json
+    assert own.json["credentials"]["key"] == "101@+13025550003"
+    meridian_client = app.test_client()
+    assert meridian_client.post(
+        "/login", json={"username": "meridian", "password": "customer-password-1234"},
+    ).status_code == 200
+    ambiguous = meridian_client.get("/admin/api/extensions/101/credentials")
+    assert ambiguous.status_code in (400, 404) and "more than one" in ambiguous.json["error"]
+
+    # Three technical identities, three endpoints: `PJSIP/101` names none of
+    # them, so the dial plan can never ring the wrong customer's desk.
+    from app.telephony_config import TelephonyConfigSync
+    rendered = TelephonyConfigSync(
+        store, None, str(tmp_path / "pjsip.dynamic.conf"),
+    ).render_pjsip()
+    for number in keys:
+        assert f"[101-{number.lstrip('+')}]\ntype=aor" in rendered
+    assert "[101]\ntype=aor" not in rendered
+    assert rendered.count("identify_by=username,auth_username") == 3
 
 
 def test_a_lines_device_is_dialled_by_its_endpoint_name(tmp_path):
@@ -1505,22 +1652,24 @@ def test_a_lines_device_is_dialled_by_its_endpoint_name(tmp_path):
         })
         assert response.status_code == 200, response.json
 
-    assert store.endpoint_name("101@+13025550001") == "101"
+    assert store.endpoint_name("101@+13025550001") == "101-13025550001"
     assert store.endpoint_name("101@+13025550002") == "101-13025550002"
     assert store.endpoint_name("901") == "901"
 
     sync = TelephonyConfigSync(store, SilentAMI(), str(tmp_path / "pjsip.dynamic.conf"))
     dialplan = sync.render_dialplan()
-    assert "Dial(PJSIP/101,30)" in dialplan
+    # Every extension of a line is dialled by its own globally unique name; the
+    # digits alone name nothing, which is what keeps the two 101s apart.
+    assert "Dial(PJSIP/101-13025550001,30)" in dialplan
     assert "Dial(PJSIP/101-13025550002,30)" in dialplan
     # Only the carrier trunk is dialled as user@trunk; every internal device is
     # named, so no key with its `@` ever reaches PJSIP as a section name.
     targets = [target for target in re.findall(r"Dial\(PJSIP/([^,)]+)", dialplan) if not target.startswith("${")]
     assert targets and not any("@" in target for target in targets), targets
     pjsip = sync.render_pjsip()
-    assert "\n[101]\n" in pjsip and "\n[101-13025550002]\n" in pjsip
+    assert "\n[101-13025550001]\n" in pjsip and "\n[101-13025550002]\n" in pjsip
 
     # The panel rings a device by that same name, never by the key.
     service, _ = ring_engine(app)
     assert service.dial_endpoint("101@+13025550002", "+13025550002") == "PJSIP/101-13025550002"
-    assert service.dial_endpoint("101@+13025550001", "+13025550001") == "PJSIP/101"
+    assert service.dial_endpoint("101@+13025550001", "+13025550001") == "PJSIP/101-13025550001"

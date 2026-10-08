@@ -12,12 +12,23 @@ set from 101 up - so the mailbox is named after both, `<digits>-<number>`:
         ↓
 101-13025550001    (the mailbox folder, the VoiceMail() context argument and the
                     name the console shows)
-101                (an account-wide extension, and what a *97 caller types)
 ```
 
-`mailbox_name()` does that translation in one place. The APIs and the console accept
-either form - the key, the mailbox name or the bare digits - and resolve them to the
-same folder, so a CRM that was written against `extension=101` keeps working.
+**A three-digit extension is resolved only within the current phone number**, so two
+101s on two numbers are two mailboxes with their own PIN, greeting and messages, and
+never one shared box:
+
+```text
++13025550001/101  →  101-13025550001
++13025550002/101  →  101-13025550002
+```
+
+`mailbox_name()` does that translation in one place, so the key, the mailbox name and
+the folder can never drift apart. The APIs and the console accept the key or the
+mailbox name anywhere, and the bare digits only while they name one extension of the
+account - two matches are refused with an explicit ambiguity error rather than
+guessed. A row with no number of its own keeps the bare `101` it was filed under, and
+that is what a `*97` caller types for it.
 The extension's own pin is filed under the same name; a mailbox that has to be longer
 than the digits records where its pin came from (`voicemail_pin_aliases`), so entering
 either name at the `*97` prompt opens the same mailbox.
@@ -36,7 +47,7 @@ PINs are encrypted in `settings.db` and are never returned by the API or admin s
 For an extension with voicemail enabled:
 
 1. Asterisk rings the SIP endpoint for 30 seconds.
-2. If it is not answered, the caller enters `VoiceMail(<extension>@engineerip,u)` and hears the unavailable greeting.
+2. If it is not answered, the caller enters `VoiceMail(101-13025550001@engineerip,u)` - the extension's own mailbox, so the message waits in that line's box - and hears the unavailable greeting.
 3. The message is stored in the private voicemail volume.
 4. Compatible SIP phones receive message-waiting indication through the endpoint mailbox subscription.
 
@@ -50,10 +61,10 @@ From a registered extension, dial:
 *97
 ```
 
-Asterisk opens `VoiceMailMain` in the private `engineerip` context. Enter the digits
-(`101`) and the configured PIN. When two of the account's numbers both hold those
-digits, enter the mailbox name instead (`101-13025550001`), which is what the
-credentials sheet shows; the pin is the same either way.
+Asterisk opens `VoiceMailMain` in the private `engineerip` context. Enter the mailbox
+name the credentials sheet shows - `101-13025550001` for 101 on that number - and the
+configured PIN; the digits alone work only where they name one extension of the
+account.
 
 ## Administration panel
 
@@ -90,8 +101,9 @@ Returns enabled extensions with display names, active state, and New, Old, Urgen
 
 ```http
 GET /api/v1/voicemails
-GET /api/v1/voicemails?extension=101
 GET /api/v1/voicemails?extension=101-13025550001
+GET /api/v1/voicemails?extension=101@+13025550001
+GET /api/v1/voicemails?extension=101                     (while one extension of the key holds the digits)
 GET /api/v1/voicemails?extension=101&folder=inbox
 ```
 
@@ -105,7 +117,7 @@ Example response:
   "voicemails": [
     {
       "id": "101:inbox:msg0000",
-      "mailbox": "101",
+      "mailbox": "101-13025550001",
       "folder": "inbox",
       "message": "msg0000",
       "caller_id": "Customer <+13025550123>",
@@ -122,7 +134,7 @@ Example response:
 ### Play or download audio
 
 ```http
-GET /api/v1/voicemails/101/inbox/msg0000/file
+GET /api/v1/voicemails/101-13025550001/inbox/msg0000/file
 Authorization: Bearer <TELEPHONY_TOKEN>
 Range: bytes=0-
 ```
@@ -132,7 +144,7 @@ The endpoint supports conditional/range responses through Flask and does not exp
 ### Mark as read
 
 ```http
-POST /api/v1/voicemails/101/inbox/msg0000/read
+POST /api/v1/voicemails/101-13025550001/inbox/msg0000/read
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
@@ -141,7 +153,7 @@ This moves a message from `INBOX` to Asterisk's `Old` folder and safely renumber
 ### Delete
 
 ```http
-DELETE /api/v1/voicemails/101/old/msg0000
+DELETE /api/v1/voicemails/101-13025550001/old/msg0000
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 

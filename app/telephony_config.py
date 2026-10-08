@@ -8,7 +8,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .admin import SettingsStore, extension_digits, extension_mailbox, extension_scope, same_account
+from .admin import (
+    SettingsStore, endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox,
+    extension_scope, same_account,
+)
 from .ami import AsteriskAMI
 
 
@@ -29,22 +32,15 @@ class TelephonyConfigSync:
         return f"{prefix}-{hashlib.sha256(value.encode()).hexdigest()[:12]}"
 
     @classmethod
-    def _section_name(cls, extension: Any, plain_names: dict[str, str] | None = None) -> str:
-        """The PJSIP section name for an extension key.
+    def _section_name(cls, extension: Any) -> str:
+        """The PJSIP section name of one extension: its globally unique identity.
 
-        Section names cannot contain `@` (Asterisk parses it as a key/value pair),
-        so a scoped extension is named by its identity unless it is the one that
-        owns the plain three-digit name.
+        `101-13025550001` - digits plus the line they belong to, so two 101s can
+        never collide and `PJSIP/101` is never ambiguous. A section name cannot
+        contain `@` (Asterisk parses it as a key/value pair), which is why the
+        identity is not the stored key.
         """
-        key = str(extension or "")
-        if extension_scope(key) == "":
-            return key
-        digits = extension_digits(key)
-        # The one extension that owns the plain three-digit name is reached by
-        # it - that is the name every hand-written dial plan and every device
-        # account already used. The rest are named by their identity, which
-        # carries no `@`.
-        return digits if (plain_names or {}).get(digits) == key else extension_mailbox(key)
+        return extension_endpoint(extension)
 
     @staticmethod
     def _clean(value: Any) -> str:
@@ -71,45 +67,55 @@ class TelephonyConfigSync:
         return value
 
     @staticmethod
-    def tenant_context(owner_user_id: Any) -> str:
-        """The dialplan context the phones of one account answer in.
+    def number_context(number: Any) -> str:
+        """The dialplan context the devices of one phone number answer in.
 
-        Extension numbers are three digits and unique platform-wide, but a
-        customer's phone must only ever reach the extensions of its own account
-        - whichever DID they belong to - plus the platform's own lines. That is
-        a property of the dialplan context, not of a per-call check, so another
-        customer's extension is not merely refused: it does not exist here.
+        A three-digit extension is resolved only inside the current phone number,
+        so the context is the number, not the account and not the platform.
+        Dialling 104 on +13025550001 rings that line's 104; the 104 of another
+        number of the same customer, or of another customer, is not merely
+        refused here - it does not exist in this context.
         """
-        owner = str(owner_user_id if owner_user_id is not None else "").strip()
-        return f"from-internal-{int(owner)}" if owner.isdigit() else "from-internal"
+        digits = re.sub(r"[^0-9]", "", str(number or ""))
+        return f"from-number-{digits}" if digits else "from-internal"
+
+    @staticmethod
+    def tenant_context(owner_user_id: Any) -> str:
+        """The context a device with no phone number of its own answers in.
+
+        The platform's own devices; the dial plan renders that context from the
+        platform's legacy rows and numbers, and a customer's device always has a
+        number context instead.
+        """
+        return "from-internal"
 
     @staticmethod
     def _same_owner(left: Any, right: Any) -> bool:
         return same_account(left, right)
 
     def _extension_owners(self) -> dict[str, Any]:
-        """extension -> the customer account that owns it (None = the platform's)."""
-        return {str(row["extension"]): row.get("owner_user_id") for row in self.store.list_extensions()}
+        """extension key -> the customer account that owns it (None = the platform's)."""
+        return {str(row["key"]): row.get("owner_user_id") for row in self.store.list_extensions()}
 
-    def _extension_reachable_by(self, extension: str, owner: Any, owners: dict[str, Any], scope: str = "") -> bool:
-        """May a device belonging to `owner` ring this extension?
+    def _extension_reachable_by(self, extension: str, number: Any, owners: dict[str, Any]) -> bool:
+        """May a call on this phone number ring this extension?
 
-        Yes for the platform's own lines and for every extension of the same
-        customer account; no for another customer's - so dialling an extension
-        number can never drop a call on a different organisation's desk. With a
-        `scope` (the DID being answered) the rule tightens to that line: an
-        extension that belongs to another of the account's numbers is not on
-        this line, so it does not answer here.
+        One answer: only when the extension belongs to that very number and to
+        the account that holds the number. Another number's 101 - another of the
+        customer's lines, or another customer's - is not reachable here, which is
+        what makes a missing extension NOT IN SERVICE instead of somebody else's
+        desk.
         """
-        if owner is None or str(owner).strip() == "":
-            return True
-        extension_owner = owners.get(str(extension))
-        if extension_owner is None or str(extension_owner).strip() == "":
-            return True
-        if not self._same_owner(extension_owner, owner):
-            return False
-        own_scope = extension_scope(extension)
-        return not (scope and own_scope and own_scope != str(scope))
+        if str(number or "").strip() == "":
+            # A platform-owned DID with no line of its own: the platform's rows.
+            return owners.get(str(extension)) in (None, "")
+        return next(
+            (
+                item for item in self.store.list_extensions()
+                if str(item["key"]) == str(extension) and item["number"] == str(number)
+            ),
+            None,
+        ) is not None
 
     @staticmethod
     def _allowed_ips(value: str) -> list[str]:
@@ -128,20 +134,26 @@ class TelephonyConfigSync:
     def _valid_extension(value: str) -> bool:
         return value.isdigit() and 100 <= int(value) <= 999
 
-    def _fallback_extension(self, configured: str, active_extensions: list[str]) -> str:
-        """The platform-wide last resort, as the key of an extension that exists."""
-        if configured and any(extension_digits(key) == configured for key in active_extensions):
-            return next(key for key in active_extensions if extension_digits(key) == configured)
-        if active_extensions:
-            return active_extensions[0]
-        return "101"
+    def _fallback_digits(self, configured: str) -> str:
+        """The digits an operator configured as a last resort, as digits.
 
-    def _outbound_identity(self, extension: str) -> tuple[str, str]:
-        """Caller ID and carrier trunk a phone on this extension dials out
-        with: its default outbound DID and that number's provider endpoint.
-        Empty strings mean the extension has no number - direct outbound
-        calls from it are refused by the dialplan."""
-        assigned = self.store.get_outbound_number(extension)
+        They are read against the current phone number like any other three
+        digits: they name a device only where that number has such an extension.
+        """
+        digits = extension_digits(configured)
+        return digits if digits.isdigit() else ""
+
+    def _outbound_identity(self, extension: str, number: str = "") -> tuple[str, str]:
+        """Caller ID and carrier trunk one device dials out with.
+
+        The caller ID is the *phone number* the device answers on - 101 on
+        +13025550001 presents that line, 101 on +13025550002 presents the other
+        one - so it travels with the line, not with the digits. A device account
+        with its own `number` presents that line. Empty strings mean the device
+        has no number at all: the dial plan refuses its outbound calls instead of
+        leaking somebody else's identity.
+        """
+        assigned = self.store.active_number(number) if str(number or "").strip() else self.store.get_outbound_number(extension)
         if not assigned:
             return "", ""
         provider = None
@@ -237,24 +249,31 @@ class TelephonyConfigSync:
         # A customer SIP account linked to an extension becomes that extension's
         # live PJSIP credential, so credentials shown in the portal really ring.
         sip_accounts = [row for row in self.store.list_sip_accounts(include_password=True) if row["active"]]
-        sip_by_extension = {str(row["extension"]): row for row in sip_accounts if row.get("extension")}
+        # A device account answers for one extension of one phone number: the
+        # pair is what identifies it, because two numbers may both hold a 101.
+        sip_by_extension = {
+            (extension_digits(row["extension"]), str(row.get("phone_number") or "")): row
+            for row in sip_accounts if row.get("extension")
+        }
+        sip_by_digits: dict[str, Any] = {}
+        for row in sip_accounts:
+            if row.get("extension"):
+                sip_by_digits.setdefault(extension_digits(row["extension"]), row)
         # Admin-chosen digest challenge (md5/sha256/both), same for every account.
         auth_digest = self._auth_digest_lines()
         configured_extensions: set[str] = set()
-        # Which extension keeps the plain three-digit endpoint name. The first
-        # row with those digits keeps the name `101` - so a hand-written dial
-        # plan, a device account and everything an operator already wrote about
-        # it go on working - and a second 101 (another line, or another account)
-        # answers on `101-<its number>`, because a PJSIP section name may not
-        # contain the `@` its key does.
+        # Every extension answers on its globally unique identity: the digits plus
+        # the phone number they belong to (`101-13025550001`). `PJSIP/101` is not
+        # ambiguous because nothing is named `101` unless it is a platform row -
+        # and a platform row answers only in the operator's own context.
         all_extensions = self.store.list_extensions()
-        plain_names = self.store.plain_endpoint_names()
         for ext in all_extensions:
             if not ext["active"]:
                 continue
-            extension = self._clean(ext["extension"])
+            extension = self._clean(ext["key"])
             digits = extension_digits(extension)
-            linked = sip_by_extension.get(extension)
+            scope = str(ext["number"] or "")
+            linked = sip_by_extension.get((digits, scope)) or (sip_by_digits.get(digits) if not scope else None)
             username = self._clean(linked["sip_username"] if linked else ext["sip_username"])
             password = self._clean(linked["sip_password"] if linked else self.store.get_extension_password(extension))
             transport = self._transport(linked["transport"] if linked else "udp")
@@ -272,16 +291,25 @@ class TelephonyConfigSync:
             #   - the canonical [extension] endpoint the dialplan dials; its
             #     aors list includes the alias AOR, so it rings the phone
             #     wherever the contact was registered.
-            outbound_cid, outbound_trunk = self._outbound_identity(extension)
-            # The device dials in the context of the account that owns it.
-            context = self.tenant_context(ext.get("owner_user_id"))
+            outbound_cid, outbound_trunk = self._outbound_identity(extension, scope)
+            # The device dials in the context of the phone number it answers on,
+            # so a three-digit extension is resolved inside that number only. A
+            # platform row (the operator's own phone) answers in the operator's
+            # context, which is where its digits are unique.
+            context = self.number_context(scope) if scope else self.tenant_context(ext.get("owner_user_id"))
             # Endpoint names may not contain `@`: a PJSIP section name with one is
             # parsed as a key/value pair. The dial plan and ARI both dial this
             # section name - see `_section_name` and `SettingsStore.endpoint_name`.
-            section = self._section_name(extension, plain_names)
+            section = self._section_name(extension)
+            mailbox = str(ext["mailbox"])
             aors = [section]
-            alias_aor = []
-            if username != section:
+            alias_aor: list[str] = []
+            if username and username != section:
+                # The registration identity: a phone signs in with its SIP
+                # username, and the registrar matches that against an AOR, so the
+                # AOR exists whatever the WebRTC switch says - a hardware phone
+                # or softphone must keep registering with the credential on its
+                # sheet.
                 aors.append(username)
                 alias_aor = [f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", ""]
             # The endpoint the dial plan rings by default: plain RTP, so the
@@ -295,16 +323,17 @@ class TelephonyConfigSync:
                 "identify_by=username,auth_username",
                 f"set_var=OUTBOUND_CID={outbound_cid}", f"set_var=OUTBOUND_TRUNK={outbound_trunk}",
                 f"allow_subscribe={'yes' if ext.get('voicemail_enabled') else 'no'}",
-                *([f"mailboxes={extension}@engineerip"] if ext.get("voicemail_enabled") else []),
+                *([f"mailboxes={mailbox}@engineerip"] if ext.get("voicemail_enabled") else []),
             ]
             alias_endpoint = []
-            if username != extension:
-                # The generated SIP username is already an AOR/endpoint alias.
-                # Keep the normal UDP/TCP endpoint untouched for Zoiper and
-                # hardware phones, and make the alias WebRTC-capable for the
-                # browser. Both endpoints use the same auth and AOR contacts, so
-                # a phone signed in on the browser is reached whichever of the
-                # two is dialled - but only this one carries the WebRTC media.
+            if ext.get("webrtc_enabled") and username and username != section:
+                # A browser needs a WebRTC-capable endpoint. It is created only
+                # for an extension whose WebRTC switch is on, so switching WebRTC
+                # on - or off - never touches the plain UDP/TCP endpoint above:
+                # hardware phones and softphones keep registering and answering
+                # either way. Both endpoints share the same auth and AORs, so a
+                # device signed in on the browser is reached whichever of the two
+                # is dialled.
                 browser_endpoint_body = [
                     line for line in endpoint_body
                     if not line.startswith(("transport=", "allow="))
@@ -333,10 +362,14 @@ class TelephonyConfigSync:
         extension_owners = self._extension_owners()
         for account in sip_accounts:
             extension = self._clean(str(account.get("extension") or ""))
-            if extension and extension in configured_extensions:
+            phone = self._clean(str(account.get("phone_number") or ""))
+            if extension and extension_key(extension_digits(extension), phone) in configured_extensions:
                 # Already rendered above as that extension's own identity.
                 continue
-            if extension and extension not in {row["extension"] for row in all_extensions}:
+            if extension and not any(
+                row["digits"] == extension_digits(extension) and (not phone or row["number"] == phone)
+                for row in all_extensions
+            ):
                 extension = ""
             endpoint = self._id("device", str(account["sip_username"]))
             username = self._clean(account["sip_username"])
@@ -346,13 +379,19 @@ class TelephonyConfigSync:
             # extension it was keyed to is gone or belongs somewhere else, and it
             # may only present the caller ID of an extension of that account.
             account_owner = account.get("owner_user_id")
-            extension_owner = extension_owners.get(extension) if extension else None
+            extension_owner = extension_owners.get(extension_key(extension_digits(extension), phone)) if extension else None
             foreign_extension = bool(
                 extension and account_owner not in (None, "") and extension_owner not in (None, "")
                 and not self._same_owner(extension_owner, account_owner)
             )
             scope_owner = account_owner if foreign_extension or extension_owner in (None, "") else extension_owner
-            context = self.tenant_context(scope_owner)
+            # A device keyed to an extension dials in that extension's number
+            # context; one with no extension keeps the account's context (its own
+            # number's, falling back to the platform's).
+            device_number = phone or ""
+            if not device_number and extension and not foreign_extension:
+                device_number = str(self.store.primary_number(int(scope_owner)) if str(scope_owner or "").strip().isdigit() else "")
+            context = self.number_context(device_number) if device_number else self.tenant_context(scope_owner)
             if foreign_extension:
                 extension = ""
             # Same registration contract as extensions: the device signs in
@@ -360,7 +399,7 @@ class TelephonyConfigSync:
             # (for the registrar) and as an alias ENDPOINT (for endpoint
             # identification - PJSIP matches usernames against endpoint
             # names, and this endpoint's own name is an internal hash).
-            outbound_cid, outbound_trunk = self._outbound_identity(extension) if extension else ("", "")
+            outbound_cid, outbound_trunk = self._outbound_identity(extension, phone) if extension else ("", "")
             device_body = [
                 f"context={context}", "disallow=all", f"allow={self.INTERNAL_CODECS}", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
@@ -425,14 +464,13 @@ class TelephonyConfigSync:
         for extension in self.store.list_extensions():
             if not extension["active"] or not extension.get("voicemail_enabled"):
                 continue
-            key = self._clean(extension["extension"])
-            # The mailbox is read off the sheet and typed into *97, so it stays
-            # the digits wherever those alone are unambiguous: only a second
-            # extension with the same digits on another number gets the longer
-            # name. The stored pin is the same either way.
+            key = self._clean(extension["key"])
+            # Every extension has its own mailbox, and two 101s on different
+            # numbers have two separate boxes: the mailbox is the digits plus the
+            # number they belong to (`101-13025550001`), never the digits alone
+            # and never `101@engineerip`. The pin is the one stored for the row.
             mailbox = extension_mailbox(key)
-            if mailbox != extension_digits(key):
-                self.store.alias_voicemail_pin(mailbox, extension_digits(key))
+            self.store.alias_voicemail_pin(mailbox, extension_digits(key))
             pin = self._clean(self.store.get_voicemail_pin(mailbox) or self.store.get_voicemail_pin(key))
             display_name = self._clean(extension.get("display_name") or f"Extension {extension_digits(key)}")
             lines.append(f"{mailbox} => {pin},{display_name},,,attach=no|delete=no")
@@ -440,151 +478,90 @@ class TelephonyConfigSync:
         return "\n".join(lines)
 
     def render_dialplan(self) -> str:
-        """The dial plan: which digits ring which device, and in whose context.
+        """The dial plan: which digits ring which device, and in which context.
 
-        Two rules shape everything here.
+        One rule shapes everything here: *a three-digit extension is resolved
+        only within the current phone number*. Every number renders its own
+        context, holding exactly its own extension set, so 104 on +13025550001
+        rings that line's 104 - and a line that has no 104 plays NOT IN SERVICE,
+        never another number's 104, the account's lowest line, or another
+        customer's desk.
 
-        Extensions belong to a *phone number*: 101 is the first device of a line
-        and the rest follow. A call arriving on a DID rings that number's own
-        extensions, the account-wide ones and the platform's - never another
-        number's, and never another organisation's.
-
-        Inside one account, extension numbers are platform-wide: a phone at
-        101 dials 117 and reaches the 117 of that same organisation, whichever
-        number it sits on. That is what keeps dialling between teams simple, and
-        it is why the context carries the shared numbers and the DID carries the
-        line's own.
+        Reaching another line is done by dialling its full number: a number of
+        the same customer is routed internally, straight to the extension or
+        flow that number answers with, and never leaves through the carrier.
+        Everything the platform does not own is an ordinary outbound call, placed
+        with the caller ID of the number the device answers on.
         """
         settings = self.store.get_settings()
         extensions = [row for row in self.store.list_extensions() if row["active"]]
-        active_exts = [row["extension"] for row in extensions]
-        voicemail_exts = {row["extension"] for row in extensions if row.get("voicemail_enabled")}
-        owners = self._extension_owners()
+        voicemail_exts = {row["key"] for row in extensions if row.get("voicemail_enabled")}
+        numbers = [number for number in self.store.list_numbers() if number["active"]]
+        default_digits = self._fallback_digits(str(settings.get("default_extension", "")).strip())
+        fallback_digits = self._fallback_digits(str(settings.get("inbound_fallback_extension", "")).strip())
+
+        def dialable(number) -> list[dict]:
+            """The extensions of one phone number, in dialling order."""
+            text = str((number or {}).get("number") or "").strip()
+            rows = [row for row in extensions if row["number"] == text]
+            return sorted(rows, key=lambda row: int(row["digits"]) if row["digits"].isdigit() else 0)
 
         def key_for(number, digits: Any) -> str:
-            """The stored key that answers these digits on this number."""
-            key = self.store.extension_key_for(str(number or ""), digits, None)
-            return key or str(digits)
-
-        def key_for_owner(number, digits: Any, owner: Any) -> str:
-            owner_id = int(owner) if str(owner or "").strip().isdigit() else None
-            key = self.store.extension_key_for(str(number or ""), digits, owner_id)
-            return key or str(digits)
-        default_ext = self._fallback_extension(str(settings.get("default_extension", "")).strip(), active_exts)
-        inbound_fallback = self._fallback_extension(
-            str(settings.get("inbound_fallback_extension", "")).strip(), active_exts
-        )
-
-        def did_extension(number) -> str:
-            """Which extension answers this DID when its own link is missing or stale.
-
-            Each customer chooses their own fallback, so an unassigned DID belonging
-            to one customer can never land on another customer's phone. The
-            platform-wide values below are only a last resort for rows written
-            before customers owned this decision.
-            """
-            owner = number.get("owner_user_id")
-            if owner is not None:
-                customer = self.store.customer_call_defaults(int(owner)).get("fallback", "")
-                if customer and customer in active_exts:
-                    return customer
-            return inbound_fallback
-
-        # Dial-by-extension is decided by context. [from-internal] is the
-        # platform's own number space - the operator's devices and every row
-        # written before extensions had an owner - and each customer account gets
-        # `from-internal-<owner>` holding that account's own extensions, every
-        # one of them whichever DID it belongs to, plus the platform's lines.
-        # Another customer's extension is not merely refused there: it is absent,
-        # so dialling 117 can never ring somebody else's desk.
-        # [from-internal] is the platform's own number space: the operator's
-        # devices, and any row written before extensions had an owner.
-        platform_exts = [
-            row["extension"] for row in extensions
-            if row.get("owner_user_id") in (None, "") and not extension_scope(row["extension"])
-        ]
-        # One context per *account*, holding every extension of every number it
-        # owns, so its phones reach each other by extension. Which line a device
-        # is on does not change who it may call inside the organisation.
-        tenant_exts: dict[int, list[str]] = {}
-        tenant_by_digits: dict[int, dict[str, str]] = {}
-        for row in extensions:
-            if row.get("owner_user_id") in (None, ""):
-                continue
-            owner_id = int(row["owner_user_id"])
-            tenant_exts.setdefault(owner_id, []).append(row["extension"])
-            digits = str(row["digits"])
-            existing = tenant_by_digits.setdefault(owner_id, {})
-            if digits not in existing or not extension_scope(existing[digits]):
-                # A line's own extension wins over an account-wide row with the
-                # same digits: it is the more specific answer.
-                existing[digits] = str(row["extension"])
-        # A device that is not linked to an extension still answers in its own
-        # account's context, so that context has to exist even without extensions.
-        for account in self.store.list_sip_accounts():
-            owner = account.get("owner_user_id")
-            if owner not in (None, "") and str(owner).strip().isdigit() and int(owner) not in tenant_exts:
-                tenant_exts[int(owner)] = []
+            """The extension that answers these digits on this number, or ""."""
+            text = str((number or {}).get("number") or "").strip()
+            return next(
+                (str(row["key"]) for row in extensions
+                 if row["number"] == text and row["digits"] == extension_digits(digits)),
+                "",
+            )
 
         def number_extension(number) -> str:
-            """The extension key that answers when this number is called.
+            """The extension that answers when this number is called.
 
-            One answer for both ways in: a call arriving from the carrier and a
+            One answer for both ways in - a call arriving from the carrier and a
             call dialled internally reach the same device. The number's own link
-            is read against this very number, so 101 is this line's 101; then
-            that customer's own fallback, then the platform's last resort.
+            is read against this very number, then that customer's own fallback,
+            then the operator's configured last resort; every candidate is a
+            three-digit number *of this line*, so a line with none of them is
+            simply not in service rather than somebody else's extension.
             """
-            candidates = (
-                key_for(number.get("number"), str(number["inbound_extension"] or "")),
-                key_for(number.get("number"), did_extension(number)),
-                key_for(number.get("number"), inbound_fallback),
-            )
+            candidates = [str(number.get("inbound_extension") or "")]
+            owner = number.get("owner_user_id")
+            if owner is not None:
+                candidates.append(str(self.store.customer_call_defaults(int(owner)).get("fallback") or ""))
+            candidates.append(fallback_digits)
             for candidate in candidates:
-                if (
-                    candidate and candidate in active_exts
-                    and self._extension_reachable_by(
-                        candidate, number.get("owner_user_id"), owners, extension_scope(number.get("number"))
-                    )
-                ):
-                    return candidate
+                key = key_for(number, candidate)
+                if key:
+                    return key
             return ""
 
-        # An extension that answers in the browser (WebRTC enabled) has to be
-        # dialled on its WebRTC endpoint: media is negotiated by the endpoint the
-        # call is dialled *towards*, so a plain RTP offer to a browser arrives
-        # with no audio, and a WebRTC offer sent to a hardware phone is refused.
-        # Only extensions the operator marked are affected; everything else is
-        # dialled exactly as before.
+        # An extension that answers in the browser (WebRTC enabled) is dialled on
+        # its WebRTC alias endpoint: media is negotiated by the endpoint the call
+        # is dialled *towards*, so a plain RTP offer to a browser arrives with no
+        # audio. Only extensions whose switch is on are affected - and their plain
+        # endpoint keeps working, so hardware phones are never disabled by it.
         web_endpoints: dict[str, str] = {}
         for row in self.store.list_extensions():
             username = self._clean(row.get("sip_username"))
-            if row.get("active") and row.get("webrtc_enabled") and username and username != str(row["extension"]):
-                web_endpoints[str(row["extension"])] = username
-        # The endpoint a device is reached by. A key holds `@`, which a PJSIP
-        # section name cannot, so the dial plan dials the name: the plain digits
-        # for the extension that owns them, its identity (`101-13025550098`)
-        # otherwise, and the WebRTC alias for a browser phone.
-        endpoint_names = self.store.plain_endpoint_names()
+            if row.get("active") and row.get("webrtc_enabled") and username and username != extension_endpoint(str(row["key"])):
+                web_endpoints[str(row["key"])] = username
 
-        def dial_target(extension: str, endpoint: str = "") -> str:
-            if endpoint:
-                return endpoint
-            return self._section_name(extension, endpoint_names)
+        def dial_target(key: str) -> str:
+            return web_endpoints.get(str(key)) or extension_endpoint(key)
 
-        def ring_extension(extension: str, spoken: str = "") -> list[str]:
+        def ring_extension(key: str, spoken: str = "") -> list[str]:
             """What it takes to ring one extension, wherever it was reached from.
 
-            `spoken` is the digits the caller dialled, which is what the mailbox
-            is named after. A registered phone that does not answer is left to
-            ring out, or to that extension's voicemail. An extension with nobody
+            `spoken` is what the caller dialled, which is what the mailbox is
+            named after. A registered phone that does not answer is left to ring
+            out, or to that extension's voicemail. An extension with nobody
             signed in gets a spoken answer instead of the silence a failed Dial
-            leaves behind - which is what a caller otherwise hears when the phone
-            they are dialling is simply not registered yet.
+            leaves behind.
             """
-            digits = spoken or extension_digits(extension)
-            target = dial_target(str(extension), web_endpoints.get(str(extension), ""))
-            mailbox = extension_mailbox(extension)
-            if extension in voicemail_exts:
+            target = dial_target(key)
+            mailbox = extension_mailbox(key)
+            if key in voicemail_exts:
                 return [
                     f" same => n,Dial(PJSIP/{target},30)",
                     f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({mailbox}@engineerip,u))',
@@ -596,52 +573,47 @@ class TelephonyConfigSync:
                 " same => n,Hangup()",
             ]
 
-        def extension_route(extension: str, dialed: str) -> list[str]:
-            """One dialable number in this context, ringing one device.
-
-            `dialed` is what the phone dials (the three digits), `extension` is
-            the device that answers it, and they differ whenever a line has its
-            own set: dialling 101 rings that line's 101, not another line's.
-            """
+        def extension_route(dialed: str, key: str) -> list[str]:
+            """One dialable three-digit number in this context, ringing one device."""
             return [
-                f"exten => {dialed},1,NoOp(EngineerIP extension {dialed})",
-                *ring_extension(extension, spoken=dialed),
+                f"exten => {dialed},1,NoOp(EngineerIP extension {dialed} on {extension_scope(key) or 'the platform'})",
+                *ring_extension(key, spoken=dialed),
             ]
 
-        def local_number_route(pattern: str, extension: str) -> list[str]:
-            """Dialling one of the organisation's own numbers, from inside.
+        def number_route(number, pattern: str) -> list[str]:
+            """A full number of the same customer, dialled from inside.
 
-            The platform looks the number up when it renders this file and rings
-            the extension that number is set to ring - the same destination the
-            carrier would have reached - so a call between two of a customer's
-            own numbers never leaves through the carrier.
+            The platform rings whatever that number answers with - the same
+            destination the carrier would have reached - so a call between two of
+            a customer's own numbers never leaves the platform. A number that
+            answers with nothing is not in service here either.
             """
+            key = number_extension(number)
+            if not key:
+                return [
+                    f"exten => {pattern},1,NoOp(EngineerIP local number {pattern} has no reachable extension)",
+                    " same => n,Playback(ss-noservice)",
+                    " same => n,Hangup()",
+                ]
             return [
-                f"exten => {pattern},1,NoOp(EngineerIP local number {pattern} rings extension {extension_digits(extension)})",
-                *ring_extension(extension),
+                f"exten => {pattern},1,NoOp(EngineerIP local number {pattern} rings extension {extension_digits(key)})",
+                *ring_extension(key),
             ]
 
-        local_numbers = [number for number in self.store.list_numbers() if number["active"]]
-
-        def local_number_routes(owner_id: int | None = None) -> list[str]:
-            """One account's numbers - or every number - as internal dialling.
-
-            Rendered as literals, which Asterisk prefers over the outbound
-            patterns below, so a number dialled by the organisation that owns it
-            rings that number's extension instead of being handed to the trunk.
-            Another organisation's number is not rendered here at all, so
-            dialling it is the ordinary external call it is.
-            """
+        def local_number_routes(owner_id: int | None) -> list[str]:
+            """Every number of one account - or the platform's own - as internal dialling."""
             lines: list[str] = []
-            for number in local_numbers:
-                if owner_id is not None and not self._same_owner(number.get("owner_user_id"), owner_id):
+            for number in numbers:
+                if owner_id is None:
+                    if number.get("owner_user_id") not in (None, ""):
+                        continue
+                elif not self._same_owner(number.get("owner_user_id"), owner_id):
                     continue
-                extension = number_extension(number)
                 digits = re.sub(r"[^0-9]", "", str(number["number"]))
-                if not extension or not digits:
+                if not digits:
                     continue
                 for pattern in (digits, f"+{digits}"):
-                    lines.extend(local_number_route(pattern, extension))
+                    lines.extend(number_route(number, pattern))
             return lines
 
         voicemail_login = [
@@ -649,20 +621,21 @@ class TelephonyConfigSync:
             " same => n,VoiceMailMain(@engineerip)",
             " same => n,Hangup()",
         ]
-        # A three-digit number that is not in this context is nobody's extension
-        # here - another organisation's or a typo. An exact extension or a more
-        # specific pattern always wins over this catch-all, so a future short code
-        # only has to be added above it.
+        # A three-digit number that is not on this line is nobody's extension
+        # here: another line's, another customer's or a typo. This is the
+        # NOT IN SERVICE answer, and an exact extension or a more specific
+        # pattern always wins over it.
         unknown_extension = [
-            "exten => _XXX,1,NoOp(${EXTEN} is not an extension of this organisation)",
+            "exten => _XXX,1,NoOp(${EXTEN} is not an extension of this phone number)",
             " same => n,Playback(ss-noservice)",
             " same => n,Hangup()",
         ]
-        # Direct outbound dialing from a registered phone. The calling endpoint
-        # carries its own caller ID and carrier trunk as channel variables
-        # (set_var in pjsip, see render_pjsip) - an endpoint without an assigned
-        # number is politely refused instead of leaking another customer's
-        # identity. Every context needs these, customers included.
+        # Direct outbound dialling from a registered phone. The endpoint carries
+        # its own caller ID and carrier trunk as channel variables (set_var in
+        # pjsip, see render_pjsip), and they are the *current phone number's* - so
+        # 101 on +13025550001 and 101 on +13025550002 present their own line. A
+        # device with no number is politely refused instead of leaking another
+        # customer's identity.
         outbound: list[str] = []
         for pattern in ("_+X.", "_XXXX."):
             outbound.extend([
@@ -679,63 +652,52 @@ class TelephonyConfigSync:
         lines = [
             "; AUTO-GENERATED EngineerIP DID, extension and voicemail routing.",
             ";",
-            "; Extensions belong to phone numbers: every number starts its own set at",
-            "; 101, so a call arriving on a DID rings that number's own extension 101",
-            "; (and 102, 103 ... as they are added), the account-wide extensions and",
-            "; the platform's - never another number's.",
+            "; A three-digit extension is resolved only within the current phone",
+            "; number: every number renders its own context from 101 up, so 104 on",
+            "; +13025550001 rings that line's 104 and a line without a 104 plays",
+            "; NOT IN SERVICE. No context falls back to another number, to the",
+            "; account's lowest line, or to another customer's extensions.",
             ";",
-            "; Inside one customer account the extension numbers are platform-wide:",
-            "; dialling 104 from any of the account's phones reaches the 104 device it",
-            "; owns, whichever DID that device sits on. Another account's extensions are",
-            "; not merely refused - they are absent from the context.",
+            "; A number of the same customer is dialled by its full number and rings",
+            "; internally, straight to that number's own extension or flow. Anything",
+            "; the platform does not own is dialled out through the carrier with the",
+            "; caller ID of the number the device answers on.",
             ";",
-            "; A number that is one of the caller's own is dialled the same way: the",
-            "; literal routes below ring the extension that number is set to ring, so a",
-            "; call between two of a customer's numbers never leaves through the carrier.",
-            ";",
-            "; [from-internal]: the platform's own devices; they may ring any extension.",
+            "; [from-internal]: the platform's own devices and numbers only.",
             "[from-internal]",
             *voicemail_login,
         ]
-        # The platform's own devices may ring every extension on the platform,
-        # the way the operator's line always has. Each three-digit number is
-        # rendered once: an account-wide row with those digits answers, and where
-        # every row with them belongs to a number the first one does - the
-        # operator's line is a single context with no DID of its own to scope to.
-        platform_dialable: dict[str, str] = {}
-        for row in extensions:
-            digits = str(row["digits"])
-            current = platform_dialable.get(digits)
-            if current is None or (not extension_scope(current) and extension_scope(row["extension"])):
-                platform_dialable[digits] = str(row["extension"])
-        for digits in sorted(platform_dialable, key=lambda value: int(value) if value.isdigit() else 0):
-            lines.extend(extension_route(platform_dialable[digits], digits))
-        lines.extend(local_number_routes())
+        # The operator's own extensions: no customer, no line, so their digits
+        # are unique in this one context.
+        for row in sorted(
+            (item for item in extensions if not item["number"] and item.get("owner_user_id") in (None, "")),
+            key=lambda item: int(item["digits"]) if item["digits"].isdigit() else 0,
+        ):
+            lines.extend(extension_route(str(row["digits"]), str(row["key"])))
+        lines.extend(local_number_routes(None))
         lines.extend(unknown_extension)
         lines.extend(outbound)
-        for owner_id in sorted(tenant_exts):
-            context = self.tenant_context(owner_id)
+        for number in numbers:
+            context = self.number_context(number["number"])
+            owner = number.get("owner_user_id")
+            who = "the platform" if owner in (None, "") else f"customer account {int(owner)}"
             lines.extend([
                 "",
-                f"; {context}: every extension of customer account {owner_id}, plus the platform's.",
+                f"; {context}: the extensions of {number['number']} ({who}), and nothing else.",
                 f"[{context}]",
                 *voicemail_login,
             ])
-            # One route per dialable three-digit number. Where a line has its own
-            # extension with those digits, that is what answers - so a phone here
-            # reaching 104 reaches the 104 of this organisation (as the customer
-            # asked), while a DID arriving at 104 reaches its own line's 104.
-            dialable: dict[str, str] = dict(tenant_by_digits.get(owner_id, {}))
-            for key in platform_exts:
-                dialable.setdefault(extension_digits(key), key)
-            for digits in sorted(dialable, key=int):
-                lines.extend(extension_route(dialable[digits], digits))
-            lines.extend(local_number_routes(owner_id))
+            for row in dialable(number):
+                lines.extend(extension_route(str(row["digits"]), str(row["key"])))
+            # Full numbers of the same customer first: a literal beats the
+            # outbound patterns below, so dialling one of the customer's own
+            # numbers never reaches the carrier.
+            lines.extend(local_number_routes(int(owner) if str(owner or "").strip().isdigit() else None))
             lines.extend(unknown_extension)
             lines.extend(outbound)
         lines.extend(["", "[voicemail-inbound]"])
-        for extension in sorted(voicemail_exts):
-            mailbox = extension_mailbox(extension)
+        for key in sorted(voicemail_exts):
+            mailbox = extension_mailbox(key)
             lines.extend([
                 f"exten => {mailbox},1,VoiceMail({mailbox}@engineerip,u)",
                 " same => n,Hangup()",
@@ -747,9 +709,9 @@ class TelephonyConfigSync:
             did = re.sub(r"[^0-9]", "", number["number"])
             if not did:
                 continue
-            # A DID rings an extension of the organisation it belongs to - the
+            # A DID rings an extension of the organisation it belongs to: the
             # device its own link names on this very number, that customer's
-            # fallback, or the platform's last resort.
+            # fallback, or the operator's last resort - never another line's 101.
             extension = number_extension(number)
             for dialed_number in (did, f"+{did}"):
                 if not extension:
@@ -760,15 +722,26 @@ class TelephonyConfigSync:
                     ])
                     continue
                 lines.extend([
-                    f"exten => {dialed_number},1,NoOp(Inbound DID {dialed_number} owned by extension {extension_digits(extension)})",
+                    f"exten => {dialed_number},1,NoOp(Inbound DID {dialed_number} rings extension {extension_digits(extension)})",
                     f" same => n,Stasis(engineerip,inbound,{dialed_number},{extension})",
                     *([f" same => n,VoiceMail({extension_mailbox(extension)}@engineerip,u)"] if extension in voicemail_exts else []),
                     " same => n,Hangup()",
                 ])
+        # A call from the carrier that names no DID of ours: the operator's own
+        # last-resort extension, which has no number of its own.
+        default_key = next(
+            (str(row["key"]) for row in extensions
+             if not row["number"] and row.get("owner_user_id") in (None, "") and row["digits"] == default_digits),
+            "",
+        )
         lines.extend([
             "exten => s,1,NoOp(Inbound provider call ${CALLERID(all)})",
-            f" same => n,Dial(PJSIP/{dial_target(default_ext)},30)",
-            *([f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({extension_mailbox(default_ext)}@engineerip,u))'] if default_ext in voicemail_exts else []),
+            *(
+                [f" same => n,Dial(PJSIP/{dial_target(default_key)},30)"]
+                if default_key else
+                [" same => n,Playback(ss-noservice)"]
+            ),
+            *([f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({extension_mailbox(default_key)}@engineerip,u))'] if default_key in voicemail_exts else []),
             " same => n,Hangup()",
             "",
         ])

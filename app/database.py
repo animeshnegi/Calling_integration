@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
-from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, MetaData, String, Table, Text, create_engine, inspect, text
+from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
@@ -28,26 +28,36 @@ def _timestamps():
 
 admin_users = Table("admin_users", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("username", String(80), unique=True, nullable=False),
-    Column("email", String(254), nullable=False, server_default=""), Column("extension", String(3), nullable=False, server_default=""),
+    Column("email", String(254), nullable=False, server_default=""), Column("extension", String(64), nullable=False, server_default=""),
     Column("full_name", String(120), nullable=False, server_default=""), Column("company_name", String(160), nullable=False, server_default=""),
     Column("job_role", String(120), nullable=False, server_default=""), Column("phone", String(30), nullable=False, server_default=""),
     Column("password_hash", String(512), nullable=False), Column("role", String(20), nullable=False, server_default="user"),
     Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
 settings = Table("settings", metadata, Column("key", String(100), primary_key=True), Column("value", Text, nullable=False), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 extensions = Table("extensions", metadata,
-    # The key carries the number an extension belongs to (`101@+13025550001`)
-    # because every number has its own set from 101; a bare `101` is an
-    # account-wide extension.
-    Column("extension", String(64), primary_key=True), Column("display_name", String(120), nullable=False, server_default=""),
+    # An extension is identified by the phone number it belongs to and its
+    # digits: `101` on +13025550001 and `101` on +13025550002 are two different
+    # desks. `id` is the stable internal handle an extension keeps for its whole
+    # life, including while it is moved between numbers. `phone_number_id` is
+    # NULL for a platform row (the operator's own phones, which have no customer
+    # line) - a customer row always names one of that customer's numbers, and the
+    # migration places every legacy row on the number it belongs to.
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("extension", String(64), nullable=False, server_default=""),
+    Column("phone_number_id", BigInteger), Column("display_name", String(120), nullable=False, server_default=""),
     Column("sip_username", String(80), nullable=False), Column("sip_password_enc", Text, nullable=False),
     Column("webrtc_enabled", Integer, nullable=False, server_default="0"), Column("recording_enabled", Integer, nullable=False, server_default="0"),
     Column("voicemail_enabled", Integer, nullable=False, server_default="0"), Column("voicemail_pin_enc", String(2048), nullable=False, server_default=""),
     Column("voicemail_email", String(254), nullable=False, server_default=""), Column("active", Integer, nullable=False, server_default="1"),
-    Column("owner_user_id", BigInteger), *_timestamps())
+    Column("owner_user_id", BigInteger), *_timestamps(),
+    # One `101` per phone number. Two numbers of the same customer - and two
+    # different customers - may each have their own 101; the same number may not
+    # hold the same digits twice.
+    UniqueConstraint("phone_number_id", "extension", name="uq_extensions_number_extension"))
 phone_numbers = Table("phone_numbers", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("number", String(16), unique=True, nullable=False),
     Column("provider", String(80), nullable=False, server_default=""), Column("description", String(160), nullable=False, server_default=""),
-    Column("inbound_extension", String(3), nullable=False, server_default=""), Column("default_outbound", Integer, nullable=False, server_default="0"),
+    Column("inbound_extension", String(64), nullable=False, server_default=""), Column("default_outbound", Integer, nullable=False, server_default="0"),
     Column("active", Integer, nullable=False, server_default="1"), Column("owner_user_id", BigInteger),
     Column("monthly_price_cents", Integer, nullable=False, server_default="500"), Column("billing_start", String(10), nullable=False, server_default=""),
     Column("billing_cycle_day", Integer, nullable=False, server_default="1"), Column("discontinue_at", String(10), nullable=False, server_default=""), *_timestamps())

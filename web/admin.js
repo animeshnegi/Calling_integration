@@ -371,6 +371,7 @@ async function loadState() {
     const changed = signature !== stateSignature;
     stateSignature = signature;
     state = payload;
+    normaliseExtensions();
     csrf = state.csrf_token;
     document.body.classList.toggle('admin-theme', !!state.is_admin);
     document.body.classList.toggle('customer-theme', !state.is_admin);
@@ -588,7 +589,14 @@ function renderAll() {
   renderRoutingOwner();
   renderFlow();
 
-  const myExtension = state.extensions.find(x => x.extension === state.assigned_extension);
+  // The profile names the extension it was assigned. The store keeps the digits
+  // there, and a row is named by its key - the digits decide which one, and a
+  // digits-only profile picks the single row that carries them, never a guess.
+  const assigned = String(state.assigned_extension || '');
+  const myExtension = state.extensions.find(x => x.extension === assigned)
+    || (assigned && !assigned.includes('@')
+      ? state.extensions.filter(x => extensionDigitsOf(x.extension) === assigned)[0]
+      : null);
   $('profile-recording-form').hidden = !myExtension;
   $('profile-recording').checked = !!myExtension?.recording_enabled;
   // The platform's switch can veto every device. Say so, instead of leaving a
@@ -645,9 +653,13 @@ function renderCustomers() {
 }
 
 /* -------------------------------------------------- 10. Render: extensions */
-function extensionName(number) {
-  const item = state.extensions.find(x => x.extension === number);
-  return item?.display_name || `Extension ${number}`;
+function extensionName(value) {
+  // Records name the exact extension (its key). A payload that only carries the
+  // digits is matched the same way - never guessed across numbers.
+  const item = state.extensions.find(x => x.extension === value)
+    || state.extensions.find(x => extensionDigitsOf(x.extension) === extensionDigitsOf(value)
+      && (!extensionNumberOf(value) || x.number === extensionNumberOf(value)));
+  return item?.display_name || `Extension ${extensionDigitsOf(value)}`;
 }
 /* The platform switch, as both consoles receive it. Absent means on, so an older
    payload never silently claims recording is stopped. */
@@ -698,7 +710,7 @@ function renderExtensions() {
   } else {
     // Grouped by the number they answer on: the customer sees at a glance which
     // devices hold which line, exactly as the platform stores them.
-    const groups = groupBy(rows, x => String(x.number || '') || 'Account-wide (every number)');
+    const groups = groupBy(rows, x => String(x.number || '') || 'No number yet');
     paint('extension-list', Object.entries(groups).map(([number, items]) => `
       <div class="acc-item open">
         <div class="acc-head"><span class="row-icon">☎</span>
@@ -856,8 +868,26 @@ function primaryExtensionIn(extensions) {
   const declared = String(state.primary_extension || '');
   if (declared) return declared;
   // A payload from before the field existed: the lowest extension is the one
-  // provisioning created first, which is the rule the store itself uses.
-  return (extensions || []).map(x => String(x.extension)).sort((left, right) => Number(left) - Number(right))[0] || '';
+  // provisioning created first, which is the rule the store itself uses. The
+  // rows carry their key (`101@+13025550001`), so the digits decide the order.
+  return (extensions || []).map(x => String(x.extension))
+    .sort((left, right) => Number(extensionDigitsOf(left)) - Number(extensionDigitsOf(right)))[0] || '';
+}
+
+/* The API sends an extension the way the database holds it - the three digits
+   in `extension`, the line in `number`, and the identity that names both in
+   `key` (`101@+13025550001`). The console works with that identity everywhere,
+   exactly as it always has, and shows the digits with the line beside them. */
+function normaliseExtensions() {
+  (state.extensions || []).forEach(row => {
+    const digits = String(row.digits || extensionDigitsOf(row.extension) || '');
+    const key = String(row.key || (row.number ? `${digits}@${row.number}` : digits));
+    row.key = key;
+    row.digits = digits;
+    row.number = String(row.number || extensionNumberOf(key) || '');
+    row.mailbox = String(row.mailbox || (row.number ? `${digits}-${String(row.number).replace(/[^0-9]/g, '')}` : digits));
+    row.extension = key;
+  });
 }
 
 /* An extension belongs to one phone number. It is stored as its key -
@@ -873,11 +903,27 @@ function extensionLabel(value) {
 function extensionOption(x) {
   return `<option value="${esc(x.extension)}">${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Unnamed')}</option>`;
 }
+/* The mailbox a device's messages live in: `101-13025550001` for the key
+   `101@+13025550001`, which is the name the platform files them under. Two lines'
+   101s are two mailboxes, each with its own messages. */
+function extensionMailbox(value) {
+  const [digits, scope] = String(value ?? '').split('@');
+  return scope ? `${digits}-${String(scope).replace(/[^0-9]/g, '')}` : digits;
+}
+/* And the way back, so a mailbox can be named the way an extension is. */
+function extensionKeyOfMailbox(mailbox) {
+  const [digits, ...rest] = String(mailbox ?? '').split('-');
+  return rest.length ? `${digits}@+${rest.join('-')}` : digits;
+}
 function extensionsOnLine(number) {
   return (state.extensions || []).filter(x => String(x.number || '') === String(number || ''));
 }
-/* The lines an extension can be put on: the chosen customer's numbers, plus the
-   account-wide choice an older deployment may still need. */
+/* The lines an extension can be put on: the chosen customer's numbers.
+
+   There is no account-wide choice any more - a three-digit extension is resolved
+   only within the current phone number - so a customer with a line has to say
+   which line it is. An account with no number at all has nothing to choose: the
+   extension waits for the first one, and the dialog says that instead. */
 function extensionNumberOptions(existing, item = null) {
   const owner = String(existing?.owner_user_id ?? item?.owner_user_id ?? (state.is_admin ? '' : state.user_id) ?? '');
   const numbers = (state.phone_numbers || []).filter(row =>
@@ -885,8 +931,10 @@ function extensionNumberOptions(existing, item = null) {
   const chosen = String(existing?.number || item?.create_on || item?.number || numbers[0]?.number || '');
   const options = numbers.map(row =>
     `<option value="${esc(row.number)}" ${String(row.number) === chosen ? 'selected' : ''}>${esc(row.number)}${row.description ? ` — ${esc(row.description)}` : ''}</option>`).join('');
-  const accountWide = `<option value="" ${chosen ? '' : 'selected'}>Account-wide (answers on every number)</option>`;
-  return options + accountWide;
+  if (!numbers.length) {
+    return '<option value="">No number yet - answers on the first number this account gets</option>';
+  }
+  return options;
 }
 
 function primaryNumberIn(numbers) {
@@ -938,12 +986,12 @@ function extensionCard(x, { wired, primary, index }) {
   // Every extension belongs to one number, and its digits start again at 101 on
   // each line - so the card always names the line the digits live on.
   const line = String(x.number || '') || linked[0] || account?.phone_number || '';
-  // What this extension calls out as. An extension without a number of its own
-  // still calls: the account's main line is presented, exactly as the dial plan
-  // gives its phone. "None linked yet" alone read as "this extension cannot
-  // call", which is not what the platform does.
-  const accountNumbers = (state.phone_numbers || []).filter(row => row.active);
-  const accountLine = (accountNumbers.find(row => row.default_outbound) || accountNumbers[0] || {}).number || '';
+  // What this extension calls out as: the phone number it belongs to, because
+  // caller ID comes from the phone-number context and never from the digits - so
+  // two 101s present their own line. There is no account-level fallback: an
+  // extension with no number of its own has no line to present yet, and says so
+  // instead of naming a line that would not answer for it.
+  const accountLine = String(x.number || '') || (!x.owner_user_id ? (linked[0] || '') : '');
   // Whether a phone is signed in as this extension, from Asterisk's own view of
   // its endpoints. A phone that is not registered is the usual reason a call
   // does not ring, so the card says it rather than leaving the customer to
@@ -960,13 +1008,13 @@ function extensionCard(x, { wired, primary, index }) {
     </div>
     <div class="tags">
       ${String(x.extension) === primary ? tag('Primary', 'violet') : ''}
-      ${line ? tag(`On ${line}`, onNumber ? 'info' : 'off') : tag('Account-wide', 'info')}
+      ${line ? tag(`On ${line}`, onNumber ? 'info' : 'off') : tag('No number yet', 'warn')}
       ${onNumber ? tag(linked.length ? `Answers ${linked.join(', ')}` : 'On this number', 'info') : tag('Other extension')}
       ${x.voicemail_enabled ? tag('Voicemail on', 'on') : tag('Voicemail off')}
       ${x.webrtc_enabled ? tag('Browser phone', 'info') : ''}
     </div>
     <div class="kv kv-2">
-      ${kv('Numbers', linked.join(', ') || (accountLine ? `Calls out as ${accountLine}` : 'None linked yet'))}
+      ${kv('Numbers', linked.join(', ') || (accountLine ? `Calls out as ${accountLine}` : 'Calls out once a number is assigned'))}
       ${kv('Device', deviceLine)}
     </div>
     <div class="ws-card-actions">
@@ -1014,7 +1062,7 @@ function renderExtensionCredentials() {
       <span class="row-icon">${esc(extensionDigitsOf(x.extension))}</span>
       <div><h3>${esc(x.display_name || `Extension ${extensionDigitsOf(x.extension)}`)}</h3>
         <p>Register with username ${esc(x.sip_username || extensionDigitsOf(x.extension))} · ${esc(extensionLabel(x.extension))}${linked.length ? ` · answers ${esc(linked.join(', '))}` : ''}</p></div>
-      <div class="tags">${String(x.extension) === primary ? tag('Primary', 'violet') : ''}${x.number ? '' : tag('Account-wide', 'info')}${flows.length ? tag('Call flow ready', 'info') : tag('No call flow', 'off')}${x.voicemail_enabled ? tag('Voicemail on', 'on') : ''}</div>
+      <div class="tags">${String(x.extension) === primary ? tag('Primary', 'violet') : ''}${x.number ? '' : (x.owner_user_id ? tag('No number yet', 'warn') : tag('Platform line', 'info'))}${flows.length ? tag('Call flow ready', 'info') : tag('No call flow', 'off')}${x.voicemail_enabled ? tag('Voicemail on', 'on') : ''}</div>
       <div class="row-actions">
         <button class="btn primary sm" data-extension-credentials="${x.extension}">Show credentials</button>
         <button class="btn ghost sm" data-extension-flow="${x.extension}">Call flow</button>
@@ -1051,7 +1099,7 @@ function renderSipAccounts() {
         ${kv('SIP username', x.sip_username)}
         ${kv('Server', `${x.server}:${x.port}`)}
         ${kv('Assigned number', x.phone_number || 'Not linked')}
-        ${kv('Extension', x.extension || 'Not linked')}
+        ${kv('Extension', x.extension ? extensionLabel(x.extension) : 'Not linked')}
       </div>
       <div class="ws-card-actions">
         <button class="btn primary sm" data-show-credentials="${x.id}">Credentials</button>
@@ -1447,7 +1495,7 @@ function callTable(calls, compact = false) {
       <td class="cell-strong">${esc(x.phone)}<span class="cell-sub">${esc(x.provider || 'EIP network')}</span></td>
       <td>${tag(x.direction || 'outbound', x.direction === 'inbound' ? 'info' : '')}</td>
       <td>${esc(x.caller_id_number || '—')}</td>
-      <td>${esc(x.extension)}<span class="cell-sub">${esc(extensionName(x.extension))}</span></td>
+      <td>${esc(extensionLabel(x.extension))}<span class="cell-sub">${esc(extensionName(x.extension))}</span></td>
       <td>${statusPill(x.status, `call-${x.call_id}`)}</td>
       <td>${esc(fmtDate(x.started_at))}</td>
       <td>${fmtDuration(x.duration_seconds)}</td>
@@ -1558,7 +1606,12 @@ async function loadVoicemails() {
     const data = await api(`/admin/api/voicemails?${params}`);
     const query = state.is_admin ? val('voicemail-search').toLowerCase() : '';
     const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
-    const selectedMailboxes = selectedNumber ? extensionsOnNumber(selectedNumber) : null;
+    // The messages name their mailbox (`101-13025550001`), while the chosen
+    // number's extensions are keys (`101@+13025550001`): both sides are compared
+    // by mailbox, so the page shows the chosen line's own messages.
+    const selectedMailboxes = selectedNumber
+      ? new Set([...extensionsOnNumber(selectedNumber)].map(extensionMailbox))
+      : null;
     const messages = data.voicemails.filter(x =>
       (!selectedMailboxes || selectedMailboxes.has(String(x.mailbox))) &&
       `${x.caller_id} ${x.message} ${x.mailbox}`.toLowerCase().includes(query));
@@ -1568,7 +1621,7 @@ async function loadVoicemails() {
       <div class="acc-item open">
         <div class="acc-head">
           <span class="row-icon">✉</span>
-          <div><h3 style="font-size:13px">Mailbox ${esc(mailbox)} · ${esc(extensionName(mailbox))}</h3>
+          <div><h3 style="font-size:13px">Mailbox ${esc(extensionLabel(extensionKeyOfMailbox(mailbox)))} · ${esc(extensionName(extensionKeyOfMailbox(mailbox)))}</h3>
             <p style="font-size:11px;color:var(--text-3)">${items.filter(x => x.folder === 'inbox').length} new of ${items.length}</p></div>
           <span class="chev">›</span>
         </div>
@@ -1867,7 +1920,7 @@ function renderCustomerRoutePickers(preferred) {
   // editing. Which number answers where is the number picker's job, not a
   // label on every row.
   const { all } = extensionsForNumber(effectiveNumber);
-  const option = x => `<option value="${esc(x.extension)}">${esc(x.extension)} — ${esc(x.display_name || 'Unnamed')}</option>`;
+  const option = x => `<option value="${esc(x.extension)}">${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Unnamed')}</option>`;
   extensionSelect.innerHTML = all.map(option).join('') || '<option value="">No extensions yet</option>';
 
   const wantedExtension = wanted.type === 'extension' ? String(wanted.target) : extensionAnsweringNumber(effectiveNumber);
@@ -2142,7 +2195,7 @@ function groupMemberOptions(item) {
     ? state.extensions.filter(x => x.owner_user_id === Number(owner))
     : state.extensions;
   const selected = item?.members || [];
-  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(x.extension)} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
 }
 
 /* The credentials a device registers with. One sheet per extension: the whole
@@ -2159,7 +2212,7 @@ function registrationAddress(c) {
 /* What a person actually types into a phone, in the order they type it. */
 function credentialLines(c) {
   return [
-    `Extension: ${c.extension}`,
+    `Extension: ${extensionLabel(c.extension)}`,
     `SIP username: ${c.sip_username}`,
     `SIP password: ${c.sip_password}`,
     `Registration server: ${c.server ? `${c.server}:${c.port}` : 'ask EIP for your registration host'}`,
@@ -2284,7 +2337,7 @@ const templates = {
       <div class="field-row">
         <label class="field">Extension<select name="extension" ${state.is_admin ? '' : 'disabled'}>${state.extensions.filter(x => x.active)
           .map(extensionOption).join('')}</select></label>
-        <label class="field">Callback / caller ID<select name="caller_id_number"><option value="">Automatic - this extension's line, else the account's main line</option>${state.phone_numbers.filter(x => x.active)
+        <label class="field">Callback / caller ID<select name="caller_id_number"><option value="">Automatic - the line this extension belongs to</option>${state.phone_numbers.filter(x => x.active)
           .map(x => `<option value="${esc(x.number)}" ${x.default_outbound ? 'selected' : ''}>${esc(x.number)} — ${esc(x.description || '')}</option>`).join('')}</select></label>
       </div>
       <div class="field-row">
@@ -2502,9 +2555,9 @@ function openModal(type, item = null) {
   if (type === 'call') {
     const extension = $('modal-fields').querySelector('[name=extension]');
     const number = $('modal-fields').querySelector('[name=caller_id_number]');
-    // Any number of the same account can be presented, which is what lets an
-    // extension without a line of its own make a call at all; another account's
-    // number is never offered.
+    // Any number of the same account can be presented - which is how an
+    // extension with no line of its own still makes a call: the line is named
+    // and is what the customer sees. Another account's number is never offered.
     const update = () => {
       const chosen = state.extensions.find(x => String(x.extension) === String(extension.value));
       const visible = option => {
@@ -2561,7 +2614,7 @@ function openModal(type, item = null) {
         note.hidden = false;
         note.textContent = scope
           ? `Extension ${digits} is on this number already — use a free number, or add the device to another line.`
-          : `Extension ${digits} is on the account-wide set already — it answers on every number this account holds.`;
+          : `Extension ${digits} has no number of its own yet — choose the phone number this device belongs to.`;
         return;
       }
       // 2. Editing this very extension and moving it to another account: that is
@@ -2705,7 +2758,7 @@ async function saveModal(event) {
       const id = workspace?.customer?.id, tab = wsTab;
       if (id) await openCustomer(id, tab, true);
       showSecret({
-        title: `Extension ${result.extension} created`,
+        title: `Extension ${extensionLabel(result.extension)} created`,
         subtitle: 'A SIP password and a default call flow were generated automatically',
         value: result.credentials.sip_password,
         body: `<div class="notice ok"><span class="glyph">✓</span><div><b>Ready to register</b>Enter these into a phone or softphone. Change the password from Edit at any time — the generated Asterisk configuration follows it.</div></div>
@@ -2776,7 +2829,7 @@ async function showCredentials(id) {
     const rows = [
       ['Number', x.phone_number], ['SIP username', x.sip_username], ['Password', x.sip_password],
       ['Server', x.server], ['Port', x.port], ['Transport', String(x.transport).toUpperCase()],
-      ['Extension', x.extension],
+      ['Extension', x.extension ? extensionLabel(x.extension) : 'Not linked'],
     ];
     showSecret({
       title: 'Device credentials',

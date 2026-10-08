@@ -112,7 +112,7 @@ builds everything else in one step:
 | The line's next extension (`next_extension_number(owner, number)`, 101 upwards) | `extensions`, owned by the customer, stored as the key `101@+13025550001` |
 | Its SIP credentials (username = the extension, generated password) | `extensions.sip_password_enc`, revealed on demand |
 | The DID link, so inbound calls actually ring | `phone_numbers.inbound_extension`, holds the key |
-| The default caller ID when that extension has none | `phone_numbers.default_outbound` |
+| The account's first line, marked as its default caller ID | `phone_numbers.default_outbound` |
 | A default flow for the number and one for the extension | `call_routes` and `routing_flows` |
 | An activity entry and a notification | `activity_history`, `notifications` |
 
@@ -120,9 +120,13 @@ builds everything else in one step:
 customer's numbers may both hold a 101: one is `101@+13025550001`, the other
 `101@+13025550002`, and the key is what tells them apart in the database, in a
 call flow, in the voicemail mailbox (`101-13025550001`) and in the PJSIP endpoint
-name (a section name may not contain `@`). A row written before this change has a
-bare `101` and answers on every number of its account; such an *account-wide*
-extension is still offered in the dialog for the platform's own line.
+name (`101-13025550001` - a section name may not contain `@`, and the digits alone
+would be ambiguous). **A three-digit extension is resolved only within the current
+phone number**: a line that does not hold the digits plays NOT IN SERVICE rather
+than borrowing another line's - or another customer's - device. A row written
+before this change keeps the bare `101`; the migration puts it on the number whose
+link names it, or on the account's main line, and leaves it unassigned - *No number
+yet* - when nothing names it, rather than merging two different extensions.
 
 That default flow is the workflow the product promises, and `inbound_plan()` is the
 one place it is turned into a call plan, so the engine and the builder cannot drift:
@@ -143,9 +147,9 @@ with *"104 is on more than one of your numbers - choose the extension on the num
 it belongs to"* when it would have to guess.
 
 Adding a device extends the line it was added to (`sync_primary_flows`), because a
-main line rings its own devices - but only while that flow is still the generated
+line rings its own devices - but only while that flow is still the generated
 one: a single ring step, the default 25s timeout, no group and only that line's own
-devices plus the account-wide ones. The moment the customer designs something of
+devices. The moment the customer designs something of
 their own, it is never rewritten. A number's flow may only ring that number's
 extensions, so a menu on one line handing over 104 rings *that line's* 104.
 
@@ -157,8 +161,9 @@ API says so instead of guessing - digits and keys are both accepted everywhere
 digits)` resolves it against the number a call is on).
 
 The SIP username is the identity the device authenticates with, so the platform owns
-it: it is six random upper-case letters, an underscore and the extension
-(`KUDGTE_101`), unique platform-wide through `idx_extensions_sip_username`.
+it: it is the account, the digits and the line - `MERIDIAN_101_13025550001` - or six
+random upper-case letters when the account has no name yet, unique platform-wide
+through `idx_extensions_sip_username`. It is a technical identifier nobody dials.
 `canonical_sip_username()` keeps a value already in that shape - a row minted before
 the letters became upper case still counts, because renaming an identity would stop
 the phone holding it from registering - and mints a fresh one otherwise, so
@@ -242,8 +247,8 @@ deployment rather than a placeholder - and it links back to the console.
 ## The extensions page, per number
 
 An extension row shows its digits as the badge and `101 · +13025550001` under the
-name, and a customer's page is grouped by the number (`Account-wide (every number)`
-for rows with none), each group headed by the line and the digits it holds. The
+name, and a customer's page is grouped by the number (`No number yet` for rows with
+none), each group headed by the line and the digits it holds. The
 numbers page is the other half of the same picture: every line shows the extensions
 it holds, how many there are, which one answers it, and an **Add extension** button
 that opens the dialog on *that* line with its next free number suggested.

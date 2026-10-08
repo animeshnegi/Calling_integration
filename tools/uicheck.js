@@ -1297,14 +1297,75 @@ async function main() {
     check('a customer refresh does not rebuild the visited list either', customerChurn === 0, `${customerChurn} mutations`);
   }
 
+  /* ------------------------------------------------------------- voicemail */
+  section("The customer's voicemail, named per number");
+  {
+    // Mailboxes are number-scoped (`101-13025550001`) while the chosen number's
+    // extensions are keys (`101@+13025550001`), so the page has to compare the two
+    // by mailbox - and name the line - or a customer sees the wrong number's
+    // messages, or none at all.
+    const lineA = '+13025550001';
+    const lineB = '+13025550002';
+    const first101 = customerState.extensions.find(row => String(row.extension) === '101');
+    const scoped = {
+      ...customerState,
+      primary_extension: `101@${lineA}`,
+      phone_numbers: customerState.phone_numbers.map(row => (
+        String(row.number) === lineA ? { ...row, inbound_extension: `101@${lineA}` }
+          : String(row.number) === lineB ? { ...row, inbound_extension: `101@${lineB}` }
+            : row
+      )),
+      extensions: [
+        ...customerState.extensions.map(row => (
+          String(row.extension) === '101'
+            ? { ...row, extension: `101@${lineA}`, digits: '101', number: lineA, mailbox: '101-13025550001' }
+            : row
+        )),
+        {
+          ...first101, extension: `101@${lineB}`, digits: '101', number: lineB,
+          mailbox: '101-13025550002', display_name: 'Meridian Health line 2',
+        },
+      ],
+    };
+    const messages = {
+      voicemails: [
+        {
+          mailbox: '101-13025550001', folder: 'inbox', message: 'msg0000',
+          caller_id: 'Line one <+919000000001>', duration_seconds: 5, received_at: '2026-09-25 10:00:00',
+        },
+        {
+          mailbox: '101-13025550002', folder: 'inbox', message: 'msg0001',
+          caller_id: 'Line two <+919000000002>', duration_seconds: 6, received_at: '2026-09-25 10:01:00',
+        },
+      ],
+      total: 2,
+    };
+    const { w, d, errors } = boot({
+      isAdmin: false, state: scoped, routes: { '/admin/api/voicemails': messages },
+    });
+    w.eval("showPage('voicemails')");
+    await settle(320);
+    const list = () => d.querySelector('#voicemail-list').textContent.replace(/\s+/g, ' ');
+    check('the voicemail page renders without errors', errors.length === 0, errors[0]);
+    check('the mailbox is named with its own line, so two 101s are told apart',
+      /Mailbox 101 · \+13025550001/.test(list()), list().slice(0, 200));
+    check('the chosen line\'s own messages are the ones shown',
+      /Line one/.test(list()) && !/Line two/.test(list()), list().slice(0, 240));
+
+    w.eval("applyCustomerNumber('+13025550002')");
+    await settle(320);
+    check('and switching the line switches the mailbox',
+      /Line two/.test(list()) && !/Line one/.test(list()), list().slice(0, 240));
+  }
+
   /* ---------------------------------------------------- extension with no line */
-  section('An extension added later still calls');
+  section('An extension added later');
   {
     // The field report: 101 answers +13025550001, then 102 is created from the
-    // console and answers nothing inbound. 102 calls out as the account's line,
-    // so its card must say that - not "None linked yet", which reads as "this
-    // extension cannot call". Its phone's registration comes from the same poll
-    // the device boxes use.
+    // console and answers nothing inbound. Caller ID comes from the phone number,
+    // so 102 - which has no number of its own yet - must say it calls out once a
+    // number is assigned rather than naming a line that would not answer for it.
+    // Its phone's registration comes from the same poll the device boxes use.
     const unlinked = {
       ...customerState,
       phone_numbers: customerState.phone_numbers.map(row => (
@@ -1322,10 +1383,10 @@ async function main() {
     const card = () => cards().find(node => /102/.test(node.querySelector('h3')?.textContent || '')) || cards()[0];
     const text = () => card().textContent.replace(/\s+/g, ' ');
     check('the customer console renders the extension card without errors', errors.length === 0 && !!card(), errors[0]);
-    check('an extension with no line of its own says what it calls out as',
-      /Numbers\s*Calls out as \+13025550001/.test(text()), text().slice(0, 240));
-    check('and does not read as if it could not call at all',
-      !/None linked yet/.test(text()), text().slice(0, 240));
+    check('an extension with no line of its own says it calls out once it has one',
+      /Numbers\s*Calls out once a number is assigned/.test(text()), text().slice(0, 240));
+    check('and it never names a line that would not answer for it',
+      !/Calls out as \+13025550001/.test(text()) && !/None linked yet/.test(text()), text().slice(0, 240));
     check('nobody signed in yet is said in plain words',
       /Sign in as QWERTY_102/.test(text()) && !/No device linked yet/.test(text()), text().slice(0, 240));
 
