@@ -287,8 +287,9 @@ def test_each_additional_number_gets_its_own_extension_and_flow(tmp_path):
 def test_auto_provision_never_reuses_another_customers_extension(tmp_path):
     """An extension is scoped to the number it was minted for.
 
-    Alpha's account-wide 101 stays alpha's alone; beta's new line still starts at
-    its own 101, because the two are different lines in different accounts.
+    Alpha's 101 was made before alpha had a line, so it answers for alpha alone;
+    beta's new line still starts at its own 101 on its own number, because the
+    two are different lines in different accounts.
     """
     app = make_app(tmp_path)
     admin = admin_client(app)
@@ -557,7 +558,7 @@ def test_administrators_edit_a_customers_call_flows(tmp_path):
     assert [row["name"] for row in kappa["groups"]] == ["Front desk"]
     lambda_ = admin.get(f"/admin/api/customers/{other_id}").json
     untouched = {row["target"] for row in lambda_["routing_flows"]}
-    # 101 came with their own number; 902 is their own account-wide extension.
+    # 101 came with their own number; 902 was put on their line.
     assert {kappa_101, "901@+13025550001"} & untouched == set() and {"902@+13025550002", lambda_101} <= untouched
     assert {row["phone_number"] for row in lambda_["call_routes"]} == {"+13025550002"}
     assert lambda_["groups"] == []
