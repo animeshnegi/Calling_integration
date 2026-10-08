@@ -194,14 +194,28 @@ theirs_context = context_block(f"from-internal-{other_customer['id']}")
 check("the customer's dial plan is its own context", bool(mine_context), dialplan_path.name)
 mine_all = [row["extension"] for row in after["extensions"] if row["owner_user_id"] == mine["owner_user_id"]]
 theirs_all = [row["extension"] for row in after["extensions"] if row["owner_user_id"] == other_customer["id"]]
+
+
+def endpoint_of(key: str) -> str:
+    """The PJSIP name a device answers on, exactly as the platform names it.
+
+    A section name cannot hold `@`, so the one row that owns the plain digits
+    answers on them and every other line's device on `digits-number`.
+    """
+    digits = key.split("@", 1)[0]
+    owner = next((row["extension"] for row in after["extensions"]
+                  if row["extension"].split("@", 1)[0] == digits), "")
+    return digits if owner == key else key.replace("@+", "-")
+
+
 check("every extension of the account is dialable in it - from either number",
-      all(f"Dial(PJSIP/{extension},30)" in mine_context for extension in mine_all),
+      all(f"Dial(PJSIP/{endpoint_of(extension)},30)" in mine_context for extension in mine_all),
       ", ".join(mine_all))
-check("the other customer's extensions are not in it",
-      all(f"exten => {extension},1" not in mine_context for extension in theirs_all),
+check("the other customer's devices are not reachable in it",
+      all(f"Dial(PJSIP/{endpoint_of(extension)},30)" not in mine_context for extension in theirs_all),
       ", ".join(theirs_all))
-check("and this customer's extensions are not in the other context",
-      all(f"exten => {extension},1" not in theirs_context for extension in mine_all),
+check("and this customer's devices are not reachable in the other context",
+      all(f"Dial(PJSIP/{endpoint_of(extension)},30)" not in theirs_context for extension in mine_all),
       ", ".join(mine_all))
 check("an unknown three-digit number says so instead of ringing somebody else",
       "exten => _XXX,1" in mine_context and "Playback(ss-noservice)" in mine_context)
@@ -226,11 +240,12 @@ def local_route(context, digits):
     return context.split(lead)[1].split("\nexten")[0] if lead in context else ""
 
 
-check("each of the customer's numbers is dialled internally and rings one of its extensions",
+check("each of the customer's numbers is dialled internally and rings its own device",
       bool(active_own) and all(
-          any(f"Dial(PJSIP/{extension},30)" in local_route(mine_context, row["number"].lstrip("+")) for extension in mine_all)
+          any(f"Dial(PJSIP/{endpoint_of(extension)},30)" in local_route(mine_context, row["number"].lstrip("+"))
+              for extension in mine_all)
           for row in active_own),
-      ", ".join(row["number"] for row in active_own))
+      ", ".join(f"{row['number']} -> {row['inbound_extension']}" for row in active_own))
 check("and that internal call is never handed to the carrier trunk",
       all("OUTBOUND_TRUNK" not in local_route(mine_context, row["number"].lstrip("+")) for row in active_own),
       ", ".join(row["number"] for row in active_own))
