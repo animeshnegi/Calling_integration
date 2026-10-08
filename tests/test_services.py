@@ -16,6 +16,7 @@ class DummyAsterisk:
         self.inbound_endpoints = []
         self.customer_legs = []
         self.local_legs = []
+        self.local_endpoints = []
 
     def answer_channel(self, channel_id):
         self.answered.append(channel_id)
@@ -42,8 +43,11 @@ class DummyAsterisk:
         self.customer_legs.append((args[0], args[1], args[2]))
         return f"{args[0]}-customer"
 
-    def create_local_leg(self, call_id, extension, employee_channel_id, caller_id_number=None):
+    def create_local_leg(self, call_id, extension, employee_channel_id, caller_id_number=None, endpoint=None):
         self.local_legs.append((call_id, extension))
+        # The channel the platform rings: the extension's own PJSIP endpoint, so
+        # a line's 105 is reached by name and a key never reaches Asterisk.
+        self.local_endpoints.append(endpoint)
         return f"{call_id}-customer"
 
     def create_bridge(self, call_id):

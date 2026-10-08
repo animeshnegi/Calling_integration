@@ -34,6 +34,43 @@ _LOGIN_WINDOW = 15 * 60
 _LOGIN_LIMIT = 8
 
 
+def extension_digits(value: Any) -> str:
+    """The three digits a person dials: the part before `@` in an extension key."""
+    return str(value or "").strip().split("@", 1)[0]
+
+
+def extension_scope(value: Any) -> str:
+    """The number an extension belongs to: the part after `@`, "" for account-wide.
+
+    Extensions are numbered per phone number - every number starts at 101 - so
+    the three digits alone are not an identity any more. The stored key carries
+    both: `101@+13025550001` is extension 101 on that line, and a bare `101` is
+    an extension that belongs to the whole account (every row written before
+    numbers had their own extension sets, plus the platform's own lines).
+    """
+    text = str(value or "").strip()
+    return text.split("@", 1)[1] if "@" in text else ""
+
+
+def extension_key(digits: Any, scope: Any = "") -> str:
+    """Build the stored key for an extension: digits, and the number it is on."""
+    digits = extension_digits(digits)
+    scope = str(scope or "").strip()
+    return f"{digits}@{scope}" if scope else digits
+
+
+def extension_mailbox(key: Any) -> str:
+    """The voicemail mailbox of an extension: unique, readable, filename-safe.
+
+    A mailbox has to be unique inside the voicemail context, and extension
+    numbers repeat across a customer's lines, so a scoped extension is
+    `101-13025550001` while an account-wide one keeps the plain `101` its
+    messages have always been filed under.
+    """
+    digits, scope = extension_digits(key), extension_scope(key)
+    return f"{digits}-{re.sub(r'[^0-9]', '', scope)}" if scope else digits
+
+
 def device_registration(account: dict, live: dict[str, str]) -> str:
     """Is this device account signed in?
 
@@ -51,14 +88,24 @@ def device_registration(account: dict, live: dict[str, str]) -> str:
 
 def extension_registration(extension: dict, live: dict[str, str], accounts: list[dict]) -> str:
     """Is any phone signed in as this extension, or as a device that answers it?"""
-    names = [str(extension.get("extension") or ""), str(extension.get("sip_username") or "")]
+    key = str(extension.get("extension") or "")
+    digits = extension_digits(key)
+    names = [str(extension.get("sip_username") or "")]
+    if extension_scope(key) == "" or str(extension.get("mailbox") or "") == digits:
+        # A device may register under the plain three-digit name only when this
+        # row is the one that owns it (see SettingsStore.plain_endpoint_names).
+        names.append(digits)
     names.extend(
         str(account.get("sip_username") or "") for account in accounts
-        if str(account.get("extension") or "") == str(extension.get("extension") or "")
+        if extension_digits(account.get("extension") or "") == digits
     )
-    for name in names:
-        if name and name in live:
-            return "online" if live[name] in {"online", "available"} else "offline"
+    # Every name that answers for this extension shares one set of contacts, so
+    # any of them being online is this extension being signed in.
+    states = [live[name] for name in names if name and name in live]
+    if any(state in {"online", "available"} for state in states):
+        return "online"
+    if states:
+        return "offline"
     # Asterisk answered and none of this extension's endpoints is signed in:
     # that is a phone that is not registered, which is the usual reason a call
     # does not ring. Asterisk not answering at all is a different case, and the
@@ -91,6 +138,13 @@ class SettingsStore:
         return self.database.connect()
 
     def _init_db(self):
+        self._create_schema()
+        # Extensions used to belong to the whole account. Migrating them onto the
+        # number their inbound link names runs here, outside the schema
+        # transaction, because it writes as it goes.
+        self._migrate_extension_scopes()
+
+    def _create_schema(self):
         if self.database.is_mysql:
             self.database.create_all()
             existing_user_columns = self.database.columns("admin_users")
@@ -197,6 +251,18 @@ class SettingsStore:
             ):
                 if definition.split()[0] not in user_columns:
                     db.execute(f"ALTER TABLE admin_users ADD COLUMN {definition}")
+            # `101@+13025550001` is longer than three characters, and MySQL
+            # declares these columns as String(3) - widen them before anything
+            # else touches an extension, or a per-number extension is truncated
+            # into somebody else's row.
+            for table, column, definition in (
+                ("extensions", "extension", "VARCHAR(64) NOT NULL DEFAULT ''"),
+                ("customer_sip_accounts", "extension", "VARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                try:
+                    db.execute(f"ALTER TABLE {table} MODIFY COLUMN {column} {definition}")
+                except Exception:
+                    pass
             extension_columns = {row["name"] for row in db.execute("PRAGMA table_info(extensions)").fetchall()}
             if "voicemail_enabled" not in extension_columns:
                 db.execute("ALTER TABLE extensions ADD COLUMN voicemail_enabled INTEGER NOT NULL DEFAULT 0")
@@ -291,6 +357,27 @@ class SettingsStore:
                 db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','true') ON CONFLICT(key) DO UPDATE SET value='true',updated_at=CURRENT_TIMESTAMP")
                 db.execute("INSERT INTO settings(`key`,value) VALUES('recording_policy_v2_initialized','true')")
 
+
+    def _migrate_extension_scopes(self) -> None:
+        """One-time migration: extensions belong to phone numbers now.
+
+        Each number carries its own set from 101, which is what lets every line
+        be configured on its own. An extension whose inbound link already points
+        at it moves onto that number - same digits, same device, same calls - and
+        every flow that named it is rewritten to the key. Runs once, and only
+        after the schema connection is closed: SQLite serialises writers, so a
+        migration inside an open transaction would wait on itself.
+        """
+        with self._connect() as db:
+            if db.execute("SELECT 1 FROM settings WHERE `key`='extension_scope_v1_initialized'").fetchone():
+                return
+        self._repair_legacy_extension_scopes()
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO settings(`key`,value) VALUES('extension_scope_v1_initialized','true') "
+                "ON CONFLICT(key) DO UPDATE SET value='true',updated_at=CURRENT_TIMESTAMP"
+            )
+
     def ensure_bootstrap_admin(self, username, password):
         if not username or not password:
             return
@@ -380,28 +467,264 @@ class SettingsStore:
         return str(row["company_name"] or row["username"] or "another account")
 
     def list_extensions(self, owner_user_id: int | None = None):
+        """Every extension row, ordered by the number it belongs to and then its digits.
+
+        `extension` holds the key (`101@+13025550001`, or a bare `101` for an
+        account-wide line); `digits` and `number` are the parts a person reads,
+        and `mailbox` is where its voicemail is filed.
+        """
         with self._connect() as db:
             where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
             rows = db.execute(
-                f"SELECT extension,display_name,sip_username,webrtc_enabled,recording_enabled,voicemail_enabled,voicemail_email,active,owner_user_id FROM extensions{where} ORDER BY extension",
+                f"SELECT extension,display_name,sip_username,webrtc_enabled,recording_enabled,voicemail_enabled,voicemail_email,active,owner_user_id FROM extensions{where}",
                 (int(owner_user_id),) if owner_user_id is not None else (),
             ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["key"] = str(item["extension"])
+            item["digits"] = extension_digits(item["extension"])
+            item["number"] = extension_scope(item["extension"])
+            item["mailbox"] = extension_mailbox(item["extension"])
+            result.append(item)
+        return sorted(result, key=lambda row: (row["number"], int(row["digits"]) if row["digits"].isdigit() else 0))
+
+    def plain_endpoint_names(self) -> dict[str, str]:
+        """Which extension key may keep the plain three-digit endpoint name.
+
+        The name matters: `PJSIP/101` is what a device account, a handset and
+        every dial plan written before this change point at. So one extension per
+        three-digit number keeps it - the account-wide row when there is one,
+        otherwise the first line that has it - and every further 101 (another
+        line, another account) is named by its identity and reached through its
+        key by the dial plan. Asterisk cannot put a `@` in a section name, so this
+        decision is made once, here, and both the renderer and the console's
+        registration view read it from the same place.
+        """
+        chosen: dict[str, str] = {}
+        for row in self.list_extensions():
+            digits = str(row["digits"])
+            if not digits.isdigit():
+                continue
+            current = chosen.get(digits)
+            if current is None:
+                chosen[digits] = str(row["extension"])
+            elif not extension_scope(current) and extension_scope(row["extension"]):
+                # Account-wide rows sort first already; this keeps the rule true
+                # even if the ordering ever changes.
+                chosen[digits] = str(row["extension"])
+        return chosen
+
+    def endpoint_name(self, extension: str) -> str:
+        """The PJSIP endpoint name a phone answers on for this extension.
+
+        A PJSIP section name cannot hold `@` (Asterisk parses it as a key/value
+        pair), so a line's own extension is named by its identity - `101-13025550098`
+        - except the one extension that owns the plain three-digit name, which
+        keeps `101`. That is what the dial plan dials and what this returns.
+        """
+        key = str(extension or "")
+        digits = extension_digits(key)
+        if not digits or extension_scope(key) == "":
+            return key
+        return digits if self.plain_endpoint_names().get(digits) == key else extension_mailbox(key)
+
+    def extensions_on_number(self, owner_user_id: int | None, number: str, active_only: bool = True) -> list[dict]:
+        """The extensions that belong to one phone number: its own set, from 101 up."""
+        number = str(number or "").strip()
+        return [
+            row for row in self.list_extensions(owner_user_id)
+            if row["number"] == number and (not active_only or row["active"])
+        ]
+
+    def _link_is(self, link: Any, key: str, owner_user_id: int | None) -> bool:
+        """Does a number's stored inbound link name this extension?"""
+        text = str(link or "").strip()
+        if not text:
+            return False
+        if text == str(key):
+            return True
+        if extension_scope(text):
+            return False
+        return extension_digits(text) == extension_digits(key)
+
+    def line_devices(self, owner_user_id: int | None, number: str, active_only: bool = True) -> list[str]:
+        """The extension keys a line's generated flow rings.
+
+        Its own set first - 101, 102, ... as they were added to this number - then
+        the account-wide extensions, which answer on every number of the account
+        (that is what a row written before numbers had their own sets is), each in
+        dialling order.
+        """
+        rows = list(self.extensions_on_number(owner_user_id, number, active_only))
+        rows.extend(self.account_wide_extensions(owner_user_id, active_only))
+        seen, keys = set(), []
+        for row in rows:
+            key = str(row["extension"])
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+        return sorted(keys, key=lambda value: (0 if extension_scope(value) else 1, int(extension_digits(value) or 0)))
+
+    def account_wide_extensions(self, owner_user_id: int | None, active_only: bool = True) -> list[dict]:
+        """Extensions that answer for every number of the account.
+
+        Every row written before lines had their own extension sets lives here,
+        so no existing customer loses a device by this change.
+        """
+        return [
+            row for row in self.list_extensions(owner_user_id)
+            if not row["number"] and (not active_only or row["active"])
+        ]
+
+    def resolve_extension(self, number: str, digits: Any, owner_user_id: int | None = None):
+        """Which row answers these digits on this number.
+
+        The number's own extension wins, so 104 on +1302... is that line's 104;
+        an account-wide row with the same digits answers only when the number has
+        none of its own, which is what keeps old rows working.
+        """
+        digits = extension_digits(digits)
+        if not digits:
+            return None
+        rows = self.list_extensions(owner_user_id)
+        number = str(number or "").strip()
+        if number:
+            exact = next((row for row in rows if row["number"] == number and row["digits"] == digits), None)
+            if exact:
+                return exact
+        return next((row for row in rows if not row["number"] and row["digits"] == digits), None)
+
+    def extension_key_for(self, number: str, digits: Any, owner_user_id: int | None = None) -> str:
+        """The key of the extension that answers these digits on this number."""
+        row = self.resolve_extension(number, digits, owner_user_id)
+        return str(row["extension"]) if row else ""
+
+    def extension_key_for_digits(self, digits: Any, owner_user_id: int | None = None) -> str:
+        """The key of a row named only by its digits, or "" when ambiguous.
+
+        Account-wide rows are looked for first (they answer on every line, and
+        that is what a reference written before this change means), and then the
+        single row that carries the digits. Two lines that both hold 101 have to
+        be named by their key - guessing one would ring the wrong desk.
+        """
+        digits = extension_digits(digits)
+        if not digits:
+            return ""
+        rows = [row for row in self.list_extensions(owner_user_id) if row["digits"] == digits]
+        for row in rows:
+            if not row["number"]:
+                return str(row["extension"])
+        return str(rows[0]["extension"]) if len(rows) == 1 else ""
+
+    def scoped_extension_keys(self, number: str, owner_user_id: int | None, *, include_platform: bool = True) -> list[str]:
+        """Every extension an inbound call on this number may reach, by key.
+
+        Its own set, the account-wide ones, and - so an operator's own devices
+        stay reachable from every line - the platform's, which is what the dial
+        plan has always offered.
+        """
+        keys = [row["extension"] for row in self.extensions_on_number(owner_user_id, number)]
+        keys.extend(row["extension"] for row in self.account_wide_extensions(owner_user_id))
+        if include_platform and owner_user_id is not None:
+            keys.extend(row["extension"] for row in self.account_wide_extensions(None))
+        seen, ordered = set(), []
+        for key in keys:
+            if key not in seen:
+                seen.add(key)
+                ordered.append(key)
+        return ordered
 
     def get_extension_owner(self, extension: str) -> int | None:
+        """The account that holds this extension key.
+
+        A bare three-digit value is not an identity any more - several accounts
+        may each hold 101 on one of their lines - so a key is answered exactly,
+        and digits only resolve while a single account-wide row carries them.
+        """
         with self._connect() as db:
             row = db.execute("SELECT owner_user_id FROM extensions WHERE extension=?", (str(extension),)).fetchone()
-        return row["owner_user_id"] if row else None
+            if row:
+                return row["owner_user_id"]
+            rows = db.execute(
+                "SELECT owner_user_id FROM extensions WHERE extension=? AND extension NOT LIKE '%@%'",
+                (extension_digits(extension),),
+            ).fetchall()
+        owners = {item["owner_user_id"] for item in rows}
+        return owners.pop() if len(owners) == 1 else None
+
+    def extension_row(self, extension):
+        """One extension row, named by its key or - while one row carries them - by its digits."""
+        return self._extension_row(extension)
+
+    def _extension_row(self, extension):
+        """One extension row by key, or by digits while a single row carries them."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT extension,display_name,sip_username,sip_password_enc,owner_user_id,voicemail_enabled,voicemail_pin_enc,recording_enabled,webrtc_enabled,active FROM extensions WHERE extension=?",
+                (str(extension),),
+            ).fetchone()
+            if row is None and extension_scope(extension) == "":
+                # Digits on their own name a device when only one row carries
+                # them, which is how an operator, a bookmark or an older console
+                # reaches an extension that now belongs to a number.
+                rows = db.execute(
+                    "SELECT extension,display_name,sip_username,sip_password_enc,owner_user_id,voicemail_enabled,voicemail_pin_enc,recording_enabled,webrtc_enabled,active FROM extensions "
+                    "WHERE extension=? OR extension LIKE ?",
+                    (extension_digits(extension), f"{extension_digits(extension)}@%" if extension_digits(extension).isdigit() else ""),
+                ).fetchall()
+                rows = [item for item in rows if extension_digits(item["extension"]) == extension_digits(extension)]
+                row = rows[0] if len(rows) == 1 else None
+        return row
 
     def get_extension_password(self, extension):
-        with self._connect() as db:
-            row = db.execute("SELECT sip_password_enc FROM extensions WHERE extension=?", (str(extension),)).fetchone()
+        row = self._extension_row(extension)
         return self.decrypt(row["sip_password_enc"]) if row else ""
 
     def get_voicemail_pin(self, extension):
-        with self._connect() as db:
-            row = db.execute("SELECT voicemail_pin_enc FROM extensions WHERE extension=?", (str(extension),)).fetchone()
+        row = self._extension_row(extension)
+        if row is None:
+            row = self._voicemail_aliases().get(str(extension))
         return self.decrypt(row["voicemail_pin_enc"]) if row and row["voicemail_pin_enc"] else ""
+
+    # A mailbox that has to be longer than the digits (two lines both holding a
+    # 101) still needs a pin, and the customer reads it off the same sheet. The
+    # alias file records where it came from.
+    VOICEMAIL_PIN_ALIASES_KEY = "voicemail_pin_aliases"
+
+    def _voicemail_aliases(self) -> dict:
+        try:
+            stored = json.loads(self.get_settings().get(self.VOICEMAIL_PIN_ALIASES_KEY) or "{}")
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(stored, dict):
+            return {}
+        aliases = {}
+        for mailbox, source in stored.items():
+            row = self._extension_row(str(source))
+            if row:
+                aliases[str(mailbox)] = row
+        return aliases
+
+    def alias_voicemail_pin(self, mailbox: str, source: str) -> None:
+        """Remember that this mailbox's pin is the one of `source`."""
+        mailbox, source = str(mailbox), str(source)
+        if mailbox == source:
+            return
+        try:
+            stored = json.loads(self.get_settings().get(self.VOICEMAIL_PIN_ALIASES_KEY) or "{}")
+        except (TypeError, ValueError):
+            stored = {}
+        if not isinstance(stored, dict):
+            stored = {}
+        if stored.get(mailbox) == source:
+            return
+        stored[mailbox] = source
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+                (self.VOICEMAIL_PIN_ALIASES_KEY, json.dumps(stored, sort_keys=True)),
+            )
 
     @staticmethod
     def _validate_config_value(value: str, field: str, max_length: int = 255) -> str:
@@ -417,10 +740,184 @@ class SettingsStore:
             raise ValueError("Invalid provider server")
         return value
 
+    def add_extension_to_number(self, number: str, owner_user_id: int | None = None, data: dict | None = None) -> dict:
+        """Add the next extension to a phone number.
+
+        Every number's extensions start at 101 and go on from there, so this is
+        what the console's "Add extension" does on a line: the next free number
+        on *this* number, provisioned with credentials and a default flow.
+        """
+        number = str(number or "").strip()
+        if not number:
+            raise ValueError("Choose the phone number this extension belongs to")
+        owner = int(owner_user_id) if owner_user_id is not None else self.get_number_owner(number)
+        if owner is None:
+            raise ValueError("Only a number assigned to a customer can hold extensions")
+        if not self._number_belongs_to(owner, number):
+            raise ValueError("Number is not assigned to this customer")
+        digits = self.next_extension_number(owner, number)
+        payload = dict(data or {})
+        payload.update({"extension": digits, "number": number})
+        payload.setdefault("active", True)
+        self.save_extension(payload, owner)
+        return next(row for row in self.list_extensions(owner) if row["extension"] == extension_key(digits, number))
+
+    def get_number_owner(self, number: str) -> int | None:
+        with self._connect() as db:
+            row = db.execute("SELECT owner_user_id FROM phone_numbers WHERE number=?", (str(number),)).fetchone()
+        return row["owner_user_id"] if row else None
+
+    def _repair_legacy_extension_scopes(self) -> int:
+        """Move legacy rows onto the number their inbound link points at.
+
+        An extension written before numbers held their own sets answers for the
+        whole account. Once a number rings it, that number is where it belongs:
+        scoping it is what lets another number start its own set at 101, and it
+        changes no call - the same digits ring the same device on the same line.
+        Rows with no inbound link stay account-wide, which is exactly how the
+        platform's own devices and unlinked test rows behave.
+        """
+        moved = 0
+        for row in self.list_numbers():
+            digits = str(row.get("inbound_extension") or "").strip()
+            owner = row.get("owner_user_id")
+            if not digits.isdigit() or owner is None:
+                continue
+            scoped = extension_key(digits, row["number"])
+            with self._connect() as db:
+                legacy = db.execute(
+                    "SELECT extension FROM extensions WHERE extension=? AND extension NOT LIKE '%@%' AND owner_user_id=?",
+                    (digits, int(owner)),
+                ).fetchone()
+                if not legacy:
+                    continue
+                if db.execute("SELECT 1 FROM extensions WHERE extension=?", (scoped,)).fetchone():
+                    continue
+                # A device account keyed to the legacy row moves with it, so the
+                # phone keeps registering as the same extension.
+                db.execute("UPDATE extensions SET extension=?,updated_at=CURRENT_TIMESTAMP WHERE extension=?", (scoped, digits))
+                db.execute("UPDATE customer_sip_accounts SET extension=? WHERE extension=?", (scoped, digits))
+            moved += 1
+        if moved:
+            self.remap_extension_references()
+        return moved
+
+    def remap_extension_references(self) -> int:
+        """Rewrite stored flow and group references from digits to their keys.
+
+        After the migration a reference like "101" can point at several rows, so
+        every flow is rewritten to the exact key that the line it belongs to
+        answers to. References that resolve to nothing are left alone: a
+        validator will report them if that flow is ever saved.
+        """
+        changed = 0
+        for flow in self.list_call_routes():
+            owner = flow.get("owner_user_id")
+            number = flow.get("phone_number")
+            route = flow.get("route") or {}
+            rewritten = self._remap_nodes(route.get("nodes") or [], int(owner) if owner is not None else None, number)
+            if rewritten:
+                self.save_call_route(int(owner), {
+                    "phone_number": number, "name": flow.get("name") or "Call flow",
+                    "route": route, "active": bool(flow.get("active", True)),
+                })
+                changed += 1
+        for flow in self.list_routing_flows():
+            owner = flow.get("owner_user_id")
+            route = flow.get("route") or {}
+            rewritten = self._remap_nodes(route.get("nodes") or [], int(owner) if owner is not None else None, "")
+            if rewritten:
+                self.save_routing_flow(
+                    int(owner),
+                    {"name": flow.get("name") or "Call flow", "route": route, "active": bool(flow.get("active", True))},
+                    target_type=flow["target_type"], target=flow["target"],
+                )
+                changed += 1
+        for group in self.list_groups():
+            members = list(group.get("members") or [])
+            rewritten = [
+                self._resolve_reference(member, group.get("owner_user_id"), "") or member for member in members
+            ]
+            if rewritten != members:
+                with self._connect() as db:
+                    db.execute(
+                        "UPDATE extension_groups SET members=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (",".join(str(item) for item in rewritten), group["id"]),
+                    )
+                changed += 1
+        return changed
+
+    def _resolve_reference(self, value: Any, owner: Any, number: str) -> str:
+        """One stored extension reference, resolved to a key ("" if unknown)."""
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        owner_id = int(owner) if str(owner or "").strip().isdigit() else None
+        rows = self.list_extensions(owner_id)
+        if any(row["extension"] == value for row in rows):
+            return value
+        return self.extension_key_for(number, value, owner_id) if value.isdigit() else ""
+
+    def _remap_nodes(self, nodes: list, owner: int | None, number: str) -> bool:
+        """Rewrite the extension references inside one flow's nodes, in place."""
+        changed = False
+        scope = str(number or "").strip()
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if node.get("type") == "extension":
+                resolved = self._resolve_reference(node.get("extension"), owner, scope)
+                if resolved and resolved != str(node.get("extension")):
+                    node["extension"] = resolved
+                    changed = True
+            elif node.get("type") == "voicemail":
+                resolved = self._resolve_reference(node.get("mailbox"), owner, scope)
+                if resolved and resolved != str(node.get("mailbox")):
+                    node["mailbox"] = resolved
+                    changed = True
+            elif node.get("type") == "ivr":
+                fallback = self._resolve_reference(node.get("fallback"), owner, scope)
+                if fallback and fallback != str(node.get("fallback")):
+                    node["fallback"] = fallback
+                    changed = True
+            for value in (node.get("extensions") or []):
+                resolved = self._resolve_reference(value, owner, scope)
+                if resolved and resolved != str(value):
+                    node["extensions"] = [resolved if str(item) == str(value) else item for item in node["extensions"]]
+                    changed = True
+        return changed
+
+    def _number_belongs_to(self, owner_user_id: int | None, number: str) -> bool:
+        """Is this DID one of the account's own numbers?"""
+        number = str(number or "").strip()
+        if not number:
+            return False
+        return any(
+            str(row["number"]) == number and same_account(row.get("owner_user_id"), owner_user_id)
+            for row in self.list_numbers()
+        )
+
     def save_extension(self, data, owner_user_id: int | None = None, enforce_owner: bool = False):
-        extension = str(data.get("extension", "")).strip()
+        """Create or edit one extension, on one of the account's numbers.
+
+        Extensions are numbered per number: every line starts at 101 and goes on
+        from there, so `104` means the 104 of the line the call is on. The stored
+        key carries both parts (`104@+13025550001`); a bare `101` stays what it
+        has always been, an extension that answers for the whole account.
+        """
+        requested = str(data.get("extension", "")).strip()
+        extension = extension_digits(requested)
+        scope = extension_scope(requested) or str(data.get("number") or "").strip()
         if not extension.isdigit() or not 100 <= int(extension) <= 999:
             raise ValueError("Extension must be a 3-digit number from 100 to 999")
+        extension = extension_key(extension, scope)
+        with self._connect() as db:
+            already = db.execute("SELECT owner_user_id FROM extensions WHERE extension=?", (extension,)).fetchone()
+        # The scope is checked when the extension is being put on a number. An
+        # existing one is *moved* by its own edit (which the owner checks below
+        # refuse unless it is deliberate), never by naming another account.
+        if scope and already is None and not self._number_belongs_to(owner_user_id, scope):
+            raise ValueError("Extension must belong to one of this account's numbers")
         password = str(data.get("sip_password") or "")
         if any(char in password for char in "\r\n;#"):
             raise ValueError("Invalid SIP password")
@@ -461,7 +958,7 @@ class SettingsStore:
             ):
                 holder = self._account_label(existing["owner_user_id"])
                 raise ValueError(
-                    f"Extension {extension} already belongs to {holder}. "
+                    f"Extension {extension_digits(extension)} already belongs to {holder}. "
                     "Choose a free extension number, or edit that extension to move it."
                 )
             # Devices authenticate with this name, so it is derived here and never
@@ -469,7 +966,7 @@ class SettingsStore:
             # extension. Editing an extension keeps the identity a registered
             # phone already uses; a row in any other shape (including the older
             # "username is the number" form) is replaced.
-            username = self.canonical_sip_username(extension, existing["sip_username"] if existing else "")
+            username = self.canonical_sip_username(extension_digits(extension), existing["sip_username"] if existing else "")
             voicemail_enabled = bool(voicemail_enabled_value) if voicemail_enabled_value is not None else bool(existing and existing["voicemail_enabled"])
             # A new extension provisions its own SIP credentials, so a customer
             # can create an extension and register a device without inventing a
@@ -515,32 +1012,53 @@ class SettingsStore:
             self.sync_primary_flows(int(owner), extension)
         return extension
 
-    def primary_extension(self, owner_user_id: int) -> str:
-        """The device a customer's main line belongs to: their lowest extension,
-        which is the one auto-provisioning created first."""
-        extensions = sorted(
-            (row["extension"] for row in self.list_extensions(owner_user_id) if row["active"]),
-            key=lambda value: int(value),
+    def primary_extension(self, owner_user_id: int, number: str = "") -> str:
+        """The first device of a line, by key: 101 on that number.
+
+        With a number, this is that line's lowest active extension - the one
+        auto-provisioning created when the number was assigned. Without one it is
+        the account-wide set, which is what an older deployment has. The key is
+        returned rather than the digits because two lines' 101s have to be told
+        apart wherever this is compared.
+        """
+        scope = str(number or "").strip()
+        rows = self.extensions_on_number(owner_user_id, scope) if scope else self.account_wide_extensions(owner_user_id)
+        keys = sorted(
+            (str(row["extension"]) for row in rows if row["active"] and row["digits"].isdigit()),
+            key=lambda value: int(extension_digits(value) or 0),
         )
-        return extensions[0] if extensions else ""
+        if keys:
+            return keys[0]
+        # No account-wide set (or empty line): the account's first number.
+        for item in self.list_numbers(owner_user_id):
+            rows = self.extensions_on_number(owner_user_id, item["number"])
+            found = sorted(
+                (str(row["extension"]) for row in rows if row["active"] and row["digits"].isdigit()),
+                key=lambda value: int(extension_digits(value) or 0),
+            )
+            if found:
+                return found[0]
+        return ""
 
     def sync_primary_flows(self, owner_user_id: int, extension: str) -> None:
-        """A main line rings every device, so adding one extends it.
+        """A line rings every device on it, so adding one extends the line.
 
         Only a flow that is still the generated one is rewritten: a single ring
         step, the default timeout, no group, and members that are a subset of the
-        customer's own devices. Anything the customer has designed - extra steps,
+        line's own devices. Anything the customer has designed - extra steps,
         another timeout, a group - is left exactly as it is.
         """
         owner_user_id, extension = int(owner_user_id), str(extension)
-        primary = self.primary_extension(owner_user_id)
-        devices = sorted(
-            (row["extension"] for row in self.list_extensions(owner_user_id) if row["active"]),
-            key=lambda value: int(value),
-        )
-        if not primary or len(devices) < 2 or extension not in devices:
+        scope = extension_scope(extension)
+        primary_number = scope or self.primary_number(owner_user_id)
+        if not primary_number:
             return
-        primary_number = self.primary_number(owner_user_id)
+        devices = (
+            self.line_devices(owner_user_id, primary_number)
+            if scope else [row["extension"] for row in self.account_wide_extensions(owner_user_id) if row["active"]]
+        )
+        if len(devices) < 2 or extension not in devices:
+            return
         if not primary_number:
             return
         flow = next((row for row in self.list_call_routes(owner_user_id) if row["phone_number"] == primary_number), None)
@@ -575,11 +1093,26 @@ class SettingsStore:
         return len(nodes) == 2 and str(nodes[1].get("type")) == "voicemail"
 
     def primary_number(self, owner_user_id: int) -> str:
-        """The customer's main line: the number the auto-provisioned device owns."""
-        numbers = [row for row in self.list_numbers(int(owner_user_id)) if row["active"]]
+        """The customer's main line.
+
+        The number the account's first extension was provisioned on - the one
+        whose inbound link points at it - and failing that the oldest number they
+        hold, so a fresh number with no extensions yet still has a main line.
+        """
+        owner_user_id = int(owner_user_id)
+        numbers = [row for row in self.list_numbers(owner_user_id) if row["active"]]
         primary = self.primary_extension(owner_user_id)
-        match = next((row for row in numbers if primary and row["inbound_extension"] == primary), None)
-        return (match or (numbers[0] if numbers else None) or {}).get("number", "")
+        if primary:
+            match = next(
+                (row for row in numbers if self._link_is(row["inbound_extension"], primary, owner_user_id)),
+                None,
+            )
+            if match:
+                return str(match["number"])
+        for row in numbers:
+            if self.extensions_on_number(owner_user_id, row["number"]):
+                return str(row["number"])
+        return str(numbers[0]["number"]) if numbers else ""
 
 
     # Six letters, an underscore, the extension (`KUDGTE_101`): the identity a
@@ -654,19 +1187,29 @@ class SettingsStore:
         secrets.SystemRandom().shuffle(secret)
         return "".join(secret)
 
-    def next_extension_number(self, owner_user_id: int | None = None) -> str:
-        """Lowest free three-digit extension.
+    def next_extension_number(self, owner_user_id: int | None = None, number: str = "") -> str:
+        """Lowest free three-digit extension on this number, starting at 101.
 
-        Extension numbers are the primary key, so they are unique platform-wide:
-        one customer cannot be handed a number another customer already owns.
-        Passing an owner treats that customer's own extensions as reusable.
+        Every phone number has its own extension set - 101 is where a line
+        starts - so 101 is free again on a number that has none, whatever other
+        accounts (or another of this account's numbers) are using. Without a
+        number the whole account-wide set is considered, which is what a caller
+        that predates per-number extensions gets.
         """
+        scope = str(number or "").strip()
         with self._connect() as db:
-            rows = db.execute("SELECT extension,owner_user_id FROM extensions").fetchall()
-        taken = {
-            str(row["extension"]) for row in rows
-            if owner_user_id is None or row["owner_user_id"] != int(owner_user_id)
-        }
+            if scope:
+                rows = db.execute(
+                    "SELECT extension FROM extensions WHERE extension LIKE ?", (f"%@{scope}",)
+                ).fetchall()
+                taken = {extension_digits(row["extension"]) for row in rows}
+            else:
+                rows = db.execute("SELECT extension,owner_user_id FROM extensions").fetchall()
+                taken = {
+                    extension_digits(row["extension"]) for row in rows
+                    if (owner_user_id is None or row["owner_user_id"] != int(owner_user_id))
+                    and not extension_scope(row["extension"])
+                }
         for candidate in range(101, 1000):
             if str(candidate) not in taken:
                 return str(candidate)
@@ -724,25 +1267,27 @@ class SettingsStore:
         secret in the generated Asterisk config, so the effective credential is
         what gets returned.
         """
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT extension,display_name,sip_username,sip_password_enc,owner_user_id,voicemail_enabled,active FROM extensions WHERE extension=?",
-                (str(extension),),
-            ).fetchone()
-        if not row or (owner_user_id is not None and row["owner_user_id"] != int(owner_user_id)):
+        row = self._extension_row(extension)
+        if not row or (owner_user_id is not None and not same_account(row["owner_user_id"], owner_user_id)):
             raise ValueError("Extension not found")
         owner = row["owner_user_id"]
+        digits, scope = extension_digits(row["extension"]), extension_scope(row["extension"])
         # A customer's sheet lists their own numbers; a platform-owned
         # extension (no customer) still lists the platform-owned DIDs that
-        # point at it instead of always claiming none are assigned.
+        # point at it instead of always claiming none are assigned. A number
+        # rings the extension of its own scope, which is why a scoped extension
+        # can only be answered by the line it belongs to.
         numbers = [
             item for item in self.list_numbers(owner)
-            if item["inbound_extension"] == row["extension"] and item["active"]
+            # The link may be the key (`101@+1302...`) or the bare digits of an
+            # older deployment; a scoped extension is only answered by its line.
+            if extension_digits(item["inbound_extension"]) == digits and item["active"]
+            and (not scope or str(item["number"]) == scope)
             and (owner is not None or item.get("owner_user_id") is None)
         ]
         device = next(
             (item for item in self.list_sip_accounts(owner, include_password=True)
-             if str(item.get("extension") or "") == row["extension"] and item["active"]),
+             if extension_digits(item.get("extension") or "") == digits and item["active"]),
             None,
         )
         # A phone registers with this platform, so the platform's own address is
@@ -759,7 +1304,11 @@ class SettingsStore:
             provider = self.get_provider(next((item["provider"] for item in numbers if item["provider"]), None)) or self.get_provider()
             server = (provider or {}).get("server", "")
         return {
-            "extension": row["extension"],
+            "extension": digits,
+            "key": row["extension"],
+            "digits": digits,
+            "number": scope,
+            "mailbox": extension_mailbox(row["extension"]),
             "display_name": row["display_name"],
             "active": bool(row["active"]),
             "sip_username": device["sip_username"] if device else (row["sip_username"] or row["extension"]),
@@ -789,14 +1338,38 @@ class SettingsStore:
                 raise ValueError("Active extension not found")
 
     def delete_extension(self, extension, owner_user_id: int | None = None):
+        """Remove an extension and every reference to it.
+
+        Extension numbers repeat across a customer's lines, so what is deleted is
+        the exact key: deleting 101 on one number leaves the 101 on the other
+        alone. A number that points at the extension has to be re-pointed first,
+        because that link is what makes an inbound call ring.
+        """
         extension = str(extension).strip()
+        if not extension_scope(extension) and extension.isdigit():
+            # Digits may name exactly one extension - the account-wide one, or
+            # the only row that carries them. Two lines that both hold 101 have
+            # to be addressed with the number, which is what the console sends.
+            row = self._extension_row(extension)
+            if not row:
+                raise ValueError("Extension not found")
+            extension = str(row["extension"])
         with self._connect() as db:
             if owner_user_id is not None and not db.execute(
                 "SELECT 1 FROM extensions WHERE extension=? AND owner_user_id=?", (extension, int(owner_user_id))
             ).fetchone():
                 raise ValueError("Extension not found")
-            if db.execute("SELECT 1 FROM phone_numbers WHERE inbound_extension=?", (extension,)).fetchone():
-                raise ValueError("Cannot delete an extension used by an inbound DID")
+            digits, scope = extension_digits(extension), extension_scope(extension)
+            pointing = next(
+                (
+                    row["number"] for row in self.list_numbers()
+                    if str(row["inbound_extension"] or "") == digits
+                    and (not scope or str(row["number"]) == scope)
+                ),
+                None,
+            )
+            if pointing:
+                raise ValueError(f"Cannot delete an extension used by inbound number {pointing}")
             if self.extension_is_a_call_default(extension):
                 raise ValueError("Cannot delete an extension used as a call default; change Call defaults first")
             result = db.execute("DELETE FROM extensions WHERE extension=?", (extension,))
@@ -834,10 +1407,22 @@ class SettingsStore:
         with self._connect() as db:
             if owner_user_id and not db.execute("SELECT 1 FROM admin_users WHERE id=? AND role='user' AND active=1", (owner_user_id,)).fetchone():
                 raise ValueError("Customer account is not active")
-            if inbound and not db.execute(
-                "SELECT 1 FROM extensions WHERE extension=? AND active=1 AND (owner_user_id=? OR (owner_user_id IS NULL AND ? IS NULL))", (inbound, owner_user_id, owner_user_id)
-            ).fetchone():
-                raise ValueError("Inbound extension must belong to the selected customer")
+            if inbound:
+                # The link names the exact extension - `101@+1302...` for the 101
+                # of one line - so a number can ring the specific device the
+                # operator meant. Digits on their own still resolve against this
+                # very number, which is what every link written before this did.
+                linked = self._extension_row(inbound)
+                if linked is None and inbound.isdigit():
+                    key = self.extension_key_for(number, inbound, owner_user_id)
+                    linked = self._extension_row(key) if key else None
+                if linked is None or not linked["active"]:
+                    raise ValueError("Inbound extension must belong to the selected customer")
+                digits, scope = extension_digits(inbound), extension_scope(inbound)
+                if scope and scope != number:
+                    raise ValueError("Inbound extension belongs to another number")
+                if linked["owner_user_id"] is not None and not same_account(linked["owner_user_id"], owner_user_id):
+                    raise ValueError("Inbound extension must belong to the selected customer")
             if data.get("provider") and not db.execute(
                 "SELECT 1 FROM sip_providers WHERE name=? AND active=1", (str(data.get("provider")).strip(),)
             ).fetchone():
@@ -858,7 +1443,7 @@ class SettingsStore:
                     number,
                     str(data.get("provider", "")).strip()[:80],
                     str(data.get("description", "")).strip()[:160],
-                    inbound[:3],
+                    inbound[:64],
                     int(default_outbound),
                     int(bool(data.get("active", True))),
                     owner_user_id,
@@ -873,16 +1458,22 @@ class SettingsStore:
     def get_outbound_number(self, extension: str, requested: str | None = None):
         """The line an extension calls out on: its own number, or the account's main one.
 
-        A number belongs to the account, so an extension without a line of its
-        own still calls out as the company - the number marked as the account
-        default, or its oldest active number. That is what makes an extension the
-        platform provisioned on its own (no DID) able to place calls at all, and
-        it is the usual PBX behaviour: every desk presents the main line unless
-        it has a direct one. A requested number is still validated: it has to be
-        active and one of *this account's* lines, so nothing can ever present
-        another customer's number - and a number another account holds stays
-        unpresentable even when the caller asks for it by name.
+        An extension that belongs to a phone number calls out on that number -
+        that is what makes 104 on +1302... present +1302... An account-wide or
+        platform extension has no line of its own, so it presents the account's
+        main line (its default outbound number, else its oldest active one),
+        which is the usual PBX behaviour and the reason such an extension can
+        place calls at all. A requested number has to be active and one of *this
+        account's* lines, so nothing can ever present another customer's number.
         """
+        row = self._extension_row(extension)
+        scoped = extension_scope((dict(row).get("extension") if row is not None else "") or extension)
+        if scoped:
+            with self._connect() as db:
+                found = db.execute(
+                    "SELECT number,provider FROM phone_numbers WHERE number=? AND active=1", (scoped,)
+                ).fetchone()
+            return dict(found) if found else None
         with self._connect() as db:
             if requested:
                 # A number of this same account may be presented by any of its
@@ -907,10 +1498,34 @@ class SettingsStore:
         return dict(row) if row else None
 
     def set_default_outbound_number(self, extension: str, number: str):
+        """Mark a number as the line this extension dials out on.
+
+        On a scoped extension the number is the line itself, so the default is
+        already decided; the link is what is being asserted and it is verified.
+        On an account-wide extension it is the account's caller ID preference.
+        """
+        digits = extension_digits(extension)
         with self._connect() as db:
-            if not db.execute("SELECT 1 FROM phone_numbers WHERE number=? AND inbound_extension=? AND active=1", (number, extension)).fetchone():
+            link = db.execute(
+                "SELECT inbound_extension FROM phone_numbers WHERE number=? AND active=1", (number,)
+            ).fetchone()
+            if not link or extension_digits(link["inbound_extension"]) != digits:
                 raise ValueError("Number is not assigned to this extension")
-            db.execute("UPDATE phone_numbers SET default_outbound=CASE WHEN number=? THEN 1 ELSE 0 END,updated_at=CURRENT_TIMESTAMP WHERE inbound_extension=?", (number, extension))
+            if extension_scope(extension) == "" and not db.execute(
+                "SELECT 1 FROM extensions WHERE extension=?", (str(extension),)
+            ).fetchone():
+                raise ValueError("Extension not found")
+            # The flag follows the extension, not the digits: the link is
+            # compared as it is stored (a key on a scoped line), so a second
+            # line that happens to start with the same 101 keeps its own caller
+            # ID untouched.
+            db.execute(
+                "UPDATE phone_numbers SET default_outbound=0,updated_at=CURRENT_TIMESTAMP WHERE inbound_extension=? OR number=?",
+                (str(link["inbound_extension"]), number),
+            )
+            db.execute(
+                "UPDATE phone_numbers SET default_outbound=1,updated_at=CURRENT_TIMESTAMP WHERE number=?", (number,)
+            )
 
     def delete_number(self, number, cascade: bool = True):
         """Remove a number and, by default, the line provisioned for it.
@@ -943,6 +1558,17 @@ class SettingsStore:
             # the platform-wide default); leave it in place rather than break
             # routing - the number itself is already gone.
             pass
+        # Extensions are numbered per line, so this line's own set (101, 102...)
+        # goes with it: a scoped extension can only be reached through the number
+        # it belongs to, and that number no longer exists.
+        for scoped in [row["extension"] for row in self.list_extensions() if extension_scope(row["extension"]) == number]:
+            with self._connect() as db:
+                db.execute("DELETE FROM customer_sip_accounts WHERE extension=?", (scoped,))
+            self._drop_extension_from_call_defaults(scoped)
+            try:
+                self.delete_extension(scoped)
+            except ValueError:
+                pass
 
     def _drop_extension_from_call_defaults(self, extension: str) -> None:
         """Clear customer call-default entries that point at this extension."""
@@ -956,7 +1582,9 @@ class SettingsStore:
             if not isinstance(entry, dict):
                 continue
             for field in ("outbound", "fallback"):
-                if str(entry.get(field) or "") == extension:
+                value = str(entry.get(field) or "")
+                digits = extension_digits(extension)
+                if value and (value == extension or (value.isdigit() and value == digits)):
                     entry[field] = ""
                     changed = True
         if changed:
@@ -1104,7 +1732,15 @@ class SettingsStore:
     def list_sip_accounts(self, owner_user_id: int | None = None, include_password: bool = False):
         with self._connect() as db:
             where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
-            rows = db.execute(f"SELECT id,owner_user_id,label,sip_username,sip_password_enc,server,port,transport,phone_number,extension,registration_status,last_registered_at,active,created_at,updated_at FROM customer_sip_accounts{where} ORDER BY label", (int(owner_user_id),) if owner_user_id is not None else ()).fetchall()
+            rows = db.execute(f"SELECT id,owner_user_id,label,sip_username,sip_password_enc,server,port,transport,phone_number,extension,registration_status,last_registered_at,active,created_at,updated_at FROM customer_sip_accounts{where}", (int(owner_user_id),) if owner_user_id is not None else ()).fetchall()
+        # Extensions first, grouped by the number they belong to and in dialling
+        # order; a device that is not keyed to one keeps its place at the end.
+        rows = sorted(rows, key=lambda row: (
+            0 if extension_digits(row["extension"]) else 1,
+            extension_scope(row["extension"]),
+            int(extension_digits(row["extension"]) or 0),
+            str(row["label"]),
+        ))
         result = []
         for row in rows:
             item = dict(row); encrypted = item.pop("sip_password_enc")
@@ -1122,14 +1758,35 @@ class SettingsStore:
         # identity - the customer may not rename the identity their phone logs in
         # with - and no account may take a name an extension already answers to.
         extensions = self.list_extensions()
+        digits = extension_digits(extension)
         if extension:
-            username = next(
-                (str(row["sip_username"] or "") for row in extensions if str(row["extension"]) == extension),
-                "",
-            ) or self.generate_sip_username(extension)
+            # A device keyed to an extension *is* that extension's generated
+            # identity, and the key is what the row stores so two lines' 101s
+            # never look like the same device.
+            row = next((item for item in extensions if item["extension"] == extension), None)
+            if row is None and extension.isdigit():
+                # The console may name the digits a person reads. The account-wide
+                # row answers first, then the line the device is being put on, and
+                # only a single remaining candidate is unambiguous.
+                candidates = [item for item in extensions if item["digits"] == digits]
+                wanted_number = str(data.get("phone_number") or "").strip()
+                if wanted_number:
+                    named = [item for item in candidates if item["number"] == wanted_number]
+                    candidates = named or candidates
+                account_wide = [item for item in candidates if not item["number"]]
+                candidates = account_wide or candidates
+                row = candidates[0] if len(candidates) == 1 else None
+            if not row:
+                raise ValueError("SIP extension is not assigned to this customer")
+            extension = str(row["extension"])
+            username = str(row["sip_username"] or "") or self.generate_sip_username(digits)
         else:
             username = self._validate_config_value(data.get("sip_username"), "SIP username", 100)
-            if username in {str(row["extension"]) for row in extensions} or username in {str(row["sip_username"]) for row in extensions}:
+            # A name an extension answers to is never handed to a device: a
+            # three-digit username would collide with the PJSIP endpoint name the
+            # extension's own phones are reached by.
+            taken = {str(row["extension"]) for row in extensions} | {str(row["sip_username"]) for row in extensions}
+            if username in taken or (username.isdigit() and username in {row["digits"] for row in extensions}):
                 raise ValueError("That SIP username belongs to an extension")
         account_id = int(data["id"]) if str(data.get("id", "")).isdigit() else None
         if any(str(row["sip_username"]) == username and row["id"] != account_id for row in self.list_sip_accounts()):
@@ -1148,6 +1805,15 @@ class SettingsStore:
             raise ValueError("SIP phone number is not assigned to this customer")
         if extension and not any(row["extension"] == extension for row in self.list_extensions(owner_user_id)):
             raise ValueError("SIP extension is not assigned to this customer")
+        if extension and phone_number:
+            # A device is a phone on one line, so the number it belongs to and
+            # the extension it answers have to be the same line.
+            scope = extension_scope(extension)
+            if scope and scope != phone_number:
+                raise ValueError("SIP number and extension belong to different numbers")
+            if not scope:
+                linked = next((row for row in self.list_numbers(owner_user_id) if str(row["inbound_extension"] or "") == digits), None)
+                phone_number = phone_number or ((linked or {}).get("number") or "")
         with self._connect() as db:
             existing = db.execute("SELECT owner_user_id,sip_password_enc FROM customer_sip_accounts WHERE id=?", (account_id,)).fetchone() if account_id else None
             if existing and existing["owner_user_id"] != owner_user_id:
@@ -1169,11 +1835,10 @@ class SettingsStore:
         changes - otherwise the console would show a new password while the phone
         kept registering with the old one. An empty password generates one.
         """
-        extension = str(extension).strip()
-        with self._connect() as db:
-            row = db.execute("SELECT owner_user_id FROM extensions WHERE extension=?", (extension,)).fetchone()
-        if not row or (owner_user_id is not None and row["owner_user_id"] != int(owner_user_id)):
+        row = self._extension_row(str(extension).strip())
+        if not row or (owner_user_id is not None and not same_account(row["owner_user_id"], owner_user_id)):
             raise ValueError("Extension not found")
+        extension = str(row["extension"])
         if password and any(char in password for char in "\r\n;#"):
             raise ValueError("Invalid SIP password")
         secret = password or self.generate_sip_password()
@@ -1258,12 +1923,15 @@ class SettingsStore:
             "label": "Enter an extension", "configured": True,
         }
 
-    def _validate_route_nodes(self, route: dict, owner_user_id: int, target_type: str = "number") -> None:
+    def _validate_route_nodes(self, route: dict, owner_user_id: int, target_type: str = "number", target: str = "") -> None:
         """One validator for every kind of call flow.
 
         Ring destinations must be extensions the customer owns, and a step that
         names a saved group must belong to that customer with members drawn from
-        the group, so a flow can never ring somebody else's phone.
+        the group, so a flow can never ring somebody else's phone. A number's own
+        flow is stricter: 101 means that line's 101, so it may only ring the
+        extensions of that number - which is also what makes the routing canvas
+        show one line's set at a time.
         """
         if not isinstance(route, dict) or not isinstance(route.get("nodes"), list) or len(route["nodes"]) > 100:
             raise ValueError("Call route must contain a nodes array with at most 100 nodes")
@@ -1280,8 +1948,18 @@ class SettingsStore:
                 node["label"] = str(node.get("label") or default["label"])[:120]
         if any(not isinstance(node, dict) or node.get("type") not in self.ROUTE_NODE_TYPES for node in route["nodes"]):
             raise ValueError("Call route contains an unsupported node")
-        owned_extensions = {row["extension"] for row in self.list_extensions(int(owner_user_id))}
-        owned_groups = {str(row["id"]): set(row["members"]) for row in self.list_groups(int(owner_user_id))}
+        owner_id = int(owner_user_id)
+        scope = ""
+        if target_type == "number":
+            scope = next((str(row["number"]) for row in self.list_numbers(owner_id) if str(row["number"]) == str(target)), "")
+        if scope:
+            # The line's own extensions, plus the account-wide and platform ones,
+            # which answer on every line.
+            allowed_keys = set(self.scoped_extension_keys(scope, owner_id))
+            owned_extensions = {row["extension"] for row in self.list_extensions(owner_id) if row["extension"] in allowed_keys}
+        else:
+            owned_extensions = {row["extension"] for row in self.list_extensions(owner_id)}
+        owned_groups = {str(row["id"]): set(row["members"]) for row in self.list_groups(owner_id)}
         for node in route["nodes"]:
             node_type = node["type"]
             if node_type in {"simultaneous", "sequential", "ring_group"}:
@@ -1326,6 +2004,46 @@ class SettingsStore:
                 if not isinstance(days, list) or not days or any(int(day) not in range(1, 8) for day in days):
                     raise ValueError("Business hours must include valid weekdays")
 
+    def _resolve_flow_key(self, value: Any, owner_user_id: int, number: str = "") -> str:
+        """The extension key a dial-plan entry means.
+
+        The customer types `104`; the plan stores the 104 that belongs to the
+        line the flow is on - `104@+13025550001` - which is what makes the entry
+        reach the right desk even when another of the account's lines has a 104
+        of its own. A value that is already a key is kept as written.
+        """
+        value = str(value or "").strip()
+        if not value or extension_scope(value):
+            return value
+        if not value.isdigit():
+            return value
+        if number:
+            return self.extension_key_for(number, value, owner_user_id) or value
+        key = self.extension_key_for_digits(value, owner_user_id)
+        if key:
+            return key
+        matches = [row for row in self.list_extensions(owner_user_id) if row["digits"] == value]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Extension {value} is on more than one number: pick the extension on the number this flow belongs to"
+            )
+        return value
+
+    def _resolve_flow_nodes(self, route, owner_user_id: int, number: str = "") -> None:
+        """Store every destination of a call flow as the extension key it names."""
+        nodes = (route or {}).get("nodes") if isinstance(route, dict) else None
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            if isinstance(node.get("extensions"), list):
+                node["extensions"] = [
+                    self._resolve_flow_key(ext, owner_user_id, number) if str(ext or "").strip() else ext
+                    for ext in node["extensions"]
+                ]
+            for field in ("extension", "mailbox", "fallback"):
+                if str(node.get(field) or "").strip():
+                    node[field] = self._resolve_flow_key(node[field], owner_user_id, number)
+
     def list_groups(self, owner_user_id: int | None = None):
         with self._connect() as db:
             where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
@@ -1356,6 +2074,7 @@ class SettingsStore:
             raise ValueError("Group name must be 2 to 80 characters")
         owned = {row["extension"] for row in self.list_extensions(owner_user_id)}
         members = [str(ext).strip() for ext in (data.get("members") or [])]
+        members = [self._resolve_flow_key(ext, owner_user_id) for ext in members]
         members = [ext for index, ext in enumerate(members) if ext and ext not in members[:index]]
         if any(ext not in owned for ext in members):
             raise ValueError("Group members must be extensions owned by this customer")
@@ -1410,22 +2129,26 @@ class SettingsStore:
         if owner is not None:
             flow = next((item for item in self.list_call_routes(int(owner)) if item["phone_number"] == number), None)
         if not flow:
-            mailbox = extension if extension and any(
-                item["extension"] == extension and item["voicemail_enabled"] for item in self.list_extensions(int(owner) if owner else None)
+            # The legacy path: no designed flow, so the number rings the
+            # extension it points at. The link holds the dialled digits, which
+            # are read against this very number, so 101 means this line's 101.
+            key = self.extension_key_for(number, extension, int(owner) if owner is not None else None) if extension else ""
+            mailbox = key if key and any(
+                item["extension"] == key and item["voicemail_enabled"] for item in self.list_extensions(int(owner) if owner else None)
             ) else ""
-            return {"destinations": [extension] if extension else [], "timeout": 30, "voicemail": mailbox, "forward": "", "outside_hours": False}
+            return {"destinations": [key] if key else [], "timeout": 30, "voicemail": mailbox, "forward": "", "outside_hours": False}
         nodes = [node for node in ((flow.get("route") or {}).get("nodes") or []) if isinstance(node, dict)]
         # A flow that carries a menu asks the caller for an extension instead of
         # ringing anybody; whatever the flow says besides that step is where an
         # unanswered or invalid entry goes.
         ivr_node = next((node for node in nodes if str(node.get("type")) == "ivr"), None)
         if ivr_node is not None:
-            answer = self._ivr_answer_plan(ivr_node, owner, extension, nodes)
+            answer = self._ivr_answer_plan(ivr_node, owner, extension, nodes, number)
             if answer is not None:
                 return answer
-        return self._plan_nodes(nodes, owner, extension)
+        return self._plan_nodes(nodes, owner, extension, number)
 
-    def _ivr_answer_plan(self, node: dict, owner, extension: str, nodes: list[dict]) -> dict | None:
+    def _ivr_answer_plan(self, node: dict, owner, extension: str, nodes: list[dict], number: str = "") -> dict | None:
         """What happens when the caller is asked to enter an extension.
 
         The menu itself - prompt, voice, how long to wait, how many times to ask
@@ -1435,9 +2158,14 @@ class SettingsStore:
         if owner is None:
             return None
         voice = self.ivr_voice(str(node.get("voice") or "platform"))
-        allowed = {row["extension"] for row in self.list_extensions(int(owner)) if row["active"]}
+        active = {row["extension"] for row in self.list_extensions(int(owner)) if row["active"]}
+        if number:
+            # A menu on one line asks for that line's extensions, so "104" is
+            # this number's 104 rather than a device on another number.
+            active &= set(self.scoped_extension_keys(number, int(owner)))
+        allowed = active
         fallback = str(node.get("fallback") or "")
-        tail = self._plan_nodes([item for item in nodes if item is not node], owner, extension)
+        tail = self._plan_nodes([item for item in nodes if item is not node], owner, extension, number)
         return {
             "kind": "ivr",
             "destinations": [],
@@ -1454,12 +2182,14 @@ class SettingsStore:
             "outside_hours": bool(tail.get("outside_hours")),
         }
 
-    def _plan_nodes(self, nodes: list[dict], owner, extension: str) -> dict:
+    def _plan_nodes(self, nodes: list[dict], owner, extension: str, number: str = "") -> dict:
         """The planner's body: turn a list of steps into what the engine dials."""
         allowed = {
             item["extension"] for item in self.list_extensions(int(owner))
             if item["active"]
         } if owner is not None else set()
+        if owner is not None and number:
+            allowed &= set(self.scoped_extension_keys(number, int(owner)))
         groups = {str(item["id"]): item for item in self.list_groups(int(owner))} if owner is not None else {}
         now = datetime.now()
         open_now, seen_hours = False, False
@@ -1515,23 +2245,28 @@ class SettingsStore:
         members = [str(ext) for ext in (destinations if isinstance(destinations, (list, tuple, set)) else [destinations])]
         if not members:
             return {"nodes": []}
-        label = f"Ring extension {members[0]} for 25s" if len(members) == 1 else f"Ring {len(members)} devices for 25s"
+        first = extension_digits(members[0])
+        label = f"Ring extension {first} for 25s" if len(members) == 1 else f"Ring {len(members)} devices for 25s"
         nodes = [{
             "type": "ring_group", "extensions": members, "timeout": 25,
             "label": label, "configured": True,
         }]
         if voicemail:
-            nodes.append({"type": "voicemail", "mailbox": str(voicemail), "label": f"Voicemail {voicemail}", "configured": True})
+            nodes.append({"type": "voicemail", "mailbox": str(voicemail), "label": f"Voicemail {extension_digits(voicemail)}", "configured": True})
         return {"nodes": nodes}
 
     @staticmethod
     def default_extension_route(extension: str, voicemail: bool = False) -> dict:
         """The flow a new extension starts with: ring that extension, and if nobody
-        picks up the call ends (voicemail is added only when it is switched on)."""
+        picks up the call ends (voicemail is added only when it is switched on).
+
+        The extension is named by its key, so the flow keeps meaning the right
+        device even when another line has an extension with the same digits.
+        """
         extension = str(extension)
-        nodes = [{"type": "extension", "extension": extension, "label": f"Ring extension {extension}", "configured": True}]
+        nodes = [{"type": "extension", "extension": extension, "label": f"Ring extension {extension_digits(extension)}", "configured": True}]
         if voicemail:
-            nodes.append({"type": "voicemail", "mailbox": extension, "label": f"Voicemail {extension}", "configured": True})
+            nodes.append({"type": "voicemail", "mailbox": extension, "label": f"Voicemail {extension_digits(extension)}", "configured": True})
         return {"nodes": nodes}
 
     def extension_voicemail_enabled(self, extension: str) -> bool:
@@ -1607,7 +2342,10 @@ class SettingsStore:
         if assigned.get("inbound_extension"):
             raise ValueError("This number already has an inbound extension")
 
-        extension = self.next_extension_number()
+        # Every number starts its own set at 101: that is the first device of the
+        # line, and the number it belongs to is what makes 104 on it mean this
+        # line's 104 rather than a device on another of the customer's numbers.
+        extension = extension_key(self.next_extension_number(owner_user_id, number), number)
         display_name = (str(description).strip() or assigned.get("description") or f"{customer['company_name'] or customer['username']} main line")[:120]
         password = self.generate_sip_password()
         username = self.generate_sip_username(extension)
@@ -1646,7 +2384,11 @@ class SettingsStore:
         # default the customer starts from and can extend in the builder.
         self.save_call_route(owner_user_id, {
             "phone_number": number, "name": "Main call flow" if self.primary_number(owner_user_id) in ("", number) else "Number call flow",
-            "route": self.default_number_route([extension]), "active": True,
+            # The line's own flow rings its own extensions - its 101 today, and
+            # every device the customer adds to this number later (see
+            # sync_primary_flows).
+            "route": self.default_number_route(self.line_devices(owner_user_id, number) or [extension]),
+            "active": True,
         })
         self.ensure_extension_flow(owner_user_id, extension, voicemail=self.extension_voicemail_enabled(extension))
         # A customer past five devices gets the menu on the flows this made too,
@@ -1705,6 +2447,9 @@ class SettingsStore:
         if target_type not in {"extension", "group"}:
             raise ValueError("Call flow target must be an extension or a group")
         if target_type == "extension":
+            # `901` names the account's 901 - there is one, or the request is
+            # refused - and a key names one line's extension exactly.
+            target = self._resolve_flow_key(target, owner_user_id)
             if not any(row["extension"] == target for row in self.list_extensions(owner_user_id)):
                 raise ValueError("Extension is not owned by this customer")
         else:
@@ -1713,6 +2458,7 @@ class SettingsStore:
                 raise ValueError("Group not found")
             target = str(group["id"])
         route = data.get("route")
+        self._resolve_flow_nodes(route, owner_user_id)
         self._validate_route_nodes(route, owner_user_id, target_type=target_type)
         payload = json.dumps(route, separators=(",", ":"))
         default_name = "Extension call flow" if target_type == "extension" else "Group call flow"
@@ -1743,7 +2489,10 @@ class SettingsStore:
         if not any(row["number"] == phone_number for row in self.list_numbers(int(owner_user_id))):
             raise ValueError("Phone number is not assigned to this customer")
         route = data.get("route")
-        self._validate_route_nodes(route, int(owner_user_id), target_type="number")
+        # The line's own flow is written in the customer's words - 101, 104 - and
+        # stored as that line's keys, so it keeps ringing this line's desks.
+        self._resolve_flow_nodes(route, int(owner_user_id), phone_number)
+        self._validate_route_nodes(route, int(owner_user_id), target_type="number", target=phone_number)
         payload = json.dumps(route, separators=(",", ":"))
         with self._connect() as db:
             existing = db.execute("SELECT id,owner_user_id FROM call_routes WHERE phone_number=?", (phone_number,)).fetchone()
@@ -2292,18 +3041,40 @@ class SettingsStore:
         active = [row["extension"] for row in self.list_extensions(owner_user_id) if row["active"]]
 
         def pick(value) -> str:
+            # Stored as the extension's key; a row written before this change -
+            # and an API caller reading the digits off a phone - still answers.
             value = str(value or "").strip()
-            return value if value in active else (active[0] if active else "")
+            if value in active:
+                return value
+            if value.isdigit():
+                key = self.extension_key_for_digits(value, owner_user_id)
+                if key in active:
+                    return key
+            return active[0] if active else ""
 
         return {"outbound": pick(entry.get("outbound")), "fallback": pick(entry.get("fallback"))}
 
     def set_customer_call_defaults(self, owner_user_id: int, outbound: str, fallback: str) -> dict:
         owner_user_id = int(owner_user_id)
         owned = {row["extension"] for row in self.list_extensions(owner_user_id) if row["active"]}
-        for label, value in (("Default outbound extension", outbound), ("Inbound fallback extension", fallback)):
+        resolved = {}
+        for field, label, value in (
+            ("outbound", "Default outbound extension", outbound),
+            ("fallback", "Inbound fallback extension", fallback),
+        ):
             value = str(value or "").strip()
             if value and value not in owned:
-                raise ValueError(f"{label} must be one of your active extensions")
+                # The three digits name the account's extension with them; two
+                # lines that both hold 101 have to be named by their key.
+                key = self.extension_key_for_digits(value, owner_user_id) if value.isdigit() else ""
+                if key not in owned:
+                    if value.isdigit() and any(row["digits"] == value for row in self.list_extensions(owner_user_id) if row["active"]):
+                        raise ValueError(
+                            f"{label}: {value} is on more than one of your numbers - choose the extension on the number it belongs to"
+                        )
+                    raise ValueError(f"{label} must be one of your active extensions")
+                value = key
+            resolved[field] = value
         with self._connect() as db:
             row = db.execute("SELECT value FROM settings WHERE `key`=?", (self.CALL_DEFAULTS_KEY,)).fetchone()
         try:
@@ -2312,7 +3083,7 @@ class SettingsStore:
             stored = {}
         if not isinstance(stored, dict):
             stored = {}
-        stored[str(owner_user_id)] = {"outbound": str(outbound or "").strip(), "fallback": str(fallback or "").strip()}
+        stored[str(owner_user_id)] = {"outbound": resolved["outbound"], "fallback": resolved["fallback"]}
         # Written directly rather than through set_settings: this is one JSON
         # document for every customer, and it is not an administrative setting.
         with self._connect() as db:
@@ -2334,19 +3105,30 @@ class SettingsStore:
         return ""
 
     def extension_is_a_call_default(self, extension: str) -> bool:
-        """Is any customer relying on this extension as their outbound or fallback?"""
+        """Is any customer relying on this extension as their outbound or fallback?
+
+        A default may have been written as bare digits before the extension moved
+        onto a number, so what is compared is the three digits - refusing to
+        delete one that is still dialled is the safe direction.
+        """
         extension = str(extension)
+        digits = extension_digits(extension)
+
+        def is_it(value) -> bool:
+            text = str(value or "")
+            return bool(text) and (text == extension or extension_digits(text) == digits)
+
         try:
             stored = json.loads(self.get_settings().get(self.CALL_DEFAULTS_KEY) or "{}")
         except (TypeError, ValueError):
             stored = {}
-        if any(str(entry.get(field) or "") == extension for entry in stored.values() if isinstance(entry, dict) for field in ("outbound", "fallback")):
+        if any(is_it(entry.get(field)) for entry in stored.values() if isinstance(entry, dict) for field in ("outbound", "fallback")):
             return True
         with self._connect() as db:
-            return bool(db.execute(
-                "SELECT 1 FROM settings WHERE `key` IN ('default_extension','inbound_fallback_extension') AND value=?",
-                (extension,),
-            ).fetchone())
+            rows = db.execute(
+                "SELECT value FROM settings WHERE `key` IN ('default_extension','inbound_fallback_extension')"
+            ).fetchall()
+        return any(is_it(row["value"]) for row in rows)
 
     def decrypt(self, ciphertext):
         from cryptography.fernet import Fernet
@@ -2375,7 +3157,13 @@ def register_admin(app, config, on_telephony_change=None):
             number = str(phone_number or target or "").strip()
             owner = next((row["owner_user_id"] for row in store.list_numbers() if row["number"] == number), None)
         elif target_type == "extension":
-            owner = next((row["owner_user_id"] for row in store.list_extensions() if str(row["extension"]) == str(target)), None)
+            # The console speaks the digits a customer reads; the row is stored
+            # under its key. A bare `901` still names the account-wide one.
+            wanted = str(target)
+            owner = next((row["owner_user_id"] for row in store.list_extensions() if str(row["extension"]) == wanted), None)
+            if owner is None and wanted.isdigit():
+                key = store.extension_key_for_digits(wanted)
+                owner = next((row["owner_user_id"] for row in store.list_extensions() if str(row["extension"]) == key), None)
         else:
             group = store.get_group(target)
             owner = group["owner_user_id"] if group else None
@@ -2554,7 +3342,10 @@ def register_admin(app, config, on_telephony_change=None):
             voicemail_messages = current_app.extensions["voicemail_store"].list_messages()
             visible_numbers = store.list_numbers()
         else:
-            voicemail_messages = [message for ext in owned_extensions for message in current_app.extensions["voicemail_store"].list_messages(ext)]
+            voicemail_messages = [
+                message for ext in owned_extensions
+                for message in current_app.extensions["voicemail_store"].list_messages(extension_mailbox(ext))
+            ]
             visible_numbers = store.list_numbers(user_id)
             for number in visible_numbers:
                 number.pop("provider", None)
@@ -2758,9 +3549,30 @@ def register_admin(app, config, on_telephony_change=None):
             data = request.get_json(silent=True) or {}
             owner = data.get("owner_user_id") if session.get("admin_role") == "admin" else int(session["admin_user_id"])
             owner_id = int(owner) if str(owner or "").isdigit() else None
-            number = str(data.get("extension", "")).strip()
-            previous_owner = store.get_extension_owner(number) if number else None
-            existed = any(row["extension"] == number for row in store.list_extensions())
+            requested = str(data.get("extension", "")).strip()
+            # `101` is not an identity any more: it names the line's own 101 when
+            # one row carries those digits, so an edit lands on that row instead
+            # of inventing an account-wide extension beside it. With a number
+            # named, the request already says which line it means.
+            scope = str(data.get("number") or "").strip() or extension_scope(requested)
+            if requested.isdigit() and not scope:
+                # Two of the account's lines may both hold 101: guessing one would
+                # put the device on the wrong desk, so the request has to say which
+                # number it means.
+                if owner_id is not None:
+                    holding = [row for row in store.list_extensions(owner_id) if row["digits"] == requested]
+                    if len(holding) > 1 and not any(not row["number"] for row in holding):
+                        raise ValueError(
+                            f"Extension {requested} is on more than one number: choose the number this extension belongs to"
+                        )
+                existing_key = store.extension_key_for_digits(requested, owner_id)
+                if existing_key:
+                    data = {**data, "extension": existing_key}
+                    requested = existing_key
+            scope = str(data.get("number") or "").strip() or extension_scope(requested)
+            canonical = extension_key(extension_digits(requested), scope) if extension_digits(requested) else requested
+            previous_owner = store.get_extension_owner(canonical) if canonical else None
+            existed = any(row["extension"] == canonical for row in store.list_extensions())
             result = store.save_extension(data, owner_id, session.get("admin_role") != "admin")
             # A moved extension changes who answers a number every phone already
             # dials, so it is recorded for the operator and the account that lost
@@ -2826,14 +3638,29 @@ def register_admin(app, config, on_telephony_change=None):
     @app.get("/admin/api/extensions/next")
     @login_required
     def admin_next_extension():
-        """The extension number a new line would get, for the console to prefill."""
-        return jsonify({"extension": store.next_extension_number()})
+        """The extension number a new line would get, for the console to prefill.
+
+        Naming the line answers for that line: every number starts its own set at
+        101, so the number the device will live on decides what comes next.
+        """
+        number = str(request.args.get("number") or "").strip()
+        owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+        if number and owner is None:
+            owner = store.get_number_owner(number)
+        return jsonify({
+            "extension": store.next_extension_number(owner, number),
+            "number": number,
+        })
 
     @app.delete("/admin/api/extensions/<extension>")
     @login_required
     def admin_delete_extension(extension):
         try:
-            if current_app.extensions["voicemail_store"].list_messages(extension):
+            row = store._extension_row(extension)
+            mailboxes = [extension]
+            if row:
+                mailboxes = [str(row["extension"]), extension_mailbox(row["extension"]), extension_digits(row["extension"])]
+            if any(current_app.extensions["voicemail_store"].list_messages(box) for box in dict.fromkeys(mailboxes)):
                 raise ValueError("Cannot delete an extension that still has voicemail messages")
             owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
             store.delete_extension(extension, owner); apply_change(); return jsonify({"ok": True})
@@ -2868,6 +3695,38 @@ def register_admin(app, config, on_telephony_change=None):
                 store.add_notification(owner, "number", "Phone number assigned", f"{result} is now available in your account.")
             apply_change(); return jsonify({"ok": True, "number": result, "provisioned": provisioned})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
+
+    @app.post("/admin/api/numbers/<path:number>/extensions")
+    @login_required
+    def admin_add_number_extension(number):
+        """Add the next extension to one phone number.
+
+        Every number's set starts at 101 and goes on from there, so this is the
+        console's "Add extension" on a line: the next free number on this very
+        number, with credentials and a default flow.
+        """
+        try:
+            data = request.get_json(silent=True) or {}
+            is_admin = session.get("admin_role") == "admin"
+            owner = int(session["admin_user_id"]) if not is_admin else None
+            if is_admin and str(data.get("owner_user_id", "")).isdigit():
+                owner = int(data["owner_user_id"])
+            if owner is None:
+                owner = store.get_number_owner(number)
+            if not is_admin and owner is not None and owner != int(session["admin_user_id"]):
+                raise ValueError("Number is not assigned to your account")
+            result = store.add_extension_to_number(number, owner, data)
+            store.sync_primary_flows(owner, result["extension"])
+            store.sync_auto_ivr(owner)
+            store.add_activity(
+                owner, int(session["admin_user_id"]), "extension.provisioned", "extension", result["extension"],
+                f"Extension {result['digits']} added to {number} with SIP credentials and a default call flow",
+            )
+            apply_change()
+            return jsonify({"ok": True, "extension": result["extension"], "created": True,
+                            "credentials": store.reveal_extension_credentials(result["extension"], owner)})
+        except (ValueError, TypeError) as exc:
+            return jsonify({"error": str(exc)}), 400
 
     @app.delete("/admin/api/numbers/<path:number>")
     @admin_required
@@ -2982,9 +3841,20 @@ def register_admin(app, config, on_telephony_change=None):
         })
 
     def mailbox_allowed(mailbox: str) -> bool:
-        return session.get("admin_role") == "admin" or any(
-            row["extension"] == str(mailbox) for row in store.list_extensions(int(session["admin_user_id"]))
-        )
+        """May this session hear that mailbox?
+
+        A mailbox is a key (`101@+13025550001`), its name on disk
+        (`101-13025550001`) or the digits a customer reads (`101`), so all three
+        are answered - and only for the account that owns the extension.
+        """
+        if session.get("admin_role") == "admin":
+            return True
+        wanted = str(mailbox)
+        for row in store.list_extensions(int(session["admin_user_id"])):
+            key = str(row["extension"])
+            if wanted in {key, extension_mailbox(key), extension_digits(key)}:
+                return True
+        return False
 
     @app.post("/admin/api/calls")
     @login_required
@@ -2998,7 +3868,12 @@ def register_admin(app, config, on_telephony_change=None):
         if not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
             return jsonify({"error": "Phone must be a valid E.164 number"}), 400
         extension = str(data.get("extension") or "").strip()
-        available = store.list_extensions() if session.get("admin_role") == "admin" else store.list_extensions(int(session["admin_user_id"]))
+        owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+        available = store.list_extensions(owner)
+        if extension.isdigit():
+            # The app and the API send the three digits their user dialled; the
+            # plan stores the key, so the digits are read as this account's.
+            extension = store.extension_key_for_digits(extension, owner) or extension
         if not any(row["extension"] == extension and row["active"] for row in available):
             return jsonify({"error": "Active extension is required"}), 400
         try:
@@ -3034,7 +3909,12 @@ def register_admin(app, config, on_telephony_change=None):
     def admin_default_number():
         data = request.get_json(silent=True) or {}
         extension = str(data.get("extension") or "").strip()
-        if session.get("admin_role") != "admin" and not any(row["extension"] == extension for row in store.list_extensions(int(session["admin_user_id"]))):
+        owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+        # `101` may name a line's own extension: resolve it to the key first, so
+        # the caller ID is set on the device the console was looking at.
+        if extension.isdigit():
+            extension = store.extension_key_for_digits(extension, owner) or extension
+        if owner is not None and not any(row["extension"] == extension for row in store.list_extensions(owner)):
             return jsonify({"error": "extension not found"}), 404
         try:
             store.set_default_outbound_number(extension, str(data.get("number") or "").strip())
@@ -3048,8 +3928,15 @@ def register_admin(app, config, on_telephony_change=None):
         mailbox = request.args.get("extension", "").strip() or None
         owned = None
         if session.get("admin_role") != "admin":
-            owned = [row["extension"] for row in store.list_extensions(int(session["admin_user_id"]))]
-            if mailbox and mailbox not in owned:
+            owner = int(session["admin_user_id"])
+            owned = [row["extension"] for row in store.list_extensions(owner)]
+            # The customer picks an extension; its messages live in that
+            # extension's own mailbox (`101-13025550001`).
+            if mailbox and mailbox.isdigit():
+                key = store.extension_key_for_digits(mailbox, owner)
+                if key:
+                    mailbox = extension_mailbox(key)
+            if mailbox and mailbox not in owned and extension_digits(mailbox) not in {extension_digits(ext) for ext in owned}:
                 return jsonify({"error": "mailbox not found"}), 404
         folder = request.args.get("folder", "").strip() or None
         try:
@@ -3480,9 +4367,12 @@ def register_admin(app, config, on_telephony_change=None):
         data = request.get_json(silent=True) or {}
         extension = str(data.get("extension") or session.get("admin_extension") or "")
         if session.get("admin_role") != "admin":
-            owned = store.list_extensions(int(session["admin_user_id"]))
+            owner = int(session["admin_user_id"])
+            owned = store.list_extensions(owner)
             if not extension and len(owned) == 1:
                 extension = owned[0]["extension"]
+            if extension.isdigit():
+                extension = store.extension_key_for_digits(extension, owner) or extension
             if not any(row["extension"] == extension for row in owned):
                 return jsonify({"error": "Extension not found"}), 404
         if not extension:

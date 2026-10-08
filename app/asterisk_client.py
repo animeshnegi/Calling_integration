@@ -132,14 +132,18 @@ class AsteriskClient:
 
     def create_local_leg(
         self, call_id: str, extension: str, employee_channel_id: str, caller_id_number: str | None = None,
+        endpoint: str | None = None,
     ) -> str:
         """Ring an extension on this platform instead of a carrier number.
 
         Used when the number being called is one of the customer's own: the
         lookup already resolved it to the extension it is set to ring, so the
-        call is an internal one and never leaves through the trunk.
+        call is an internal one and never leaves through the trunk. `endpoint`
+        overrides the channel to ring, the same way it does for an outbound call
+        - an extension that belongs to a line is reached on the PJSIP endpoint
+        named after its identity, not by the key that holds `@`.
         """
-        return self._customer_leg(call_id, f"PJSIP/{extension}", employee_channel_id, caller_id_number, 30)
+        return self._customer_leg(call_id, endpoint or f"PJSIP/{extension}", employee_channel_id, caller_id_number, 30)
 
     def list_channels(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/channels")

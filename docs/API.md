@@ -41,7 +41,12 @@ GET /api/v1/numbers?extension=101
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
-Returns configured DIDs with provider, owning `inbound_extension`, active state and `default_outbound`. Use this before presenting caller-ID choices in a CRM. It never returns provider credentials.
+Returns configured DIDs with provider, owning `inbound_extension`, active state and
+`default_outbound`. Use this before presenting caller-ID choices in a CRM. It never
+returns provider credentials. `inbound_extension` is the extension key
+(`101@+13025550001`), which is what tells the same digits on two of a customer's
+numbers apart; `?extension=101` narrows the list to the numbers whose extension
+carries those digits, and a key or a mailbox name works there too.
 
 ## Start outbound call
 
@@ -60,7 +65,14 @@ Idempotency-Key: <unique CRM request UUID>
 }
 ```
 
-`phone` must be E.164 format. `extension` must be a configured active three-digit extension. If omitted, the active configured default extension is used. `caller_id_number` is optional, but when supplied it must be an active DID assigned to that extension. Otherwise the extension's default/first assigned active number is used. Calls are rejected when the extension has no assigned callback number. See [`NUMBER_OWNERSHIP.md`](NUMBER_OWNERSHIP.md).
+`phone` must be E.164 format. `extension` is the extension the call is placed as - the
+three digits the person dials (`102`), or the key (`102@+13025550001`) when a customer
+has two numbers that both hold those digits. If omitted, the account's default
+extension is used. `caller_id_number` is optional, but when supplied it must be an
+active number assigned to that extension; otherwise the extension's own line is
+presented, falling back to the account's main line for an account-wide extension.
+Calls are rejected when the extension has no number to call out as. See
+[`NUMBER_OWNERSHIP.md`](NUMBER_OWNERSHIP.md).
 
 Send a unique `Idempotency-Key` (8–128 safe characters) for every user click/CRM job. The key is scoped to the API client for 24 hours. A successful replay returns HTTP 200 with the original call and `idempotent_replay: true`; a concurrent in-progress duplicate returns 409. This prevents network retries from originating duplicate paid calls.
 
@@ -242,6 +254,7 @@ Extension mailbox messages can be listed, played, marked read, and deleted throu
 ```text
 GET    /api/v1/voicemail/mailboxes
 GET    /api/v1/voicemails?extension=101&folder=inbox
+GET    /api/v1/voicemails?extension=101-13025550001&folder=inbox   (same mailbox, two lines hold a 101)
 GET    /api/v1/voicemails/101/inbox/msg0000/file
 POST   /api/v1/voicemails/101/inbox/msg0000/read
 DELETE /api/v1/voicemails/101/old/msg0000

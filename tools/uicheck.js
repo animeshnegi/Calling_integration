@@ -902,6 +902,78 @@ async function main() {
       `${hint.hidden} ${hint.textContent}`);
   }
 
+  /* -------------------------------------------- one set of numbers per line */
+  section('Every number carries its own extensions');
+  {
+    // The payload the server sends now: an extension is its key, and the line
+    // it belongs to is what tells two 101s apart. Two lines of one customer
+    // both start at 101, which is the whole point of the change.
+    const line1 = '+13025550001', line2 = '+13025550002';
+    const perNumber = {
+      ...JSON.parse(JSON.stringify(state)),
+      primary_extension: `101@${line1}`,
+      phone_numbers: [
+        { id: 1, number: line1, owner_user_id: 2, inbound_extension: `101@${line1}`, active: 1, default_outbound: 1, monthly_price_cents: 500, description: 'Main line' },
+        { id: 2, number: line2, owner_user_id: 2, inbound_extension: `101@${line2}`, active: 1, default_outbound: 0, monthly_price_cents: 500, description: 'Warehouse' },
+      ],
+      extensions: [
+        { extension: `101@${line1}`, key: `101@${line1}`, digits: '101', number: line1, mailbox: '101-13025550001', sip_username: 'ABC123_101', display_name: 'Front desk', owner_user_id: 2, active: 1 },
+        { extension: `102@${line1}`, key: `102@${line1}`, digits: '102', number: line1, mailbox: '102-13025550001', sip_username: 'ABC123_102', display_name: 'Accounts', owner_user_id: 2, active: 1 },
+        { extension: `101@${line2}`, key: `101@${line2}`, digits: '101', number: line2, mailbox: '101-13025550002', sip_username: 'ABC123_901', display_name: 'Warehouse desk', owner_user_id: 2, active: 1 },
+      ],
+      sip_accounts: [],
+      call_routes: [],
+      routing_flows: [],
+    };
+    const { w, d, seen } = boot({
+      state: perNumber,
+      routes: { '/admin/api/extensions/next': () => ({ extension: '102' }) },
+    });
+    await settle(340);
+    w.eval("showPage('extensions')");
+    await settle(260);
+    const rows = [...d.querySelectorAll('#extension-list .row')];
+    check('both lines of a customer are listed as extensions of their own number',
+      rows.length === 3
+      && rows.some(row => /101 · \+13025550001/.test(row.textContent))
+      && rows.some(row => /101 · \+13025550002/.test(row.textContent)),
+      rows.map(row => row.textContent.replace(/\s+/g, ' ').slice(0, 48)).join(' | '));
+
+    w.eval("showPage('numbers')");
+    await settle(260);
+    const cards = [...d.querySelectorAll('#number-list .row')];
+    check('each number says which of its own extensions answers it',
+      cards.length === 2
+      && /Rings 101/.test(cards[0].textContent) && /Rings 101/.test(cards[1].textContent)
+      && /2 extensions on this number/.test(cards[0].textContent)
+      && /1 extension on this number/.test(cards[1].textContent),
+      cards.map(row => row.textContent.replace(/\s+/g, ' ').slice(0, 90)).join(' | '));
+
+    // Adding a device to the second line: the dialog is a create on that very
+    // number, its line select is that number, and the suggestion is asked of
+    // that line - 102 on it, even though the first line already has a 102.
+    const addToSecond = cards[1].querySelector('[data-add-extension]');
+    check('a number offers its own "add extension" action',
+      !!addToSecond && addToSecond.dataset.addExtension === line2,
+      addToSecond && addToSecond.outerHTML.slice(0, 90));
+    addToSecond.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await settle(260);
+    const fields = d.getElementById('modal-fields');
+    check('the dialog opens on that number, not on the customer\'s first line',
+      fields.querySelector('#extension-number')?.value === line2,
+      fields.querySelector('#extension-number')?.value);
+    check('and that line\'s own next extension is suggested for it',
+      /102/.test(fields.querySelector('[name=extension]').value),
+      `${fields.querySelector('[name=extension]').value} after ${seen.filter(row => row.url === '/admin/api/extensions/next').length} suggestion request(s)`);
+    const typed = fields.querySelector('[name=extension]');
+    typed.value = '101';
+    typed.dispatchEvent(new w.Event('input', { bubbles: true }));
+    const note = d.getElementById('extension-note');
+    check('typing a number that line already holds is said before saving',
+      note.hidden === false && /101 is on this number already/.test(note.textContent),
+      `${note.hidden} ${note.textContent}`);
+  }
+
   /* --------------------------------------------------------- setup journey */
   section('Setup journey');
   {

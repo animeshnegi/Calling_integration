@@ -616,10 +616,23 @@ def test_registration_helpers_read_the_endpoint_names_a_phone_uses():
     live = {"101": "online", "AUMPNO_101": "offline", "device-desk302": "unavailable"}
     # A device account registers as its own username or as the generated device id.
     assert device_registration({"sip_username": "desk302", "extension": ""}, live) == "offline"
-    # An extension is online when its number or its SIP username is.
-    assert extension_registration({"extension": "101", "sip_username": "AUMPNO_101"}, live, []) == "online"
+    # An extension is online when the name it registers under is: the generated
+    # identity, or the plain three-digit name when it owns that name.
+    assert extension_registration(
+        {"extension": "101", "sip_username": "AUMPNO_101", "mailbox": "101"}, live, []
+    ) == "online"
+    # A line's own extension registers under its identity, not the digits.
+    assert extension_registration(
+        {"extension": "101@+13025550001", "sip_username": "AUMPNO_101", "mailbox": "101-13025550001"},
+        {"101": "online", "AUMPNO_101": "offline"}, [],
+    ) == "offline"
     # A device account that answers the extension counts as well.
-    accounts = [{"extension": "105", "sip_username": "AUMPNO_105"}]
-    assert extension_registration({"extension": "105", "sip_username": "X_105"}, {"AUMPNO_105": "online"}, accounts) == "online"
+    accounts = [{"extension": "105@+13025550001", "sip_username": "AUMPNO_105"}]
+    assert extension_registration(
+        {"extension": "105@+13025550001", "sip_username": "X_105", "mailbox": "105-13025550001"},
+        {"AUMPNO_105": "online"}, accounts,
+    ) == "online"
     # Asterisk answered, and nothing of this extension is signed in.
-    assert extension_registration({"extension": "105", "sip_username": "X_105"}, live, []) == "offline"
+    assert extension_registration(
+        {"extension": "105@+13025550001", "sip_username": "X_105", "mailbox": "105-13025550001"}, live, []
+    ) == "offline"

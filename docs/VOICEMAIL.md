@@ -2,6 +2,26 @@
 
 EngineerIP uses Asterisk `app_voicemail` with one mailbox per enabled extension. Mailbox definitions, PINs, message-waiting indicators, unanswered-call routing, browser playback, and CRM-facing APIs are integrated with the administration system.
 
+## Mailbox names
+
+An extension belongs to one phone number, and every number carries its own extension
+set from 101 up - so the mailbox is named after both, `<digits>-<number>`:
+
+```text
+101@+13025550001   (the key in `extensions`)
+        ↓
+101-13025550001    (the mailbox folder, the VoiceMail() context argument and the
+                    name the console shows)
+101                (an account-wide extension, and what a *97 caller types)
+```
+
+`mailbox_name()` does that translation in one place. The APIs and the console accept
+either form - the key, the mailbox name or the bare digits - and resolve them to the
+same folder, so a CRM that was written against `extension=101` keeps working.
+The extension's own pin is filed under the same name; a mailbox that has to be longer
+than the digits records where its pin came from (`voicemail_pin_aliases`), so entering
+either name at the `*97` prompt opens the same mailbox.
+
 ## Enable a mailbox
 
 1. Open `/admin` and select **Extensions**.
@@ -30,7 +50,10 @@ From a registered extension, dial:
 *97
 ```
 
-Asterisk opens `VoiceMailMain` in the private `engineerip` context. Enter the three-digit mailbox number and configured voicemail PIN when prompted. Users can record greetings and manage messages with Asterisk's voice menus.
+Asterisk opens `VoiceMailMain` in the private `engineerip` context. Enter the digits
+(`101`) and the configured PIN. When two of the account's numbers both hold those
+digits, enter the mailbox name instead (`101-13025550001`), which is what the
+credentials sheet shows; the pin is the same either way.
 
 ## Administration panel
 
@@ -68,6 +91,7 @@ Returns enabled extensions with display names, active state, and New, Old, Urgen
 ```http
 GET /api/v1/voicemails
 GET /api/v1/voicemails?extension=101
+GET /api/v1/voicemails?extension=101-13025550001
 GET /api/v1/voicemails?extension=101&folder=inbox
 ```
 
@@ -150,7 +174,7 @@ Store the Asterisk message identity (`mailbox`, `folder`, and `message`) only as
 
 ### `*97` cannot find the mailbox
 
-Confirm the mailbox is enabled and rendered in `voicemail.dynamic.conf`. At the prompt, enter the three-digit extension mailbox and its PIN.
+Confirm the mailbox is enabled and rendered in `voicemail.dynamic.conf`. At the prompt, enter the three-digit extension mailbox and its PIN - or `<digits>-<number>` when two of the account's lines hold the same digits. The name the console shows on the credentials sheet is the one that always works.
 
 ### Messages exist but admin playback returns 404
 
@@ -158,4 +182,7 @@ Check the `asterisk_voicemail` mounts, shared group permissions, message audio f
 
 ### No message-waiting light
 
-Not every softphone supports the same MWI behavior. Confirm the endpoint has `mailboxes=<extension>@engineerip`, subscription support is enabled, and the device is subscribed/registered.
+Not every softphone supports the same MWI behavior. Confirm the endpoint has
+`mailboxes=<mailbox>@engineerip` - the mailbox name, so `101-13025550001` for a device
+that belongs to a line - subscription support is enabled, and the device is
+subscribed/registered.

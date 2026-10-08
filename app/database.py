@@ -35,7 +35,10 @@ admin_users = Table("admin_users", metadata,
     Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
 settings = Table("settings", metadata, Column("key", String(100), primary_key=True), Column("value", Text, nullable=False), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 extensions = Table("extensions", metadata,
-    Column("extension", String(3), primary_key=True), Column("display_name", String(120), nullable=False, server_default=""),
+    # The key carries the number an extension belongs to (`101@+13025550001`)
+    # because every number has its own set from 101; a bare `101` is an
+    # account-wide extension.
+    Column("extension", String(64), primary_key=True), Column("display_name", String(120), nullable=False, server_default=""),
     Column("sip_username", String(80), nullable=False), Column("sip_password_enc", Text, nullable=False),
     Column("webrtc_enabled", Integer, nullable=False, server_default="0"), Column("recording_enabled", Integer, nullable=False, server_default="0"),
     Column("voicemail_enabled", Integer, nullable=False, server_default="0"), Column("voicemail_pin_enc", String(2048), nullable=False, server_default=""),
@@ -75,7 +78,7 @@ email_config = Table("email_config", metadata, Column("id", Integer, primary_key
     Column("from_email", String(254), nullable=False, server_default=""), Column("from_name", String(120), nullable=False, server_default="EIP Telephony Voicemail"),
     Column("enabled", Integer, nullable=False, server_default="0"), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 voicemail_deliveries = Table("voicemail_deliveries", metadata,
-    Column("fingerprint", String(128), primary_key=True), Column("mailbox", String(3), nullable=False), Column("recipient", String(254), nullable=False),
+    Column("fingerprint", String(128), primary_key=True), Column("mailbox", String(64), nullable=False), Column("recipient", String(254), nullable=False),
     Column("status", String(20), nullable=False, server_default="pending"), Column("attempts", Integer, nullable=False, server_default="0"),
     Column("last_error", Text), Column("delivered_at", DateTime), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 billing_invoices = Table("billing_invoices", metadata,
@@ -93,7 +96,7 @@ customer_sip_accounts = Table("customer_sip_accounts", metadata,
     Column("label", String(120), nullable=False), Column("sip_username", String(100), unique=True, nullable=False),
     Column("sip_password_enc", Text, nullable=False), Column("server", String(255), nullable=False),
     Column("port", Integer, nullable=False, server_default="5060"), Column("transport", String(10), nullable=False, server_default="udp"),
-    Column("phone_number", String(16), nullable=False, server_default=""), Column("extension", String(3), nullable=False, server_default=""),
+    Column("phone_number", String(16), nullable=False, server_default=""), Column("extension", String(64), nullable=False, server_default=""),
     Column("registration_status", String(20), nullable=False, server_default="offline"), Column("last_registered_at", DateTime),
     Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
 call_routes = Table("call_routes", metadata,
@@ -121,7 +124,7 @@ notifications = Table("notifications", metadata,
     Column("read_at", DateTime), Column("created_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 calls = Table("calls", metadata,
     Column("call_id", String(128), primary_key=True), Column("contact_id", String(255)), Column("member_id", String(255)),
-    Column("extension", String(3), nullable=False), Column("phone", String(16), nullable=False), Column("caller_id_number", String(16)),
+    Column("extension", String(64), nullable=False), Column("phone", String(16), nullable=False), Column("caller_id_number", String(16)),
     Column("provider", String(80)), Column("direction", String(20), nullable=False), Column("status", String(40), nullable=False),
     Column("answered", Integer, nullable=False, server_default="0"), Column("started_at", String(40), nullable=False),
     Column("answered_at", String(40)), Column("ended_at", String(40)), Column("duration_seconds", Integer, nullable=False, server_default="0"),

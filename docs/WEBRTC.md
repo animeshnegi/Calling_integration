@@ -53,7 +53,12 @@ hardware phone cannot share one:
 
 | Device | Endpoint | Media |
 | --- | --- | --- |
-| Hardware phone, Zoiper, desk phone | `PJSIP/<extension>` (UDP/TCP) | plain RTP, G.722 first |
+| Hardware phone, Zoiper, desk phone | `PJSIP/<endpoint name>` (UDP/TCP) | plain RTP, G.722 first |
+
+`<endpoint name>` is the digits (`101`) for the extension that owns the plain name,
+and `101-13025550001` for another line's 101: a PJSIP section name cannot contain
+`@`, so the key is never dialled - the store's `endpoint_name()` and the renderer's
+`_section_name()` decide the same name from the same rule.
 | Browser PWA | `PJSIP/<generated username>` (WSS, `webrtc=yes`) | DTLS-SRTP, ICE, RTCP-mux |
 
 A browser refuses an unencrypted RTP offer, and a hardware phone refuses a

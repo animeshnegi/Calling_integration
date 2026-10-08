@@ -109,12 +109,20 @@ builds everything else in one step:
 
 | Created | Where it lives |
 | --- | --- |
-| A three-digit extension (`next_extension_number()`, 101 upwards) | `extensions`, owned by the customer |
+| The line's next extension (`next_extension_number(owner, number)`, 101 upwards) | `extensions`, owned by the customer, stored as the key `101@+13025550001` |
 | Its SIP credentials (username = the extension, generated password) | `extensions.sip_password_enc`, revealed on demand |
-| The DID link, so inbound calls actually ring | `phone_numbers.inbound_extension` |
+| The DID link, so inbound calls actually ring | `phone_numbers.inbound_extension`, holds the key |
 | The default caller ID when that extension has none | `phone_numbers.default_outbound` |
 | A default flow for the number and one for the extension | `call_routes` and `routing_flows` |
 | An activity entry and a notification | `activity_history`, `notifications` |
+
+**Every number carries its own extension set, counting from 101 up**, so two of a
+customer's numbers may both hold a 101: one is `101@+13025550001`, the other
+`101@+13025550002`, and the key is what tells them apart in the database, in a
+call flow, in the voicemail mailbox (`101-13025550001`) and in the PJSIP endpoint
+name (a section name may not contain `@`). A row written before this change has a
+bare `101` and answers on every number of its account; such an *account-wide*
+extension is still offered in the dialog for the platform's own line.
 
 That default flow is the workflow the product promises, and `inbound_plan()` is the
 one place it is turned into a call plan, so the engine and the builder cannot drift:
@@ -125,16 +133,28 @@ one place it is turned into a call plan, so the engine and the builder cannot dr
 | A number tied to one extension | Just that extension | The call ends |
 | A number whose flow ends in voicemail | The ring step, then that mailbox | The caller leaves a message |
 
-Adding a device extends the primary number (`sync_primary_flows`), because a main
-line rings everyone - but only while that flow is still the generated one: a single
-ring step, the default 25s timeout, no group and only the customer's own extensions.
-The moment the customer designs something of their own, it is never rewritten.
+`POST /admin/api/numbers/<number>/extensions` is the console's **Add extension** on
+a line: it creates that line's next device, writes its default flow and answers with
+the key and the credentials. `GET /admin/api/extensions/next?number=…` suggests the
+number before that, so the dialog can prefill it, and `POST /admin/api/extensions`
+(create or edit) takes the digits plus the `number` they belong to - a bare request
+without a line still works when only one row carries those digits, and is refused
+with *"104 is on more than one of your numbers - choose the extension on the number
+it belongs to"* when it would have to guess.
 
-Extension numbers are the primary key and therefore unique platform-wide, so
-provisioning never hands a customer a number another customer already owns; the
-suggestion comes from `GET /admin/api/extensions/next`. The customers' own
-`POST /admin/api/extensions` behaves the same way: leave the password blank and the
-server generates one, then writes the extension's default flow.
+Adding a device extends the line it was added to (`sync_primary_flows`), because a
+main line rings its own devices - but only while that flow is still the generated
+one: a single ring step, the default 25s timeout, no group and only that line's own
+devices plus the account-wide ones. The moment the customer designs something of
+their own, it is never rewritten. A number's flow may only ring that number's
+extensions, so a menu on one line handing over 104 rings *that line's* 104.
+
+A line does not take another line's digits: the dialog names the number that already
+holds them as they are typed, and the store refuses the write as well. A digits-only
+reference is ambiguous once two of an account's lines hold the same number, and the
+API says so instead of guessing - digits and keys are both accepted everywhere
+(`extension_key_for_digits()` resolves a bare value, `resolve_extension(number,
+digits)` resolves it against the number a call is on).
 
 The SIP username is the identity the device authenticates with, so the platform owns
 it: it is six random upper-case letters, an underscore and the extension
@@ -155,6 +175,10 @@ lower case, digits and symbols, always at least one of each, 16 characters by de
 and never fewer than 12. `0/O` and `1/l/I` are left out so a password cannot be
 misread, and `;`, `#` and whitespace are never generated because the generated
 Asterisk configuration rejects a value containing them.
+
+`<extension>` in these endpoints is the key (`101@+13025550001`). The bare digits
+still work while a single row carries them, which is what an older console, a
+bookmark or an operator typing `101` sends.
 
 `GET /admin/api/extensions/<extension>/credentials` (owner or administrator) returns
 the effective credential: if a device account is linked to the extension, that account
@@ -215,6 +239,15 @@ customer data - the only thing rendered into it is the service address, substitu
 for `{{API_BASE}}` and `{{SIP_HOST}}`, so every example on the page names this
 deployment rather than a placeholder - and it links back to the console.
 
+## The extensions page, per number
+
+An extension row shows its digits as the badge and `101 · +13025550001` under the
+name, and a customer's page is grouped by the number (`Account-wide (every number)`
+for rows with none), each group headed by the line and the digits it holds. The
+numbers page is the other half of the same picture: every line shows the extensions
+it holds, how many there are, which one answers it, and an **Add extension** button
+that opens the dialog on *that* line with its next free number suggested.
+
 ## Call flows: one builder, three kinds of target
 
 A flow can belong to an extension or a group. **A number is not an editable target for
@@ -222,9 +255,10 @@ anyone**: a number's workflow does not live on the number - the extensions that 
 carry the flows, and the platform keeps the number's own ring plan in step with the
 devices a customer adds. An administrator picks from `#route-target`, which lists the
 chosen customer's extensions and groups; a **customer** navigates instead:
-`#route-number` lists their assigned numbers and `#route-extension` is one plain list of
-their active extensions (`extensionsForNumber`), with no line-by-line grouping - the
-number only decides which extension the builder opens on. A number with nothing wired to
+`#route-number` lists their assigned numbers and `#route-extension` lists their active
+extensions (`extensionsForNumber`) - labelled `101 · +13025550001` so the same digits on
+two lines are told apart, and the number decides which extension the builder opens on.
+Ring steps name those same labels, and a destination is stored as the extension's key. A number with nothing wired to
 it still offers the customer's own extensions, so the picker is never empty. Every entry
 point resolves a number key to `extension:<the one that answers it>` (`focusRouteTarget`),
 so a number row on the Numbers page opens the workflow of the extension that answers it

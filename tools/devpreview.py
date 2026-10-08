@@ -37,12 +37,14 @@ CUSTOMERS = [
     ("bluewave", "Bluewave Studio", "Tom Fischer", "Founder"),
 ]
 
-# extensions and how many numbers each customer gets
+# Every number carries its own extension set starting at 101: `lines` is what
+# each of the customer's numbers is seeded with, in order. The first extension of
+# a line is the one provisioning creates; the rest are added on top of it.
 LAYOUT = {
-    "meridian": dict(extensions=["101", "102"], numbers=2, group="Front desk"),
-    "northwind": dict(extensions=["201"], numbers=1, group=""),
-    "acme": dict(extensions=["301"], numbers=1, group=""),
-    "bluewave": dict(extensions=[], numbers=0, group=""),
+    "meridian": dict(lines=[["101", "102", "103"], ["101"]], group="Front desk"),
+    "northwind": dict(lines=[["101", "102"]], group=""),
+    "acme": dict(lines=[["101"]], group=""),
+    "bluewave": dict(lines=[], group=""),
 }
 
 
@@ -80,12 +82,7 @@ def seed(store):
     number_seq = 0
     for user_id, username, company, index in seeded:
         plan = LAYOUT[username]
-        for ext in plan["extensions"]:
-            store.save_extension({
-                "extension": ext, "display_name": f"{company} {ext}", "sip_password": f"secret-{ext}",
-                "voicemail_enabled": True, "voicemail_pin": "4321", "active": True,
-            }, user_id)
-        for position in range(plan["numbers"]):
+        for position, wanted in enumerate(plan["lines"]):
             number_seq += 1
             number = f"+1302555{number_seq:04d}"
             store.save_number({
@@ -94,17 +91,27 @@ def seed(store):
                 "owner_user_id": user_id, "monthly_price": "5.00",
                 "billing_cycle_day": 12, "billing_start": str(date.today().replace(day=1)), "active": True,
             })
-            extension = plan["extensions"][position % len(plan["extensions"])] if plan["extensions"] else ""
+            # Assigning a number builds the line: its own 101, credentials, the
+            # DID link and a default call flow. Extensions after the first are
+            # added to that number one by one, as the console's "Add extension"
+            # does, so 102 on one line is a different phone from 102 on another.
+            store.provision_number(user_id, number)
+            extension = wanted[0] if wanted else ""
+            for extra in wanted[1:]:
+                store.add_extension_to_number(number, user_id, {"display_name": f"{company} {extra}"})
             if not extension:
                 continue
-            # Link the DID and give the line its default call flow, exactly as
-            # auto-provisioning does in the console.
-            store.save_number({
-                "number": number, "provider": "IPComms", "description": f"{company} line {position + 1}",
-                "inbound_extension": extension, "default_outbound": position == 0,
-                "owner_user_id": user_id, "monthly_price": "5.00",
-                "billing_cycle_day": 12, "billing_start": str(date.today().replace(day=1)), "active": True,
-            })
+            # The digits the line's own set starts with (101 unless it was seeded
+            # differently), and the link provisioning wrote for it.
+            extension = next(
+                row["extension"] for row in store.extensions_on_number(user_id, number)
+                if row["digits"] == extension
+            )
+            for row in store.extensions_on_number(user_id, number):
+                store.save_extension({
+                    "extension": row["extension"], "number": number, "display_name": row["display_name"],
+                    "voicemail_enabled": True, "voicemail_pin": "4321", "active": True,
+                }, user_id)
             # Linked to an extension, so the store gives the account that
             # extension's identity: that is what the device authenticates with.
             account_id = store.save_sip_account({
@@ -121,22 +128,23 @@ def seed(store):
                         (account_id,),
                     )
 
-    # Call flows per customer: the main line rings every device, a number tied to
-    # one extension rings that one, and each extension has its own flow.
+    # Call flows per customer: each line rings its own extension set (which is
+    # what provisioning and "Add extension" keep in step), and every extension
+    # has its own flow. A group spans the whole account.
     for user_id, username, company, index in seeded:
         plan = LAYOUT[username]
-        if not plan["extensions"]:
+        if not plan["lines"]:
             continue
         extensions = [row["extension"] for row in store.list_extensions(user_id)]
-        primary = store.primary_extension(user_id)
         for row in store.list_numbers(user_id):
             if not row["inbound_extension"]:
                 continue
-            devices = extensions if row["inbound_extension"] == primary else [row["inbound_extension"]]
-            store.save_call_route(user_id, {
-                "phone_number": row["number"], "name": "Main call flow",
-                "route": store.default_number_route(devices), "active": True,
-            })
+            devices = [item["extension"] for item in store.extensions_on_number(user_id, row["number"], active_only=True)]
+            if devices:
+                store.save_call_route(user_id, {
+                    "phone_number": row["number"], "name": "Main call flow",
+                    "route": store.default_number_route(devices), "active": True,
+                })
             store.ensure_extension_flow(user_id, row["inbound_extension"], voicemail=True)
         if plan["group"]:
             group_id = store.save_group({
@@ -156,7 +164,7 @@ def seed(store):
     # that used to offer "Use for outbound" and then fail.
     meridian_id = next(user_id for user_id, username, _, _ in seeded if username == "meridian")
     store.save_number({
-        "number": "+13025550003", "provider": "IPComms", "description": "Meridian spare line (no extension yet)",
+        "number": "+13025550098", "provider": "IPComms", "description": "Meridian spare line (no extension yet)",
         "inbound_extension": "", "owner_user_id": meridian_id, "monthly_price": "5.00", "active": True,
     })
     store.save_number({
@@ -185,13 +193,19 @@ def seed(store):
     # Call history so the dashboard, analytics and recordings have content.
     service = store_app.extensions["telephony_service"]
     now = datetime.now()
+    # The extension a past call was answered on: written the way the history of a
+    # live deployment would be, with the key that was dialled.
+    def any_extension(digits: str) -> str:
+        rows = [row for row in store.list_extensions() if row["digits"] == digits]
+        return rows[0]["extension"] if rows else digits
+
     history = [
-        ("+919812345678", "101", "inbound", "completed", True, 184, 2),
-        ("+919812345679", "102", "inbound", "failed", False, 0, 5),
-        ("+14155550123", "101", "outbound", "completed", True, 96, 26),
-        ("+919812345680", "201", "inbound", "completed", True, 42, 30),
-        ("+919812345681", "101", "inbound", "completed", True, 311, 51),
-        ("+14155550124", "301", "outbound", "failed", False, 0, 74),
+        ("+919812345678", any_extension("101"), "inbound", "completed", True, 184, 2),
+        ("+919812345679", any_extension("102"), "inbound", "failed", False, 0, 5),
+        ("+14155550123", any_extension("101"), "outbound", "completed", True, 96, 26),
+        ("+919812345680", any_extension("103"), "inbound", "completed", True, 42, 30),
+        ("+919812345681", any_extension("101"), "inbound", "completed", True, 311, 51),
+        ("+14155550124", any_extension("101"), "outbound", "failed", False, 0, 74),
     ]
     for phone, extension, direction, status, answered, duration, hours_ago in history:
         started = now - timedelta(hours=hours_ago)

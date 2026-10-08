@@ -11,8 +11,26 @@ from pathlib import Path
 from typing import Any
 
 
-MAILBOX_RE = re.compile(r"^[1-9]\d{2}$")
+# A mailbox is the extension's three digits, or those digits and the number the
+# extension belongs to (`101-13025550001`). The number is what keeps two lines'
+# 101s - and their messages - apart.
+MAILBOX_RE = re.compile(r"^[1-9]\d{2}(?:-\+?[0-9]{5,20})?$")
+MAILBOX_GLOB_RE = re.compile(r"^[1-9]\d{2}(?:-[^/]*)?$")
 MESSAGE_RE = re.compile(r"^msg\d{4}$")
+
+
+def mailbox_name(mailbox: Any) -> str:
+    """The folder a mailbox lives in.
+
+    `101@+13025550001` is the extension key, `101-13025550001` is its mailbox;
+    the digits alone are what an older deployment - and a caller reading them off
+    a phone - says. All three name the same folder here.
+    """
+    text = str(mailbox or "").strip()
+    if "@" in text and "-" not in text.partition("@")[0]:
+        digits, _, scope = text.partition("@")
+        return f"{digits}-{scope}" if digits.isdigit() and scope else text
+    return text
 FOLDERS = {"inbox": "INBOX", "old": "Old", "urgent": "Urgent"}
 AUDIO_FORMATS = ("wav", "WAV", "gsm")
 
@@ -27,6 +45,7 @@ class VoicemailStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _folder(self, mailbox: str, folder: str) -> Path:
+        mailbox = mailbox_name(mailbox)
         if not MAILBOX_RE.fullmatch(str(mailbox)) or folder.lower() not in FOLDERS:
             raise ValueError("Invalid voicemail mailbox or folder")
         context_root = (self.root / self.context).resolve()
@@ -55,11 +74,17 @@ class VoicemailStore:
         return None
 
     def list_messages(self, mailbox: str | None = None, folder: str | None = None) -> list[dict[str, Any]]:
+        mailbox = mailbox_name(mailbox) if mailbox else mailbox
         if mailbox and not MAILBOX_RE.fullmatch(str(mailbox)):
             raise ValueError("Invalid voicemail mailbox")
         if folder and folder.lower() not in FOLDERS:
             raise ValueError("Invalid voicemail folder")
-        mailboxes = [str(mailbox)] if mailbox else [p.name for p in self.root.joinpath(self.context).glob("[1-9][0-9][0-9]") if p.is_dir()]
+        context_root = self.root.joinpath(self.context)
+        mailboxes = (
+            [str(mailbox)] if mailbox
+            else sorted(p.name for p in context_root.iterdir() if p.is_dir() and MAILBOX_GLOB_RE.fullmatch(p.name))
+            if context_root.is_dir() else []
+        )
         folder_keys = [folder.lower()] if folder else list(FOLDERS)
         result: list[dict[str, Any]] = []
         for box in sorted(mailboxes):

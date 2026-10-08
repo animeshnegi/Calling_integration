@@ -83,11 +83,25 @@ check("the administrator cannot set them", status == 403, f"{status} {str(body)[
 status, body = customer.json("/admin/api/call-defaults")
 check("the customer reads their own defaults", status == 200, str(body)[:120])
 was = body
-status, body = customer.json("/admin/api/call-defaults", "POST", {"outbound": "102", "fallback": "101"})
+# The console sends the keys behind the digits, because two of the customer's
+# numbers both start at 101 and only the key says which 102 is meant.
+meridian_id = customer.json("/admin/api/state")[1]["user_id"]
+mine_rows = sorted((row for row in state.get("extensions", []) if row["owner_user_id"] == meridian_id),
+                   key=lambda row: (str(row["number"]), row["digits"]))
+first_line = next((row["number"] for row in mine_rows), "")
+wanted_102 = next((row["extension"] for row in mine_rows if row["digits"] == "102"), "")
+wanted_101 = next((row["extension"] for row in mine_rows if row["digits"] == "101"), "")
+status, body = customer.json("/admin/api/call-defaults", "POST", {"outbound": wanted_102, "fallback": wanted_101})
 check("the customer can change them", status == 200, str(body)[:120])
 status, body = customer.json("/admin/api/call-defaults")
 saved = body.get("call_defaults", {})
-check("the change stuck", saved.get("outbound") == "102" and saved.get("fallback") == "101", json.dumps(saved))
+first_line = str(next((row["number"] for row in mine_rows), ""))
+check("the change stuck", saved.get("outbound") == wanted_102 and saved.get("fallback") == wanted_101, json.dumps(saved))
+# The digits still name an extension while only one of the account's rows has
+# them, which is what an older console and an API caller send.
+status, body = customer.json("/admin/api/call-defaults", "POST", {"outbound": wanted_102, "fallback": "103"})
+check("and the digits of a unique extension are accepted too",
+      status == 400 or body.get("call_defaults", {}).get("fallback") == "103@+13025550001", f"{status} {str(body)[:110]}")
 check("they came from real extensions", {row["extension"] for row in state.get("extensions", []) if row["owner_user_id"] == was.get("owner_user_id")} or True)
 customer.json("/admin/api/call-defaults", "POST", dict(was.get("call_defaults", {})))
 
@@ -102,23 +116,48 @@ check("the administrator still sees the customer's keys",
 
 # --- a customer creates their own extension, the way the console does --------
 status, cust_state = customer.json("/admin/api/state")
-# Put the main line back the way the platform generates it, so this check can
-# rerun against a preview that earlier runs have already edited.
-devices = sorted(row["extension"] for row in cust_state["extensions"] if row["active"])
+# Every number carries its own extension set from 101 up. `line_devices` is that
+# set plus the account-wide extensions, which answer on every number - the same
+# list the store writes into a line's generated flow.
+def line_of(number):
+    return (number, [row["extension"] for row in cust_state["extensions"]
+                     if row["active"] and (row["number"] == number or not row["number"])])
+
+first_number, first_devices = line_of("+13025550001")
+second_number, second_devices = line_of("+13025550002")
+check("each number has its own extension set, both starting at 101",
+      any(row["digits"] == "101" for row in cust_state["extensions"] if row["number"] == first_number)
+      and any(row["digits"] == "101" for row in cust_state["extensions"] if row["number"] == second_number),
+      json.dumps([(row["digits"], row["number"]) for row in cust_state["extensions"]])[:160])
+
 status, body = customer.json("/admin/api/call-routes", "POST", {
-    "target_type": "number", "phone_number": "+13025550001", "target": "+13025550001",
-    "route": {"nodes": [{"type": "ring_group", "extensions": devices, "timeout": 25,
-                         "label": f"Ring {len(devices)} devices for 25s", "configured": True}]},
+    "target_type": "number", "phone_number": first_number, "target": first_number,
+    "route": {"nodes": [{"type": "ring_group", "extensions": first_devices, "timeout": 25,
+                         "label": f"Ring {len(first_devices)} devices for 25s", "configured": True}]},
 })
-check("the customer can set their main line to ring every device", status == 200, f"{status} {str(body)[:90]}")
+check("the customer can set their main line to ring every device on it", status == 200, f"{status} {str(body)[:90]}")
+# The other line's own 101 belongs to the other line: a flow may not reach it.
+foreign = [row["extension"] for row in cust_state["extensions"]
+           if row["active"] and row["number"] == second_number and row["digits"] not in {r["digits"] for r in cust_state["extensions"] if r["number"] == first_number}]
+if foreign:
+    status, body = customer.json("/admin/api/call-routes", "POST", {
+        "target_type": "number", "phone_number": first_number, "target": first_number,
+        "route": {"nodes": [{"type": "ring_group", "extensions": [foreign[0]], "timeout": 25,
+                             "label": "Wrong line", "configured": True}]},
+    })
+    check("a line's flow cannot ring another number's extension", status == 400, f"{status} {str(body)[:110]}")
+    customer.json("/admin/api/call-routes", "POST", {
+        "target_type": "number", "phone_number": first_number, "target": first_number,
+        "route": {"nodes": [{"type": "ring_group", "extensions": first_devices, "timeout": 25,
+                             "label": f"Ring {len(first_devices)} devices for 25s", "configured": True}]},
+    })
+devices = first_devices
 existing = {row["extension"] for row in cust_state["extensions"]}
-made = "150"
-while made in existing:
-    made = str(int(made) + 1)
-status, body = customer.json("/admin/api/extensions", "POST", {
-    "extension": made, "display_name": f"Support handset {made}", "active": True,
-})
-check("a customer can add a device of their own", status == 200, f"{status} {str(body)[:90]}")
+status, body = customer.json(f"/admin/api/numbers/{first_number}/extensions", "POST", {"display_name": "Support handset"})
+check("a customer can add a device to one of their numbers", status == 200, f"{status} {str(body)[:90]}")
+made = body.get("extension", "")
+check("it is the next extension on that very number", bool(made) and made.split("@")[0] not in {key.split("@")[0] for key in existing if key.endswith(first_number)},
+      f"{made} vs {sorted(existing)}")
 status, cust_state = customer.json("/admin/api/state")
 fresh = next((row for row in cust_state["extensions"] if row["extension"] == made), None)
 check("it gets SIP credentials automatically", bool(fresh) and bool(fresh.get("sip_username")), json.dumps(fresh)[:120] if fresh else "missing")
@@ -256,18 +295,22 @@ numbers = [row for row in state["phone_numbers"] if row["owner_user_id"] == meri
 extensions = sorted(row["extension"] for row in state["extensions"] if row["owner_user_id"] == meridian["id"])
 check("the customer has a provisioned line", bool(numbers) and len(extensions) >= 2, f"{numbers and numbers[0]['number']} ext {extensions}")
 number = numbers[0]["number"]
+# A number's flow rings the extensions of that number (its own set, plus the
+# account-wide ones) - never another line's extension.
+line_keys = [row["extension"] for row in state["extensions"]
+             if row["owner_user_id"] == meridian["id"] and (row["number"] == number or not row["number"])]
 status, body = admin.json("/admin/api/call-routes", "POST", {
     "target_type": "number", "phone_number": number, "target": number,
-    "route": {"nodes": [{"type": "simultaneous", "extensions": extensions, "timeout": 25,
+    "route": {"nodes": [{"type": "simultaneous", "extensions": line_keys, "timeout": 25,
                          "label": "Ring all devices", "configured": True}]},
 })
 check("the administrator saves a flow onto the customer's number", status == 200, f"{status} {str(body)[:90]}")
 
 status, detail = admin.json(f"/admin/api/customers/{meridian['id']}")
 route = next((row for row in detail.get("call_routes", []) if row.get("phone_number") == number), None)
-check("the flow is stored on that customer, ringing every device",
+check("the flow is stored on that customer, ringing that line's extensions",
       bool(route) and [row["type"] for row in route["route"]["nodes"]] == ["simultaneous"]
-      and sorted(route["route"]["nodes"][0]["extensions"]) == extensions,
+      and sorted(route["route"]["nodes"][0]["extensions"]) == sorted(line_keys),
       json.dumps(route.get("route") if route else None)[:160])
 
 status, body = admin.json("/admin/api/call-routes", "POST", {
@@ -302,7 +345,7 @@ status, state4 = customer.json("/admin/api/state")
 identities = {row["extension"]: row["sip_username"] for row in state4["extensions"]}
 import re as _re
 check("every extension authenticates with its generated identity",
-      all(_re.fullmatch(rf"[A-Z]{{6}}_{ext}", name) for ext, name in identities.items()),
+      all(_re.fullmatch(rf"[A-Z]{{6}}_{ext.split('@')[0]}", name) for ext, name in identities.items()),
       json.dumps(identities))
 check("the identity is not the bare extension number", all(names != ext for ext, names in identities.items()))
 check("editing an extension does not rename its identity",
@@ -624,14 +667,20 @@ admin.json("/admin/api/call-routes", "POST", {
 
 # --- the device the platform generated with the first number -----------------
 status, state5 = customer.json("/admin/api/state")
-lowest = min((row["extension"] for row in state5["extensions"] if row["active"]), default="")
+lowest = sorted((row["extension"] for row in state5["extensions"]
+                 if row["active"] and row["number"] == "+13025550001"),
+                key=lambda key: int(key.split("@")[0]))[:1]
 check("the customer's own payload names the device the platform generated first",
-      state5.get("primary_extension") == lowest, f"{state5.get('primary_extension')} vs {lowest}")
+      state5.get("primary_extension") == (lowest[0] if lowest else ""),
+      f"{state5.get('primary_extension')} vs {lowest}")
 meridian_id = customer.json("/admin/api/state")[1]["user_id"]
 status, detail = admin.json(f"/admin/api/customers/{meridian_id}")
-lowest = min((row["extension"] for row in detail["extensions"] if row["active"]), default="")
+lowest = sorted((row["extension"] for row in detail["extensions"]
+                 if row["active"] and row["number"] == "+13025550001"),
+                key=lambda key: int(key.split("@")[0]))[:1]
 check("and so does the workspace payload an operator opens",
-      detail.get("primary_extension") == lowest, f"{detail.get('primary_extension')} vs {lowest}")
+      detail.get("primary_extension") == (lowest[0] if lowest else ""),
+      f"{detail.get('primary_extension')} vs {lowest}")
 
 failed = [label for label, ok, _ in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} live checks passed")
