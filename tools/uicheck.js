@@ -1415,6 +1415,81 @@ async function main() {
     check('and the extensions that do not are not',
       ![...web.d.querySelectorAll('#extension-credential-list .ext-card')]
         .some(node => /101/.test(node.querySelector('h3')?.textContent || '') && /Browser phone/.test(node.textContent)));
+
+    // The Softphone button: each extension card opens the softphone signed in as
+    // that extension, keyed by the extension key so two 101s are two buttons.
+    const keyOf = { '101': '101@+13025550001', '102': '102@+13025550002' };
+    const keyed = {
+      ...customerState,
+      extensions: customerState.extensions.map(row => ({
+        ...row, key: keyOf[row.extension] || `${row.extension}@+13025550001`,
+        number: row.extension === '102' ? '+13025550002' : '+13025550001', webrtc_enabled: 0,
+      })),
+    };
+    const credsUrl = `/admin/api/extensions/${encodeURIComponent('102@+13025550002')}/credentials`;
+    const softCredentials = {
+      credentials: {
+        key: '102@+13025550002', digits: '102', number: '+13025550002',
+        sip_username: 'MERIDIANHEALTH_102_13025550002', sip_password: 'soft-secret',
+        server: 'sip.engineerip.com', managed_address: true, port: 5060,
+      },
+    };
+    const plain = boot({ isAdmin: false, state: keyed, routes: { [credsUrl]: softCredentials } });
+    plain.w.eval("showPage('sipaccounts')");
+    await settle(320);
+    check('every extension card offers a Softphone button, keyed by the extension',
+      plain.d.querySelectorAll('#extension-credential-list [data-softphone]').length === keyed.extensions.length
+      && !!plain.d.querySelector('[data-softphone="102@+13025550002"]'));
+    check('the credentials button uses the same key, so a duplicate 101 cannot pick the wrong card',
+      !!plain.d.querySelector('[data-extension-credentials="102@+13025550002"]'));
+
+    const plainOpened = [];
+    plain.w.open = (...args) => { plainOpened.push(args); return { closed: false, postMessage() {} }; };
+    plain.d.querySelector('[data-softphone="102@+13025550002"]').click();
+    await settle(60);
+    check('without Browser phone the softphone is not opened, and the card says why',
+      plainOpened.length === 0 && /Tick Browser phone/.test(plain.d.body.textContent), String(plainOpened.length));
+
+    const soft = boot({
+      isAdmin: false,
+      state: { ...keyed, extensions: keyed.extensions.map(row => (row.key === '102@+13025550002' ? { ...row, webrtc_enabled: 1 } : row)) },
+      routes: { [credsUrl]: softCredentials },
+    });
+    soft.w.eval("showPage('sipaccounts')");
+    await settle(320);
+    const opened = [];
+    const consoleWindow = { closed: false, posted: [], postMessage(message, origin) { this.posted.push({ message, origin }); } };
+    soft.w.open = (...args) => { opened.push(args); return consoleWindow; };
+    soft.d.querySelector('[data-softphone="102@+13025550002"]').click();
+    await settle(80);
+    check('the softphone opens in its own window, on the phone page',
+      opened.length === 1 && opened[0][0] === '/phone?connect=extension', JSON.stringify(opened));
+    check('the extension is looked up by its key',
+      soft.seen.some(entry => entry.url === credsUrl && entry.method === 'GET'));
+    check('the sign-in is not in the address of the new window or anywhere in the page',
+      !/soft-secret/.test(JSON.stringify(opened)) && !/soft-secret/.test(soft.d.documentElement.outerHTML));
+    check('nothing is sent until the new window says it is ready', consoleWindow.posted.length === 0);
+
+    const fromWindow = (data, origin, source) => {
+      const event = new soft.w.Event('message');
+      Object.defineProperty(event, 'data', { value: data });
+      Object.defineProperty(event, 'origin', { value: origin });
+      Object.defineProperty(event, 'source', { value: source });
+      soft.w.dispatchEvent(event);
+    };
+    fromWindow({ type: 'eip-softphone:ready' }, 'https://evil.example.com', consoleWindow);
+    await settle(40);
+    check('a ready message from another origin gets no sign-in', consoleWindow.posted.length === 0);
+    fromWindow({ type: 'eip-softphone:ready' }, 'http://localhost', consoleWindow);
+    await settle(60);
+    const handed = consoleWindow.posted.find(entry => entry.message.type === 'eip-softphone:connect');
+    check('the sign-in is handed to that window once it is ready, on this origin only',
+      !!handed && handed.origin === 'http://localhost' && consoleWindow.posted.length === 1, JSON.stringify(consoleWindow.posted.length));
+    check('it carries the extension\'s own SIP identity, domain and WebSocket address',
+      !!handed && handed.message.sip_username === 'MERIDIANHEALTH_102_13025550002'
+      && handed.message.sip_password === 'soft-secret' && handed.message.domain === 'sip.engineerip.com'
+      && handed.message.wss === 'wss://sip.engineerip.com/ws' && handed.message.extension === '102@+13025550002',
+      JSON.stringify(handed && handed.message).slice(0, 200));
   }
 
   output += `\n${failures.length ? `${failures.length} CHECK(S) FAILED\n${failures.map(f => `  - ${f}`).join('\n')}\n` : 'ALL CHECKS PASSED'}\n`;

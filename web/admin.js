@@ -688,9 +688,9 @@ function renderExtensions() {
         ${x.webrtc_enabled ? tag('Browser phone', 'info') : ''}
       </div>
       <div class="row-actions">
-        <button class="btn ghost sm" data-extension-credentials="${x.extension}">Credentials</button>
+        <button class="btn ghost sm" data-extension-credentials="${esc(x.key || x.extension)}">Credentials</button>
         <button class="btn ghost sm" data-extension-flow="${x.extension}">Call flow</button>
-        <button class="btn ghost sm" data-edit-extension="${x.extension}">Edit</button>
+        <button class="btn ghost sm" data-edit-extension="${esc(x.key || x.extension)}">Edit</button>
         <button class="btn danger sm" data-delete-extension="${x.extension}">Delete</button>
       </div>
     </div>`;
@@ -1018,7 +1018,8 @@ function extensionCard(x, { wired, primary, index }) {
       ${kv('Device', deviceLine)}
     </div>
     <div class="ws-card-actions">
-      <button class="btn primary sm" data-extension-credentials="${esc(x.extension)}">Show credentials</button>
+      <button class="btn primary sm" data-softphone="${esc(x.key || x.extension)}" title="${x.webrtc_enabled ? 'Open the softphone signed in as this extension' : 'Tick Browser phone on this extension first'}">Softphone</button>
+      <button class="btn primary sm" data-extension-credentials="${esc(x.key || x.extension)}">Show credentials</button>
       <button class="btn ghost sm" data-extension-flow="${esc(x.extension)}">Call flow</button>
     </div>
   </article>`;
@@ -1064,7 +1065,7 @@ function renderExtensionCredentials() {
         <p>Register with username ${esc(x.sip_username || extensionDigitsOf(x.extension))} · ${esc(extensionLabel(x.extension))}${linked.length ? ` · answers ${esc(linked.join(', '))}` : ''}</p></div>
       <div class="tags">${String(x.extension) === primary ? tag('Primary', 'violet') : ''}${x.number ? '' : (x.owner_user_id ? tag('No number yet', 'warn') : tag('Platform line', 'info'))}${flows.length ? tag('Call flow ready', 'info') : tag('No call flow', 'off')}${x.voicemail_enabled ? tag('Voicemail on', 'on') : ''}</div>
       <div class="row-actions">
-        <button class="btn primary sm" data-extension-credentials="${x.extension}">Show credentials</button>
+        <button class="btn primary sm" data-extension-credentials="${esc(x.key || x.extension)}">Show credentials</button>
         <button class="btn ghost sm" data-extension-flow="${x.extension}">Call flow</button>
       </div>
     </div>`;
@@ -2284,6 +2285,56 @@ async function showExtensionCredentials(extension) {
   } catch (error) { notify(error.message, true); }
 }
 
+/* The softphone (/phone) signed in as one extension. The window opens at once,
+   from the click itself, so the browser does not block it. The extension's
+   sign-in then goes to that window by postMessage - never into a URL, the
+   history or storage - and only after the window says it is ready. */
+const softphoneWindows = [];
+
+async function openSoftphone(key) {
+  const row = (state.extensions || []).find(x => (x.key || x.extension) === key);
+  if (!row) return notify('That extension is no longer on this account', true);
+  if (!row.webrtc_enabled) {
+    return notify('Tick Browser phone on this extension first - the softphone signs in over the browser connection', true);
+  }
+  const win = window.open('/phone?connect=extension', `eip-softphone-${key.replace(/[^A-Za-z0-9]/g, '-')}`, 'width=420,height=780');
+  if (!win) return notify('Your browser blocked the softphone window - allow pop-ups for this site', true);
+  const entry = { win, ready: false, payload: null };
+  softphoneWindows.splice(0, softphoneWindows.length, ...softphoneWindows.filter(item => !item.win.closed), entry);
+  try {
+    const { credentials } = await api(`/admin/api/extensions/${encodeURIComponent(key)}/credentials`);
+    if (!credentials.server || !credentials.managed_address) {
+      win.close();
+      return notify('Set the service host in Settings first, so a browser can reach the platform', true);
+    }
+    entry.payload = {
+      type: 'eip-softphone:connect',
+      extension: credentials.key || key,
+      label: `${credentials.digits} · ${credentials.number || ''}`.replace(/ · $/, ''),
+      sip_username: credentials.sip_username,
+      sip_password: credentials.sip_password,
+      domain: credentials.server,
+      wss: `wss://${credentials.server}/ws`,
+    };
+    sendSoftphone(entry);
+  } catch (error) {
+    win.close();
+    notify(error.message, true);
+  }
+}
+
+function sendSoftphone(entry) {
+  if (entry.ready && entry.payload && !entry.win.closed) entry.win.postMessage(entry.payload, location.origin);
+}
+
+window.addEventListener('message', event => {
+  if (event.origin !== location.origin || event.data?.type !== 'eip-softphone:ready') return;
+  const entry = softphoneWindows.find(item => item.win === event.source);
+  if (!entry) return;
+  entry.ready = true;
+  sendSoftphone(entry);
+});
+
 /* Rotate the password a device registers with, then show the new one. */
 async function rotateExtensionPassword(extension, password = "") {
   try {
@@ -3258,8 +3309,8 @@ function wsDevices() {
             </div></div>
         </div>
         <div class="ws-card-actions">
-          <button class="btn primary sm" data-extension-credentials="${esc(x.extension)}">Credentials</button>
-          <button class="btn ghost sm" data-edit-extension="${esc(x.extension)}">Edit</button>
+          <button class="btn primary sm" data-extension-credentials="${esc(x.key || x.extension)}">Credentials</button>
+          <button class="btn ghost sm" data-edit-extension="${esc(x.key || x.extension)}">Edit</button>
         </div>
       </article>`;
     }).join('');
@@ -3577,7 +3628,8 @@ document.addEventListener('click', async event => {
   }
 
   if (d.addExtension) return addExtensionToNumber(d.addExtension);
-  if (d.editExtension) return openModal('extension', state.extensions.find(x => x.extension === d.editExtension));
+  if (d.editExtension) return openModal('extension', state.extensions.find(x => (x.key || x.extension) === d.editExtension));
+  if (d.softphone) return openSoftphone(d.softphone);
   if (d.extensionCredentials) return showExtensionCredentials(d.extensionCredentials);
   if (d.extensionFlow) {
     showPage('routing');

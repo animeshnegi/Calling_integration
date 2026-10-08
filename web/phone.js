@@ -3,16 +3,21 @@ const input=$("number-input"),display=$("dial-display"),hint=$("dial-hint"),stat
 const installBtn=$("install-btn"),remoteAudio=$("remote-audio"),settingsDialog=$("settings-dialog"),loginScreen=$("login-screen"),phoneApp=$("phone-app");
 let deferredInstall=null,ua=null,currentSession=null,currentCallAnswered=false,currentCallStatus="completed",callStartedAt=null,timer=null,muted=false,held=false;
 
+/* A sign-in the admin console handed this window for one extension. It lives in
+   memory only: nothing from it is written to storage. */
+let handoff=null;
 const storeKey="eip-phone-settings";
 const secretKey="eip-phone-sip-password";
 const recentsKey="eip-phone-recents";
 const contactsKey="eip-phone-contacts";
 
 function settings(){
+  if(handoff)return {...handoff};
   const publicSettings=JSON.parse(localStorage.getItem(storeKey)||"{}");
   return {...publicSettings,password:sessionStorage.getItem(secretKey)||""};
 }
 function saveSettings(s){
+  if(handoff){handoff={...s};return}
   const publicSettings={extension:s.extension||"",username:s.username||"",domain:s.domain||"",wss:s.wss||"",apiToken:s.apiToken||""};
   localStorage.setItem(storeKey,JSON.stringify(publicSettings));
   if(s.password)sessionStorage.setItem(secretKey,s.password);
@@ -293,7 +298,7 @@ $("connect-btn").onclick=async()=>{
   try{await connectSip(s);$("settings-status").className="settings-status ok";$("settings-status").textContent="Phone connected."}catch(err){$("settings-status").className="settings-status error";$("settings-status").textContent=err.message}
 };
 $("logout-btn").onclick=()=>{
-  try{if(ua)ua.stop()}catch{}ua=null;currentSession=null;sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
+  try{if(ua)ua.stop()}catch{}ua=null;handoff=null;currentSession=null;sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
 };
 $("refresh-recents").onclick=loadRecents;
 $("contacts-btn").onclick=()=>nav("contacts-view");
@@ -311,12 +316,35 @@ installBtn.onclick=async()=>{if(!deferredInstall)return;deferredInstall.prompt()
 window.addEventListener("appinstalled",()=>installBtn.classList.add("hidden"));
 if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js").catch(()=>{});
 
+const fromConsole=new URLSearchParams(location.search).get("connect")==="extension"&&!!window.opener;
 const saved=settings();
 $("login-username").value=saved.username||"";
 $("login-domain").value=saved.domain||"";
 $("login-wss").value=saved.wss||"";
 renderContacts();loadRecents();showNumber();setState("Offline");
-if(saved.username&&saved.domain&&saved.password){
+if(!fromConsole&&saved.username&&saved.domain&&saved.password){
   $("login-status").textContent="Previous SIP session found. Reconnecting…";
   connectSip(saved).catch(()=>showLogin("Please sign in again.",true));
+}
+
+/* Opened from the admin console's Softphone button (`/phone?connect=extension`).
+   The console hands this window one extension's sign-in by postMessage - never in
+   the URL - and only from the window that opened it. A previous phone session in
+   this browser is not reused. */
+if(fromConsole){
+  window.addEventListener("message",event=>{
+    if(event.source!==window.opener||event.origin!==location.origin)return;
+    const m=event.data||{};
+    if(m.type==="eip-softphone:connect"&&m.sip_username&&m.sip_password)startConsoleSession(m);
+  });
+  window.opener.postMessage({type:"eip-softphone:ready"},location.origin);
+}
+async function startConsoleSession(m){
+  const label=m.label||m.sip_username;
+  handoff={extension:m.extension||"",username:m.sip_username,password:m.sip_password,domain:m.domain,wss:m.wss||defaultWss(m.domain),apiToken:""};
+  try{if(ua)ua.stop()}catch{}ua=null;
+  setLoginBusy(true);$("login-status").className="login-status";$("login-status").textContent=`Signing in as ${label}…`;
+  try{await connectSip(handoff);document.title=`Softphone · ${label}`}
+  catch(err){showLogin(err.message||"Could not sign this extension in.",true)}
+  finally{setLoginBusy(false)}
 }

@@ -7,6 +7,7 @@ link and default call flows, all of them editable afterwards.
 """
 import json
 import re
+from urllib.parse import quote
 from pathlib import Path
 
 import pytest
@@ -1674,3 +1675,50 @@ def test_a_lines_device_is_dialled_by_its_endpoint_name(tmp_path):
     service, _ = ring_engine(app)
     assert service.dial_endpoint("101@+13025550002", "+13025550002") == "PJSIP/101-13025550002"
     assert service.dial_endpoint("101@+13025550001", "+13025550001") == "PJSIP/101-13025550001"
+
+
+def test_extensions_run_from_101_to_999_only_and_the_card_softphone_key_is_unique(tmp_path):
+    """Manual entry and auto-numbering use 101-999 on every number; 100 is refused.
+
+    The console's Softphone button and the credentials button both address an
+    extension by its key (`101@+13025550002`), so two 101s are two different cards.
+    """
+    app = make_app(tmp_path)
+    admin = admin_client(app)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    for number in ("+13025550001", "+13025550002"):
+        response = admin.post("/admin/api/numbers", json={
+            "number": number, "provider": "TestProvider", "owner_user_id": user_id,
+            "inbound_extension": "auto", "auto_provision": True,
+        })
+        assert response.status_code == 200, response.json
+
+    for refused in ("100", "99", "1000", "0"):
+        response = admin.post("/admin/api/numbers/+13025550002/extensions", json={"extension": refused})
+        assert response.status_code == 400, (refused, response.json)
+        assert "101 to 999" in response.json["error"], response.json
+        with pytest.raises(ValueError, match="101 to 999"):
+            store.add_extension_to_number("+13025550002", user_id, {"extension": refused})
+
+    # The second line's 101 was provisioned with the number, so 101 there is a clash,
+    # while 102 and 999 are both inside the range.
+    clash = admin.post("/admin/api/numbers/+13025550002/extensions", json={"extension": "101"})
+    assert clash.status_code == 400 and "already answers" in clash.json["error"], clash.json
+    for accepted in ("102", "999"):
+        response = admin.post("/admin/api/numbers/+13025550002/extensions", json={"extension": accepted})
+        assert response.status_code == 200, (accepted, response.json)
+        assert response.json["extension"] == f"{accepted}@+13025550002"
+
+    # Auto-numbering never starts below 101, and the second line's 101 is its own device.
+    assert store.next_extension_number(user_id, "+13025550001") == "102"
+    assert store.next_extension_number(user_id, "+13025550002") == "103"
+    first = key_on(store, user_id, "+13025550001", "101")
+    second = key_on(store, user_id, "+13025550002", "101")
+    assert (first, second) == ("101@+13025550001", "101@+13025550002")
+
+    # The credentials behind each card are that line's own identity.
+    for key, expected in ((first, "13025550001"), (second, "13025550002")):
+        response = admin.get(f"/admin/api/extensions/{quote(key, safe='')}/credentials")
+        assert response.status_code == 200, (key, response.json)
+        assert response.json["credentials"]["sip_username"].endswith(f"_101_{expected}"), response.json

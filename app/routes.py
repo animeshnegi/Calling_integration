@@ -72,7 +72,7 @@ def require_token(scope_or_fn=None):
 def _configured_default_extension(service) -> str:
     if service.settings_store:
         configured = str(service.settings_store.get_settings().get("default_extension", "")).strip()
-        if configured.isdigit() and 100 <= int(configured) <= 999:
+        if configured.isdigit() and 101 <= int(configured) <= 999:
             if any(row["extension"] == configured and row["active"] for row in service.settings_store.list_extensions()):
                 return configured
     return service.config.DEFAULT_EXTENSION
@@ -113,8 +113,8 @@ def register_routes(app, service):
         if not E164_RE.fullmatch(phone):
             return None, (jsonify({"error": "phone must be a valid E.164 number"}), 400)
         digits = extension_digits(extension)
-        if not digits.isdigit() or not 100 <= int(digits) <= 999:
-            return None, (jsonify({"error": "extension must be a 3-digit number"}), 400)
+        if not digits.isdigit() or not 101 <= int(digits) <= 999:
+            return None, (jsonify({"error": "Extension must be a 3-digit number from 101 to 999"}), 400)
         # The digits name the number's own extension - `104` is the 104 of the line
         # it is on - so a request that names them while two lines both hold them is
         # refused instead of guessed, and the caller names the number (`104@+1…`).

@@ -116,7 +116,7 @@ builds everything else in one step:
 | A default flow for the number and one for the extension | `call_routes` and `routing_flows` |
 | An activity entry and a notification | `activity_history`, `notifications` |
 
-**Every number carries its own extension set, counting from 101 up**, so two of a
+**Every number carries its own extension set, counting from 101 up to 999** (manual entry and auto-numbering both refuse 100 and anything above 999), so two of a
 customer's numbers may both hold a 101: one is `101@+13025550001`, the other
 `101@+13025550002`, and the key is what tells them apart in the database, in a
 call flow, in the voicemail mailbox (`101-13025550001`) and in the PJSIP endpoint
@@ -184,6 +184,8 @@ Asterisk configuration rejects a value containing them.
 `<extension>` in these endpoints is the key (`101@+13025550001`). The bare digits
 still work while a single row carries them, which is what an older console, a
 bookmark or an operator typing `101` sends.
+
+Each extension card in the customer console has a **Softphone** button. It opens `/phone` in a new window signed in as that extension (`?connect=extension`). Once the window reports ready, the console hands the sign-in to it with `postMessage`, and only to that window and only on the console's own origin. The SIP password never goes in a URL, is not stored on the server, and the new window keeps it in memory only, so a stored session in the same browser is not reused. The button is available only on an extension with **Browser phone** (`webrtc_enabled`) switched on; on any other extension it explains what to switch on instead.
 
 `GET /admin/api/extensions/<extension>/credentials` (owner or administrator) returns
 the effective credential: if a device account is linked to the extension, that account

@@ -132,7 +132,7 @@ class TelephonyConfigSync:
 
     @staticmethod
     def _valid_extension(value: str) -> bool:
-        return value.isdigit() and 100 <= int(value) <= 999
+        return value.isdigit() and 101 <= int(value) <= 999
 
     def _fallback_digits(self, configured: str) -> str:
         """The digits an operator configured as a last resort, as digits.

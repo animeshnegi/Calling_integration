@@ -206,7 +206,7 @@ function shellWorker({ offline = false } = {}) {
 
 /* The page as a browser receives it, with phone.js executed for real. */
 function boot({ settings = null, recents = null, contacts = null, password = null,
-                clipboard = '', prompts = [], fetchImpl = null } = {}) {
+                clipboard = '', prompts = [], fetchImpl = null, search = '', opener = null } = {}) {
   const page = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8')
     .replace(/<script[^>]*jssip[^>]*><\/script>/i, '');
   const errors = [];
@@ -216,9 +216,10 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
   const sip = makeFakeSip();
   const dom = new JSDOM(page, {
     runScripts: 'dangerously', pretendToBeVisual: true, virtualConsole,
-    url: 'https://phone.example.com/phone',
+    url: `https://phone.example.com/phone${search}`,
     beforeParse(window) {
       window.JsSIP = sip.api;
+      if (opener) Object.defineProperty(window, 'opener', { value: opener, configurable: true });
       /* jsdom seams: media, clipboard, prompts and a Date the test can move. */
       window.HTMLMediaElement.prototype.play = () => Promise.resolve();
       Object.defineProperty(window.HTMLMediaElement.prototype, 'srcObject', {
@@ -954,6 +955,69 @@ async function main() {
     const shipped = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
     check('a release can replace the shell by bumping the cache name',
       /const CACHE = "eip-phone-v\d+";/.test(shipped));
+
+    section('The softphone the admin console opens for one extension');
+    const CONNECT = '?connect=extension';
+    const ORIGIN = 'https://phone.example.com';
+    const consoleWindow = { posts: [], postMessage(message, origin) { this.posts.push({ message, origin }); } };
+    const fromWindow = (env, data, origin, source) => {
+      const event = new env.w.Event('message');
+      Object.defineProperty(event, 'data', { value: data });
+      Object.defineProperty(event, 'origin', { value: origin });
+      Object.defineProperty(event, 'source', { value: source });
+      env.w.dispatchEvent(event);
+    };
+    const handoffMessage = (password = 'handed-secret') => ({
+      type: 'eip-softphone:connect', extension: '101@+13025550002', label: '101 · +13025550002',
+      sip_username: 'MERIDIANHEALTH_101_13025550002', sip_password: password,
+      domain: 'sip.engineerip.com', wss: 'wss://sip.engineerip.com/ws',
+    });
+
+    const stored = boot({
+      search: CONNECT, opener: consoleWindow,
+      settings: { username: 'OLD_201', domain: 'sip.engineerip.com', wss: '' }, password: 'stored-secret',
+    });
+    await settle(40);
+    check('the window says it is ready to the console that opened it',
+      consoleWindow.posts.some(entry => entry.message.type === 'eip-softphone:ready' && entry.origin === ORIGIN),
+      JSON.stringify(consoleWindow.posts));
+    check('a stored phone session is not signed in from the console window', stored.sip.instances.length === 0);
+
+    const clean = boot({ search: CONNECT, opener: consoleWindow });
+    await settle(40);
+    fromWindow(clean, handoffMessage(), 'https://evil.example.com', consoleWindow);
+    fromWindow(clean, handoffMessage(), ORIGIN, { posted: true });
+    await settle(40);
+    check('a sign-in from another origin, or from another window, is ignored', clean.sip.instances.length === 0);
+
+    fromWindow(clean, handoffMessage(), ORIGIN, consoleWindow);
+    await settle(60);
+    const ua = clean.sip.instances[0];
+    check('the console\'s sign-in registers that extension\'s own SIP identity',
+      !!ua && ua.config.uri === 'sip:MERIDIANHEALTH_101_13025550002@sip.engineerip.com', ua && ua.config.uri);
+    check('over the WebSocket address the console gave', clean.sip.sockets[0] === 'wss://sip.engineerip.com/ws', clean.sip.sockets[0]);
+    check('a registered console window shows the dialer', shown(clean.d, 'phone-app') && !shown(clean.d, 'login-screen'));
+    check('the window is titled for the extension', /Softphone · 101 · \+13025550002/.test(clean.d.title), clean.d.title);
+    check('the sign-in is never written to local storage', clean.w.localStorage.getItem('eip-phone-settings') === null,
+      clean.w.localStorage.getItem('eip-phone-settings'));
+    check('nor to session storage', clean.w.sessionStorage.getItem('eip-phone-sip-password') === null);
+
+    const denied = boot({ search: CONNECT, opener: consoleWindow });
+    await settle(40);
+    fromWindow(denied, handoffMessage('bad-password'), ORIGIN, consoleWindow);
+    await settle(60);
+    check('a rejected extension sign-in returns to the sign-in screen with the reason',
+      shown(denied.d, 'login-screen') && /Rejected/.test(denied.d.getElementById('login-status').textContent),
+      denied.d.getElementById('login-status').textContent);
+    check('and keeps that extension\'s username for another attempt',
+      denied.d.getElementById('login-username').value === 'MERIDIANHEALTH_101_13025550002',
+      denied.d.getElementById('login-username').value);
+    check('and writes nothing to storage', denied.w.localStorage.getItem('eip-phone-settings') === null);
+
+    const plainOpen = boot({});
+    await settle(40);
+    check('opened without the console, the phone signs in from its own form as before',
+      plainOpen.sip.instances.length === 0 && shown(plainOpen.d, 'login-screen') && !plainOpen.w.opener);
   }
 
   output += `\n${failures.length ? `${failures.length} CHECK(S) FAILED\n${failures.map(f => `  - ${f}`).join('\n')}\n` : 'ALL CHECKS PASSED'}\n`;

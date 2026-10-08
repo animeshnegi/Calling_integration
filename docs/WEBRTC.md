@@ -45,6 +45,13 @@ The browser softphone connects directly to Asterisk over SIP WebSocket and WebRT
 
 Asterisk renders a `transport-wss` PJSIP transport and, **only for extensions whose WebRTC switch is on**, a second WebRTC-capable endpoint under the extension's generated technical SIP username (for example `MERIDIAN_101_13025550001`) while leaving the canonical UDP/TCP endpoint - and the SIP registration hardware phones already use - unchanged. The alias exists only when `webrtc_enabled = true`: **checking WebRTC never disables normal SIP.** This follows Asterisk's WebRTC configuration model: a WSS transport plus an endpoint with `webrtc=yes`, which enables the required DTLS-SRTP, ICE, RTCP-mux and AVPF settings. See the official Asterisk WebRTC guidance.
 
+### Opening the softphone from the console
+
+Each extension card in the customer console has a **Softphone** button. It opens `/phone?connect=extension` in a new window, signed in as *that* extension - the card's own key (`101@+13025550002`) names the identity, so two 101s on two numbers open two different softphones. The page reports ready to the console that opened it; the console answers with the extension's SIP username, password, domain and WebSocket address over `postMessage`, checking origin and source on both sides. The password never appears in a URL or in server storage, and the new window keeps the sign-in in memory only: a phone session saved in the same browser is not picked up.
+
+The Softphone button needs **Browser phone** (`webrtc_enabled`) on that extension. Without it the browser endpoint does not exist, so the console says so instead of opening a phone that cannot register.
+It also needs the platform's **service host** set in Settings, because the phone registers with that address. Without it the console closes the window and says so, rather than handing over a server the browser cannot reach.
+
 ## Answering in the browser
 
 The two endpoints hold two media modes, and the endpoint a call is placed

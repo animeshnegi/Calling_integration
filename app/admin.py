@@ -1115,8 +1115,8 @@ class SettingsStore:
         # them gets the next free one. Either way the pair (number, digits) is
         # what an extension is, so a clash is on this very line.
         wanted = extension_digits(payload.get("extension") or payload.get("digits") or "")
-        if wanted and not (wanted.isdigit() and 100 <= int(wanted) <= 999):
-            raise ValueError("Extension must be a 3-digit number from 100 to 999")
+        if wanted and not (wanted.isdigit() and 101 <= int(wanted) <= 999):
+            raise ValueError("Extension must be a 3-digit number from 101 to 999")
         if wanted and any(row["digits"] == wanted for row in self.extensions_on_number(owner, number)):
             raise ValueError(f"Extension {wanted} already answers on {number}")
         digits = wanted or self.next_extension_number(owner, number)
@@ -1260,8 +1260,8 @@ class SettingsStore:
         """
         requested = str(data.get("extension", "")).strip()
         digits = extension_digits(requested)
-        if not digits.isdigit() or not 100 <= int(digits) <= 999:
-            raise ValueError("Extension must be a 3-digit number from 100 to 999")
+        if not digits.isdigit() or not 101 <= int(digits) <= 999:
+            raise ValueError("Extension must be a 3-digit number from 101 to 999")
         number_text = extension_scope(requested) or str(data.get("number") or "").strip()
         number_row = None
         if number_text:
@@ -1522,7 +1522,7 @@ class SettingsStore:
     @classmethod
     def generate_sip_username(cls, extension: str, number: Any = "", label: str = "") -> str:
         """`MERIDIAN_101_13025550001` - the account, the extension, its line."""
-        digits = extension_digits(extension) or "100"
+        digits = extension_digits(extension) or "101"
         stem = re.sub(r"[^A-Za-z0-9]", "", str(label or "")).upper()[:24]
         if not stem:
             stem = "".join(secrets.choice(string.ascii_uppercase) for _ in range(6))
@@ -3654,7 +3654,7 @@ class SettingsStore:
                 if not 1 <= port <= 65535:
                     raise ValueError("SIP port must be between 1 and 65535")
             if key in {"default_extension", "inbound_fallback_extension"}:
-                if not text.isdigit() or not 100 <= int(text) <= 999:
+                if not text.isdigit() or not 101 <= int(text) <= 999:
                     raise ValueError(f"Invalid extension for {key}")
                 with self._connect() as db:
                     if not db.execute("SELECT 1 FROM extensions WHERE extension=? AND active=1", (text,)).fetchone():
@@ -4544,7 +4544,7 @@ def register_admin(app, config, on_telephony_change=None):
         number = request.args.get("number", "").strip()
         recordings_only = request.args.get("recordings", "false").lower() == "true"
         if extension and not (
-            (extension.isdigit() and 100 <= int(extension) <= 999) or extension_scope(extension)
+            (extension.isdigit() and 101 <= int(extension) <= 999) or extension_scope(extension)
         ):
             return jsonify({"error": "invalid extension"}), 400
         if number:
