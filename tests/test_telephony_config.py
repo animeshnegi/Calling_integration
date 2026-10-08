@@ -212,7 +212,10 @@ def test_the_two_101s_present_their_own_number_and_keep_their_own_mailbox(tmp_pa
     assert "exten => 104,1" in context_a
     assert "Dial(PJSIP/104-13025550098,30)" in context_a
     assert "exten => 104,1" not in context_b
-    assert "Dial(PJSIP/104-13025550098,30)" not in context_b
+    # The first line's 104 is reached from the second only by full number - and
+    # only because both lines are one customer's; bare 104 stays NOT IN SERVICE.
+    assert "exten => +13025550098*104,1" in context_b
+    assert "exten => 104,1" not in context_b
 
 
 def test_both_101s_register_with_their_own_globally_unique_identity(tmp_path: Path):
@@ -472,11 +475,17 @@ def test_every_number_has_its_own_extension_set(tmp_path: Path):
     # that has no 104 plays NOT IN SERVICE rather than borrowing one.
     assert "exten => 104,1" not in context_b
     assert "exten => _XXX,1" in context_b and "Playback(ss-noservice)" in context_b
-    assert f"Dial(PJSIP/104-13025550098,30)" not in context_b
-    # Another organisation's 101 is nowhere near this context.
-    assert "13025550011" not in context_a and "13025550011" not in context_b
+    # 104 on the first line is reachable from the second only by its full number,
+    # which is allowed because both lines belong to one customer - bare 104 is not.
+    assert "exten => +13025550098*104,1" in context_b
+    # Northwind's line is a full number from here: it rings northwind's own
+    # inbound destination on the platform, and its other desks are refused.
+    assert "exten => +13025550011,1" in context_a and "exten => _+13025550011*X.,1" in context_a
+    assert "exten => +13025550011*101" not in context_a
     assert f"Dial(PJSIP/101-13025550011,30)" in north_context
-    assert "13025550098" not in north_context
+    # Northwind reaches meridian's line by its full number, never its desks.
+    assert "exten => +13025550098,1" in north_context
+    assert "+13025550098*104" not in north_context and "+13025550098*101,1" not in north_context
 
     # The operator's own devices reach the platform's line, not a customer's.
     assert "exten => 900,1" in platform_context
@@ -624,11 +633,17 @@ def test_a_customer_dials_its_own_numbers_internally(tmp_path: Path):
     assert "local number 13025550098 rings extension 105" in context_b
     assert "Dial(PJSIP/105-13025550098,30)" in context_b
 
-    # Another organisation's number is not a local number here: dialling it is
-    # the ordinary external call, and it leaves through the trunk.
-    assert "exten => 13025550011,1" not in context_a
-    assert "exten => 13025550098,1" not in north_context
-    assert "exten => 13025550067,1" not in north_context
+    # Another customer's number is dialled by its full number and rings its own
+    # inbound destination on the platform - it never leaves through the trunk.
+    assert "exten => 13025550011,1,NoOp(EngineerIP local number 13025550011 rings extension 201)" in context_a
+    assert "Dial(PJSIP/201-13025550011,30)" in context_a
+    # ...but that customer's other desks are NOT IN SERVICE from here.
+    assert "exten => _13025550011*X.,1" in context_a
+    assert "exten => 13025550011*201" not in context_a
+    # And Northwind reaches meridian's two lines by full number, at their inbound destinations.
+    assert "local number 13025550098 rings extension 105" in north_context
+    assert "local number 13025550067 rings extension 117" in north_context
+    assert "exten => 13025550098*105" not in north_context
 
 
 def test_a_number_that_cannot_ring_one_of_its_own_extensions_is_external(tmp_path: Path):
@@ -733,3 +748,62 @@ def test_an_extension_that_answers_in_the_browser_is_dialled_on_its_webRTC_endpo
     endpoint = sync.render_pjsip().split(f"[{web_username}]\ntype=endpoint")[1].split("\n\n")[0]
     assert "transport=transport-wss" in endpoint
     assert "webrtc=yes" in endpoint
+
+
+def test_a_full_number_of_any_platform_line_is_dialled_inside_the_platform(tmp_path: Path):
+    """Typing a number reaches it - of this customer or of another - never the carrier.
+
+    Same setup as the per-number test. From meridian's +13025550098:
+      * +13025550067 (meridian's own line) rings that line's 101, and its 105 by
+        `+13025550067*105`;
+      * +13025550011 (northwind's line) rings northwind's 101 - its inbound
+        destination - but its 101 by `+13025550011*101` is NOT IN SERVICE: one
+        customer's extensions are not dialable from another's line.
+    The carrier catch-all only ever sees numbers the platform does not own.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "Carrier", "server": "sip.example.com", "port": 5060, "username": "user",
+        "password": "secret", "transport": "udp", "codecs": "ulaw,alaw", "allowed_ips": "198.51.100.10/32",
+    })
+    for username in ("meridian", "northwind"):
+        store.save_user({"username": username, "password": "customer-password-1", "role": "user",
+                         "email": f"{username}@example.com", "company_name": username.title()})
+    meridian = next(row["id"] for row in store.list_users() if row["username"] == "meridian")
+    northwind = next(row["id"] for row in store.list_users() if row["username"] == "northwind")
+    line_a, line_b, north_line = "+13025550098", "+13025550067", "+13025550011"
+    for number, owner in ((line_a, meridian), (line_b, meridian), (north_line, northwind)):
+        store.save_number({"number": number, "provider": "Carrier", "owner_user_id": owner, "active": True})
+    store.add_extension_to_number(line_a, meridian, {"extension": "101"})
+    store.add_extension_to_number(line_b, meridian, {"extension": "101"})
+    store.add_extension_to_number(line_b, meridian, {"extension": "105"})
+    store.add_extension_to_number(north_line, northwind, {"extension": "101"})
+    for number, owner in ((line_a, meridian), (line_b, meridian), (north_line, northwind)):
+        store.save_number({"number": number, "provider": "Carrier", "owner_user_id": owner, "active": True,
+                           "inbound_extension": f"101@{number}"})
+    store.set_settings({"service_host": "sip.engineerip.com"})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+
+    dialplan = sync.render_dialplan()
+    context_a = dialplan.split(f"\n[{TelephonyConfigSync.number_context(line_a)}]\n")[1].split("\n\n")[0]
+    north_context = dialplan.split(f"\n[{TelephonyConfigSync.number_context(north_line)}]\n")[1].split("\n\n")[0]
+
+    # Meridian's own second line: its inbound destination, and its 105 by full number.
+    assert "exten => +13025550067,1,NoOp(EngineerIP local number +13025550067 rings extension 101)" in context_a
+    assert "exten => +13025550067*105,1" in context_a
+    assert "Dial(PJSIP/105-13025550067,30)" in context_a
+
+    # Northwind's line: rings its inbound destination, never its other extensions.
+    assert "exten => +13025550011,1,NoOp(EngineerIP local number +13025550011 rings extension 101)" in context_a
+    assert "Dial(PJSIP/101-13025550011,30)" in context_a
+    assert "exten => _+13025550011*X.,1" in context_a
+    assert "exten => +13025550011*101" not in context_a
+    assert "exten => +13025550011*101,1" in north_context          # northwind dials its own 101 by number
+
+    # Meridian cannot reach northwind's extensions by full number; northwind cannot reach meridian's.
+    assert "exten => +13025550067*105" not in north_context
+    assert "exten => +13025550098,1" in north_context and "exten => _+13025550098*X." in north_context
+
+    # The carrier catch-all is only ever reached by numbers the platform does not own.
+    assert context_a.index("exten => +13025550011,1") < context_a.index("exten => _+X.,1")
+    assert "_+X." in context_a

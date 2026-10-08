@@ -487,11 +487,13 @@ class TelephonyConfigSync:
         never another number's 104, the account's lowest line, or another
         customer's desk.
 
-        Reaching another line is done by dialling its full number: a number of
-        the same customer is routed internally, straight to the extension or
-        flow that number answers with, and never leaves through the carrier.
-        Everything the platform does not own is an ordinary outbound call, placed
-        with the caller ID of the number the device answers on.
+        Reaching another line is done by dialling its full number. Any number the
+        platform owns - of the same customer or of another one - is routed
+        internally, straight to the extension or flow that number answers with,
+        and never leaves through the carrier. A number's other extensions are
+        reached as `<number>*<digits>` by its own customer only. Everything the
+        platform does not own is an ordinary outbound call, placed with the caller
+        ID of the number the device answers on.
         """
         settings = self.store.get_settings()
         extensions = [row for row in self.store.list_extensions() if row["active"]]
@@ -600,20 +602,42 @@ class TelephonyConfigSync:
                 *ring_extension(key),
             ]
 
-        def local_number_routes(owner_id: int | None) -> list[str]:
-            """Every number of one account - or the platform's own - as internal dialling."""
+        def number_extension_route(number, pattern: str, row: dict) -> list[str]:
+            """`<number>*<digits>`: one of a number's own extensions, by a caller of its account."""
+            digits = str(row["digits"])
+            return [
+                f"exten => {pattern}*{digits},1,NoOp(EngineerIP {pattern}*{digits} rings extension {digits} on {number['number']})",
+                *ring_extension(str(row["key"]), spoken=digits),
+            ]
+
+        def local_number_routes(context_owner: Any) -> list[str]:
+            """Every number the platform owns, dialled by its full number from this context.
+
+            Typing a full number reaches that number whoever holds it - a number of
+            the same customer or of another one - and never leaves through the
+            carrier. The caller reaches the number's own inbound destination (the
+            extension or flow it answers with, see number_route). A number's other
+            extensions are reached as `<number>*<digits>`, and only by a caller of
+            that number's own account; for another account those digits are NOT IN
+            SERVICE, so one customer's desks are never dialable by another.
+            """
             lines: list[str] = []
             for number in numbers:
-                if owner_id is None:
-                    if number.get("owner_user_id") not in (None, ""):
-                        continue
-                elif not self._same_owner(number.get("owner_user_id"), owner_id):
-                    continue
                 digits = re.sub(r"[^0-9]", "", str(number["number"]))
                 if not digits:
                     continue
+                same = self._same_owner(number.get("owner_user_id"), context_owner)
                 for pattern in (digits, f"+{digits}"):
                     lines.extend(number_route(number, pattern))
+                    if same:
+                        for row in dialable(number):
+                            lines.extend(number_extension_route(number, pattern, row))
+                    else:
+                        lines.extend([
+                            f"exten => _{pattern}*X.,1,NoOp(EngineerIP {pattern}* is another customer's extension: not dialable)",
+                            " same => n,Playback(ss-noservice)",
+                            " same => n,Hangup()",
+                        ])
             return lines
 
         voicemail_login = [
@@ -659,11 +683,13 @@ class TelephonyConfigSync:
             "; account's lowest line, or to another customer's extensions.",
             ";",
             "; A number of the same customer is dialled by its full number and rings",
-            "; internally, straight to that number's own extension or flow. Anything",
-            "; the platform does not own is dialled out through the carrier with the",
-            "; caller ID of the number the device answers on.",
+            "; internally, straight to that number's own extension or flow - of this",
+            "; customer or of another one. A number's other extensions are dialled as",
+            "; <number>*<digits> by its own customer only. Anything the platform does",
+            "; not own is dialled out through the carrier with the caller ID of the",
+            "; number the device answers on.",
             ";",
-            "; [from-internal]: the platform's own devices and numbers only.",
+            "; [from-internal]: the platform's own devices; any platform number is reachable.",
             "[from-internal]",
             *voicemail_login,
         ]

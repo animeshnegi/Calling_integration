@@ -61,7 +61,9 @@ against the number the call is on.
 | `104` | a caller in +13025550002's menu (which has 104) | `104@+13025550002` | the menu is that line's |
 | `13025550002` | a phone on +13025550001, same customer | `101@+13025550002`, that number's own inbound destination | the number is looked up internally, and never handed to the carrier |
 | `+13025550002` | the same phone | the same device | the `+` form works the same way |
-| `13025550011` | a Meridian phone | an ordinary external call over the carrier | another organisation's number is not the platform's to route |
+| `13025550011` (another customer's number) | a Meridian phone | that number's own inbound destination, inside the platform | a number the platform owns is reached by typing it, whoever holds it - never the carrier |
+| `+13025550011*101` (another customer's extension) | a Meridian phone | NOT IN SERVICE | one customer's extensions are not dialable from another's line |
+| `+13025550002*104` (same customer's other number) | a phone on +13025550001 | `104@+13025550002` | `<number>*<digits>` reaches one of the customer's own extensions, by its number |
 | `+919812345678` | any phone | the carrier trunk, presenting that line's own number | anything the platform does not own is outbound |
 
 A line that lacks the digits plays **NOT IN SERVICE** - never another number's
@@ -70,10 +72,11 @@ same lookup is used everywhere: normal dialling, inbound routing, IVR menus, cal
 flows, internal calls triggered through the API, transfers (blind and attended),
 ring groups and voicemail.
 
-**Another customer's extensions are not reachable by their digits.** A customer's
-context contains its own numbers' sets and nothing else, so a misdial is
-`ss-noservice` and never a crossed line; customer-to-customer internal extensions
-are not exposed through three-digit dialling at all.
+**A three-digit extension is resolved only within the current phone number.** A
+customer's context contains its own numbers' sets, so a misdial is `ss-noservice`
+and never a crossed line. Customer-to-customer internal extensions are not exposed
+through three-digit dialling at all: another customer's number is reached only by
+its full number, and that reaches its inbound destination, never its desks.
 
 ## Inbound calls
 
@@ -87,14 +90,28 @@ somebody else's.
 
 There is exactly one numbering plan per line and no hidden second one:
 
-* **Three digits** - an extension of the current number, and of no other.
-* **A full phone number** - the platform's own numbers are routed internally,
-  straight to the destination number's inbound destination; a number the platform
-  does not own leaves over the carrier. Both the plain digits and the `+` form are
-  rendered as literal routes, because the phone decides which one it sends, and a
-  literal always beats the outbound patterns.
-* **The SIP username** - never customer-dialable, and never rendered as an
-  extension.
+* **Three digits** - an extension of the current number, and of no other. Full
+  stop: a three-digit extension is resolved only within the current phone number.
+* **A full phone number** - full-number dialling reaches another number, whether
+  or not it is on the caller's account. Every number the platform owns is routed
+  internally, straight to that number's own inbound destination, and never leaves
+  over the carrier. Both the plain digits and the `+` form are rendered as literal
+  routes, because the phone decides which one it sends, and a literal always beats
+  the outbound patterns.
+* **`<number>*<digits>`** - one of a number's own extensions, reached by its
+  number. A customer reaches its own numbers' extensions this way; another
+  customer's extensions are NOT IN SERVICE, so customer-to-customer internal
+  extensions are never exposed.
+* **Same customer, number to number** - a number of the same customer resolves
+  internally, to the extension or flow that number answers with.
+* **The SIP username** - a technical identifier only: never customer-dialable,
+  and never rendered as an extension.
+
+Full-number dialling is the one way across a number boundary, and it is a
+platform policy, not a carrier call: the carrier is used only for numbers the
+platform does not own. The API takes the full E.164 number (`phone`), so the
+`<number>*<digits>` form is a keypad feature of the dial plan and is not accepted
+by the outbound API.
 
 ## Outbound calls and caller ID
 

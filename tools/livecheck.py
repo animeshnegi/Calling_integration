@@ -254,15 +254,25 @@ for row in own_numbers_all(after, mine):
           f"{row['number']}: rules {sorted(three_digit_rules(context))} vs {sorted(digits_here)}")
     check(f"and {row['number']} has NOT IN SERVICE for the rest",
           "exten => _XXX,1" in context and "Playback(ss-noservice)" in context)
-check("another customer's devices are not reachable in any of these contexts",
+# Another customer's number is reachable by its full number - it rings that
+# number's inbound destination, and nothing else of theirs. Their other desks
+# are refused in every context of this customer's.
+theirs_inbound = {row["inbound_extension"] for row in after["phone_numbers"]
+                  if row.get("owner_user_id") == other_customer["id"] and row.get("inbound_extension")}
+theirs_desks = [key for key in theirs_all if key not in theirs_inbound]
+check("another customer's other devices are not reachable in any of these contexts",
       all(f"Dial(PJSIP/{endpoint_of(key)},30)" not in context_block(TelephonyConfigSync.number_context(row["number"]))
-          for key in theirs_all for row in own_numbers_all(after, mine)),
-      ", ".join(theirs_all))
-check("and this customer's devices are not reachable in the other context",
+          for key in theirs_desks for row in own_numbers_all(after, mine)),
+      ", ".join(theirs_desks))
+mine_inbound = {row["inbound_extension"] for row in after["phone_numbers"]
+                if row.get("owner_user_id") == mine["owner_user_id"] and row.get("inbound_extension")}
+mine_desks = [key for key in mine_all if key not in mine_inbound]
+check("and this customer's other devices are not reachable in the other context",
       all(f"Dial(PJSIP/{endpoint_of(key)},30)" not in context_block(TelephonyConfigSync.number_context(row["number"]))
-          for key in mine_all for row in [r for r in after["phone_numbers"]
-                                          if r.get("owner_user_id") == other_customer["id"] and r.get("active")]),
-      ", ".join(mine_all))
+          for key in mine_desks for row in [r for r in after["phone_numbers"]
+                                            if r.get("owner_user_id") == other_customer["id"] and r.get("active")]),
+      ", ".join(mine_desks))
+
 own_numbers = [row for row in after["phone_numbers"] if row.get("owner_user_id") == mine["owner_user_id"]]
 check("each number rings an extension of the account that owns it",
       all(f"Stasis(engineerip,inbound,{row['number'].lstrip('+')},{row['inbound_extension']})" in dialplan
@@ -296,21 +306,30 @@ check("and that internal call is never handed to the carrier trunk",
           local_route(context_block(TelephonyConfigSync.number_context(other["number"])), row["number"].lstrip("+"))
           for row in active_own for other in active_own if other["number"] != row["number"]),
       ", ".join(row["number"] for row in active_own))
-check("another organisation's number is not a local number in any of these contexts",
-      all(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number"
-          not in context_block(TelephonyConfigSync.number_context(own["number"]))
-          for row in theirs_numbers for own in active_own),
+check("this customer's number is reached by full number from the other customer, at its inbound destination",
+      all(f"Dial(PJSIP/{endpoint_of(row['inbound_extension'])},30)" in
+          local_route(context_block(TelephonyConfigSync.number_context(other["number"])), row["number"].lstrip("+"))
+          for row in active_own if row.get("inbound_extension") for other in theirs_numbers if other.get("active")),
+      ", ".join(row["number"] for row in active_own))
+check("another organisation's number is reached inside the platform, never by the trunk",
+      all(f"Dial(PJSIP/{endpoint_of(row['inbound_extension'])},30)" in
+          local_route(context_block(TelephonyConfigSync.number_context(own["number"])), row["number"].lstrip("+"))
+          and "OUTBOUND_TRUNK" not in
+          local_route(context_block(TelephonyConfigSync.number_context(own["number"])), row["number"].lstrip("+"))
+          for row in theirs_numbers if row.get("inbound_extension") for own in active_own),
       ", ".join(row["number"] for row in theirs_numbers))
 # The operator's context holds the platform's own numbers only: a customer's
 # number is dialled there as the external call it is, so a customer's internal
 # extension set is never exposed in the platform's dial plan.
 platform_numbers = [row for row in after["phone_numbers"] if row.get("owner_user_id") in (None, "")]
-check("the operator's context reaches the platform's own numbers, and no customer's",
+all_inbound = {row["inbound_extension"] for row in after["phone_numbers"] if row.get("inbound_extension")}
+customer_desks = [row["key"] for row in after["extensions"]
+                  if row.get("owner_user_id") not in (None, "") and row["key"] not in all_inbound]
+check("the operator's context reaches every number the platform owns, at its inbound destination only",
       all(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number" in context_block("from-internal")
-          for row in platform_numbers)
-      and not any(f"exten => {row['number'].lstrip('+')},1,NoOp(EngineerIP local number" in context_block("from-internal")
-                  for row in active_own),
-      ", ".join(row["number"] for row in active_own))
+          for row in after["phone_numbers"] if row.get("active"))
+      and not any(f"Dial(PJSIP/{endpoint_of(key)},30)" in context_block("from-internal") for key in customer_desks),
+      ", ".join(customer_desks))
 flows = [row for row in cust_state["routing_flows"] if row["target"] == made]
 check("and a default call flow of its own", bool(flows), ",".join(row["target"] for row in cust_state["routing_flows"]))
 if flows:

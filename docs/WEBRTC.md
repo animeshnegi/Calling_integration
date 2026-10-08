@@ -77,8 +77,13 @@ that fits the device that answers them:
   SIP device keeps working and the tick can be removed again at any time.
 * Every other extension is dialled on its plain endpoint, which is what the
   credentials in the sheet are written for.
-* Anything else - a customer calling another customer's number, or an outside
-  caller - arrives from the carrier and the number's own call flow decides.
+* A full number the platform owns - of the same customer or of another one - is
+  reached inside the platform, and rings that number's own inbound destination,
+  so a browser calling it reaches the WebRTC endpoint of that destination. Only
+  numbers the platform does not own, and outside callers, arrive from the
+  carrier. A three-digit extension is resolved only within the current phone
+  number, and `<number>*<digits>` reaches another of the same customer's
+  extensions; another customer's extensions are not dialable.
 
 Give a browser extension its own extension number rather than sharing one with a
 desk phone: the switch belongs to the extension, so a plain phone registered on

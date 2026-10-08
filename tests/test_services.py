@@ -562,12 +562,38 @@ def test_one_of_the_customers_own_numbers_is_called_without_a_carrier(tmp_path):
     assert store.get("local-1").status == "dialing_customer"
 
 
-def test_a_number_that_is_not_the_customers_own_still_leaves_through_the_carrier(tmp_path):
+def test_a_number_the_platform_does_not_own_still_leaves_through_the_carrier(tmp_path):
     """Nothing about the local shortcut changes ordinary outbound calls.
 
-    A number that belongs to somebody else - including another organisation on
-    this platform - is an external call and is dialled over the customer's
-    carrier, with the customer's caller ID.
+    A number that is not on this platform at all is an external call: it is
+    dialled over the customer's carrier, with the customer's caller ID.
+    """
+    from app.admin import SettingsStore
+    from app.models import Call
+
+    service, asterisk, store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "field-co", "Field Co")
+    mine = line_setup(settings, "+13025550098", owner, ("105",))
+    settings.save_number({"number": "+13025550098", "provider": "TestCarrier", "inbound_extension": mine["105"],
+                          "owner_user_id": owner, "default_outbound": True, "active": True})
+
+    store.create(Call(call_id="outside-1", contact_id=None, member_id=None, extension=mine["105"],
+                      phone="+13025559999", provider="TestCarrier", caller_id_number="+13025550098"))
+    service._start_customer(store.get("outside-1"))
+    assert asterisk.customer_legs[-1][:2] == ("outside-1", "+13025559999")
+    assert asterisk.customer_legs[-1][2].startswith("provider-")
+    assert asterisk.local_legs == []
+
+
+def test_another_customers_platform_number_is_reached_inside_the_platform(tmp_path):
+    """Typing a full number the platform owns reaches it, whoever holds it.
+
+    +13025550011 belongs to another customer. Dialling it from a desk of
+    +13025550098 rings that number's own inbound destination on the platform -
+    never the carrier - and does not expose the other customer's other
+    extensions (see the dial plan tests for the `<number>*<digits>` refusal).
     """
     from app.admin import SettingsStore
     from app.models import Call
@@ -578,17 +604,47 @@ def test_a_number_that_is_not_the_customers_own_still_leaves_through_the_carrier
     owner = make_customer(settings, "field-co", "Field Co")
     other = make_customer(settings, "other-co", "Other Co")
     mine = line_setup(settings, "+13025550098", owner, ("105",))
-    line_setup(settings, "+13025550011", other, ("201",))
-    settings.save_number({"number": "+13025550098", "provider": "TestCarrier", "inbound_extension": mine["105"],
-                          "owner_user_id": owner, "default_outbound": True, "active": True})
+    theirs = line_setup(settings, "+13025550011", other, ("201", "202"))
 
-    for call_id, phone in (("outside-1", "+13025559999"), ("outside-2", "+13025550011")):
-        store.create(Call(call_id=call_id, contact_id=None, member_id=None, extension=mine["105"],
-                          phone=phone, provider="TestCarrier", caller_id_number="+13025550098"))
-        service._start_customer(store.get(call_id))
-        assert asterisk.customer_legs[-1][:2] == (call_id, phone)
-        assert asterisk.customer_legs[-1][2].startswith("provider-")
+    store.create(Call(call_id="cross-1", contact_id=None, member_id=None, extension=mine["105"],
+                      phone="+13025550011", provider="TestCarrier", caller_id_number="+13025550098"))
+    service._start_customer(store.get("cross-1"))
+
+    assert asterisk.local_legs == [("cross-1", theirs["201"])]
+    assert asterisk.local_endpoints == ["PJSIP/201-13025550011"]
+    assert asterisk.customer_legs == []
+
+
+def test_a_platform_number_with_no_reachable_extension_is_not_in_service(tmp_path):
+    """A full number the platform owns but cannot ring is NOT IN SERVICE.
+
+    It must never fall back to the carrier: the number is ours, so a carrier
+    round trip would be a second, different answer for the same number.
+    """
+    from app.admin import SettingsStore
+    from app.models import Call
+
+    service, asterisk, store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "field-co", "Field Co")
+    other = make_customer(settings, "other-co", "Other Co")
+    mine = line_setup(settings, "+13025550098", owner, ("105",))
+    settings.save_number({"number": "+13025550012", "provider": "TestCarrier", "owner_user_id": other,
+                          "active": True})                       # owned, but no extension at all
+    hung = []
+    asterisk.hangup = lambda channel_id: hung.append(channel_id)
+
+    store.create(Call(call_id="empty-1", contact_id=None, member_id=None, extension=mine["105"],
+                      phone="+13025550012", provider="TestCarrier", caller_id_number="+13025550098",
+                      employee_channel_id="empty-1-employee"))
+    service._start_customer(store.get("empty-1"))
+
+    failed = store.get("empty-1")
+    assert failed.status == "failed"
+    assert asterisk.customer_legs == []
     assert asterisk.local_legs == []
+    assert hung == ["empty-1-employee"]
 
 
 def test_a_stale_link_on_an_own_number_rings_the_accounts_own_extension(tmp_path):

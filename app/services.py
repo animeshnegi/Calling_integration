@@ -679,40 +679,53 @@ class TelephonyService:
         self._finalize(call_id, "hangup_requested")
         return self.store.get(call_id)
 
-    def _local_target(self, extension: str, number: str) -> str:
-        """The extension that answers when this phone calls this number, or "".
+    def _platform_line(self, number: str) -> dict | None:
+        """The active phone number the platform owns with these digits, whoever holds it.
 
-        A customer's own numbers belong to that customer, so dialling one of them
-        from one of its own extensions reaches the extension that very number is
-        set to ring - the same destination the carrier would have reached - and
-        the call stays on the platform instead of making a round trip. The answer
-        is read on the destination number (its own link, then that customer's own
-        fallback), so one line can never route to another line's device. Another
-        organisation's number is not local and leaves the usual way.
+        Typing a full number reaches it - the same customer's or another's - so
+        this is the test for "internally owned" that decides between the platform
+        and the carrier. A number the platform does not own returns None.
         """
         store = self.settings_store
-        if not store:
-            return ""
-        digits = re.sub(r"[^0-9]", "", str(number))
-        if not digits:
-            return ""
+        digits = re.sub(r"[^0-9]", "", str(number or ""))
+        if not store or not digits:
+            return None
         try:
-            owner = store.get_extension_owner(str(extension))
-            if owner in (None, ""):
-                return ""
-            for row in store.list_numbers(int(owner)):
-                if not row.get("active") or re.sub(r"[^0-9]", "", str(row["number"])) != digits:
-                    continue
-                candidate = store.resolve_extension(
-                    str(row["number"]), str(row["inbound_extension"] or ""), int(owner)
-                )
-                if candidate is None:
-                    candidate = store.resolve_extension(
-                        str(row["number"]),
-                        str(store.customer_call_defaults(int(owner)).get("fallback") or ""),
-                        int(owner),
-                    )
-                return str(candidate["key"]) if candidate is not None else ""
+            return next(
+                (
+                    row for row in store.list_numbers()
+                    if row.get("active") and re.sub(r"[^0-9]", "", str(row["number"])) == digits
+                ),
+                None,
+            )
+        except Exception:
+            return None
+
+    def _local_target(self, number_row: dict) -> str:
+        """The extension that answers when a full number of the platform is dialled, or "".
+
+        It is the same answer the dial plan gives for that number
+        (TelephonyConfigSync.number_route): the number's own inbound extension,
+        then its account's fallback, then the operator's last resort - each
+        read against that very number, so a line can never ring another line's
+        device. "" means the number has no reachable extension: NOT IN SERVICE,
+        never the carrier, because the number is one the platform owns.
+        """
+        store = self.settings_store
+        if not store or not number_row:
+            return ""
+        number = str(number_row["number"])
+        owner = number_row.get("owner_user_id")
+        owner_id = int(owner) if str(owner or "").strip().isdigit() else None
+        try:
+            candidates = [str(number_row.get("inbound_extension") or "")]
+            if owner_id is not None:
+                candidates.append(str(store.customer_call_defaults(owner_id).get("fallback") or ""))
+            candidates.append(str(store.get_settings().get("inbound_fallback_extension") or ""))
+            for candidate in candidates:
+                found = store.resolve_extension(number, extension_digits(candidate), owner_id)
+                if found is not None:
+                    return str(found["key"])
         except Exception:
             return ""
         return ""
@@ -738,7 +751,16 @@ class TelephonyService:
     def _start_customer(self, call: Call) -> None:
         if call.customer_channel_id or call.status in {"completed", "failed"}:
             return
-        local = self._local_target(call.extension, call.phone)
+        # A full number the platform owns - of this customer or of another - is
+        # reached on the platform, never over the carrier. If it has no reachable
+        # extension it is NOT IN SERVICE, and the call stops here.
+        line = self._platform_line(call.phone)
+        local = self._local_target(line) if line else ""
+        if line is not None and not local:
+            updated = self.store.update(call.call_id, status="failed", ended_at=iso_now())
+            self.notify_crm("call.failed", updated, {"reason": "number_not_in_service"})
+            self.asterisk.hangup(call.employee_channel_id or "")
+            return
         customer_channel = f"{call.call_id}-customer"
         prepared = self.store.update(call.call_id, customer_channel_id=customer_channel, status="dialing_customer")
         if not prepared:

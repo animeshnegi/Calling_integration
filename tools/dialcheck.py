@@ -216,17 +216,18 @@ def main() -> int:
         ("104 on +1 302 555 0001 is that line's 104", a_dials.get("104") == f"104-{line_a[1:]}"),
         ("104 on +1 302 555 0002 is that line's 104", b_dials.get("104") == f"104-{line_b[1:]}"),
         ("the two 104s are different endpoints", a_dials.get("104") != b_dials.get("104")),
-        ("+1 302 555 0098 has no 104 - NOT IN SERVICE, never the other line's",
+        ("+1 302 555 0098 has no 104 - NOT IN SERVICE; the other line's 104 is only +13025550001*104",
          "104" not in c_dials and "exten => 104,1" not in context_c
          and "exten => _XXX,1" in context_c and "Playback(ss-noservice)" in context_c
-         and f"Dial(PJSIP/{a_dials.get('104')}" not in context_c),
+         and f"exten => {line_a}*104,1" in context_c),
         ("a line only dials the extensions it holds",
          set(extensions_in(context_a)) == {"101", "102", "104"}
          and set(extensions_in(context_c)) == {"101", "102"}),
         ("the desk with no number is not dialable from any line", "901" not in a_dials and "901" not in c_dials),
         # 3. Another customer is out of reach.
-        ("Northwind's 101 and 102 are not in Meridian's context",
-         "101" not in north_dials or True),
+        ("Northwind's 102 is not in Meridian's context - only its line's inbound destination is",
+         "Dial(PJSIP/102-13025550011" not in context_a
+         and "exten => +13025550011*102" not in context_a),
         ("Northwind cannot dial Meridian's extensions",
          set(extensions_in(north_context)) == {"101", "102"} and "104" not in north_dials),
         # 4. A full number of the same customer goes inside, not to the carrier.
@@ -235,7 +236,9 @@ def main() -> int:
         ("and that call never leaves through the carrier trunk", "OUTBOUND_TRUNK" not in cross_number),
         ("the + form of the number works the same way",
          a_numbers.get("+13025550002") == a_numbers.get("13025550002")),
-        ("another customer's number is not a local shortcut", "13025550011" not in a_numbers),
+        ("another customer's number is reached inside the platform, never by the trunk",
+         a_numbers.get("13025550011") == "101-13025550011"
+         and "OUTBOUND_TRUNK" not in route_of(context_a, "13025550011", "local number ")),
         # 5. One globally unique identity per extension; digits alone never a name.
         ("every extension answers on digits-number, and no name holds `@`",
          all(store.endpoint_name(f"{digits}@{number}") in endpoints
