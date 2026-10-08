@@ -52,12 +52,21 @@
       </div>
     </section>
 
+    <section id="console-screen" class="console-screen hidden" aria-live="polite" aria-label="Softphone sign-in">
+      <img src="https://engineerip.com/static/img/preloder1.png" alt="EngineerIP" class="console-logo">
+      <span class="console-label">SOFTPHONE</span>
+      <h1 id="console-title" class="console-title">Softphone</h1>
+      <p id="console-status" class="console-status">Waiting for the EngineerIP console to sign this window in…</p>
+      <div class="spinner" aria-hidden="true"></div>
+    </section>
+
     <section id="phone-app" class="phone-app hidden" aria-label="EngineerIP Phone">
+      <div class="status-bar" aria-hidden="true"><span id="sb-time">--:--</span><span class="sb-icons"><i class="sb-signal"></i><b>5G</b><i class="sb-battery"><i></i></i></span></div>
       <header class="topbar">
         <div class="brand">
           <img src="https://engineerip.com/static/img/preloder1.png" alt="EngineerIP" class="brand-logo">
           <div>
-            <strong>Phone</strong>
+            <strong id="brand-title">Phone</strong>
             <span id="connection-state" class="state offline"><i></i> Offline</span>
           </div>
         </div>
@@ -87,8 +96,11 @@
           <button data-key="7"><b>7</b><small>PQRS</small></button><button data-key="8"><b>8</b><small>TUV</small></button><button data-key="9"><b>9</b><small>WXYZ</small></button>
           <button data-key="*"><b>*</b></button><button data-key="0"><b>0</b><small>+</small></button><button data-key="#"><b>#</b></button>
         </div>
-        <button id="call-btn" class="call-btn" aria-label="Call">☎</button>
-        <div class="dial-tools"><button id="backspace-btn">⌫ Delete</button><button id="contacts-btn">♙ Contacts</button></div>
+        <div class="call-row">
+          <button id="contacts-btn" class="tool-btn" aria-label="Contacts" title="Contacts"><span>♙</span></button>
+          <button id="call-btn" class="call-btn" aria-label="Call">☎</button>
+          <button id="backspace-btn" class="tool-btn" aria-label="Delete" title="Delete"><span>⌫</span></button>
+        </div>
         <p class="dial-tip">Keyboard: type a number, Enter to call, Esc to hang up</p>
       </section>
 

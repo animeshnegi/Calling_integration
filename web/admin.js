@@ -2249,7 +2249,8 @@ function credentialSheetBody({ credentials: c, rotating }) {
         </tr>`).join('')}</tbody>
     </table>
     <div class="cred-actions">
-      <button class="btn primary sm" type="button" data-cred-copy-all>Copy everything</button>
+      <button class="btn primary sm" type="button" data-softphone="${esc(c.key || c.extension)}" title="Open a softphone window signed in as this extension">Open softphone</button>
+      <button class="btn ghost sm" type="button" data-cred-copy-all>Copy everything</button>
       <button class="btn ghost sm" type="button" data-cred-rotate="${esc(c.extension)}" aria-expanded="${rotating ? 'true' : 'false'}">${rotating ? 'Cancel' : 'Change password'}</button>
       <small>Anyone with these can place calls as this extension.</small>
     </div>
@@ -2291,20 +2292,37 @@ async function showExtensionCredentials(extension) {
    history or storage - and only after the window says it is ready. */
 const softphoneWindows = [];
 
+/* The softphone window is the size of a phone (390 x 860 - the browser's own
+   frame takes a little of it), centred on the screen, with no toolbars. The page
+   inside it lays itself out for any size, so a smaller window still works. */
+const SOFTPHONE_FEATURES = (() => {
+  const width = 390;
+  const height = 860;
+  const left = Math.max(0, Math.round(((window.screen?.availWidth || 1280) - width) / 2));
+  const top = Math.max(0, Math.round(((window.screen?.availHeight || 800) - height) / 2));
+  return `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=no,menubar=no,toolbar=no,location=no,status=no`;
+})();
+
 async function openSoftphone(key) {
   const row = (state.extensions || []).find(x => (x.key || x.extension) === key);
   if (!row) return notify('That extension is no longer on this account', true);
   if (!row.webrtc_enabled) {
     return notify('Tick Browser phone on this extension first - the softphone signs in over the browser connection', true);
   }
-  const win = window.open('/phone?connect=extension', `eip-softphone-${key.replace(/[^A-Za-z0-9]/g, '-')}`, 'width=420,height=780');
+  // One softphone window per extension: a second click brings the first one forward
+  // and hands it fresh credentials, rather than opening a window that never hears.
+  const open = softphoneWindows.find(item => item.key === key && !item.win.closed);
+  const win = open ? open.win : window.open('/phone?connect=extension', `eip-softphone-${key.replace(/[^A-Za-z0-9]/g, '-')}`, SOFTPHONE_FEATURES);
   if (!win) return notify('Your browser blocked the softphone window - allow pop-ups for this site', true);
-  const entry = { win, ready: false, payload: null };
-  softphoneWindows.splice(0, softphoneWindows.length, ...softphoneWindows.filter(item => !item.win.closed), entry);
+  try { win.focus(); } catch { /* a browser may refuse to focus a popup; the window is open either way */ }
+  const entry = open || { key, win, ready: false, payload: null };
+  if (!open) {
+    softphoneWindows.splice(0, softphoneWindows.length, ...softphoneWindows.filter(item => !item.win.closed), entry);
+  }
   try {
     const { credentials } = await api(`/admin/api/extensions/${encodeURIComponent(key)}/credentials`);
     if (!credentials.server || !credentials.managed_address) {
-      win.close();
+      if (!open) win.close();
       return notify('Set the service host in Settings first, so a browser can reach the platform', true);
     }
     entry.payload = {
@@ -2318,7 +2336,7 @@ async function openSoftphone(key) {
     };
     sendSoftphone(entry);
   } catch (error) {
-    win.close();
+    if (!open) win.close();
     notify(error.message, true);
   }
 }

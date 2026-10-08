@@ -31,6 +31,8 @@ const sipDomain=()=>settings().domain||location.hostname;
 const defaultWss=domain=>"wss://"+String(domain||location.hostname).replace(/^https?:\/\//,"").replace(/\/$/,"")+"/ws";
 const sipTarget=n=>{const d=sipDomain();return /^sip:/i.test(n)?n:"sip:"+cleanNumber(n)+"@"+d};
 
+function tickClock(){$("sb-time").textContent=new Date().toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}
+tickClock();setInterval(tickClock,15000);
 function setState(text,online=false){state.className="state "+(online?"online":"offline");state.innerHTML="<i></i> "+text}
 function showNumber(){const v=input.value.trim();display.textContent=v||"Enter number";hint.textContent=v?"Ready to call":"Direct paste is supported"}
 function addRecent(number,direction="outgoing",status="completed"){const rows=JSON.parse(localStorage.getItem(recentsKey)||"[]");rows.unshift({number,direction,status,at:Date.now()});localStorage.setItem(recentsKey,JSON.stringify(rows.slice(0,100)))}
@@ -87,8 +89,14 @@ document.addEventListener("keydown",e=>{
 });
 input.addEventListener("paste",()=>setTimeout(()=>{input.value=cleanNumber(input.value);showNumber()},0));
 
-function showPhone(){loginScreen.classList.add("hidden");phoneApp.classList.remove("hidden")}
+/* One screen at a time: the sign-in form, the console hand-off, or the phone. */
+function showPhone(){loginScreen.classList.add("hidden");$("console-screen").classList.add("hidden");phoneApp.classList.remove("hidden")}
+function showConsoleScreen(title,text){
+  loginScreen.classList.add("hidden");phoneApp.classList.add("hidden");$("console-screen").classList.remove("hidden");
+  $("console-title").textContent=title;$("console-status").textContent=text;
+}
 function showLogin(message="",error=false){
+  $("console-screen").classList.add("hidden");
   phoneApp.classList.add("hidden");loginScreen.classList.remove("hidden");
   $("login-status").className="login-status"+(error?" error":"");$("login-status").textContent=message;
   $("login-password").value="";
@@ -330,21 +338,24 @@ if(!fromConsole&&saved.username&&saved.domain&&saved.password){
 /* Opened from the admin console's Softphone button (`/phone?connect=extension`).
    The console hands this window one extension's sign-in by postMessage - never in
    the URL - and only from the window that opened it. A previous phone session in
-   this browser is not reused. */
+   this browser is not reused. Until that sign-in arrives the window says so; if it
+   never does, the sign-in form is offered instead of a spinner that never stops. */
+let consoleHandoffSeen=false;
 if(fromConsole){
+  showConsoleScreen("Softphone","Waiting for the EngineerIP console to sign this window in…");
   window.addEventListener("message",event=>{
     if(event.source!==window.opener||event.origin!==location.origin)return;
     const m=event.data||{};
-    if(m.type==="eip-softphone:connect"&&m.sip_username&&m.sip_password)startConsoleSession(m);
+    if(m.type==="eip-softphone:connect"&&m.sip_username&&m.sip_password){consoleHandoffSeen=true;startConsoleSession(m)}
   });
+  setTimeout(()=>{if(!consoleHandoffSeen&&!ua)showLogin("The console did not sign this window in. Enter the extension's SIP details here, or close this window.",true)},15000);
   window.opener.postMessage({type:"eip-softphone:ready"},location.origin);
 }
 async function startConsoleSession(m){
   const label=m.label||m.sip_username;
   handoff={extension:m.extension||"",username:m.sip_username,password:m.sip_password,domain:m.domain,wss:m.wss||defaultWss(m.domain),apiToken:""};
   try{if(ua)ua.stop()}catch{}ua=null;
-  setLoginBusy(true);$("login-status").className="login-status";$("login-status").textContent=`Signing in as ${label}…`;
-  try{await connectSip(handoff);document.title=`Softphone · ${label}`}
+  showConsoleScreen(label,`Signing in as ${label}…`);
+  try{await connectSip(handoff);document.title=`Softphone · ${label}`;$("brand-title").textContent=label}
   catch(err){showLogin(err.message||"Could not sign this extension in.",true)}
-  finally{setLoginBusy(false)}
 }

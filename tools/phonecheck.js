@@ -724,19 +724,21 @@ async function main() {
       /overflow-y:auto/.test(view), view);
     check('the in-call screen scrolls too', /\.active-call\{[^}]*overflow-y:auto/.test(css));
     check('short windows get their own layout instead of a scrollbar',
-      /@media\(max-height:760px\)/.test(css));
+      /@media\(max-height:\d+px\)/.test(css));
     check('keyboard users get a visible focus ring', /:focus-visible\{[^}]*outline:2px solid/.test(css));
     check('the keyboard hint only appears where there is a keyboard',
-      /\.dial-tip\{display:none/.test(css) && /@media\(min-width:700px\)\{\.dial-tip\{display:block\}/.test(css));
+      /\.dial-tip\{display:none/.test(css) && /@media\(min-width:700px\)\{\s*\.dial-tip\{display:block\}/.test(css));
     check('the phone layout keeps its small-screen rules and safe areas',
       /@media\(max-width:520px\)/.test(css) && /env\(safe-area-inset-bottom\)/.test(css)
       && /env\(safe-area-inset-top\)/.test(css));
-    const keyHeights = [...css.matchAll(/\.keypad button\{[^}]*height:(\d+)px/g)].map(m => Number(m[1]));
+    // The keypad rows are sized from the window, but no key may ever be smaller than a finger.
+    const keyHeights = [...css.matchAll(/\.keypad button\{[^}]*min-height:(\d+)px/g)].map(m => Number(m[1]));
     check('every keypad layout keeps a finger-sized target',
-      keyHeights.length >= 2 && keyHeights.every(height => height >= 44), keyHeights.join(', '));
-    const cards = [...css.matchAll(/min-height:min\((\d+)px/g)].map(m => Number(m[1]));
+      keyHeights.length >= 1 && keyHeights.every(height => height >= 44), keyHeights.join(', '));
+    // The card is one height variable: a phone-sized maximum, and never taller than the window.
+    const cards = [...css.matchAll(/--screen-h:min\((\d+)px,calc\(100dvh - \d+px\)\)/g)].map(m => Number(m[1]));
     check('the card is phone-shaped and never taller than the window',
-      cards.length > 0 && cards.every(width => width <= 900), cards.join(', '));
+      cards.length > 0 && cards.every(height => height <= 900) && /\.phone-app,\.console-screen\{[^}]*height:var\(--screen-h\)/.test(css), cards.join(', '));
   }
 
   /* ----------------------------------------------------------- recents */
@@ -982,6 +984,11 @@ async function main() {
       consoleWindow.posts.some(entry => entry.message.type === 'eip-softphone:ready' && entry.origin === ORIGIN),
       JSON.stringify(consoleWindow.posts));
     check('a stored phone session is not signed in from the console window', stored.sip.instances.length === 0);
+
+    const waiting = boot({ search: CONNECT, opener: consoleWindow });
+    await settle(20);
+    check('until the console signs it in, the window says so instead of showing a form',
+      shown(waiting.d, 'console-screen') && !shown(waiting.d, 'login-screen') && !shown(waiting.d, 'phone-app'));
 
     const clean = boot({ search: CONNECT, opener: consoleWindow });
     await settle(40);

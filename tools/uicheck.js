@@ -1442,6 +1442,10 @@ async function main() {
       && !!plain.d.querySelector('[data-softphone="102@+13025550002"]'));
     check('the credentials button uses the same key, so a duplicate 101 cannot pick the wrong card',
       !!plain.d.querySelector('[data-extension-credentials="102@+13025550002"]'));
+    plain.d.querySelector('[data-extension-credentials="102@+13025550002"]').click();
+    await settle(200);
+    check('the credential sheet offers Open softphone for that same extension',
+      !!plain.d.querySelector('#modal [data-softphone="102@+13025550002"]'));
 
     const plainOpened = [];
     plain.w.open = (...args) => { plainOpened.push(args); return { closed: false, postMessage() {} }; };

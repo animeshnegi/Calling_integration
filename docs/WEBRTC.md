@@ -49,6 +49,8 @@ Asterisk renders a `transport-wss` PJSIP transport and, **only for extensions wh
 
 Each extension card in the customer console has a **Softphone** button. It opens `/phone?connect=extension` in a new window, signed in as *that* extension - the card's own key (`101@+13025550002`) names the identity, so two 101s on two numbers open two different softphones. The page reports ready to the console that opened it; the console answers with the extension's SIP username, password, domain and WebSocket address over `postMessage`, checking origin and source on both sides. The password never appears in a URL or in server storage, and the new window keeps the sign-in in memory only: a phone session saved in the same browser is not picked up.
 
+The window opens at phone size (390 × 860, centred, no toolbars). The page lays itself out to whatever size the window is: the keypad rows shrink with the height, the call button and the navigation always stay on screen, and only the lists scroll. On a phone, or in a window no wider than 520 px, the phone fills the whole window.
+
 The Softphone button needs **Browser phone** (`webrtc_enabled`) on that extension. Without it the browser endpoint does not exist, so the console says so instead of opening a phone that cannot register.
 It also needs the platform's **service host** set in Settings, because the phone registers with that address. Without it the console closes the window and says so, rather than handing over a server the browser cannot reach.
 

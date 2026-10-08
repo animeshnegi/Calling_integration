@@ -590,10 +590,10 @@ check("the softphone carries the call-quality badge",
 check("and the keyboard hint a desktop uses", 'class="dial-tip"' in softphone)
 status, phone_sheet = Client().request("/phone.css")
 check("the softphone stylesheet scrolls the dialer instead of clipping it",
-      status == 200 and ".view{display:none;flex:1;min-height:0;padding:8px 20px 100px;overflow-y:auto" in phone_sheet,
+      status == 200 and ".view{display:none;flex:1 1 auto;min-height:0;padding:4px 18px 14px;overflow-y:auto" in phone_sheet and ".phone-app,.console-screen{" in phone_sheet and "overflow:hidden" in phone_sheet,
       str(status))
 check("and keeps a layout for both phone-sized and short screens",
-      "@media(max-width:520px)" in phone_sheet and "@media(max-height:760px)" in phone_sheet)
+      "@media(max-width:520px)" in phone_sheet and "@media(max-height:700px)" in phone_sheet and "@media(max-height:560px)" in phone_sheet)
 
 # --- every page carries the EngineerIP logo as its favicon --------------------
 LOGO = "https://engineerip.com/static/img/logo.png"
