@@ -178,6 +178,55 @@ class VoicemailStore:
             self._renumber(directory)
             return True
 
+    def adopt_mailbox(self, legacy: str, mailbox: str) -> int:
+        """Move a pre-scoped mailbox's messages into its number-scoped mailbox.
+
+        Before extensions belonged to a phone number, the mailbox of `101` was
+        `101` and its messages sat in that folder. The same device now files under
+        `101-13025550001`, so an upgrade moves what is already there - renumbered
+        so nothing is overwritten - rather than leaving the customer's messages
+        behind in a folder nothing reads any more. A no-op the second time it
+        runs, and when `legacy` already is the mailbox.
+        """
+        legacy, mailbox = mailbox_name(legacy), mailbox_name(mailbox)
+        if legacy == mailbox or not MAILBOX_RE.fullmatch(str(legacy)) or not MAILBOX_RE.fullmatch(str(mailbox)):
+            return 0
+        source_root = self.root / self.context / str(legacy)
+        if not source_root.is_dir():
+            return 0
+        moved = 0
+        with self._locked():
+            for folder_key, folder_dir in FOLDERS.items():
+                source = source_root / folder_dir
+                if not source.is_dir():
+                    continue
+                stems = sorted(
+                    path.stem for path in source.glob("msg[0-9][0-9][0-9][0-9].txt")
+                    if path.is_file() and not path.is_symlink() and MESSAGE_RE.fullmatch(path.stem)
+                )
+                if not stems:
+                    continue
+                destination = self._folder(str(mailbox), folder_key)
+                existing = {path.stem for path in destination.glob("msg[0-9][0-9][0-9][0-9].*")}
+                for stem in stems:
+                    index = 0
+                    while f"msg{index:04d}" in existing:
+                        index += 1
+                    target = f"msg{index:04d}"
+                    for path in sorted(source.glob(f"{stem}.*")):
+                        if path.is_file() and not path.is_symlink():
+                            shutil.move(str(path), str(destination / f"{target}{path.suffix}"))
+                    existing.add(target)
+                    moved += 1
+            # The folders of one mailbox, now empty, and nothing outside them.
+            for folder_dir in FOLDERS.values():
+                empty = source_root / folder_dir
+                if empty.is_dir() and not any(empty.iterdir()):
+                    empty.rmdir()
+            if not any(source_root.iterdir()):
+                source_root.rmdir()
+        return moved
+
     def mark_read(self, mailbox: str, folder: str, message: str) -> bool:
         if folder.lower() != "inbox" or not MESSAGE_RE.fullmatch(message):
             return False

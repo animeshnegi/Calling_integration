@@ -33,6 +33,18 @@ The extension's own pin is filed under the same name; a mailbox that has to be l
 than the digits records where its pin came from (`voicemail_pin_aliases`), so entering
 either name at the `*97` prompt opens the same mailbox.
 
+## Upgrading a mailbox that gained a number
+
+An install that predates number-scoped extensions filed `101` under the folder
+`101`. When the migration moves that row onto the phone number it answers on, its
+messages move with it: at startup `101` is adopted into `101-13025550001`, once,
+renumbered so nothing is overwritten, and the empty folder is removed
+(`SettingsStore.adopt_legacy_mailboxes()`). The move only happens while those
+digits name exactly one extension and no row keeps the bare digits as a mailbox of
+its own - the operator's `900` stays `900`. When two lines could both mean the
+same folder nothing is moved at all, because a customer's messages are never
+merged into the wrong box; the folder is left where it is, untouched.
+
 ## Enable a mailbox
 
 1. Open `/admin` and select **Extensions**.

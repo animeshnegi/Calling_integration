@@ -9,6 +9,7 @@ import sqlite3
 
 from app.admin import SettingsStore
 from app.telephony_config import TelephonyConfigSync
+from app.voicemail import VoicemailStore
 
 
 def legacy_database(path, secret="a" * 40):
@@ -91,6 +92,75 @@ def legacy_database(path, secret="a" * 40):
         columns = {row[1] for row in raw.execute("PRAGMA table_info(extensions)").fetchall()}
         assert columns and "id" not in columns and "phone_number_id" not in columns
     return {"meridian": meridian}
+
+
+def write_message(root, mailbox, message, caller="Customer <+13025550123>"):
+    """One message as app_voicemail leaves it: a text file and its audio."""
+    directory = root / "engineerip" / mailbox / "INBOX"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{message}.txt").write_text(
+        f"[message]\ncallerid={caller}\norigtime=1700000000\nduration=12\n"
+    )
+    (directory / f"{message}.wav").write_bytes(b"RIFF-voicemail")
+
+
+def test_an_upgrade_keeps_the_messages_of_a_mailbox_that_gained_a_number(tmp_path):
+    """The folder `101` follows its extension to `101-<number>` - once.
+
+    An install that filed messages under the bare digits keeps every one of them
+    when the extension moves onto the number it answers on; a folder two lines
+    could both mean is left exactly where it is rather than merged into the wrong
+    mailbox, and a platform device keeps its own digits because nothing else can
+    mean them.
+    """
+    root = tmp_path / "voicemail"
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "Carrier", "server": "sip.example.com", "username": "user", "password": "secret",
+        "allowed_ips": "198.51.100.10/32", "codecs": "ulaw,alaw",
+    })
+    store.save_user({"username": "meridian", "password": "customer-password-1", "role": "user",
+                     "email": "m@example.com", "company_name": "Meridian"})
+    meridian = next(row["id"] for row in store.list_users() if row["username"] == "meridian")
+    store.save_number({"number": "+13025550001", "provider": "Carrier", "owner_user_id": meridian, "active": True})
+    store.add_extension_to_number("+13025550001", meridian, {
+        "extension": "101", "sip_password": "secret-101", "voicemail_enabled": True, "voicemail_pin": "4321",
+    })
+    store.save_extension({
+        "extension": "900", "sip_password": "secret-900", "voicemail_enabled": True, "voicemail_pin": "1000",
+    })
+    voicemail = VoicemailStore(str(root), "engineerip")
+
+    # The state an upgrade really is in: the row answers on +13025550001, and the
+    # messages it took before that are still filed under its bare digits.
+    write_message(root, "101", "msg0000", caller="Old desk <+13025550123>")
+    write_message(root, "900", "msg0000", caller="Operator <+13025550124>")
+
+    assert store.adopt_legacy_mailboxes(voicemail) == 1
+    # The folder itself is gone before anything reads it: listing a mailbox
+    # creates its folders, which is why the absence is checked first.
+    assert not (root / "engineerip" / "101").exists()
+    moved = voicemail.list_messages("101-13025550001")
+    assert [message["message"] for message in moved] == ["msg0000"]
+    assert moved[0]["caller_id"] == "Old desk <+13025550123>"
+    assert voicemail.list_messages("101") == []          # nothing left under the digits
+    # The operator's own device keeps the digits nothing else can mean.
+    assert [message["message"] for message in voicemail.list_messages("900")] == ["msg0000"]
+    # Running again moves nothing: the upgrade is finished, not repeated.
+    assert store.adopt_legacy_mailboxes(voicemail) == 0
+
+
+def test_two_lines_that_could_both_mean_a_folder_leave_it_alone(tmp_path):
+    """Two rows carrying 101 after the migration - the legacy fixture's shape -
+    must not have their messages guessed into one of the two mailboxes."""
+    path = tmp_path / "settings.db"
+    legacy_database(path)
+    store = SettingsStore(str(path), "a" * 40)
+    assert len([row for row in store.list_extensions() if row["digits"] == "101"]) == 2
+    root = tmp_path / "voicemail"
+    write_message(root, "101", "msg0000")
+    assert store.adopt_legacy_mailboxes(VoicemailStore(str(root), "engineerip")) == 0
+    assert [message["message"] for message in VoicemailStore(str(root), "engineerip").list_messages("101")] == ["msg0000"]
 
 
 def test_an_existing_install_migrates_without_losing_a_device(tmp_path):

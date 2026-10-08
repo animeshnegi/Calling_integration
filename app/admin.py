@@ -3767,6 +3767,31 @@ class SettingsStore:
                 return str(row["key"])
         return ""
 
+    def adopt_legacy_mailboxes(self, voicemail_store) -> int:
+        """Give every migrating extension the voicemail it already had.
+
+        An install that predates number-scoped extensions filed `101` under the
+        folder `101`. That row now answers on a phone number and files under
+        `101-13025550001`, so the messages are moved across once, at startup,
+        rather than left where nothing reads them. The move happens only while
+        the digits name exactly one row and no row keeps the bare digits as a
+        mailbox of its own - a platform device keeps `900` - and when two lines
+        could both mean the same folder nothing is moved at all, because a
+        customer's messages must never be merged into the wrong box.
+        """
+        grouped: dict[str, list[dict]] = {}
+        for row in self.list_extensions():
+            grouped.setdefault(extension_digits(str(row["key"])), []).append(row)
+        moved = 0
+        for digits, group in grouped.items():
+            if not digits.isdigit() or any(str(row["key"]) == digits for row in group):
+                continue
+            scoped = [row for row in group if str(row["number"] or "").strip()]
+            if len(scoped) != 1:
+                continue
+            moved += int(voicemail_store.adopt_mailbox(digits, extension_mailbox(str(scoped[0]["key"]))))
+        return moved
+
     def _digits_are_numberless(self, digits: Any) -> bool:
         """Do these digits name a row that has no phone number of its own?
 
