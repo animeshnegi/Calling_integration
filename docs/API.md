@@ -166,11 +166,17 @@ call.recording_finished
 call.recording_failed
 call.recording_announcement_failed
 call.recording_deleted
+call.ringing
+call.ivr_extension_selected
+call.ivr_fallback
+call.voicemail
+call.missed
 call.completed
 call.failed
-call.hangup_requested
 call.disposition
 ```
+
+The complete list, with meanings, is in [`WEBHOOKS.md`](WEBHOOKS.md). The browser documentation page at `/documentation` describes the same events and is checked against the server by `tests/test_api_docs.py`.
 
 CRM handlers should treat `call_id` as the stable identifier and make webhook processing idempotent.
 

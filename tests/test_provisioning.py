@@ -1326,12 +1326,12 @@ def test_the_documentation_page_names_this_deployment(tmp_path):
     page = admin.get("/documentation").data.decode()
     assert "https://voice.acme.test/api/v1/calls" in page
     assert "voice.acme.test:5060" in page
-    assert "KUDGTE_101" in page
+    assert "MERIDIAN_101_13025550001" in page
     assert 'href="/admin"' in page
 
-    # It stays behind the sign-in wall.
+    # It is public: the landing page links to it before anyone has an account.
     anonymous = make_app(tmp_path).test_client()
-    assert anonymous.get("/documentation").status_code in (302, 401)
+    assert anonymous.get("/documentation").status_code == 200
 
 
 

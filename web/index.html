@@ -82,9 +82,44 @@
     footer{border-top:1px solid #10182812;padding:28px 0;color:#555f79;font-size:13px}
     .foot{display:flex;justify-content:space-between}
     :focus-visible{outline:2px solid #4f46e5;outline-offset:2px}
+    /* The softphone is the one nav item that stays on small screens: a live pill
+       with a green status dot, so the phone is one tap away on a phone too. */
+    .softphone-link{
+      display:inline-flex;align-items:center;gap:9px;padding:7px 15px 7px 7px;border-radius:999px;
+      color:#14532d;font-weight:750;letter-spacing:-.01em;white-space:nowrap;
+      background:linear-gradient(135deg,#ecfdf5,#e0f2fe);border:1px solid #15803d2e;
+      box-shadow:0 8px 20px #15803d1c;transition:transform .16s cubic-bezier(.22,.75,.25,1),box-shadow .16s;
+    }
+    .softphone-link:hover{transform:translateY(-1px);box-shadow:0 12px 26px #15803d2e;color:#14532d}
+    .softphone-link .sp-icon{
+      width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:13px;
+      background:linear-gradient(140deg,#15803d,#0e7490);
+    }
+    .softphone-link .sp-live{width:7px;height:7px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 0 #22c55e88;animation:spPulse 2.2s infinite}
+    @keyframes spPulse{0%{box-shadow:0 0 0 0 #22c55e88}70%{box-shadow:0 0 0 7px #22c55e00}100%{box-shadow:0 0 0 0 #22c55e00}}
+    .sp-grid{display:grid;grid-template-columns:.8fr 1.2fr;gap:60px;align-items:center}
+    .sp-phone{
+      justify-self:center;width:260px;padding:22px 18px 26px;border-radius:38px;background:#141b2d;
+      box-shadow:0 30px 60px #141b2d40,inset 0 0 0 2px #2b3550;
+    }
+    .sp-screen{background:linear-gradient(180deg,#f7f8fd,#eef0f8);border-radius:22px;padding:18px 14px 14px;text-align:center}
+    .sp-screen small{display:block;color:#555f79;font-size:11px;letter-spacing:.08em;font-weight:700}
+    .sp-screen b{display:block;font-size:22px;letter-spacing:.02em;margin:6px 0 14px;font-variant-numeric:tabular-nums}
+    .sp-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
+    .sp-keys span{height:38px;border-radius:50%;display:grid;place-items:center;background:#ffffff;border:1px solid #10182814;font-weight:700;font-size:15px;box-shadow:0 1px 2px #1018280f}
+    .sp-call{margin-top:14px;height:46px;border-radius:999px;display:grid;place-items:center;color:#fff;font-size:18px;background:linear-gradient(135deg,#16a34a,#0e7490);box-shadow:0 10px 22px #16a34a40}
+    .sp-steps{display:grid;gap:14px}
+    .sp-step{display:grid;grid-template-columns:38px 1fr;gap:14px;align-items:start;background:#ffffffe0;border:1px solid #10182814;border-radius:18px;padding:18px 20px;box-shadow:0 1px 3px #1018280f}
+    .sp-step i{font-style:normal;width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-weight:800;color:#fff;background:linear-gradient(135deg,#4f46e5,#7c3aed)}
+    .sp-step b{display:block;font-size:15.5px;margin-bottom:3px}
+    .sp-step p{margin:0;color:#4c5878;font-size:14px;line-height:1.6}
+    .sp-note{color:#555f79;font-size:13px;margin:4px 0 0}
+    .sp-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:6px}
     @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
     @media(max-width:800px){
-      .links a:not(.button){display:none}
+      .links a:not(.button):not(.softphone-link){display:none}
+      .sp-grid{grid-template-columns:1fr;gap:30px}
+      .sp-phone{width:230px}
       .hero{padding-top:50px}
       .hero-grid,.signup{grid-template-columns:1fr}
       .preview{display:none}
@@ -95,15 +130,39 @@
       .section{padding:60px 0}
     }
   </style>
-  </style>
 </head>
 <body>
-<nav class="wrap"><a class="brand" href="/"><span class="mark">E</span><span>EIP Telephony Control</span></a><div class="links"><a href="#features">Benefits</a><a href="#pricing">Pricing</a><a href="/login">Log in</a><a class="button primary" href="#signup">Get started</a></div></nav>
+<nav class="wrap"><a class="brand" href="/"><span class="mark">E</span><span>EIP Telephony Control</span></a><div class="links"><a class="softphone-link" href="/phone" title="Open the browser softphone"><span class="sp-icon" aria-hidden="true">☎</span><span>Softphone</span><span class="sp-live" aria-hidden="true"></span></a><a href="#features">Benefits</a><a href="#pricing">Pricing</a><a href="/documentation">API &amp; webhooks</a><a href="/login">Log in</a><a class="button primary" href="#signup">Get started</a></div></nav>
 <main>
 <section class="hero"><div class="wrap hero-grid"><div><div class="eyebrow">MODERN CLOUD TELEPHONY</div><h1>Your US business number, <span class="gradient">ready for work.</span></h1><p>Calls, extensions, voicemail, recordings and CRM automation in one secure control center. EIP manages the carrier infrastructure while you control your team and workflows.</p><div class="actions"><a class="button primary" href="#signup">Start from $5/month</a><a class="button" href="/login">Customer login</a></div><div class="proof"><span>No setup fee</span><span>Invoice billing</span><span>Cancel a number anytime</span></div></div><div class="preview"><div class="window"><header><b>EIP Telephony Control</b><span class="dot">● Operational</span></header><div class="stats"><div class="stat"><small>US numbers</small><b>3</b></div><div class="stat"><small>Answer rate</small><b>92%</b></div><div class="stat"><small>Extensions</small><b>8</b></div><div class="stat"><small>New voicemail</small><b>2</b></div></div><div class="call"><span>Recent call<br><small>+1 302 555 0198</small></span><b class="dot">Completed</b></div></div></div></div></section>
 <section class="section" id="features"><div class="wrap"><h2>Everything included</h2><p class="lead">A capable phone platform without exposing carrier passwords or making customers manage SIP infrastructure.</p><div class="features"><article class="card"><span class="icon">☎</span><h3>US numbers & smart routing</h3><p>Use multiple numbers, route each callback to the correct extension, and select outbound caller ID.</p></article><article class="card"><span class="icon">⌁</span><h3>Team extensions</h3><p>Create and manage SIP extensions while EIP administrators securely configure the upstream carrier.</p></article><article class="card"><span class="icon">◇</span><h3>CRM automation</h3><p>Scoped API keys, signed webhooks, call lifecycle events, idempotency and integration history.</p></article><article class="card"><span class="icon">✉</span><h3>Voicemail</h3><p>Private mailboxes with browser playback and optional SendGrid audio attachments.</p></article><article class="card"><span class="icon">◉</span><h3>Optional recording</h3><p>Recording is off by default. Use global and extension controls with secure browser playback.</p></article><article class="card"><span class="icon">▣</span><h3>Clear billing</h3><p>See monthly pricing, renewal cycles, invoices and scheduled number discontinuation in your panel.</p></article></div></div></section>
+<section class="section" id="softphone"><div class="wrap">
+  <div class="eyebrow" style="text-align:center">BROWSER SOFTPHONE</div>
+  <h2>A real phone, in your browser tab.</h2>
+  <p class="lead">Keypad, recent calls, contacts, mute, speaker and hold, with HD (G.722) audio whenever both ends support it. Sign in with your extension and your business number rings in the browser, with nothing to install.</p>
+  <div class="sp-grid">
+    <div class="sp-phone" aria-hidden="true">
+      <div class="sp-screen">
+        <small>ON A CALL · 02:14</small>
+        <b>+1 302 555 0198</b>
+        <div class="sp-keys"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span><span>*</span><span>0</span><span>#</span></div>
+        <div class="sp-call">☎</div>
+      </div>
+    </div>
+    <div class="sp-steps">
+      <div class="sp-step"><i>1</i><div><b>Sign in</b><p>Open the softphone and enter the SIP username, password and domain from your extension's credentials. Pressing <b>Softphone</b> in the console opens it already signed in as that extension.</p></div></div>
+      <div class="sp-step"><i>2</i><div><b>Dial</b><p>Type or paste a number, or press a contact. A three-digit extension reaches the extension on your own number. Press the call button, or Enter.</p></div></div>
+      <div class="sp-step"><i>3</i><div><b>In a call</b><p>Mute, switch the speaker or hold the line from the call screen. Answer or decline incoming calls there too, and Esc hangs up.</p></div></div>
+      <div class="sp-actions">
+        <a class="button primary" href="/phone">Open the softphone</a>
+        <a class="button" href="/documentation#softphone">Read the softphone guide</a>
+      </div>
+      <p class="sp-note">The browser softphone needs your extension's WebRTC option switched on in the console. It needs a modern browser with microphone access.</p>
+    </div>
+  </div>
+</div></section>
 <section class="section" id="pricing"><div class="wrap"><h2>Simple per-number pricing</h2><p class="lead">Start with one number and add more as your business grows.</p><div class="pricing"><div class="eyebrow">EIP US NUMBER</div><div class="price">$5 <small>/ number / month</small></div><ul><li>US phone number</li><li>Multiple extensions</li><li>Inbound & outbound calls</li><li>Voicemail</li><li>Optional recordings</li><li>API keys</li><li>CRM webhooks</li><li>Invoice history</li></ul><a class="button primary" style="display:block;text-align:center;margin-top:10px" href="#signup">Create free account</a></div></div></section>
 <section class="section" id="signup"><div class="wrap signup"><div><div class="eyebrow">CREATE YOUR ACCOUNT</div><h2>Get your telephony workspace.</h2><p>Sign up instantly. Your account opens with no carrier credentials and no phone number. An EIP administrator will assign your purchased number and underlying SIP service.</p></div><form class="form" id="signup-form"><input name="full_name" maxlength="120" placeholder="Your name" required><input name="company_name" maxlength="160" placeholder="Company name" required><input name="job_role" maxlength="120" placeholder="Your role (Owner, IT, Operations…)" required><input name="phone" type="tel" maxlength="30" placeholder="Phone number" required><input name="username" minlength="3" maxlength="80" pattern="[a-zA-Z0-9._-]+" placeholder="Username" required><input name="email" type="email" placeholder="Business email" required><input name="password" type="password" minlength="14" maxlength="256" placeholder="Password (minimum 14 characters)" required><button class="button primary" type="submit">Create account</button><div class="message" id="signup-message"></div><small style="color:#555f79">Already registered? <a style="color:#4f46e5;font-weight:600" href="/login">Log in here</a>.</small></form></div></section>
-</main><footer><div class="wrap foot"><span>© 2026 EIP Telephony Control</span><span>Secure · Flexible · CRM ready</span></div></footer>
+</main><footer><div class="wrap foot"><span>© 2026 EIP Telephony Control</span><span><a href="/phone">Softphone</a> · <a href="/documentation">API &amp; webhooks</a> · Secure · Flexible · CRM ready</span></div></footer>
 <script>document.querySelector('#signup-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.target.querySelector('button'),message=document.querySelector('#signup-message');button.disabled=true;message.className='message';message.textContent='Creating account…';try{const response=await fetch('/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(event.target)))}),data=await response.json();if(!response.ok)throw Error(data.error||'Signup failed');message.textContent='Account created. Redirecting to login…';setTimeout(()=>location='/login',900)}catch(error){message.className='message error';message.textContent=error.message;button.disabled=false}});</script>
 </body></html>

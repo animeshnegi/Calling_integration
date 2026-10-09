@@ -4017,15 +4017,14 @@ def register_admin(app, config, on_telephony_change=None):
         return send_from_directory(web_dir, "console-check.html")
 
     @app.get("/documentation")
-    @login_required
     def documentation_page():
-        """The setup and API reference that the console links to.
+        """The setup, API and webhook reference, linked from the public landing page.
 
-        Signed-in only: it describes the integration surface of this deployment,
-        so it is not something an anonymous visitor needs to read. The page holds
-        no customer data; the only thing rendered into it is the service address
-        an administrator configured, so every example names this deployment
-        rather than a placeholder.
+        Public on purpose: a developer deciding whether to sign up reads the API
+        before they have an account. The page holds no customer data; the only
+        things rendered into it are the service addresses an administrator
+        configured, which a device needs to register anyway, so every example
+        names this deployment rather than a placeholder.
         """
         page_file = Path(web_dir) / "documentation.html"
         page = page_file.read_text(encoding="utf-8")

@@ -2546,7 +2546,7 @@ const templates = {
     fields: `<label class="field">Name<input name="name" maxlength="80" placeholder="Production CRM" required value="${esc(item?.name || '')}"></label>
       <label class="field">Endpoint URL<input name="url" type="url" maxlength="1000" placeholder="https://crm.example.com/api/telephony/events" required value="${esc(item?.url || '')}"></label>
       <label class="field">Signing secret<input name="token" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Optional shared secret'}"><small>When set, each delivery is signed with an HMAC-SHA256 header so your service can verify authenticity.</small></label>
-      <label class="field">Events<select name="events" multiple size="7" required>${['*','call.started','call.ringing','call.answered','call.completed','call.failed','call.voicemail']
+      <label class="field">Events<select name="events" multiple size="8" required>${['*','call.started','call.ringing','call.employee_ringing','call.employee_answered','call.customer_dialing','call.answered','call.bridged','call.ivr_extension_selected','call.ivr_fallback','call.voicemail','call.missed','call.recording_started','call.recording_finished','call.recording_failed','call.recording_announcement_failed','call.recording_deleted','call.completed','call.failed','call.disposition']
         .map(ev => `<option value="${ev}" ${(item?.events || '*').split(',').includes(ev) ? 'selected' : ''}>${ev === '*' ? 'All call events' : ev}</option>`).join('')}</select>
         <small>Select only the events this integration needs.</small></label>
       <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Endpoint is active</label>`,
