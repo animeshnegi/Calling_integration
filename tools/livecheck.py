@@ -631,9 +631,13 @@ check("the phone manifest installs with the same logo",
       LOGO in Client().request("/manifest.json")[1])
 
 status, console_page = admin.request("/admin")
-check("the customer's workflow tab ships the two-step pickers",
-      'id="route-number"' in console_page and 'id="route-extension"' in console_page
-      and 'aria-label="Number"' in console_page and 'aria-label="Extension"' in console_page)
+# The number is chosen once, in the scope bar above every page, and the workflow
+# tab offers the extensions of that number beside it - there is no second number
+# picker on the tab itself.
+check("the customer's workflow tab ships the number bar and the extension picker",
+      'class="customer-number-select"' in console_page and 'aria-label="Phone number"' in console_page
+      and 'id="route-extension"' in console_page and 'aria-label="Extension"' in console_page
+      and 'id="route-number"' not in console_page)
 check("while the flat target picker is the administrator's alone",
       'id="route-target" aria-label="Call flow target" data-admin-only' in console_page)
 check("the console ships no call-defaults editor for any role",
@@ -673,7 +677,7 @@ status, page = admin.request("/documentation")
 check("the documentation page is served to a signed-in operator", status == 200 and "EIP Telephony" in page, str(status))
 check("it links back to the console", 'href="/admin"' in page)
 check("it documents the API surface", "/api/v1/calls" in page and "X-EngineerIP-Signature" in page)
-check("it explains the SIP identity format", "KUDGTE_101" in page)
+check("it explains the SIP identity format, with the example it is built from", "MERIDIAN_101_13025550001" in page)
 check("every example names this deployment's own address",
       "https://sip.engineerip.example/api/v1/calls" in page and "sip.engineerip.example:5060" in page
       and "{{" not in page, page[:0])

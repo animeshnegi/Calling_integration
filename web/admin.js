@@ -238,7 +238,7 @@ function showPage(name) {
   document.querySelector('.content')?.scrollTo?.({ top: 0, behavior: 'auto' });
   window.scrollTo({ top: 0, behavior: 'auto' });
   if (!$('workspace').classList.contains('open')) $('scrim').classList.remove('open');
-  if (name === 'routing') { renderRoutingOwner(); renderFlow(); renderGroups(); }
+  if (name === 'routing') { renderScopeBars(); renderFlow(); renderGroups(); }
   if (name === 'calls') loadCalls();
   if (name === 'recordings') loadRecordings();
   if (name === 'voicemails') loadVoicemails();
@@ -509,36 +509,111 @@ async function loadSystem() {
 
 /* ------------------------------------------------------- 8. Render: shell */
 let customerNumber = '';
-function customerNumberList() { return state.is_admin ? [] : (state.phone_numbers || []); }
+let scopeOwner = null;
+
+/* ------------------------------------------------------ 8. Render: scope */
+/* One scope for the whole console, chosen the same way on every page.
+
+   The scope bar at the top of a page holds the same two selects everywhere: the
+   customer (administrator only), then the phone number that customer owns.
+   Everything below the bar - lists, dropdowns, flows, totals - follows the
+   number. A page whose data is account-wide (Integrations) carries no number.
+
+   `scopeOwner` is the customer an administrator is reading; null means every
+   customer, offered only on the history pages. `customerNumber` is the number
+   chosen on the bar and is always one of the scope's own numbers. */
+const scopeAllowedHere = () => !!document.querySelector(`#page-${currentPage} [data-scope-all]`);
+const scopeShort = (text, max = 26) => {
+  const clean = String(text || '').trim();
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+};
+const numberLabel = x => `${x.number}${x.description ? ` · ${scopeShort(x.description)}` : ''}`;
+const numberTitle = x => `${x.number}${x.description ? ` — ${x.description}` : ''}`;
+const customerHasWork = id => (state.phone_numbers || []).some(x => Number(x.owner_user_id) === Number(id))
+  || (state.extensions || []).some(x => Number(x.owner_user_id) === Number(id));
+
+/* The numbers in scope: the customer's own, or the chosen customer's when an
+   administrator reads one customer. */
+function scopeNumbers() {
+  return (state.phone_numbers || []).filter(x =>
+    !state.is_admin || scopeOwner === null || Number(x.owner_user_id) === Number(scopeOwner));
+}
+function customerNumberList() { return scopeNumbers(); }
+
+/* The number the page is showing, or '' when an administrator reads every
+   customer. A number that is not in scope falls back to the primary line. */
 function chosenCustomerNumber() {
-  const numbers = customerNumberList();
+  if (state.is_admin && scopeOwner === null) return '';
+  const numbers = scopeNumbers();
   const wanted = String(customerNumber || '');
   if (numbers.some(x => String(x.number) === wanted)) return wanted;
   return primaryNumberIn(numbers);
 }
-function renderCustomerNumberPickers() {
-  if (state.is_admin) return;
-  const numbers = customerNumberList();
+
+/* A page that lists calls, recordings or mailboxes needs one line to read: an
+   administrator must have a customer, and every reader must have a number. */
+const scopeBlocked = () => (state.is_admin ? scopeOwner !== null : true) && !chosenCustomerNumber();
+const scopeNoLine = what => empty('No phone number yet', `${what} appear here once a number is assigned.`, '☎');
+
+/* Paint the scope bar on every page, from one state. */
+function renderScopeBars() {
+  const customers = state.is_admin ? ownerChoices() : [];
+  if (state.is_admin) {
+    if (scopeOwner !== null && !customers.some(c => c.id === scopeOwner)) scopeOwner = null;
+    // A page that cannot read every customer always reads one.
+    if (scopeOwner === null && !scopeAllowedHere()) {
+      scopeOwner = resolvePickedOwner(null, customerHasWork);
+    }
+  }
+  if (state.is_admin) document.querySelectorAll('.scope-customer-select').forEach(select => {
+    const allowAll = !!select.closest('[data-scope-all]');
+    select.innerHTML = (allowAll ? '<option value="">All customers</option>' : '')
+      + (customers.map(c => `<option value="${c.id}">${esc(c.company_name || c.username)}</option>`).join('')
+        || '<option value="">No customers yet</option>');
+    select.value = scopeOwner === null ? '' : String(scopeOwner);
+  });
+
+  const numbers = scopeNumbers();
   const chosen = chosenCustomerNumber();
   customerNumber = chosen;
+  const reading = !(state.is_admin && scopeOwner === null);
   document.querySelectorAll('.customer-number-select').forEach(select => {
-    const current = String(select.value || '');
-    select.innerHTML = numbers.map(x => `<option value="${esc(x.number)}">${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('') || '<option value="">No numbers yet</option>';
-    select.value = numbers.some(x => String(x.number) === current) ? current : chosen;
+    select.disabled = !reading;
+    select.innerHTML = reading
+      ? (numbers.map(x => `<option value="${esc(x.number)}" title="${esc(numberTitle(x))}">${esc(numberLabel(x))}</option>`).join('')
+        || '<option value="">No numbers yet</option>')
+      : '<option value="">All numbers</option>';
+    select.value = reading ? chosen : '';
   });
 }
+
+/* The customer an administrator picked changes the numbers the page offers. */
+function applyScopeOwner(value) {
+  if (!state.is_admin) return;
+  scopeOwner = value === '' || value == null ? null : Number(value);
+  customerNumber = '';
+  renderScopeBars();
+  refreshScope();
+}
+/* The number picked on the bar changes every list below it. */
 function applyCustomerNumber(number) {
-  if (state.is_admin) return;
-  const numbers = customerNumberList();
   const next = String(number || '');
-  if (next && !numbers.some(x => String(x.number) === next)) return;
-  customerNumber = next || primaryNumberIn(numbers);
-  renderCustomerNumberPickers();
+  if (next && !scopeNumbers().some(x => String(x.number) === next)) return;
+  customerNumber = next;
+  renderScopeBars();
+  refreshScope();
+}
+/* Re-read everything that follows the scope, once, from one place. */
+function refreshScope() {
   callOffset = 0; recordingOffset = 0;
-  renderExtensions(); renderSipAccounts(); renderBilling(); renderDeviceNumbers();
-  renderFlow(flowKey('number', customerNumber));
+  renderScopeExtensionSelects();
+  renderExtensions(); renderNumbers(); renderSipAccounts(); renderBilling(); renderDeviceNumbers();
+  renderApiKeys(); renderWebhooks(); renderDeliveries();
+  renderFlow(state.is_admin ? undefined : flowKey('number', customerNumber));
+  renderGroups();
   loadCalls(); loadRecordings(); loadVoicemails();
 }
+
 function renderAll() {
   const summary = state.call_summary || {};
   countTo($('stat-total'), summary.total);
@@ -560,12 +635,9 @@ function renderAll() {
   setBadge($('notification-badge'), (state.notifications || []).filter(n => !n.read_at).length);
 
   if (!state.is_admin) renderCustomerStatus();
-  renderCustomerNumberPickers();
-  // Resolve whose numbers, devices and integrations are on screen *before* the
-  // lists render, so the first paint already belongs to the chosen customer.
-  renderNumberOwnerPicker();
-  renderSipOwnerPicker();
-  renderIntegrationOwnerPicker();
+  // Resolve the scope - customer, then number - before any list renders, so the
+  // first paint already belongs to the chosen customer and line.
+  renderScopeBars();
   renderExtensions();
   renderNumbers();
   renderProviders();
@@ -586,7 +658,6 @@ function renderAll() {
   renderSystemBoard();
   if (state.is_admin) loadSystem();
   renderEmailSettings();
-  renderRoutingOwner();
   renderFlow();
 
   // The profile names the extension it was assigned. The store keeps the digits
@@ -648,7 +719,7 @@ function renderCustomers() {
       <div class="tags">${u.active ? tag('Active', 'on') : tag('Disabled', 'off')}${tag('Administrator', 'violet')}</div>
       <div class="row-actions"><span class="cell-sub">Managed from the platform</span></div>
     </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂'));
-  if (currentPage === 'routing') { renderRoutingOwner(); renderFlow($('route-target')?.value); renderGroups(); }
+  if (currentPage === 'routing') { renderScopeBars(); renderFlow($('route-target')?.value); renderGroups(); }
   markStagger();
 }
 
@@ -672,8 +743,14 @@ function platformRecordingAllowed() {
    digits on two lines are told apart by the line they answer on. */
 function renderExtensions() {
   const query = state.is_admin ? val('extension-search').toLowerCase() : '';
+  const line = chosenCustomerNumber();
+  // One flat list for the number on the bar: no accordion per line, no other
+  // line's extensions beside it.
   const rows = state.extensions
-    .filter(x => `${x.extension} ${x.display_name} ${x.sip_username}`.toLowerCase().includes(query));  $('extension-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
+    .filter(x => !state.is_admin || scopeOwner === null || Number(x.owner_user_id) === Number(scopeOwner))
+    .filter(x => !line || String(x.number) === line)
+    .filter(x => `${x.extension} ${x.display_name} ${x.sip_username}`.toLowerCase().includes(query));
+  $('extension-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
   const card = x => `
     <div class="row">
       <span class="row-icon">${esc(extensionDigitsOf(x.extension))}</span>
@@ -694,49 +771,25 @@ function renderExtensions() {
         <button class="btn danger sm" data-delete-extension="${x.extension}">Delete</button>
       </div>
     </div>`;
-  if (state.is_admin) {
-    const groups = groupBy(rows, x => {
-      const owner = state.users.find(u => u.id === x.owner_user_id);
-      return owner?.company_name || owner?.username || 'Platform / unassigned';
-    });
-    paint('extension-list', Object.entries(groups).map(([name, items]) => `
-      <div class="acc-item open">
-        <div class="acc-head"><span class="row-icon">${esc(name[0].toUpperCase())}</span>
-          <div><h3 style="font-size:13px">${esc(name)}</h3><p style="font-size:11px;color:var(--text-3)">${items.length} extension${items.length === 1 ? '' : 's'}</p></div>
-          <span class="chev">›</span>
-        </div>
-        <div class="acc-body" style="padding:0">${items.map(card).join('')}</div>
-      </div>`).join('') || empty('No extensions found', 'Open a customer workspace to create an extension.', '⌁'));
-  } else {
-    // Grouped by the number they answer on: the customer sees at a glance which
-    // devices hold which line, exactly as the platform stores them.
-    const groups = groupBy(rows, x => String(x.number || '') || 'No number yet');
-    paint('extension-list', Object.entries(groups).map(([number, items]) => `
-      <div class="acc-item open">
-        <div class="acc-head"><span class="row-icon">☎</span>
-          <div><h3 style="font-size:13px">${esc(number)}</h3>
-            <p style="font-size:11px;color:var(--text-3)">${items.length} extension${items.length === 1 ? '' : 's'} · ${esc(items.map(x => extensionDigitsOf(x.extension)).join(', '))}</p></div>
-          <span class="chev">›</span>
-        </div>
-        <div class="acc-body" style="padding:0">${items.map(card).join('')}</div>
-      </div>`).join('') || empty('No extensions yet', 'Create departments such as Sales, Support or Operations.', '⌁', '',
-      emptyAction('Create extension', 'data-open="extension"', true)));
-  }
+  const none = state.is_admin || line
+    ? empty(line ? 'No extensions on this number yet' : 'No extensions yet',
+      line ? 'Add an extension to give this number an answering destination.' : 'Create an extension once a number is assigned.', '⌁', '',
+      emptyAction('Add extension', 'data-open="extension"', true))
+    : scopeNoLine('Extensions');
+  paint('extension-list', rows.map(card).join('') || none);
   markStagger();
 }
 
-/* ----------------------------------------------------- 11. Render: numbers */
-/* The two lists an administrator most often reads one customer at a time. The
-   choice lives here, not in the DOM, so a refresh keeps it. */
-let numberOwner = null, sipOwner = null;
 
+/* ----------------------------------------------------- 11. Render: numbers */
+/* Customers an administrator can read, by company name. */
 function ownerChoices() {
   return [...(state.customers || [])].sort((left, right) =>
     (left.company_name || left.username).localeCompare(right.company_name || right.username));
 }
 
-/* Nothing is selected until the operator (or the data) picks: with one customer
-   there is no choice to make, and with none the page is simply empty. */
+/* Nothing is chosen until the operator (or the data) picks: the first customer
+   with something to show is read, and with none the page is simply empty. */
 function resolvePickedOwner(current, rows) {
   const choices = ownerChoices();
   if (!choices.length) return null;
@@ -745,54 +798,9 @@ function resolvePickedOwner(current, rows) {
   return (withRows || choices[0]).id;
 }
 
-function renderOwnerPicker(hostId, selected, counts, onPick) {
-  const host = $(hostId);
-  if (!host) return;
-  const choices = ownerChoices();
-  host.innerHTML = choices.map(customer => {
-    const picked = customer.id === selected;
-    const count = counts(customer.id);
-    return `<button type="button" class="customer-chip ${picked ? 'active' : ''}" data-owner="${customer.id}" aria-pressed="${picked}">
-      <span class="avatar">${esc((customer.company_name || customer.username || 'C')[0].toUpperCase())}</span>
-      <span class="copy"><b>${esc(customer.company_name || customer.username)}</b><small>${esc(count)}</small></span>
-    </button>`;
-  }).join('') || '<p class="picker-empty">No customers yet. Add one to assign numbers and devices.</p>';
-  host.querySelectorAll('[data-owner]').forEach(button => {
-    button.addEventListener('click', () => onPick(Number(button.dataset.owner)));
-  });
-}
-
-function renderNumberOwnerPicker() {
-  if (!state.is_admin) return;
-  const rows = id => (state.phone_numbers || []).filter(x => x.owner_user_id === id).length;
-  numberOwner = resolvePickedOwner(numberOwner, rows);
-  renderOwnerPicker('number-picker', numberOwner, id => {
-    const count = rows(id);
-    return `${count} number${count === 1 ? '' : 's'}`;
-  }, id => {
-    numberOwner = id;
-    renderNumbers();
-    renderNumberOwnerPicker();
-  });
-}
-
-function renderSipOwnerPicker() {
-  if (!state.is_admin) return;
-  const devices = id => (state.sip_accounts || []).filter(x => x.owner_user_id === id).length;
-  const extensions = id => (state.extensions || []).filter(x => x.owner_user_id === id).length;
-  sipOwner = resolvePickedOwner(sipOwner, devices);
-  renderOwnerPicker('sip-picker', sipOwner, id =>
-    `${extensions(id)} extension${extensions(id) === 1 ? '' : 's'} · ${devices(id)} device${devices(id) === 1 ? '' : 's'}`,
-    id => {
-      sipOwner = id;
-      renderSipAccounts();
-      renderSipOwnerPicker();
-    });
-}
-
 function renderNumbers() {
   const query = val('number-search').toLowerCase();
-  const owner = state.is_admin ? numberOwner : null;
+  const owner = state.is_admin ? scopeOwner : null;
   const rows = state.phone_numbers
     .filter(x => !state.is_admin || x.owner_user_id === owner)
     .filter(x => `${x.number} ${x.provider} ${x.description} ${x.inbound_extension}`.toLowerCase().includes(query));
@@ -878,8 +886,8 @@ function primaryExtensionIn(extensions) {
    in `extension`, the line in `number`, and the identity that names both in
    `key` (`101@+13025550001`). The console works with that identity everywhere,
    exactly as it always has, and shows the digits with the line beside them. */
-function normaliseExtensions() {
-  (state.extensions || []).forEach(row => {
+function normaliseExtensions(rows = state.extensions) {
+  (rows || []).forEach(row => {
     const digits = String(row.digits || extensionDigitsOf(row.extension) || '');
     const key = String(row.key || (row.number ? `${digits}@${row.number}` : digits));
     row.key = key;
@@ -986,12 +994,6 @@ function extensionCard(x, { wired, primary, index }) {
   // Every extension belongs to one number, and its digits start again at 101 on
   // each line - so the card always names the line the digits live on.
   const line = String(x.number || '') || linked[0] || account?.phone_number || '';
-  // What this extension calls out as: the phone number it belongs to, because
-  // caller ID comes from the phone-number context and never from the digits - so
-  // two 101s present their own line. There is no account-level fallback: an
-  // extension with no number of its own has no line to present yet, and says so
-  // instead of naming a line that would not answer for it.
-  const accountLine = String(x.number || '') || (!x.owner_user_id ? (linked[0] || '') : '');
   // Whether a phone is signed in as this extension, from Asterisk's own view of
   // its endpoints. A phone that is not registered is the usual reason a call
   // does not ring, so the card says it rather than leaving the customer to
@@ -1014,7 +1016,7 @@ function extensionCard(x, { wired, primary, index }) {
       ${x.webrtc_enabled ? tag('Browser phone', 'info') : ''}
     </div>
     <div class="kv kv-2">
-      ${kv('Numbers', linked.join(', ') || (accountLine ? `Calls out as ${accountLine}` : 'Calls out once a number is assigned'))}
+      ${kv('Numbers', linked.join(', ') || 'Not answering a number yet')}
       ${kv('Device', deviceLine)}
     </div>
     <div class="ws-card-actions">
@@ -1031,17 +1033,19 @@ function renderExtensionCredentials() {
   const host = $('extension-credential-list');
   if (!host) return;
   const query = val('sip-search').toLowerCase();
-  const owner = state.is_admin ? sipOwner : null;
+  const owner = state.is_admin ? scopeOwner : null;
+  const line = chosenCustomerNumber();
   const numbers = extension => (state.phone_numbers || []).filter(x => x.inbound_extension === extension).map(x => x.number);
   const rows = (state.extensions || [])
     .filter(x => !state.is_admin || x.owner_user_id === owner)
+    .filter(x => !line || String(x.number) === line)
     .filter(x => x.active)
     .filter(x => `${x.extension} ${x.digits || ''} ${x.number || ''} ${x.display_name || ''} ${x.sip_username || ''} ${numbers(x.extension).join(' ')}`.toLowerCase().includes(query));  $('extension-credential-count').textContent = `${rows.length} extension${rows.length === 1 ? '' : 's'}`;
   if (!state.is_admin) {
     // A customer reads cards. The extensions answering the number they picked
     // come first and wear the accent; the rest stay quiet but reachable.
     const wired = extensionsOnNumber(chosenDeviceNumber());
-    const primary = primaryExtensionIn(state.extensions);
+    const primary = primaryKeyIn(rows);
     rows.sort((left, right) =>
       Number(wired.has(String(right.extension))) - Number(wired.has(String(left.extension)))
       || String(left.number || '').localeCompare(String(right.number || ''))
@@ -1055,7 +1059,7 @@ function renderExtensionCredentials() {
   host.className = 'rows';
   // The operator's list names the primary device the same way the customer's
   // cards do: the lowest extension of the customer being looked at.
-  const primary = primaryExtensionIn(rows);
+  const primary = primaryKeyIn(rows);
   host.innerHTML = rows.map(x => {
     const linked = numbers(x.extension);
     const flows = (state.routing_flows || []).filter(flow => flow.target_type === 'extension' && flow.target === x.extension);
@@ -1083,8 +1087,10 @@ function renderSipAccounts() {
     return;
   }
   const query = state.is_admin ? val('sip-search').toLowerCase() : '';
-  const owner = state.is_admin ? sipOwner : null;
-  const rows = (state.sip_accounts || []).filter(x => !state.is_admin || x.owner_user_id === owner).filter(x =>
+  const owner = state.is_admin ? scopeOwner : null;
+  const line = chosenCustomerNumber();
+  const rows = (state.sip_accounts || []).filter(x => !state.is_admin || x.owner_user_id === owner)
+    .filter(x => !line || String(x.phone_number) === line).filter(x =>
     `${x.label} ${x.sip_username} ${x.extension || ''} ${x.phone_number || ''}`.toLowerCase().includes(query));
   $('sip-count').textContent = `${rows.length} account${rows.length === 1 ? '' : 's'}`;
   paint('sip-account-list', rows.map((x, i) => {
@@ -1116,28 +1122,11 @@ function renderSipAccounts() {
 /* ------------------------------------------------- 14. Render: API & hooks */
 /* Integrations belong to the customer who runs them. An administrator selects an
    account and manages what is there; creating one is the customer's action. */
-let integrationOwner = null;
-
-function renderIntegrationOwnerPicker() {
-  const keys = id => (state.api_keys || []).filter(x => x.owner_user_id === id).length;
-  const hooks = id => (state.webhooks || []).filter(x => x.owner_user_id === id).length;
-  integrationOwner = resolvePickedOwner(integrationOwner, id => keys(id) || hooks(id));
-  renderOwnerPicker('integration-picker', integrationOwner, id =>
-    `${keys(id)} key${keys(id) === 1 ? '' : 's'} · ${hooks(id)} endpoint${hooks(id) === 1 ? '' : 's'}`,
-    id => {
-      integrationOwner = id;
-      renderApiKeys();
-      renderWebhooks();
-      renderDeliveries();
-      renderIntegrationOwnerPicker();
-    });
-}
-
 function ownedIntegrations(rows) {
   if (!state.is_admin) return rows;
   // Ownerless rows predate customer-owned integrations; keep them reachable
   // rather than losing sight of a live key.
-  return rows.filter(row => row.owner_user_id === integrationOwner || !row.owner_user_id);
+  return rows.filter(row => row.owner_user_id === scopeOwner || !row.owner_user_id);
 }
 
 function renderApiKeys() {
@@ -1339,8 +1328,8 @@ function renderNotifications() {
 
 /* --------------------------------------------------- 16. Render: billing */
 function renderBilling() {
-  const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
-  const numbers = (state.phone_numbers || []).filter(x => !selectedNumber || String(x.number) === selectedNumber);
+  const selectedNumber = chosenCustomerNumber();
+  const numbers = scopeNumbers().filter(x => !selectedNumber || String(x.number) === selectedNumber);
   paint('subscription-list', numbers.map(x => `
     <div class="row">
       <span class="row-icon">$</span>
@@ -1353,7 +1342,9 @@ function renderBilling() {
       <div class="row-actions">${!state.is_admin && !x.discontinue_at ? `<button class="btn danger sm" data-discontinue-number="${esc(x.number)}">Discontinue at renewal</button>` : ''}</div>
     </div>`).join('') || empty('No active subscriptions', state.is_admin ? 'Assign a number to start billing.' : 'An administrator will assign your phone numbers.', '▣'));
 
-  const invoices = (state.invoices || []).filter(x => !selectedNumber || String(x.number) === selectedNumber);
+  // Invoices follow the same scope: the number on the bar, inside the customer.
+  const inScope = number => scopeNumbers().some(n => String(n.number) === String(number));
+  const invoices = (state.invoices || []).filter(x => inScope(x.number) && (!selectedNumber || String(x.number) === selectedNumber));
   paint('invoice-list', invoices.length ? `
     <table class="data"><thead><tr><th>Invoice</th><th>Number</th><th>Period</th><th>Amount</th><th>Status</th><th>Due</th><th>Action</th></tr></thead>
     <tbody>${invoices.map(x => `<tr>
@@ -1374,16 +1365,32 @@ function optionList(includeEmpty = false) {
     .map(extensionOption).join('')}`;
 }
 
-function renderSelects() {
-  const customerSelect = $('recording-customer');
-  if (customerSelect) customerSelect.innerHTML = '<option value="">All customers</option>' + state.customers
-    .map(x => `<option value="${x.id}">${esc(x.company_name || x.username)}</option>`).join('');
-  const allExtensions = `<option value="">All extensions</option>${optionList()}`;
-  paint('call-extension', allExtensions);
-  paint('recording-extension', allExtensions);
-  paint('voicemail-extension', `<option value="">All mailboxes</option>${state.extensions
-    .filter(x => x.voicemail_enabled).map(extensionOption).join('')}`);
+/* The extension dropdowns of the call, recording and voicemail pages follow the
+   scope: only the extensions on the chosen number, labelled by digits and name. */
+function scopeExtensions() {
+  if (state.is_admin && scopeOwner === null) return null;
+  const line = chosenCustomerNumber();
+  return (state.extensions || []).filter(x =>
+    (!state.is_admin || Number(x.owner_user_id) === Number(scopeOwner))
+    && (!line || String(x.number) === line));
 }
+function setSelectOptions(select, html) {
+  if (!select) return;
+  const prior = select.value;
+  select.innerHTML = html;
+  select.value = [...select.options].some(option => option.value === prior) ? prior : '';
+}
+function renderScopeExtensionSelects() {
+  const rows = scopeExtensions();
+  const pool = rows === null ? (state.extensions || []) : rows;
+  const multiLine = new Set(pool.map(x => x.number)).size > 1;
+  const option = x => `<option value="${esc(x.key || x.extension)}" title="${esc(extensionLabel(x.key || x.extension))}">${esc(extensionDigitsOf(x.extension))} — ${esc(scopeShort(x.display_name || 'Unnamed', 22))}${multiLine ? ` · ${esc(x.number)}` : ''}</option>`;
+  const active = pool.filter(x => x.active).map(option).join('');
+  setSelectOptions($('call-extension'), `<option value="">All extensions</option>${active}`);
+  setSelectOptions($('recording-extension'), `<option value="">All extensions</option>${active}`);
+  setSelectOptions($('voicemail-extension'), `<option value="">All mailboxes</option>${pool.filter(x => x.voicemail_enabled).map(option).join('')}`);
+}
+function renderSelects() { renderScopeExtensionSelects(); }
 
 /* The customer's own call defaults: which extension an API call without one
    uses, and where a number with no valid destination lands. Both selects are
@@ -1509,7 +1516,12 @@ async function loadCalls() {
   if (val('call-extension')) params.set('extension', val('call-extension'));
   if (val('call-status')) params.set('status', val('call-status'));
   if (val('call-search')) params.set('q', val('call-search'));
-  if (!state.is_admin && chosenCustomerNumber()) params.set('number', chosenCustomerNumber());
+  if (chosenCustomerNumber()) params.set('number', chosenCustomerNumber());
+  if (scopeBlocked()) {
+    paint('call-list', scopeNoLine('Calls'));
+    $('call-count').textContent = '0 calls';
+    return;
+  }
   if (!quietRender) {
     paint('call-list', skeletonRows(6), true);
     setLoading($('call-list'), true);
@@ -1553,13 +1565,19 @@ async function loadRecordings() {
   const params = new URLSearchParams({ limit: '50', offset: String(recordingOffset), recordings: 'true' });
   if (val('recording-extension')) params.set('extension', val('recording-extension'));
   if (val('recording-search')) params.set('q', val('recording-search'));
-  if (!state.is_admin && chosenCustomerNumber()) params.set('number', chosenCustomerNumber());
+  if (chosenCustomerNumber()) params.set('number', chosenCustomerNumber());
+  if (scopeBlocked()) {
+    paint('recording-list', scopeNoLine('Recordings'));
+    $('recording-count').textContent = '0 recordings';
+    return;
+  }
   if (!quietRender) setLoading($('recording-list'), true);
   try {
     const data = await api(`/admin/api/calls?${params}`);
-    const customerId = Number(val('recording-customer') || 0);
     const from = val('recording-from'), to = val('recording-to');
-    const owned = customerId ? new Set(state.extensions.filter(x => x.owner_user_id === customerId).map(x => x.extension)) : null;
+    // An administrator reading one customer keeps that customer's recordings only.
+    const owned = state.is_admin && scopeOwner !== null
+      ? new Set(state.extensions.filter(x => Number(x.owner_user_id) === Number(scopeOwner)).map(x => x.extension)) : null;
     const calls = data.calls.filter(x =>
       (!owned || owned.has(x.extension)) &&
       (!from || String(x.started_at).slice(0, 10) >= from) &&
@@ -1606,13 +1624,11 @@ async function loadVoicemails() {
   try {
     const data = await api(`/admin/api/voicemails?${params}`);
     const query = state.is_admin ? val('voicemail-search').toLowerCase() : '';
-    const selectedNumber = !state.is_admin ? chosenCustomerNumber() : '';
-    // The messages name their mailbox (`101-13025550001`), while the chosen
-    // number's extensions are keys (`101@+13025550001`): both sides are compared
-    // by mailbox, so the page shows the chosen line's own messages.
-    const selectedMailboxes = selectedNumber
-      ? new Set([...extensionsOnNumber(selectedNumber)].map(extensionMailbox))
-      : null;
+    // The messages name their mailbox (`101-13025550001`); the scope's extensions
+    // are keys (`101@+13025550001`). Both are compared by mailbox, so the page shows
+    // the messages of the extensions on the chosen number, and nothing else.
+    const scoped = scopeExtensions();
+    const selectedMailboxes = scoped ? new Set(scoped.map(x => extensionMailbox(x.key || x.extension))) : null;
     const messages = data.voicemails.filter(x =>
       (!selectedMailboxes || selectedMailboxes.has(String(x.mailbox))) &&
       `${x.caller_id} ${x.message} ${x.mailbox}`.toLowerCase().includes(query));
@@ -1682,8 +1698,7 @@ function flowTargetParts(raw) {
    a customer: a customer session is that customer, an administrator picks one. */
 function routingOwner() {
   if (!state.is_admin) return Number(state.user_id) || null;
-  const chosen = Number(val('route-owner'));
-  return Number.isFinite(chosen) && chosen ? chosen : null;
+  return scopeOwner;
 }
 
 function flowOwnerId() {
@@ -1703,7 +1718,8 @@ function routeTargets() {
   // it, and the platform keeps the number's own ring plan in step with the
   // devices a customer adds.
   const mine = row => !state.is_admin || owner === null || row.owner_user_id === owner;
-  (state.extensions || []).filter(x => x.active && mine(x)).forEach(x => targets.push({
+  const line = chosenCustomerNumber();
+  (state.extensions || []).filter(x => x.active && mine(x) && (!line || String(x.number) === line)).forEach(x => targets.push({
     key: flowKey('extension', x.extension), section: 'Extensions', type: 'extension', target: x.extension,
     label: `${extensionLabel(x.extension)} — ${x.display_name || 'Extension'}`,
   }));
@@ -1714,25 +1730,6 @@ function routeTargets() {
   return targets;
 }
 
-/* The customer picker the administrator routes for. Customers see their own. */
-function renderRoutingOwner(preferred) {
-  const select = $('route-owner');
-  if (!select) return;
-  if (!state.is_admin) { select.hidden = true; select.innerHTML = ''; return; }
-  const customers = (state.customers || []).length ? state.customers : (state.users || []).filter(u => u.role === 'user');
-  // Prefer what the operator chose, then the customer whose workspace is open,
-  // then the one the routing page was already showing. Failing all three, land
-  // on a customer that actually has something to route: an empty page reads as
-  // a missing flow, and the flows are the reason the page exists.
-  const hasWork = id => (state.phone_numbers || []).some(x => x.owner_user_id === id)
-    || (state.extensions || []).some(x => x.owner_user_id === id)
-    || (state.groups || []).some(x => x.owner_user_id === id);
-  const fallback = customers.find(c => hasWork(c.id)) || customers[0];
-  const prior = String(preferred ?? select.value ?? workspace?.customer?.id ?? fallback?.id ?? '');
-  select.innerHTML = customers.map(c => `<option value="${c.id}">${esc(c.company_name || c.username)}</option>`).join('')
-    || '<option value="">No customers yet</option>';
-  if (customers.some(c => String(c.id) === prior)) select.value = prior;
-}
 /* Every flow that belongs to one owner, in the shape the pickers expect. */
 function allFlowsFor(ownerUserId) {
   const owns = row => ownerUserId === undefined || row.owner_user_id === ownerUserId;
@@ -1788,11 +1785,15 @@ function focusRouteTarget(key) {
   const number = type === 'number' ? String(target) : numberAnsweredBy(target);
   const resolved = extension ? flowKey('extension', extension) : key;
   if (state.is_admin) {
-    if ($('route-owner')) {
-      const picked = flowTargetParts(resolved);
-      const owner = flowTargetOwner(picked.type, picked.target);
-      if (owner) renderRoutingOwner(owner);
+    // The scope follows the target: its customer, then the number it answers.
+    const picked = flowTargetParts(resolved);
+    const owner = flowTargetOwner(picked.type, picked.target);
+    if (owner) scopeOwner = Number(owner);
+    if (picked.type === 'extension') {
+      const line = (state.extensions || []).find(x => String(x.extension) === String(picked.target))?.number;
+      if (line) customerNumber = String(line);
     }
+    renderScopeBars();
     renderRouteTargets(resolved);
     applyFlowTarget(resolved);
   } else {
@@ -1869,7 +1870,9 @@ function numberRow(number) {
    way in: the workflow belongs to the extension that answers it, and the
    customer's own list is what they choose from. */
 function extensionsForNumber(number) {
-  const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || x.owner_user_id === routingOwner()));
+  // The extensions on one number: the workflow of each one belongs to it.
+  const mine = (state.extensions || []).filter(x => x.active && String(x.number) === String(number)
+    && (!state.is_admin || x.owner_user_id === routingOwner()));
   return { all: mine, answered: extensionAnsweringNumber(number) };
 }
 
@@ -1894,35 +1897,18 @@ function numberAnsweredBy(extension) {
 }
 
 function renderCustomerRoutePickers(preferred) {
-  const numberSelect = $('route-number');
   const extensionSelect = $('route-extension');
-  if (!numberSelect || !extensionSelect) return '';
-  const numbers = state.phone_numbers || [];
+  if (!extensionSelect) return '';
+  // The number is the one on the scope bar; the extension list is that number's.
   const wanted = flowTargetParts(preferred || '');
-  const wantedNumber = wanted.type === 'number' ? String(wanted.target) : numberAnsweredBy(wanted.target);
-  const priorNumber = !state.is_admin && chosenCustomerNumber()
-    ? chosenCustomerNumber()
-    : (numbers.some(x => String(x.number) === wantedNumber) ? wantedNumber : numberSelect.value);
-
-  numberSelect.innerHTML = numbers.map(x => `<option value="${esc(x.number)}">${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('')
-    || '<option value="">No numbers yet</option>';
-  // Never rely on the browser pre-selecting the first option: say which one is
-  // current, so the extension list below is built from the number on screen.
-  const effectiveNumber = numbers.some(x => String(x.number) === String(priorNumber))
-    ? String(priorNumber)
-    : String(numbers[0]?.number ?? '');
-  numberSelect.value = effectiveNumber;
+  const effectiveNumber = chosenCustomerNumber();
   if (!state.is_admin) {
     customerNumber = effectiveNumber;
-    renderCustomerNumberPickers();
+    renderScopeBars();
   }
-
-  // One plain list: the customer picks the extension whose workflow they are
-  // editing. Which number answers where is the number picker's job, not a
-  // label on every row.
   const { all } = extensionsForNumber(effectiveNumber);
-  const option = x => `<option value="${esc(x.extension)}">${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Unnamed')}</option>`;
-  extensionSelect.innerHTML = all.map(option).join('') || '<option value="">No extensions yet</option>';
+  const option = x => `<option value="${esc(x.extension)}" title="${esc(extensionLabel(x.extension))}">${esc(extensionDigitsOf(x.extension))} — ${esc(scopeShort(x.display_name || 'Unnamed', 24))}</option>`;
+  extensionSelect.innerHTML = all.map(option).join('') || '<option value="">No extensions on this number yet</option>';
 
   const wantedExtension = wanted.type === 'extension' ? String(wanted.target) : extensionAnsweringNumber(effectiveNumber);
   const effectiveExtension = all.some(x => String(x.extension) === String(wantedExtension))
@@ -2015,12 +2001,26 @@ function renderIvrHint() {
   }
 }
 
+/* The phone number a flow belongs to: a number's own, an extension's line. A
+   group can ring members on several lines, so it has no single line. */
+function flowLineNumber() {
+  const { type, target } = flowTargetParts(currentFlowKey());
+  if (type === 'number') return String(target);
+  if (type === 'extension') {
+    return String((state.extensions || []).find(x => String(x.extension) === String(target))?.number || '');
+  }
+  return '';
+}
+
+/* A flow can only reach the extensions on its own number: typing 104 on a number
+   reaches 104 on that same number, never another line's 104. */
 function flowExtensionOptions(selected = []) {
   const values = Array.isArray(selected) ? selected : [selected];
   const owner = flowOwnerId();
-  const available = state.is_admin && owner
+  const line = flowLineNumber();
+  const available = (state.is_admin && owner
     ? state.extensions.filter(x => x.owner_user_id === owner)
-    : state.extensions;
+    : state.extensions).filter(x => !line || String(x.number) === line);
   return available.filter(x => x.active).map(x =>
     `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
 }
@@ -2233,13 +2233,12 @@ function credentialSheetBody({ credentials: c, rotating }) {
     ['Registration server', c.server ? `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}` : 'Ask EIP for your registration host', true],
     ['Numbers', (c.numbers || []).join(', ') || 'None assigned yet', false],
     ['Answers calls to', (c.answers || []).join(', ') || 'No number rings this yet. Set it as a number\'s incoming extension on the Numbers page.', false],
-    ['Password comes from', source, false],
   ];
   return `<div class="cred-sheet">
     <div class="cred-identity">
       <span class="ws-glyph">${esc(extensionDigitsOf(c.extension))}</span>
       <div><b>${esc(c.display_name || `Extension ${extensionDigitsOf(c.extension)}`)}</b>
-        <small>Register a phone or softphone with these ${rows.filter(row => row[2]).length} values${c.managed_address ? '' : ' — this is the console\'s own address, ask EIP for the public one'}</small></div>
+        <small>Register a phone or softphone with these ${rows.filter(row => row[2]).length} values · password from ${esc(source.toLowerCase())}${c.managed_address ? '' : ' — this is the console\'s own address, ask EIP for the public one'}</small></div>
       <span class="tag ${c.active ? 'on' : 'off'}">${c.active ? 'Active' : 'Disabled'}</span>
     </div>
     <table class="cred-table">
@@ -2947,6 +2946,9 @@ async function openCustomer(customerId, tab = 'overview', silent = false) {
       paint('ws-recent', '');
     }
     workspace = await api(`/admin/api/customers/${customerId}`);
+    // The drawer reads the customer's extensions by the same identity as the
+    // console: the key, with the digits and the line beside it.
+    normaliseExtensions(workspace.extensions);
     if (silent) {
       // Called from a background refresh, which already holds body.updating. The
       // scroll position is kept so a live update never moves the page someone is
@@ -3135,11 +3137,13 @@ function renderWsTab(tab, { keepScroll = false } = {}) {
   wsTab = tab;
   document.querySelectorAll('[data-ws-tab]').forEach(b => b.classList.toggle('active', b.dataset.wsTab === tab));
   const body = $('ws-body');
-  body.innerHTML = ({
+  const scoped = ['devices', 'routing', 'calls', 'recordings'].includes(tab);
+  const html = ({
     overview: wsOverview(), numbers: wsNumbers(), devices: wsDevices(), routing: wsRouting(),
     calls: wsCallsTab(), recordings: wsRecordingsTab(), requests: wsRequestsTab(),
     billing: wsBilling(), integrations: wsIntegrations(), activity: wsActivityTab(),
   }[tab] || wsOverview());
+  body.innerHTML = (scoped ? wsScopeBar() : '') + html;
   if (!keepScroll) revealWsTabs();
   body.classList.remove('swapping');
   void body.offsetWidth;
@@ -3252,17 +3256,24 @@ function wsNumbers() {
    the extension the platform generated with the customer's first number. */
 let wsDeviceNumber = '';
 
-function wsPrimaryExtension() {
-  const declared = String(workspace.primary_extension || '');
-  if (declared) return declared;
-  return (workspace.extensions || []).map(x => String(x.extension)).sort((left, right) => Number(left) - Number(right))[0] || '';
+/* The primary device: the lowest extension of the rows given - the chosen
+   number's list when there is one - by its digits, returned as its key so two
+   lines' 101s are not confused. With no rows it is the account's main line. */
+function primaryKeyIn(rows = null) {
+  if (!rows) {
+    const declared = String(workspace.primary_extension || '');
+    if (declared) return declared;
+    rows = workspace.extensions || [];
+  }
+  return rows.map(x => String(x.key || x.extension))
+    .sort((left, right) => Number(extensionDigitsOf(left)) - Number(extensionDigitsOf(right)))[0] || '';
 }
 
 function wsChosenNumber() {
   const numbers = (workspace.numbers || []).filter(x => x.active);
   const wanted = String(wsDeviceNumber || '');
   if (numbers.some(x => String(x.number) === wanted)) return wanted;
-  const primary = wsPrimaryExtension();
+  const primary = primaryKeyIn();
   return String((numbers.find(x => String(x.inbound_extension) === primary) || numbers[0] || {}).number || '');
 }
 
@@ -3276,22 +3287,27 @@ function wsExtensionsOnNumber(number) {
   return wired;
 }
 
-function wsDevicePicker(number) {
+/* The drawer's one number bar. Devices, routing, calls and recordings all read
+   the number chosen here, so the tabs never disagree with each other. */
+function wsScopeBar() {
   const numbers = (workspace.numbers || []).filter(x => x.active);
-  if (!numbers.length) return '<small class="cell-sub">No number yet: assign one and the platform generates its extension.</small>';
-  return `<label class="field">Number
-      <select data-ws-device-number aria-label="Which number">
-        ${numbers.map(x => `<option value="${esc(x.number)}" ${String(x.number) === String(number) ? 'selected' : ''}>${esc(x.number)}${x.description ? ` — ${esc(x.description)}` : ''}</option>`).join('')}
+  if (!numbers.length) {
+    return '<div class="scope-bar ws-scope"><span class="scope-note">No number yet: assign one and the platform generates its extension.</span></div>';
+  }
+  const number = wsChosenNumber();
+  return `<div class="scope-bar ws-scope">
+    <label class="scope-field"><span>Phone number</span>
+      <select class="ws-number-select" data-ws-device-number aria-label="Phone number">
+        ${numbers.map(x => `<option value="${esc(x.number)}" title="${esc(numberTitle(x))}" ${String(x.number) === String(number) ? 'selected' : ''}>${esc(numberLabel(x))}</option>`).join('')}
       </select></label>
-    <small class="cell-sub">The marked cards answer this number.</small>`;
+  </div>`;
 }
 
 function wsDevices() {
   const c = workspace.customer;
   const number = wsChosenNumber();
   const wired = wsExtensionsOnNumber(number);
-  const primary = wsPrimaryExtension();
-  const devices = workspace.sip_accounts.map(x => `
+  const devices = workspace.sip_accounts.filter(x => !number || String(x.phone_number) === number).map(x => `
     <article class="ws-card">
       <div class="ws-card-head">
         <span class="ws-glyph">◈</span>
@@ -3310,9 +3326,11 @@ function wsDevices() {
         <button class="btn ghost sm" data-edit-sip="${x.id}">Edit service</button>
       </div>
     </article>`).join('');
-  const extensions = [...(workspace.extensions || [])]
+  const listed = (workspace.extensions || []).filter(x => !number || String(x.number) === number);
+  const primary = primaryKeyIn(listed);
+  const extensions = [...listed]
     .sort((left, right) => (Number(wired.has(String(right.extension))) - Number(wired.has(String(left.extension))))
-      || Number(left.extension) - Number(right.extension))
+      || Number(extensionDigitsOf(left.extension)) - Number(extensionDigitsOf(right.extension)))
     .map(x => {
       const onNumber = wired.has(String(x.extension));
       return `
@@ -3336,7 +3354,6 @@ function wsDevices() {
   return `<section class="ws-section">
     <div class="ws-section-head"><div><h3>Extensions</h3><p>Internal destinations owned by this customer, and the number each one answers.</p></div>
       <button class="btn ghost" data-new-for-customer="extension:${c.id}">＋ Add extension</button></div>
-    <div class="ws-number-picker">${wsDevicePicker(number)}</div>
     <div class="ws-cards">${extensions || wsEmpty('No extensions', 'Add an extension to give this customer an internal destination.', '⌁')}</div>
 
     <div class="ws-section-head" style="margin-top:26px"><div><h3>Devices &amp; SIP accounts</h3><p>Credentials for the phones and softphones this customer connects. The customer can view these too.</p></div>
@@ -3346,9 +3363,20 @@ function wsDevices() {
 }
 
 /* --- Routing --- */
+/* The number a flow answers on: a number flow's own, an extension flow's line. */
+function flowLine(flow) {
+  if (flow.type === 'number') return String(flow.target);
+  if (flow.type === 'extension') {
+    return String((state.extensions || []).find(x => String(x.extension) === String(flow.target))?.number || '');
+  }
+  return '';
+}
+
 function wsRouting() {
   const owner = workspace?.customer?.id;
-  const flows = allFlowsFor(owner);
+  const number = wsChosenNumber();
+  // Group flows belong to the customer; number and extension flows to one line.
+  const flows = allFlowsFor(owner).filter(flow => flow.type === 'group' || flowLine(flow) === number);
   const labels = {
     number: flow => flow.target,
     extension: flow => `Extension ${extensionLabel(flow.target)}`,
@@ -3373,9 +3401,9 @@ function wsRouting() {
       <div class="ws-card-actions"><button class="btn ghost sm" data-route-target="${esc(flow.key)}">${state.is_admin ? 'Edit this flow' : 'Open in flow builder'}</button></div>
     </article>`;
   }).join('');
-  const unconfigured = workspace.numbers.filter(n => !flows.some(flow => flow.key === flowKey('number', n.number)));
+  const unconfigured = workspace.numbers.filter(n => n.number === number && !flows.some(flow => flow.key === flowKey('number', n.number)));
   const flowsFor = type => flows.filter(flow => flow.type === type).length;
-  const defaultTarget = workspace.numbers[0] ? flowKey('number', workspace.numbers[0].number) : flows[0]?.key || '';
+  const defaultTarget = number ? flowKey('number', number) : flows[0]?.key || '';
   return `<section class="ws-section">
     <div class="ws-section-head"><div><h3>Call routing</h3><p>${state.is_admin ? "Edit the customer's flows; callers reach them exactly as shown." : "Flows for this customer's numbers, extensions and groups."}</p></div>
       <button class="btn primary" data-route-target="${esc(defaultTarget)}">${state.is_admin ? 'Edit call flows' : 'Open flow builder'}</button></div>
@@ -3391,15 +3419,18 @@ function wsRouting() {
 
 /* --- Calls / Recordings --- */
 function wsCallsTab() {
+  const number = wsChosenNumber();
+  const rows = wsCalls().filter(call => !number || String(call.caller_id_number) === number);
   return `<section class="ws-section">
-    <div class="ws-section-head"><div><h3>Recent calls</h3><p>The most recent ${wsCalls().length} of ${workspace.call_total} calls for this customer.</p></div>
+    <div class="ws-section-head"><div><h3>Recent calls</h3><p>${rows.length} of the most recent ${wsCalls().length} calls${number ? ` on ${esc(number)}` : ''}, out of ${workspace.call_total} for this customer.</p></div>
       <button class="btn ghost sm" data-ws-goto="calls">Open full call history</button></div>
-    <div class="panel" style="overflow:hidden"><div class="table-wrap">${callTable(wsCalls())}</div></div>
+    <div class="panel" style="overflow:hidden"><div class="table-wrap">${callTable(rows)}</div></div>
   </section>`;
 }
 
 function wsRecordingsTab() {
-  const rows = wsRecordings();
+  const number = wsChosenNumber();
+  const rows = wsRecordings().filter(call => !number || String(call.caller_id_number) === number);
   return `<section class="ws-section">
     <div class="ws-section-head"><div><h3>Recordings</h3><p>Secure playback for this customer's recorded calls. Only finalised audio can be played.</p></div>
       <button class="btn ghost sm" data-ws-goto="recordings">Open recording library</button></div>
@@ -3524,7 +3555,7 @@ document.addEventListener('change', event => {
   const picker = event.target.closest('[data-ws-device-number]');
   if (!picker) return;
   wsDeviceNumber = picker.value;
-  renderWsTab('devices', { keepScroll: true });
+  renderWsTab(wsTab, { keepScroll: true });
 });
 document.addEventListener('click', event => {
   const reveal = event.target.closest('[data-reveal-extension]');
@@ -3751,9 +3782,9 @@ document.addEventListener('click', async event => {
 
 /* ------------------------------------------------------- 27. Field wiring */
 document.addEventListener('change', event => {
-  const picker = event.target.closest('.customer-number-select');
-  if (!picker || state.is_admin) return;
-  applyCustomerNumber(picker.value);
+  if (event.target.matches('.scope-customer-select')) return applyScopeOwner(event.target.value);
+  if (event.target.matches('.customer-number-select')) return applyCustomerNumber(event.target.value);
+  return undefined;
 });
 
 const wire = (id, event, handler) => $(id)?.addEventListener(event, handler);
@@ -3763,7 +3794,7 @@ wire('call-search', 'input', () => debounce(() => { callOffset = 0; loadCalls();
 wire('recording-search', 'input', () => debounce(() => { recordingOffset = 0; loadRecordings(); }));
 wire('voicemail-search', 'input', () => debounce(loadVoicemails));
 ['call-extension', 'call-status'].forEach(id => wire(id, 'change', () => { callOffset = 0; loadCalls(); }));
-['recording-extension', 'recording-customer', 'recording-from', 'recording-to'].forEach(id => wire(id, 'change', () => { recordingOffset = 0; loadRecordings(); }));
+['recording-extension', 'recording-from', 'recording-to'].forEach(id => wire(id, 'change', () => { recordingOffset = 0; loadRecordings(); }));
 ['voicemail-extension', 'voicemail-folder'].forEach(id => wire(id, 'change', loadVoicemails));
 wire('refresh-calls', 'click', loadCalls);
 wire('refresh-recordings', 'click', loadRecordings);
@@ -3881,17 +3912,7 @@ if (dragSurface) {
   });
 }
 wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
-wire('route-number', 'change', () => {
-  const chosen = $('route-number').value;
-  // This picker and the page header's are the same choice, so switching here
-  // re-scopes the whole page - the extensions below, the flow and the header -
-  // instead of being overridden by the header on the next render.
-  if (state.is_admin) renderFlow(flowKey('number', chosen));
-  else applyCustomerNumber(chosen);
-  renderGroups();
-});
 wire('route-extension', 'change', () => { renderFlow(flowKey('extension', $('route-extension').value)); renderGroups(); });
-wire('route-owner', 'change', () => { renderRouteTargets(); renderFlow(); renderGroups(); });
 wire('save-route', 'click', async () => {
   if (saveFlowBusy) return;                       // one save at a time
   if (!canDesignFlows()) { setSaveFlowState('blocked'); return notify(flowDesignHint(), true); }

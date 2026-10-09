@@ -177,28 +177,19 @@
 
       <!-- ========================================================== EXTENSIONS -->
       <section class="page" id="page-extensions">
-        <div class="customer-number-context" data-customer-only>
-  <div class="customer-number-copy">
-    <span class="glyph">☎</span>
-    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
-  </div>
-  <select class="customer-number-select" aria-label="Select phone number"></select>
-</div>
-        <div class="toolbar">
-          <div class="search" data-admin-only><span>⌕</span><input id="extension-search" placeholder="Search extension or employee"></div>
-          <span class="spacer"></span>
-          <button class="btn primary" data-open="extension">＋ Add extension</button>
-        </div>
-        <div class="notice"><span class="glyph">⌁</span><div><b>Extensions are the technical layer behind a device</b>Each extension maps one employee or department to a SIP identity. Customers normally manage the devices and credentials that connect to it.</div></div>
+        <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <article class="panel">
-          <div class="panel-head"><div><h2>Extensions</h2><p>Internal destinations, availability and per-extension policies</p></div><span class="count" id="extension-count">0 extensions</span></div>
+          <div class="panel-head"><div><h2>Extensions</h2><p>Destinations on the chosen number. Every number starts its own set at 101.</p></div>
+            <div class="head-tools"><div class="search" data-admin-only><span>⌕</span><input id="extension-search" placeholder="Search extension or employee"></div>
+              <span class="count" id="extension-count">0 extensions</span>
+              <button class="btn primary sm" data-open="extension">＋ Add extension</button></div></div>
           <div class="panel-body flush"><div id="extension-list" class="rows"></div></div>
         </article>
       </section>
 
       <!-- ============================================================= NUMBERS -->
       <section class="page" id="page-numbers">
-        <div class="customer-picker" id="number-picker" data-admin-only></div>
+        <div class="customer-number-context scope-bar" data-scope="customer" data-admin-only><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label></div>
         <div class="toolbar">
           <div class="search"><span>⌕</span><input id="number-search" placeholder="Search number, owner or extension"></div>
           <span class="spacer"></span>
@@ -213,55 +204,29 @@
 
       <!-- ==================================================== DEVICES & SIP -->
       <section class="page" id="page-sipaccounts">
-        <div class="customer-picker" id="sip-picker" data-admin-only></div>
-        <div class="customer-number-context" data-customer-only>
-  <div class="customer-number-copy">
-    <span class="glyph">☎</span>
-    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
-  </div>
-  <select class="customer-number-select" aria-label="Select phone number"></select>
-</div>
-        <div class="toolbar">
-          <div class="search" data-admin-only><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
-          <!-- The customer's own page answers one question: which number, and
-               which extensions answer it. The administrator picks the customer
-               instead, in the chips above. -->
-          <span class="spacer"></span>
-          <button class="btn primary" data-open="sipaccount" data-admin-only>＋ Assign SIP service</button>
-        </div>
-        <article class="notice"><span class="glyph">◈</span><div><b>Connected devices</b>Each SIP account is the credential set a physical phone, softphone or device uses to register. Share credentials only with the person using that device.</div></article>
+        <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <article class="panel">
-          <div class="panel-head"><div><h2 id="device-extension-title">Extension credentials</h2><p id="device-extension-sub">The username and password each extension registers with</p></div><span class="count" id="extension-credential-count">0 extensions</span></div>
+          <div class="panel-head"><div><h2 id="device-extension-title">Extension credentials</h2><p id="device-extension-sub">Each extension registers with the username and password below. Share them only with the person using that device.</p></div>
+            <div class="head-tools"><div class="search" data-admin-only><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
+              <span class="count" id="extension-credential-count">0 extensions</span></div></div>
           <div class="panel-body flush"><div id="extension-credential-list" class="rows"></div></div>
         </article>
         <!-- The platform's own device boxes are a list for whoever runs the
              platform. A customer reads their extensions, and each of those
              already carries its credentials, its registration and its number. -->
         <article class="panel" data-admin-only>
-          <div class="panel-head"><div><h2>Devices &amp; SIP accounts</h2><p>Ownership, registration, number and extension mapping</p></div><span class="count" id="sip-count">0 accounts</span></div>
+          <div class="panel-head"><div><h2>Devices &amp; SIP accounts</h2><p>Ownership, registration, number and extension mapping</p></div>
+            <div class="head-tools"><button class="btn primary sm" data-open="sipaccount">＋ Assign SIP service</button><span class="count" id="sip-count">0 accounts</span></div></div>
           <div class="panel-body flush"><div id="sip-account-list" class="cards"></div></div>
         </article>
       </section>
 
       <!-- ============================================================ ROUTING -->
       <section class="page" id="page-routing">
-        <div class="customer-number-context" data-customer-only>
-  <div class="customer-number-copy">
-    <span class="glyph">☎</span>
-    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
-  </div>
-  <select class="customer-number-select" aria-label="Select phone number"></select>
-</div>
+        <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <div class="flow-toolbar sheen">
           <div><h2>Call flows</h2><p data-customer-only>Pick a number, then the extension that answers it. Groups keep their own flows, listed below.</p><p data-admin-only>Edit a customer's flows exactly as their callers meet them: choose the customer, then the number, extension or group.</p></div>
           <div class="tools">
-            <select id="route-owner" aria-label="Customer" data-admin-only></select>
-            <!-- The customer's two-step: which number, then which extension
-                 answers it. A number carries no workflow of its own - the
-                 extensions that answer it do - so it is never an editable
-                 target for anyone, and the administrator's picker (below)
-                 lists extensions and groups only. -->
-            <select id="route-number" aria-label="Number" data-customer-only hidden></select>
             <select id="route-extension" aria-label="Extension" data-customer-only></select>
             <select id="route-target" aria-label="Call flow target" data-admin-only></select>
             <button class="btn primary" id="save-route" data-state="ready">Save flow</button>
@@ -311,13 +276,7 @@
 
       <!-- ============================================================== CALLS -->
       <section class="page" id="page-calls">
-        <div class="customer-number-context" data-customer-only>
-  <div class="customer-number-copy">
-    <span class="glyph">☎</span>
-    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
-  </div>
-  <select class="customer-number-select" aria-label="Select phone number"></select>
-</div>
+        <div class="customer-number-context scope-bar" data-scope="number" data-scope-all><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <div class="toolbar">
           <div class="search" data-admin-only><span>⌕</span><input id="call-search" placeholder="Search phone, call ID, contact or member"></div>
           <select id="call-extension"><option value="">All extensions</option></select>
@@ -335,16 +294,9 @@
 
       <!-- ========================================================= RECORDINGS -->
       <section class="page" id="page-recordings">
-        <div class="customer-number-context" data-customer-only>
-  <div class="customer-number-copy">
-    <span class="glyph">☎</span>
-    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
-  </div>
-  <select class="customer-number-select" aria-label="Select phone number"></select>
-</div>
+        <div class="customer-number-context scope-bar" data-scope="number" data-scope-all><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <div class="toolbar">
           <div class="search" data-admin-only><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div>
-          <select id="recording-customer" data-admin-only><option value="">All customers</option></select>
           <select id="recording-extension"><option value="">All extensions</option></select>
           <input id="recording-from" type="date" title="From date" style="width:auto">
           <input id="recording-to" type="date" title="To date" style="width:auto">
@@ -360,13 +312,7 @@
 
       <!-- =========================================================== VOICEMAIL -->
       <section class="page" id="page-voicemails">
-        <div class="customer-number-context" data-customer-only>
-  <div class="customer-number-copy">
-    <span class="glyph">☎</span>
-    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
-  </div>
-  <select class="customer-number-select" aria-label="Select phone number"></select>
-</div>
+        <div class="customer-number-context scope-bar" data-scope="number" data-scope-all><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <div class="toolbar">
           <div class="search" data-admin-only><span>⌕</span><input id="voicemail-search" placeholder="Search caller or mailbox"></div>
           <select id="voicemail-extension"><option value="">All mailboxes</option></select>
@@ -382,19 +328,12 @@
 
       <!-- ================================================= APIS & WEBHOOKS -->
       <section class="page" id="page-webhooks">
-        <div class="customer-number-context" data-customer-only>
-  <div class="customer-number-copy">
-    <span class="glyph">☎</span>
-    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
-  </div>
-  <select class="customer-number-select" aria-label="Select phone number"></select>
-</div>
+        <div class="customer-number-context scope-bar" data-scope="customer" data-admin-only><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label></div>
         <div class="doc-link">
           <span>Setup guide, REST API and webhook reference for this deployment
             <b>API base</b> <code id="integration-api-base">—</code></span>
           <a class="btn ghost sm" href="/documentation" target="_blank" rel="noopener">Documentation ↗</a>
         </div>
-        <div class="customer-picker" id="integration-picker" data-admin-only></div>
         <article class="notice secure"><span class="glyph">◇</span><div><b>Integrations</b><span data-customer-only>API keys authenticate your own software against the EIP API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own.</span><span data-admin-only>Choose a customer to inspect the keys and webhooks their software uses. These credentials belong to them, so creating one is their action, not the platform's.</span></div></article>
 
         <div class="grid cols-2">
@@ -416,13 +355,7 @@
 
       <!-- ============================================================ BILLING -->
       <section class="page" id="page-billing">
-        <div class="customer-number-context" data-customer-only>
-  <div class="customer-number-copy">
-    <span class="glyph">☎</span>
-    <div><b>Phone number</b><small>Select a number to view its related details</small></div>
-  </div>
-  <select class="customer-number-select" aria-label="Select phone number"></select>
-</div>
+        <div class="customer-number-context scope-bar" data-scope="number" data-scope-all><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <div class="notice"><span class="glyph">▣</span><div><b>$5 per number / month</b>Every assigned number includes extensions, calls, voicemail, recordings, API keys and CRM webhooks. Payments are collected externally; invoices are recorded here.</div></div>
         <article class="panel">
           <div class="panel-head"><div><h2>Subscriptions</h2><p>Monthly number billing, renewal cycles and scheduled discontinuation</p></div></div>

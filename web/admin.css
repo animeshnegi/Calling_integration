@@ -549,9 +549,9 @@ select[multiple]{background-image:none;padding-right:12px}
 /* A picker that stands on its own - a toolbar filter, a customer chooser - rises
    by a single pixel under the pointer. Enough to feel alive, not enough to
    shift the row it sits in. */
-.toolbar select,.flow-toolbar select,.customer-picker select{transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast),transform var(--t-fast)}
-.toolbar select:hover,.flow-toolbar select:hover,.customer-picker select:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}
-.toolbar select:focus-visible,.flow-toolbar select:focus-visible,.customer-picker select:focus-visible{transform:none}
+.toolbar select,.flow-toolbar select{transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast),transform var(--t-fast)}
+.toolbar select:hover,.flow-toolbar select:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+.toolbar select:focus-visible,.flow-toolbar select:focus-visible{transform:none}
 label.field input,label.field textarea{display:block}
 label.field input,label.field select,label.field textarea{margin-top:6px}
 textarea{resize:vertical;min-height:90px;line-height:1.6}
@@ -891,9 +891,6 @@ body.theme-light .ws-card:hover{background:#fff}
 body.theme-light .ext-card.on-number{box-shadow:0 0 0 1.5px var(--acc-1),var(--shadow-sm)}
 .ext-card.other-number{border-style:dashed}
 .ext-card.other-number:hover{border-style:solid}
-.ws-number-picker{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;margin:0 0 15px}
-.ws-number-picker label.field{margin-bottom:0;min-width:240px}
-.ws-number-picker small{display:block;font-size:10.5px;color:var(--text-3);padding-bottom:11px}
 .ws-card-head{display:flex;align-items:center;gap:12px}
 .ws-card-head > div{flex:1;min-width:0}
 .ws-card-head small{font-size:9px;font-weight:800;letter-spacing:.13em;color:var(--text-3);text-transform:uppercase}
@@ -1749,14 +1746,6 @@ a.nav-item{
   -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
   box-shadow:var(--shadow-sm);
 }
-.customer-number-copy{display:flex;align-items:center;gap:11px;min-width:0}
-.customer-number-copy .glyph{
-  width:34px;height:34px;display:grid;place-items:center;flex:none;
-  border-radius:10px;color:#fff;background:linear-gradient(140deg,var(--fill-1),var(--fill-2));
-  box-shadow:0 7px 18px #6366f13d;font-size:15px;
-}
-.customer-number-copy b{display:block;font-size:12.5px;font-weight:760}
-.customer-number-copy small{display:block;margin-top:2px;color:var(--text-3);font-size:10.5px}
 .customer-number-select{width:min(360px,100%);min-width:230px!important;flex:0 1 360px}
 @media (max-width:680px){
   .customer-number-context{align-items:stretch;flex-direction:column;gap:10px}
@@ -1769,25 +1758,6 @@ a.nav-item{
    administrator uses to choose whose numbers, devices or integrations to read,
    and the board that reports what the platform is doing right now.
    ========================================================================== */
-.customer-picker{
-  display:flex;gap:10px;overflow-x:auto;padding:4px 2px 12px;margin-bottom:4px;
-  scrollbar-gutter:stable;
-}
-.customer-chip{
-  display:flex;align-items:center;gap:10px;flex:none;padding:9px 15px 9px 10px;
-  border-radius:var(--r-lg);border:1px solid var(--line);background:var(--surface-2);
-  color:var(--text);font:inherit;text-align:left;cursor:pointer;
-  transition:transform var(--t-fast),border-color var(--t-fast),background var(--t-fast);
-}
-.customer-chip:hover{transform:translateY(-2px);border-color:var(--line-strong)}
-.customer-chip.active{border-color:var(--acc-1);background:var(--surface-3);box-shadow:var(--shadow-sm)}
-.customer-chip .avatar{
-  width:32px;height:32px;flex:none;border-radius:10px;display:grid;place-items:center;
-  font-size:13px;font-weight:800;color:#fff;background:linear-gradient(140deg,var(--fill-1),var(--fill-2));
-}
-.customer-chip .copy b{display:block;font-size:12.5px;font-weight:750}
-.customer-chip .copy small{display:block;font-size:10.5px;color:var(--text-3);margin-top:1px}
-.picker-empty{font-size:12px;color:var(--text-3);margin:0}
 
 .system-board{
   padding:16px 18px 18px;margin-bottom:16px;border-radius:var(--r-xl);
@@ -1839,9 +1809,34 @@ a.nav-item{
     scroll-behavior:auto!important;
   }
   .page.entering > *,.ws-card,.ws-section,.stat,.empty,.flow-node,
-  .skeleton,.glass-card,.board-tile,.customer-chip{animation:none!important}
+  .skeleton,.glass-card,.board-tile{animation:none!important}
   .load-bar i{transition:none}
   .empty-icon,.canvas-empty .glyph,.journey-step.current,.device.online i,
   .aurora b,.ws-avatar::after,.ws-head::before{animation:none!important}
   .ws-tab-ink{transition:none}
+}
+
+/* ===========================================================================
+   38. One scope on every page
+   The same bar sits at the top of each page: the customer (administrator only),
+   then the phone number. Every list below follows the number. Long labels never
+   widen a select - the option text is shortened, and the box clips the rest.
+   ========================================================================== */
+.scope-bar{justify-content:flex-start;flex-wrap:wrap;gap:12px 22px}
+.scope-bar.ws-scope{margin:0 0 14px}
+.scope-field{display:flex;align-items:center;gap:10px;min-width:0;max-width:100%}
+.scope-field>span{font-size:10.5px;font-weight:760;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);white-space:nowrap}
+.scope-field select{width:min(260px,62vw);min-width:0!important;max-width:100%}
+.scope-bar .customer-number-select{width:min(340px,62vw);min-width:0!important;flex:0 1 340px}
+.scope-customer-select,.ws-number-select{width:min(260px,62vw);min-width:0!important;max-width:100%}
+.scope-bar select:disabled{opacity:.7}
+.scope-note{font-size:11px;color:var(--text-3)}
+.scope-field select,.toolbar select,.flow-toolbar select{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toolbar select{max-width:230px}
+.flow-toolbar .tools select{max-width:240px;min-width:0}
+.head-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;min-width:0}
+.head-tools .search{min-width:200px}
+@media (max-width:680px){
+  .scope-field{width:100%;flex-wrap:wrap}
+  .scope-field select,.scope-bar .customer-number-select{width:100%;flex:1 1 auto}
 }

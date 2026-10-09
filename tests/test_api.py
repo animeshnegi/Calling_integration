@@ -764,3 +764,44 @@ def test_registration_helpers_read_the_endpoint_names_a_phone_uses():
     assert extension_registration(
         {"extension": "105@+13025550001", "sip_username": "X_105", "mailbox": "105-13025550001"}, live, []
     ) == "offline"
+
+
+def test_admin_webhook_test_reports_the_endpoint_answer(tmp_path, monkeypatch):
+    client = app_client(tmp_path)
+    login = client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"})
+    assert login.status_code == 200
+    csrf = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
+    # Customers create their endpoints; the administrator tests the one that exists.
+    store = client.application.extensions["telephony_service"].settings_store
+    store.save_webhook({
+        "name": "CRM", "url": "https://crm.example.com/events", "token": "secret",
+        "events": "call.started,call.completed", "active": True,
+    }, None)
+    webhook_id = store.list_webhooks()[0]["id"]
+
+    sent = []
+
+    class Accepted:
+        ok = True
+        status_code = 200
+
+    class Refused:
+        ok = False
+        status_code = 503
+
+    def accept(url, **kwargs):
+        sent.append((url, kwargs["data"]))
+        return Accepted()
+
+    monkeypatch.setattr("app.services.requests.post", accept)
+    response = client.post(f"/admin/api/webhooks/{webhook_id}/test", headers=csrf)
+    assert response.status_code == 200
+    assert response.json == {"ok": True, "status_code": 200, "error": None}
+    assert sent and b'"event":"webhook.test"' in sent[0][1]
+
+    monkeypatch.setattr("app.services.requests.post", lambda url, **kwargs: Refused())
+    response = client.post(f"/admin/api/webhooks/{webhook_id}/test", headers=csrf)
+    assert response.status_code == 502
+    assert response.json == {"ok": False, "status_code": 503, "error": "HTTP 503"}
+
+    assert client.post("/admin/api/webhooks/999999/test", headers=csrf).status_code == 404

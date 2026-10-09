@@ -1,6 +1,6 @@
 /* What the console actually shows, from the live server.
  *
- *   node tools/livepages.js [--customer meridian] [--password customer-password-01]
+ *   node tools/livepages.js   (the administrator, then customer meridian)
  *
  * Boots the real web/admin.js in jsdom but sends every API call to the running
  * preview (tools/devpreview.py) with a real session and CSRF token, then prints
@@ -126,11 +126,11 @@ async function main() {
 
   await page(w, d, 'numbers');
   show('ADMIN · Numbers — choose a customer, then their numbers',
-    `${text(d.getElementById('number-picker')).slice(0, 200)}\nrows shown: ${d.querySelectorAll('#number-list .row').length}\n${text(d.getElementById('number-list')).slice(0, 300)}`);
+    `${text(d.querySelector('#page-numbers .scope-bar')).slice(0, 200)}\nrows shown: ${d.querySelectorAll('#number-list .row').length}\n${text(d.getElementById('number-list')).slice(0, 300)}`);
 
   await page(w, d, 'sipaccounts');
   show('ADMIN · Devices & SIP — choose a customer, then their extensions and devices',
-    `${text(d.getElementById('sip-picker')).slice(0, 240)}\ncredential rows: ${d.querySelectorAll('#extension-credential-list .row').length}\nsip rows: ${d.querySelectorAll('#sip-account-list .row').length}\n${text(d.getElementById('sip-account-list')).slice(0, 240)}`);
+    `${text(d.querySelector('#page-sipaccounts .scope-bar')).slice(0, 240)}\ncredential rows: ${d.querySelectorAll('#extension-credential-list .row').length}\nsip rows: ${d.querySelectorAll('#sip-account-list .row').length}\n${text(d.getElementById('sip-account-list')).slice(0, 240)}`);
 
   // The credential sheet itself: open the first extension's credentials, then
   // measure how much of it is above the fold.
@@ -156,7 +156,7 @@ async function main() {
   show('ADMIN · APIs & Webhooks — the documentation link and API base on top',
     `href: ${docLink?.getAttribute('href')} target: ${docLink?.getAttribute('target')}\n${text(d.querySelector('#page-webhooks .doc-link'))}`);
   show('ADMIN · APIs & Webhooks — whose keys, and what he may do',
-    `picker: ${text(d.getElementById('integration-picker')).slice(0, 200)}\nkeys: ${text(d.getElementById('api-key-list')).slice(0, 220)}\nwebhooks: ${text(d.getElementById('webhook-list')).slice(0, 220)}\ncreate buttons: ${[...d.querySelectorAll('[data-open="apikey"],[data-open="webhook"]')].map(x => `${x.dataset.open}:hidden=${x.hidden}`).join(' ')}`);
+    `picker: ${text(d.querySelector('#page-webhooks .scope-bar')).slice(0, 200)}\nkeys: ${text(d.getElementById('api-key-list')).slice(0, 220)}\nwebhooks: ${text(d.getElementById('webhook-list')).slice(0, 220)}\ncreate buttons: ${[...d.querySelectorAll('[data-open="apikey"],[data-open="webhook"]')].map(x => `${x.dataset.open}:hidden=${x.hidden}`).join(' ')}`);
 
   // The administrator's Overview: the customer's checklist must not appear here.
   await page(w, d, 'dashboard');
@@ -168,7 +168,7 @@ async function main() {
 
   await page(w, d, 'routing');
   show('ADMIN · Call flows — which customer, and can he build',
-    `owner selector: ${[...d.querySelectorAll('#route-owner option')].map(o => `${o.value}:${o.textContent}`).join(', ')} (value ${d.getElementById('route-owner').value})\nsave button hidden=${d.getElementById('save-route').hidden}, disabled=${d.getElementById('save-route').disabled}\nblocks offered: ${[...d.querySelectorAll('[data-node-type]')].length} (menu: ${!!d.querySelector('[data-node-type="ivr"]')})\nmenu hint: ${text(d.getElementById('ivr-palette-hint')) || '(none at this size)'}\nvoices offered to a menu: ${d.getElementById('flow-config-fields') ? '' : 'sheet closed'}\ntargets: ${text(d.getElementById('route-target')).slice(0, 200)}\nnumber targets offered: ${[...d.getElementById('route-target').options].filter(o => o.value.startsWith('number:')).length}\ncanvas: ${text(d.getElementById('flow-nodes')).slice(0, 200)}\ngroups: ${text(d.getElementById('group-list')).slice(0, 200)}`);
+    `owner selector: ${[...d.querySelectorAll('#page-routing .scope-customer-select option')].map(o => `${o.value}:${o.textContent}`).join(', ')} (value ${d.querySelector('#page-routing .scope-customer-select').value})\nsave button hidden=${d.getElementById('save-route').hidden}, disabled=${d.getElementById('save-route').disabled}\nblocks offered: ${[...d.querySelectorAll('[data-node-type]')].length} (menu: ${!!d.querySelector('[data-node-type="ivr"]')})\nmenu hint: ${text(d.getElementById('ivr-palette-hint')) || '(none at this size)'}\nvoices offered to a menu: ${d.getElementById('flow-config-fields') ? '' : 'sheet closed'}\ntargets: ${text(d.getElementById('route-target')).slice(0, 200)}\nnumber targets offered: ${[...d.getElementById('route-target').options].filter(o => o.value.startsWith('number:')).length}\ncanvas: ${text(d.getElementById('flow-nodes')).slice(0, 200)}\ngroups: ${text(d.getElementById('group-list')).slice(0, 200)}`);
 
   // Saving: press it and read the button, the hint and the stored flow back.
   const saveButton = d.getElementById('save-route');
@@ -195,7 +195,7 @@ async function main() {
     `${text(cust.d.querySelector('#page-webhooks .doc-link'))}`);
 
   await page(cust.w, cust.d, 'sipaccounts');
-  const custNumbers = cust.d.getElementById('device-number');
+  const custNumbers = cust.d.querySelector('#page-sipaccounts .customer-number-select');
   show('CUSTOMER · Devices & SIP — a number on top, its extensions below',
     `number picker: ${[...(custNumbers?.options || [])].map(o => o.textContent).join(' | ')} (value ${custNumbers?.value})\n`
     + `heading: ${text(cust.d.getElementById('device-extension-title'))} — ${text(cust.d.getElementById('device-extension-sub'))}\n`
@@ -244,14 +244,14 @@ async function main() {
 
   await page(cust.w, cust.d, 'routing');
   show('CUSTOMER · Call flows — a number, then the extension that answers it',
-    `number picker: ${cust.d.getElementById('route-number').hidden ? 'hidden' : 'shown'} — ${[...cust.d.querySelectorAll('#route-number option')].map(o => o.textContent).join(' | ')}\n`
+    `number picker: ${cust.d.querySelector('#page-routing .customer-number-select').hidden ? 'hidden' : 'shown'} — ${[...cust.d.querySelectorAll('#page-routing .customer-number-select option')].map(o => o.textContent).join(' | ')}\n`
     + `extension picker: ${cust.d.getElementById('route-extension').hidden ? 'hidden' : 'shown'} — ${[...cust.d.querySelectorAll('#route-extension option')].map(o => `${o.textContent}${o.closest('optgroup') ? ` [${o.closest('optgroup').label}]` : ''}`).join(' | ')}\ngrouped: ${cust.d.querySelectorAll('#route-extension optgroup').length}\n`
     + `flat target picker: hidden=${cust.d.getElementById('route-target').hidden}, options=${cust.d.getElementById('route-target').options.length}\n`
     + `editing: ${cust.w.eval('currentFlowKey()')} — canvas starts at "${cust.d.getElementById('flow-entry-number').textContent}"\n`
     + `flows in state: ${custState.payload.routing_flows.map(r => `${r.target_type} ${r.target}`).join(', ')}\nnumber flows (provisioned, not edited here): ${custState.payload.call_routes.map(r => r.phone_number).join(', ')}`);
 
   // Changing the number re-scopes the extensions beside it.
-  const numberPickerLive = cust.d.getElementById('route-number');
+  const numberPickerLive = cust.d.querySelector('#page-routing .customer-number-select');
   if (numberPickerLive.options.length > 1) {
     numberPickerLive.value = numberPickerLive.options[1].value;
     numberPickerLive.dispatchEvent(new cust.w.Event('change', { bubbles: true }));

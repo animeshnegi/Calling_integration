@@ -394,7 +394,7 @@ ok = hmac.compare_digest(expected, received)</pre>
       <tbody>
         <tr><td>SIP username</td><td>The account label, the extension and the number's digits, joined by underscores — for example <code>MERIDIAN_101_13025550001</code>. The platform generates it, keeps it unique across the whole platform, and it cannot be edited. It is the device's login identity, and a caller never dials it.</td></tr>
         <tr><td>SIP password</td><td>A generated secret with upper case, lower case, digits and symbols, rotatable from the same sheet with <b>Change password</b>. A linked device account's password is what actually authenticates, so rotating changes that one.</td></tr>
-        <tr><td>Registration server</td><td><code>{{SIP_HOST}}</code> — this deployment's own SIP address, with the port and transport (UDP, TCP or TLS). An administrator sets it once under <b>Settings → Server addresses</b>, as an IP address or a subdomain whose DNS record points directly at this server — never through a web proxy, because SIP and call audio travel over UDP.</td></tr>
+        <tr><td>Registration server</td><td><code>{{SIP_HOST}}</code> — this deployment's own SIP address, with the port and transport (UDP, TCP or TLS). An administrator sets it once under <b>Platform Settings → Server addresses</b>, as an IP address or a subdomain whose DNS record points directly at this server — never through a web proxy, because SIP and call audio travel over UDP.</td></tr>
         <tr><td>Numbers</td><td>The line the extension belongs to. It calls out with that number as caller ID, and its three digits reach it on that line.</td></tr>
         <tr><td>Answers calls to</td><td>The numbers whose incoming calls ring this extension. If it says none, set the extension as a number's incoming extension under <b>Numbers</b>.</td></tr>
       </tbody>
@@ -402,7 +402,7 @@ ok = hmac.compare_digest(expected, received)</pre>
     <div class="note">A device that is already registered keeps its session until it registers again: change the password
       on the phone after rotating it here.</div>
     <div class="note">Registration server, API base and webhook URLs all come from the one address in
-      <b>Settings → Server addresses</b>, so changing it once changes every link a customer is given.</div>
+      <b>Platform Settings → Server addresses</b>, so changing it once changes every link a customer is given.</div>
     <div class="note">A browser softphone needs the extension's <b>Answers in the browser (WebRTC)</b> option ticked, which the console shows as
       <b>Browser phone</b>. A hardware phone or desktop softphone registers on its own extension, without that option.</div>
   </section>
