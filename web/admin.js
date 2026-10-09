@@ -2232,6 +2232,7 @@ function credentialSheetBody({ credentials: c, rotating }) {
     ['SIP password', c.sip_password, true],
     ['Registration server', c.server ? `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}` : 'Ask EIP for your registration host', true],
     ['Numbers', (c.numbers || []).join(', ') || 'None assigned yet', false],
+    ['Answers calls to', (c.answers || []).join(', ') || 'No number rings this yet. Set it as a number\'s incoming extension on the Numbers page.', false],
     ['Password comes from', source, false],
   ];
   return `<div class="cred-sheet">

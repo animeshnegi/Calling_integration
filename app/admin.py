@@ -1697,19 +1697,28 @@ class SettingsStore:
             raise ValueError("Extension not found")
         owner = row["owner_user_id"]
         digits, scope = str(row["digits"]), str(row["number"])
-        # A customer's sheet lists their own numbers; a platform-owned
-        # extension (no customer) still lists the platform-owned DIDs that
-        # point at it instead of always claiming none are assigned. A number
-        # rings the extension of its own scope, which is why a scoped extension
-        # can only be answered by the line it belongs to.
-        numbers = [
+        # `numbers` is the line the extension belongs to. A platform-owned
+        # extension (no customer) has no line, so it lists the platform-owned
+        # DIDs that point at it instead. `answers` is the set of numbers whose
+        # incoming calls ring this extension.
+        visible = [
             item for item in self.list_numbers(owner)
-            # The link may be the key (`101@+1302...`) or the bare digits of an
-            # older deployment; a scoped extension is only answered by its line.
-            if extension_digits(item["inbound_extension"]) == digits and item["active"]
-            and (not scope or str(item["number"]) == scope)
-            and (owner is not None or item.get("owner_user_id") is None)
+            if item["active"] and (owner is not None or item.get("owner_user_id") is None)
         ]
+        # The line the extension belongs to: it calls out on this number and is
+        # reached by its three digits there. This is what the sheet means by
+        # "Numbers" - a new extension on a line shows that line at once.
+        own_line = [item for item in visible if scope and str(item["number"]) == scope]
+        # Numbers whose incoming destination is this extension: a call to the
+        # number itself rings it. The link may be the key (`101@+1302...`) or the
+        # bare digits of an older deployment; a scoped extension is only answered
+        # by its own line.
+        answers = [
+            item for item in visible
+            if extension_digits(item["inbound_extension"]) == digits
+            and (not scope or str(item["number"]) == scope)
+        ]
+        numbers = own_line or answers
         device = device_account_for_extension(row, self.list_sip_accounts(owner, include_password=True))
         # A phone registers with this platform, so the platform's own address is
         # the server that belongs in the sheet. A device account's server and then
@@ -1741,6 +1750,7 @@ class SettingsStore:
             "registration": "device" if device else "extension",
             "device_label": (device or {}).get("label", ""),
             "numbers": [item["number"] for item in numbers],
+            "answers": [item["number"] for item in answers],
             "voicemail_enabled": bool(row["voicemail_enabled"]),
             # Carried along so the sheet can offer the whole "register here" value
             # in one piece, and point at the API base, without a second request.
