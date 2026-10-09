@@ -22,6 +22,7 @@ from pathlib import Path
 from flask import Response, current_app, jsonify, redirect, request, session, send_file, send_from_directory, stream_with_context
 from werkzeug.security import check_password_hash, generate_password_hash
 from pymysql.err import IntegrityError as MySQLIntegrityError
+from sqlalchemy import inspect
 
 from .database import Database
 from .voicemail import mailbox_name
@@ -206,6 +207,16 @@ class SettingsStore:
 
     def _init_db(self):
         self._create_schema()
+        if self.database.is_mysql:
+            # create_all has reconciled the tables and released its lock. The
+            # identity migration adds the columns the sip-username normalisation
+            # reads, so it must run first - the other order crashes on a database
+            # created before per-number extensions ("Unknown column e.id").
+            with self.database.advisory_lock(self.database.MIGRATION_LOCK):
+                self._migrate_extension_identity()
+                with self._connect() as db:
+                    self.normalise_sip_usernames(db)
+            return
         # Extensions used to belong to the whole account. Migrating them onto the
         # number their inbound link names runs here, outside the schema
         # transaction, because it writes as it goes.
@@ -216,7 +227,6 @@ class SettingsStore:
             self.database.create_all()
             existing_user_columns = self.database.columns("admin_users")
             with self._connect() as db:
-                self.normalise_sip_usernames(db)
                 try:
                     db.execute("CREATE UNIQUE INDEX idx_extensions_sip_username ON extensions(sip_username)")
                 except Exception:
@@ -470,34 +480,32 @@ class SettingsStore:
     EXTENSION_IDENTITY_FLAG = "extension_identity_v2_initialized"
 
     def _ensure_extension_identity_schema(self) -> None:
-        """Add `id` and `phone_number_id` to an existing extensions table.
+        """Add `id`, `phone_number_id` and the per-number unique key to extensions.
 
         SQLite is rebuilt in `_create_schema` (it cannot add a primary key with
-        ALTER TABLE); MySQL is patched in place here, because it can.
+        ALTER TABLE); MySQL is patched in place here, because it can. Each step is
+        checked against the live table first, so a rerun is a no-op, and a real
+        failure raises instead of being swallowed.
         """
         if not self.database.is_mysql:
             return
-        columns = self.database.columns("extensions")
+        inspector = inspect(self.database.engine)
+        columns = {column["name"] for column in inspector.get_columns("extensions")}
+        primary_key = list((inspector.get_pk_constraint("extensions") or {}).get("constrained_columns") or [])
+        indexes = {index["name"] for index in inspector.get_indexes("extensions")}
         with self._connect() as db:
             if "id" not in columns:
-                try:
-                    db.execute(
-                        "ALTER TABLE extensions DROP PRIMARY KEY, "
-                        "ADD COLUMN id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST"
-                    )
-                except Exception:
+                if primary_key == ["extension"]:
+                    # The old key was the digits alone. Drop it, then make the stable
+                    # id the key. Existing rows keep their data and receive ids. If
+                    # this stops between the two statements, the next boot finds no
+                    # primary key and adds `id` alone, so the sequence can be rerun.
                     db.execute("ALTER TABLE extensions DROP PRIMARY KEY")
-                    db.execute(
-                        "ALTER TABLE extensions ADD COLUMN id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST"
-                    )
+                db.execute("ALTER TABLE extensions ADD COLUMN id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST")
             if "phone_number_id" not in columns:
                 db.execute("ALTER TABLE extensions ADD COLUMN phone_number_id BIGINT NULL")
-            try:
-                db.execute(
-                    "CREATE UNIQUE INDEX uq_extensions_number_extension ON extensions(phone_number_id,extension)"
-                )
-            except Exception:
-                pass
+            if "uq_extensions_number_extension" not in indexes:
+                db.execute("CREATE UNIQUE INDEX uq_extensions_number_extension ON extensions(phone_number_id,extension)")
 
     def _migrate_extension_identity(self) -> None:
         """One-time migration: extensions belong to a phone number.

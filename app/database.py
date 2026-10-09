@@ -8,7 +8,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
+from contextlib import contextmanager
+
 from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, inspect, text
+from sqlalchemy.dialects import mysql as _mysql_dialect
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
@@ -149,6 +152,53 @@ Index("idx_calls_employee_channel", calls.c.employee_channel_id)
 Index("idx_calls_customer_channel", calls.c.customer_channel_id)
 Index("idx_calls_recording_name", calls.c.recording_name)
 Index("idx_calls_started_at", calls.c.started_at)
+
+
+def mysql_column_sql(column) -> str:
+    """The MySQL column definition for a metadata column (name, type, NULL, default)."""
+    sql = f"{column.name} {column.type.compile(dialect=_mysql_dialect.dialect())}"
+    if not column.nullable:
+        sql += " NOT NULL"
+    default = column.server_default
+    if default is not None:
+        arg = default.arg
+        if isinstance(arg, str):
+            sql += " DEFAULT '" + arg.replace("'", "''") + "'"
+        else:
+            sql += f" DEFAULT {arg.text}"
+    return sql
+
+
+def reconcile_statements(existing_columns: dict[str, dict[str, dict]]) -> list[str]:
+    """Return ALTER statements that bring existing MySQL tables up to the metadata.
+
+    ``create_all`` only creates tables that are missing, so a table created by an
+    older release never gains a column added later. This adds every missing
+    non-key column, and widens a VARCHAR the metadata declares longer than the
+    live column (an extension stored as ``101@+13025550001`` cannot fit in
+    VARCHAR(3)). It never narrows a column and never drops anything.
+
+    Primary keys are not handled here: a key change has to be planned around the
+    rows that already exist, so the store's identity migration owns it.
+    """
+    statements: list[str] = []
+    for table in metadata.sorted_tables:
+        table_info = existing_columns.get(table.name)
+        if not table_info:
+            continue
+        key_columns = set(table.primary_key.columns.keys())
+        for column in table.columns:
+            if column.name in key_columns:
+                continue
+            info = table_info.get(column.name)
+            if info is None:
+                statements.append(f"ALTER TABLE {table.name} ADD COLUMN {mysql_column_sql(column)}")
+                continue
+            wanted = getattr(column.type, "length", None)
+            live = getattr(info.get("type"), "length", None)
+            if isinstance(column.type, String) and wanted and live is not None and live < wanted:
+                statements.append(f"ALTER TABLE {table.name} MODIFY COLUMN {mysql_column_sql(column)}")
+    return statements
 
 
 def timestamp_column_fixes(existing_columns: dict[str, dict[str, dict]]) -> list[str]:
@@ -295,6 +345,28 @@ class Database:
             raise ValueError("DATABASE_URI must use mysql+pymysql:// or sqlite:///")
 
     _SCHEMA_LOCK = "eip_telephony.schema_init"
+    MIGRATION_LOCK = "eip_telephony.schema_migrate"
+
+    @contextmanager
+    def advisory_lock(self, name: str):
+        """Hold a server-side MySQL lock for the duration of the block.
+
+        Used to serialise one-time schema migrations across the gunicorn workers
+        and the ARI worker, which all boot against the same database at once.
+        Raises if the lock cannot be taken, so a migration never runs unguarded.
+        """
+        if not self.is_mysql:
+            yield
+            return
+        with self.engine.connect() as conn:
+            got = conn.execute(text("SELECT GET_LOCK(:name, 120)"), {"name": name}).scalar()
+            if not got:
+                raise RuntimeError(f"Could not take the database lock {name!r}; another process is migrating.")
+            try:
+                yield
+            finally:
+                conn.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": name})
+                conn.commit()
 
     def create_all(self):
         if not self.is_mysql:
@@ -332,7 +404,7 @@ class Database:
             for table in metadata.sorted_tables
             if inspector.has_table(table.name)
         }
-        for statement in timestamp_column_fixes(existing):
+        for statement in reconcile_statements(existing) + timestamp_column_fixes(existing):
             conn.execute(text(statement))
         conn.commit()
 
