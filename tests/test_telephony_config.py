@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from app.admin import SettingsStore
@@ -322,6 +323,14 @@ def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path)
     assert "exten => _XXXX.,1,NoOp(Outbound" in dialplan
     assert "Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)" in dialplan
 
+    # The "no trunk assigned" guard compares *inside* $[...] so GotoIf is
+    # handed the 0/1 of the comparison. The shape it used to render,
+    # GotoIf($["${OUTBOUND_TRUNK}"]=""]?blocked), never evaluates: the
+    # condition reaches GotoIf as a non-empty string, reads as true, and every
+    # outbound call was sent to the blocked branch - trunk assigned or not.
+    assert 'GotoIf($["${OUTBOUND_TRUNK}"=""]?blocked)' in dialplan
+    assert 'GotoIf($["${OUTBOUND_TRUNK}"]=""]' not in dialplan
+
     # Extension 101's endpoints carry their own DID and carrier trunk as
     # channel variables, so any call it originates dials out as itself...
     assert "set_var=OUTBOUND_CID=+13025550101" in pjsip
@@ -330,6 +339,46 @@ def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path)
     assert "set_var=OUTBOUND_CID=\n" in pjsip
     assert "set_var=OUTBOUND_TRUNK=\n" in pjsip
     assert "Playback(ss-noservice)" in dialplan
+
+
+def test_every_dialplan_condition_compares_inside_the_expression(tmp_path: Path):
+    """GotoIf/ExecIf must receive the 0/1 of a $[...] comparison.
+
+    A condition written as $["${X}"]=""] - comparison outside the brackets -
+    never evaluates; the application then receives a non-empty string, reads it
+    as true, and takes its branch unconditionally. That is exactly how every
+    outbound call ended in "No outbound number assigned" while the endpoint
+    carried its trunk in OUTBOUND_TRUNK.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    store.save_provider({
+        "name": "Carrier", "server": "sip.example.com", "username": "user", "password": "secret",
+        "allowed_ips": "198.51.100.10/32", "codecs": "ulaw,alaw",
+    })
+    store.save_number({
+        "number": "+13025550101", "provider": "Carrier", "inbound_extension": "101",
+        "default_outbound": True,
+    })
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    dialplan = sync.render_dialplan()
+
+    # Every application condition must be one comparison of two quoted
+    # strings, closed by ]? before the branch labels - the shape the other
+    # ExecIf lines in this renderer use: $["${X}" = "value"]?...
+    conditions = []
+    for line in dialplan.splitlines():
+        if not re.search(r"\b(?:GotoIf|ExecIf)\(", line):
+            continue
+        head, opened, tail = line.partition("$[")
+        assert opened, line
+        body, closed, _ = tail.partition("]?")
+        assert closed, line
+        conditions.append(body)
+
+    assert conditions
+    for body in conditions:
+        assert re.match(r'^"[^"]*"\s*[=!<>]=?\s*"[^"]*"$', body), body
 
 
 def test_recording_defaults_to_allowed_globally_and_off_per_extension(tmp_path: Path):

@@ -659,12 +659,15 @@ class TelephonyConfigSync:
         # pjsip, see render_pjsip), and they are the *current phone number's* - so
         # 101 on +13025550001 and 101 on +13025550002 present their own line. A
         # device with no number is politely refused instead of leaking another
-        # customer's identity.
+        # customer's identity. The trunk test must compare *inside* $[...], like
+        # every other condition here, so GotoIf receives 0/1; the shape
+        # $["${X}"]=""] never evaluates and leaves a truthy string, which sent
+        # every outbound call to blocked - trunk assigned or not.
         outbound: list[str] = []
         for pattern in ("_+X.", "_XXXX."):
             outbound.extend([
                 f"exten => {pattern},1,NoOp(Outbound ${{EXTEN}} from endpoint ${{CHANNEL(endpoint)}})",
-                ' same => n,GotoIf($["${OUTBOUND_TRUNK}"]=""]?blocked)',
+                ' same => n,GotoIf($["${OUTBOUND_TRUNK}"=""]?blocked)',
                 " same => n,Set(CALLERID(num)=${OUTBOUND_CID})",
                 " same => n,Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)",
                 " same => n,Hangup()",
