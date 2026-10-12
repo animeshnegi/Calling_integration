@@ -2,12 +2,12 @@
  *
  *   npm install jsdom && node tools/phonecheck.js
  *
- * Boots the real web/phone.js in jsdom with a stub JsSIP in place of the CDN
- * build and a fake SIP session in place of the WebRTC stack, then walks the
- * contract the phone promises: SIP sign-in and auto-reconnect, the keypad and
- * paste, outbound calls (progress, answer, end), incoming answer/decline, the
- * in-call controls, recents (local and API-backed), contacts, settings and
- * logout.
+ * Boots the real web/phone.js in jsdom with a stub JsSIP in place of the
+ * vendored build and a fake SIP session in place of the WebRTC stack, then
+ * walks the contract the phone promises: SIP sign-in and auto-reconnect, the
+ * keypad and paste, outbound calls (progress, answer, end), incoming
+ * answer/decline, the in-call controls, recents (local and API-backed),
+ * contacts, settings and logout.
  *
  * jsdom has no media engine, no dialog element implementation and no
  * clipboard, so those are stubbed; what the page asks the SIP stack to do is
@@ -291,8 +291,11 @@ async function main() {
       (env.d.querySelector('link[rel="apple-touch-icon"]') || {}).href === LOGO,
       (env.d.querySelector('link[rel="apple-touch-icon"]') || {}).href);
     check('the installable-app manifest is linked', /\/manifest\.json/.test(html));
-    check('the SIP stack is loaded from the pinned CDN build',
-      /jssip@3\.10\.1/.test(fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8')));
+    const shippedPage = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8');
+    check('the SIP stack is loaded from the vendored same-origin build',
+      /<script src="\/jssip\.min\.js">/.test(shippedPage));
+    check('and falls back to the pinned upstream build if that fails',
+      /JsSIP@3\.10\.1/.test(shippedPage));
     check('the in-call status line carries the class its stylesheet styles',
       env.d.getElementById('active-status').classList.contains('active-status'),
       env.d.getElementById('active-status').className);
@@ -916,7 +919,7 @@ async function main() {
     const worker = shellWorker();
     await worker.install();
     check('installing precaches the phone shell',
-      ['/phone', '/phone.css', '/phone.js', '/manifest.json']
+      ['/phone', '/phone.css', '/phone.js', '/jssip.min.js', '/manifest.json']
         .every(url => worker.entries.has(`https://phone.example.com${url}`)),
       [...worker.entries.keys()].join(', '));
     check('and reaches for nothing outside this site', worker.network.length === 0, worker.network.join(', '));
@@ -931,19 +934,23 @@ async function main() {
     check('a cached asset is answered too',
       fresh && fresh.url === 'https://phone.example.com/phone.js', fresh && fresh.url);
 
+    const stack = await worker.fetch('https://phone.example.com/jssip.min.js');
+    check('the SIP stack comes from the cache as well',
+      stack && stack.url === 'https://phone.example.com/jssip.min.js', stack && stack.url);
+
     const state = await worker.fetch('https://phone.example.com/admin/api/state');
     check('the console API is left to the network, never cached', state === undefined);
     const consolePage = await worker.fetch('https://phone.example.com/admin', { mode: 'navigate' });
     check('and so is the console page itself', consolePage === undefined);
     const api = await worker.fetch('https://phone.example.com/api/v1/calls?limit=50');
     check('nor does call history pass through the cache', api === undefined);
-    const cdn = await worker.fetch('https://cdn.jsdelivr.net/npm/jssip@3.10.1/dist/jssip.min.js');
-    check('the SIP library from the CDN is untouched', cdn === undefined);
+    const cdn = await worker.fetch('https://cdn.jsdelivr.net/gh/versatica/JsSIP@3.10.1/dist/jssip.min.js');
+    check('the fallback CDN build is left to the network, never cached', cdn === undefined);
     const post = await worker.fetch('https://phone.example.com/phone', { method: 'POST' });
     check('a non-GET request is never answered from the shell', post === undefined);
     check('nothing else was written to the cache',
       [...worker.entries.keys()].sort().join(', ') ===
-        ['/manifest.json', '/phone', '/phone.css', '/phone.js']
+        ['/jssip.min.js', '/manifest.json', '/phone', '/phone.css', '/phone.js']
           .map(url => `https://phone.example.com${url}`).join(', '),
       [...worker.entries.keys()].join(', '));
 

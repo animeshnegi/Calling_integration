@@ -1,16 +1,18 @@
 /* The softphone's offline shell.
  *
  * It precaches the phone itself and, for those URLs only, answers from the
- * cache first. Everything else - the console, the API, the CDN build of JsSIP,
- * the brand logo - is left alone: a service worker in scope "/" that cached
- * every same-origin GET could otherwise hand the console a stale page or a
- * stale API answer, which is not this worker's business.
+ * cache first. Everything else - the console, the API, the brand logo - is
+ * left alone: a service worker in scope "/" that cached every same-origin GET
+ * could otherwise hand the console a stale page or a stale API answer, which
+ * is not this worker's business. The vendored SIP stack (/jssip.min.js) is
+ * part of the shell: it is served from this origin and the phone cannot sign
+ * in without it.
  *
  * Bump CACHE on a release that changes the shell: install then replaces the
  * cached copies instead of serving the previous version forever.
  */
-const CACHE = "eip-phone-v5";
-const SHELL = ["/phone", "/phone.css", "/phone.js", "/manifest.json"];
+const CACHE = "eip-phone-v6";
+const SHELL = ["/phone", "/phone.css", "/phone.js", "/jssip.min.js", "/manifest.json"];
 
 self.addEventListener("install", e => e.waitUntil(
   caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())

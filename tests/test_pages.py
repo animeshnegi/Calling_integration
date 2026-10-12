@@ -74,9 +74,31 @@ def test_the_softphone_surface_is_served(tmp_path: Path):
     assert worker.headers["Service-Worker-Allowed"] == "/"
 
 
+def test_the_softphone_loads_its_sip_stack_from_this_origin(tmp_path: Path):
+    """The SIP stack is vendored, not fetched from a CDN.
+
+    The page used to load JsSIP from cdn.jsdelivr.net/npm/jssip@3.10.1, a path
+    the npm package does not actually ship - the request came back as a 404
+    page, so every sign-in failed with "SIP library is not loaded.". The stack
+    now ships with the app; only a pinned upstream build may stand in as a
+    fallback.
+    """
+    client = page_client(tmp_path)
+    html = client.get("/phone").get_data(as_text=True)
+    assert '<script src="/jssip.min.js">' in html
+    assert "cdn.jsdelivr.net/npm/jssip" not in html
+    assert "JsSIP@3.10.1" in html  # the pinned fallback, if any, stays pinned
+
+    stack = client.get("/jssip.min.js")
+    assert stack.status_code == 200
+    body = stack.get_data(as_text=True)
+    assert "JsSIP v3.10.1" in body
+    assert ".JsSIP=" in body  # the browser build defines window.JsSIP
+
+
 def test_static_assets_keep_their_cache_policy_and_api_answers_are_not_cached(tmp_path: Path):
     client = page_client(tmp_path)
-    for path in ("/phone.css", "/phone.js", "/manifest.json"):
+    for path in ("/phone.css", "/phone.js", "/jssip.min.js", "/manifest.json"):
         response = client.get(path)
         assert response.status_code == 200
         assert response.headers["Cache-Control"] == "public, max-age=3600", path

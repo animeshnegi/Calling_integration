@@ -106,11 +106,16 @@ https://<your-service-host>/phone
 
 The page is installable: it ships a manifest, a versioned service worker that
 keeps the shell available offline and answers for the phone's own URLs only (it
-never touches the console, the API or the CDN build of JsSIP), and it links the
+never touches the console or the API), and it links the
 EngineerIP logo as its favicon and iOS home-screen icon. Every other page (landing, sign-in,
 console, documentation) links the same logo, and `/favicon.ico` answers with it
 too, so no page ever falls back to a blank tab icon. Point a deployment at a
 different image with `FAVICON_URL` if the brand moves.
+
+The SIP stack is vendored: the JsSIP browser build ships with the app at
+`/jssip.min.js` (same origin, precached in the offline shell), so opening the
+softphone never depends on a third-party CDN. The page falls back to the pinned
+upstream build (`jssip@3.10.1`) only if that copy cannot be fetched.
 
 For production, serve the page through trusted HTTPS and expose Asterisk WSS through the production reverse proxy. Do not place the ARI master credential or provider credentials in browser JavaScript.
 

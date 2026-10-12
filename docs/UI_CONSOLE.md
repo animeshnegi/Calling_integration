@@ -569,7 +569,7 @@ pages are linkable.
   organisation can dial, including dialling one of the customer's own numbers from
   another of its phones (see [`NUMBER_OWNERSHIP.md`](NUMBER_OWNERSHIP.md)).
 * `node tools/phonecheck.js` — boots the real softphone (`/phone`) in jsdom with a stub
-  JsSIP in place of the CDN build and a fake SIP session in place of the WebRTC stack, and
+  JsSIP in place of the vendored build and a fake SIP session in place of the WebRTC stack, and
   walks what the page promises: sign-in and auto-reconnect, the keypad and paste, an
   outbound call from dialling to hangup (the target, the audio-only offer, the remote
   audio track, the timer, mute/hold/speaker, one recents row), incoming answer/decline, a

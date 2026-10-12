@@ -220,10 +220,23 @@ function endCall(message="Call ended",terminate=true,status="completed"){
   $("call-btn").disabled=false;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");loadRecents()
 }
 
-function connectSip(s){
+/* The SIP stack is vendored at /jssip.min.js and loaded before this file, with
+   the pinned upstream build as a fallback in the page. A copy of the page
+   cached from before the vendoring - or a fetch that failed while the page was
+   loading - can still arrive here with no JsSIP, so try both copies again
+   before giving up. */
+function loadScript(src){return new Promise(resolve=>{const el=document.createElement("script");el.src=src;el.onload=()=>resolve(true);el.onerror=()=>resolve(false);document.head.appendChild(el)})}
+async function ensureSipLibrary(){
+  if(window.JsSIP)return true;
+  await loadScript("/jssip.min.js");
+  if(!window.JsSIP)await loadScript("https://cdn.jsdelivr.net/gh/versatica/JsSIP@3.10.1/dist/jssip.min.js");
+  return !!window.JsSIP;
+}
+
+async function connectSip(s){
+  if(!(await ensureSipLibrary()))throw new Error("SIP library is not loaded. The phone's SIP stack could not be downloaded - reload the page and try again.");
+  if(!s.username||!s.password||!s.domain||!s.wss)throw new Error("Enter SIP username, password and domain.");
   return new Promise((resolve,reject)=>{
-    if(!window.JsSIP)return reject(new Error("SIP library is not loaded."));
-    if(!s.username||!s.password||!s.domain||!s.wss)return reject(new Error("Enter SIP username, password and domain."));
     try{
       if(ua){try{ua.stop()}catch{}ua=null}
       const socket=new JsSIP.WebSocketInterface(s.wss);

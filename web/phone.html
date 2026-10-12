@@ -149,7 +149,11 @@
   </dialog>
 
   <audio id="remote-audio" autoplay playsinline></audio>
-  <script src="https://cdn.jsdelivr.net/npm/jssip@3.10.1/dist/jssip.min.js"></script>
+  <!-- The SIP stack ships with the phone, same origin: a third-party CDN is
+       never on the critical path to placing a call. If that copy could not be
+       fetched, fall back to the pinned upstream build before phone.js runs. -->
+  <script src="/jssip.min.js"></script>
+  <script>if(!window.JsSIP)document.write('<script src="https://cdn.jsdelivr.net/gh/versatica/JsSIP@3.10.1/dist/jssip.min.js"><\/script>');</script>
   <script src="/phone.js"></script>
 </body>
 </html>
