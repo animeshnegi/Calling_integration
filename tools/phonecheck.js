@@ -156,16 +156,33 @@ function makeFakeSip() {
 function shellWorker({ offline = false } = {}) {
   const code = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
   const handlers = {};
-  const entries = new Map();
+  /* Named caches, the way a browser keeps them: a release installs into its
+     own cache and activation deletes the older ones. */
+  const stores = new Map();
   const network = [];
   /* The Cache API keys on absolute URLs: a worker that precaches "/phone"
      stores "https://phone.example.com/phone". */
   const absolute = value => new URL(String(value.url || value), 'https://phone.example.com').href;
   const makeResponse = url => ({ url: absolute(url), clone: () => makeResponse(url) });
-  const cache = {
-    addAll: async urls => urls.forEach(url => entries.set(absolute(url), makeResponse(url))),
-    put: async (request, response) => entries.set(absolute(request), response),
-    match: async request => entries.get(absolute(request)),
+  const namedCache = store => ({
+    addAll: async urls => urls.forEach(url => store.set(absolute(url), makeResponse(url))),
+    put: async (request, response) => store.set(absolute(request), response),
+    match: async request => store.get(absolute(request)),
+  });
+  const cacheStorage = {
+    open: async name => {
+      if (!stores.has(name)) stores.set(name, new Map());
+      return namedCache(stores.get(name));
+    },
+    match: async request => {
+      for (const store of stores.values()) {
+        const hit = store.get(absolute(request));
+        if (hit) return hit;
+      }
+      return undefined;
+    },
+    keys: async () => [...stores.keys()],
+    delete: async name => stores.delete(name),
   };
   const sandbox = {
     self: {
@@ -173,7 +190,7 @@ function shellWorker({ offline = false } = {}) {
       skipWaiting: () => {},
       clients: { claim: async () => {} },
     },
-    caches: { open: async () => cache, match: async request => cache.match(request) },
+    caches: cacheStorage,
     location: { origin: 'https://phone.example.com' },
     URL,
     Response: { error: () => ({ error: true }) },
@@ -200,7 +217,14 @@ function shellWorker({ offline = false } = {}) {
       handlers.fetch({ request, respondWith: promise => { responded = promise; } });
       return responded ? responded.then(value => value, error => { throw error; }) : undefined;
     },
-    entries, network,
+    /* Every cache together, as the checks want to see what was written. */
+    get entries() {
+      const combined = new Map();
+      for (const store of stores.values()) for (const [key, value] of store) combined.set(key, value);
+      return combined;
+    },
+    network,
+    caches: cacheStorage,
   };
 }
 
@@ -953,6 +977,23 @@ async function main() {
         ['/jssip.min.js', '/manifest.json', '/phone', '/phone.css', '/phone.js']
           .map(url => `https://phone.example.com${url}`).join(', '),
       [...worker.entries.keys()].join(', '));
+
+    /* A release must replace the shell outright: a copy cached by an earlier
+       release used to shadow the new files forever (caches.match looks in
+       every cache, oldest first), which kept broken pages - like one with no
+       SIP stack - alive after the fix had shipped. */
+    const stale = () => ({ url: 'https://phone.example.com/phone', stale: true, clone() { return this; } });
+    const upgrading = shellWorker();
+    const older = await upgrading.caches.open('eip-phone-v5');
+    await older.put('https://phone.example.com/phone', stale());
+    await upgrading.install();
+    const served = await upgrading.fetch('https://phone.example.com/phone', { mode: 'navigate' });
+    check('a cache from an older release never shadows the shell the worker reads',
+      served && !served.stale);
+    await upgrading.activate();
+    check('and activation deletes the older cache outright',
+      !(await upgrading.caches.keys()).includes('eip-phone-v5'),
+      (await upgrading.caches.keys()).join(', '));
 
     const offlineWorker = shellWorker({ offline: true });
     await offlineWorker.install();

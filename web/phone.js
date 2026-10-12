@@ -234,7 +234,17 @@ async function ensureSipLibrary(){
 }
 
 async function connectSip(s){
-  if(!(await ensureSipLibrary()))throw new Error("SIP library is not loaded. The phone's SIP stack could not be downloaded - reload the page and try again.");
+  if(!(await ensureSipLibrary())){
+    /* "Not loaded" alone cannot tell a stale cached page from a server that is
+       running an image without the vendored stack at all, so probe the one URL
+       that matters and put the answer in the error. */
+    let why="the SIP stack could not be downloaded";
+    try{
+      const probe=await fetch("/jssip.min.js",{method:"HEAD"});
+      why=probe.ok?"/jssip.min.js loaded but did not start":"/jssip.min.js answered HTTP "+probe.status+" - the server is running an image without the phone's SIP stack";
+    }catch{}
+    throw new Error("SIP library is not loaded: "+why+". Reload the page; if this persists, rebuild the telephony-api image - it must contain web/jssip.min.js.");
+  }
   if(!s.username||!s.password||!s.domain||!s.wss)throw new Error("Enter SIP username, password and domain.");
   return new Promise((resolve,reject)=>{
     try{
