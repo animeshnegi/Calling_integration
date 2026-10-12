@@ -2,6 +2,49 @@
 
 EngineerIP uses Asterisk `app_voicemail` with one mailbox per enabled extension. Mailbox definitions, PINs, message-waiting indicators, unanswered-call routing, browser playback, and CRM-facing APIs are integrated with the administration system.
 
+## Mailbox names
+
+An extension belongs to one phone number, and every number carries its own extension
+set from 101 up - so the mailbox is named after both, `<digits>-<number>`:
+
+```text
+101@+13025550001   (the key in `extensions`)
+        ↓
+101-13025550001    (the mailbox folder, the VoiceMail() context argument and the
+                    name the console shows)
+```
+
+**A three-digit extension is resolved only within the current phone number**, so two
+101s on two numbers are two mailboxes with their own PIN, greeting and messages, and
+never one shared box:
+
+```text
++13025550001/101  →  101-13025550001
++13025550002/101  →  101-13025550002
+```
+
+`mailbox_name()` does that translation in one place, so the key, the mailbox name and
+the folder can never drift apart. The APIs and the console accept the key or the
+mailbox name anywhere, and the bare digits only while they name one extension of the
+account - two matches are refused with an explicit ambiguity error rather than
+guessed. A row with no number of its own keeps the bare `101` it was filed under, and
+that is what a `*97` caller types for it.
+The extension's own pin is filed under the same name; a mailbox that has to be longer
+than the digits records where its pin came from (`voicemail_pin_aliases`), so entering
+either name at the `*97` prompt opens the same mailbox.
+
+## Upgrading a mailbox that gained a number
+
+An install that predates number-scoped extensions filed `101` under the folder
+`101`. When the migration moves that row onto the phone number it answers on, its
+messages move with it: at startup `101` is adopted into `101-13025550001`, once,
+renumbered so nothing is overwritten, and the empty folder is removed
+(`SettingsStore.adopt_legacy_mailboxes()`). The move only happens while those
+digits name exactly one extension and no row keeps the bare digits as a mailbox of
+its own - the operator's `900` stays `900`. When two lines could both mean the
+same folder nothing is moved at all, because a customer's messages are never
+merged into the wrong box; the folder is left where it is, untouched.
+
 ## Enable a mailbox
 
 1. Open `/admin` and select **Extensions**.
@@ -16,7 +59,7 @@ PINs are encrypted in `settings.db` and are never returned by the API or admin s
 For an extension with voicemail enabled:
 
 1. Asterisk rings the SIP endpoint for 30 seconds.
-2. If it is not answered, the caller enters `VoiceMail(<extension>@engineerip,u)` and hears the unavailable greeting.
+2. If it is not answered, the caller enters `VoiceMail(101-13025550001@engineerip,u)` - the extension's own mailbox, so the message waits in that line's box - and hears the unavailable greeting.
 3. The message is stored in the private voicemail volume.
 4. Compatible SIP phones receive message-waiting indication through the endpoint mailbox subscription.
 
@@ -30,7 +73,10 @@ From a registered extension, dial:
 *97
 ```
 
-Asterisk opens `VoiceMailMain` in the private `engineerip` context. Enter the three-digit mailbox number and configured voicemail PIN when prompted. Users can record greetings and manage messages with Asterisk's voice menus.
+Asterisk opens `VoiceMailMain` in the private `engineerip` context. Enter the mailbox
+name the credentials sheet shows - `101-13025550001` for 101 on that number - and the
+configured PIN; the digits alone work only where they name one extension of the
+account.
 
 ## Administration panel
 
@@ -67,7 +113,9 @@ Returns enabled extensions with display names, active state, and New, Old, Urgen
 
 ```http
 GET /api/v1/voicemails
-GET /api/v1/voicemails?extension=101
+GET /api/v1/voicemails?extension=101-13025550001
+GET /api/v1/voicemails?extension=101@+13025550001
+GET /api/v1/voicemails?extension=101                     (while one extension of the key holds the digits)
 GET /api/v1/voicemails?extension=101&folder=inbox
 ```
 
@@ -81,7 +129,7 @@ Example response:
   "voicemails": [
     {
       "id": "101:inbox:msg0000",
-      "mailbox": "101",
+      "mailbox": "101-13025550001",
       "folder": "inbox",
       "message": "msg0000",
       "caller_id": "Customer <+13025550123>",
@@ -98,7 +146,7 @@ Example response:
 ### Play or download audio
 
 ```http
-GET /api/v1/voicemails/101/inbox/msg0000/file
+GET /api/v1/voicemails/101-13025550001/inbox/msg0000/file
 Authorization: Bearer <TELEPHONY_TOKEN>
 Range: bytes=0-
 ```
@@ -108,7 +156,7 @@ The endpoint supports conditional/range responses through Flask and does not exp
 ### Mark as read
 
 ```http
-POST /api/v1/voicemails/101/inbox/msg0000/read
+POST /api/v1/voicemails/101-13025550001/inbox/msg0000/read
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
@@ -117,7 +165,7 @@ This moves a message from `INBOX` to Asterisk's `Old` folder and safely renumber
 ### Delete
 
 ```http
-DELETE /api/v1/voicemails/101/old/msg0000
+DELETE /api/v1/voicemails/101-13025550001/old/msg0000
 Authorization: Bearer <TELEPHONY_TOKEN>
 ```
 
@@ -150,7 +198,7 @@ Store the Asterisk message identity (`mailbox`, `folder`, and `message`) only as
 
 ### `*97` cannot find the mailbox
 
-Confirm the mailbox is enabled and rendered in `voicemail.dynamic.conf`. At the prompt, enter the three-digit extension mailbox and its PIN.
+Confirm the mailbox is enabled and rendered in `voicemail.dynamic.conf`. At the prompt, enter the three-digit extension mailbox and its PIN - or `<digits>-<number>` when two of the account's lines hold the same digits. The name the console shows on the credentials sheet is the one that always works.
 
 ### Messages exist but admin playback returns 404
 
@@ -158,4 +206,7 @@ Check the `asterisk_voicemail` mounts, shared group permissions, message audio f
 
 ### No message-waiting light
 
-Not every softphone supports the same MWI behavior. Confirm the endpoint has `mailboxes=<extension>@engineerip`, subscription support is enabled, and the device is subscribed/registered.
+Not every softphone supports the same MWI behavior. Confirm the endpoint has
+`mailboxes=<mailbox>@engineerip` - the mailbox name, so `101-13025550001` for a device
+that belongs to a line - subscription support is enabled, and the device is
+subscribed/registered.

@@ -9,10 +9,10 @@ class FakeAsterisk:
     def health(self):
         return {"system": "Asterisk Test"}
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
         return call_id
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, endpoint=None):
         return f"{call_id}-employee"
 
     def continue_in_dialplan(self, channel_id, context, extension):
@@ -77,6 +77,72 @@ def test_health_without_asterisk_dependency(tmp_path):
     assert response.json["ok"] is True
 
 
+def test_two_101s_keep_their_own_voicemail(tmp_path):
+    """Voicemail is number-scoped: two lines' 101s are two boxes, named apart.
+
+    The API resolves a mailbox by its name (`101-13025550041`), by the extension
+    key or by the digits while they name one extension of the account. A request
+    that says only `101` while two of the account's lines hold it is refused
+    rather than guessed into one of the two.
+    """
+    client = app_client(tmp_path)
+    store = client.application.extensions["settings_store"]
+    user_id = store.save_user({
+        "username": "meridian", "email": "m@example.com", "role": "user",
+        "password": "customer-password-01", "active": True, "company_name": "Meridian",
+    })
+    first, second = "+13025550041", "+13025550042"
+    for number in (first, second):
+        store.save_number({
+            "number": number, "provider": "TestProvider", "owner_user_id": user_id, "active": True,
+        })
+    store.add_extension_to_number(first, user_id, {
+        "extension": "101", "voicemail_enabled": True, "voicemail_pin": "1111",
+    })
+    store.add_extension_to_number(second, user_id, {
+        "extension": "101", "voicemail_enabled": True, "voicemail_pin": "2222",
+    })
+    # One message in each box, under the name the platform files them with.
+    root = tmp_path / "voicemail" / "engineerip"
+    for mailbox, message in (("101-13025550041", "msg0000"), ("101-13025550042", "msg0001")):
+        directory = root / mailbox / "INBOX"
+        directory.mkdir(parents=True)
+        (directory / f"{message}.txt").write_text(
+            "[message]\ncallerid=Customer <+13025550123>\norigtime=1700000000\nduration=12\n"
+        )
+        (directory / f"{message}.wav").write_bytes(b"RIFF-voicemail")
+    _, token = store.create_api_key("Meridian CRM", "voicemail:read", user_id)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    listed = client.get("/api/v1/voicemail/mailboxes", headers=headers)
+    assert listed.status_code == 200
+    assert {row["mailbox"] for row in listed.json["mailboxes"]} == {
+        "101-13025550041", "101-13025550042",
+    }
+    assert {row["key"] for row in listed.json["mailboxes"]} == {
+        f"101@{first}", f"101@{second}",
+    }
+
+    # The digits alone are ambiguous, so they are refused - never guessed.
+    ambiguous = client.get("/api/v1/voicemails?extension=101", headers=headers)
+    assert ambiguous.status_code == 400
+    assert "more than one" in ambiguous.json["error"]
+    # The mailbox name, the key and the mailbox of the other line all resolve to
+    # one box each, and the two boxes are never the same one.
+    for wanted, mailbox, message in (
+        ("101-13025550041", "101-13025550041", "msg0000"), (f"101@{first}", "101-13025550041", "msg0000"),
+        ("101-13025550042", "101-13025550042", "msg0001"), (f"101@{second}", "101-13025550042", "msg0001"),
+    ):
+        response = client.get(f"/api/v1/voicemails?extension={wanted}", headers=headers)
+        assert response.status_code == 200, (wanted, response.json)
+        assert [row["message"] for row in response.json["voicemails"]] == [message]
+        assert response.json["voicemails"][0]["mailbox"] == mailbox
+    # And the audio of one box is not served under the other's name.
+    assert client.get("/api/v1/voicemails/101-13025550041/inbox/msg0000/file", headers=headers).status_code == 200
+    assert client.get("/api/v1/voicemails/101-13025550041/inbox/msg0001/file", headers=headers).status_code == 404
+    assert client.get("/api/v1/voicemails/101/inbox/msg0000/file", headers=headers).status_code == 404
+
+
 def test_call_requires_auth(tmp_path):
     client = app_client(tmp_path)
     response = client.post("/api/v1/calls", json={"phone": "+16235551234", "extension": "101"})
@@ -89,12 +155,56 @@ def test_create_call_and_disposition(tmp_path):
     response = client.post("/api/v1/calls", json={"phone": "+16235551234", "extension": "102", "contact_id": 582, "member_id": 37}, headers=headers)
     assert response.status_code == 201
     call_id = response.json["call"]["call_id"]
-    assert response.json["call"]["extension"] == "102"
+    # The record names the exact extension - its key, which carries the line - so
+    # two records never look like the same device.
+    assert response.json["call"]["extension"] == "102@+13025550102"
     assert response.json["call"]["caller_id_number"] == "+13025550102"
 
     response = client.post(f"/api/v1/calls/{call_id}/disposition", json={"disposition": "follow_up", "notes": "Call Tuesday"}, headers=headers)
     assert response.status_code == 200
     assert response.json["call"]["disposition"] == "follow_up"
+
+
+def test_a_call_names_the_line_when_two_of_them_hold_the_digits(tmp_path):
+    """`extension: 101` with two 101s is refused, not guessed.
+
+    A three-digit extension is resolved only within the current phone number, so
+    the caller sends the key of the device it means - and the record keeps it.
+    """
+    client = app_client(tmp_path)
+    store = client.application.extensions["settings_store"]
+    user_id = store.save_user({
+        "username": "meridian", "email": "m@example.com", "role": "user",
+        "password": "customer-password-01", "active": True, "company_name": "Meridian",
+    })
+    for number in ("+13025550041", "+13025550042"):
+        store.save_number({
+            "number": number, "provider": "TestProvider", "owner_user_id": user_id, "active": True,
+        })
+        store.add_extension_to_number(number, user_id, {"extension": "101"})
+    _, token = store.create_api_key("Meridian CRM", "calls:write,calls:read,config:read", user_id)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    listed = client.get("/api/v1/extensions", headers=headers)
+    assert listed.json["extensions"] == ["101", "101"]
+    assert listed.json["keys"] == ["101@+13025550041", "101@+13025550042"]
+
+    ambiguous = client.post("/api/v1/calls", json={"phone": "+16235551234", "extension": "101"}, headers=headers)
+    assert ambiguous.status_code == 400
+    assert ambiguous.json["error"] == "101 is on more than one of your numbers - name the phone number as well"
+
+    response = client.post(
+        "/api/v1/calls", json={"phone": "+16235551234", "extension": "101@+13025550042"}, headers=headers,
+    )
+    assert response.status_code == 201, response.json
+    assert response.json["call"]["extension"] == "101@+13025550042"
+    # The line the device belongs to presents the call, never the other line's.
+    assert response.json["call"]["caller_id_number"] == "+13025550042"
+
+    numbers = client.get("/api/v1/numbers?extension=101", headers=headers)
+    assert {row["number"] for row in numbers.json["numbers"]} == {"+13025550041", "+13025550042"}
+    only_two = client.get("/api/v1/numbers?extension=101-13025550041", headers=headers)
+    assert [row["number"] for row in only_two.json["numbers"]] == ["+13025550041"]
 
 
 def test_bad_extension(tmp_path):
@@ -128,6 +238,7 @@ def test_extensions_are_authenticated(tmp_path):
     response = client.get("/api/v1/extensions", headers={"Authorization": "Bearer test-token"})
     assert response.status_code == 200
     assert response.json["extensions"] == ["101", "102"]
+    assert response.json["keys"] == ["101@+13025550101", "102@+13025550102"]
     numbers = client.get("/api/v1/numbers?extension=101", headers={"Authorization": "Bearer test-token"})
     assert numbers.status_code == 200
     assert numbers.json["numbers"][0]["number"] == "+13025550101"
@@ -254,9 +365,23 @@ def test_extension_user_is_scoped_and_cannot_change_system_settings(tmp_path):
         "extension": "101", "sip_username": "101", "active": True,
         "recording_enabled": False,
     }, owner_user_id=user_id)
+    # The extension is the account's only one, and the line it answers is the one
+    # its calls go out on: a customer never presents a number it does not own.
+    settings.save_number({
+        "number": "+13025559901", "provider": "TestProvider", "inbound_extension": "101",
+        "owner_user_id": user_id, "default_outbound": True, "active": True,
+    })
     service = app.extensions["telephony_service"]
-    service.store.create(Call(call_id="user-call", contact_id=None, member_id=None, extension="101", phone="+16235550101"))
-    service.store.create(Call(call_id="other-call", contact_id=None, member_id=None, extension="102", phone="+16235550102"))
+    # A record names the exact extension: the digits plus the number they answer
+    # on, so this call and a call from another line's 101 are never the same row.
+    service.store.create(Call(
+        call_id="user-call", contact_id=None, member_id=None,
+        extension="101@+13025559901", phone="+16235550101",
+    ))
+    service.store.create(Call(
+        call_id="other-call", contact_id=None, member_id=None,
+        extension="102@+13025550102", phone="+16235550102",
+    ))
 
     client = app.test_client()
     assert client.post("/admin/login", json={"username": "agent101", "password": "long-agent-password"}).status_code == 200
@@ -271,19 +396,21 @@ def test_extension_user_is_scoped_and_cannot_change_system_settings(tmp_path):
     assert calls.json["calls"][0]["call_id"] == "user-call"
 
     started = client.post(
-        "/admin/api/calls", json={"phone": "+919876543210", "extension": "101", "caller_id_number": "+13025550101"},
+        "/admin/api/calls", json={"phone": "+919876543210", "extension": "101", "caller_id_number": "+13025559901"},
         headers={"X-CSRF-Token": state.json["csrf_token"]},
     )
     assert started.status_code == 201
-    assert started.json["call"]["extension"] == "101"
-    assert started.json["call"]["caller_id_number"] == "+13025550101"
+    # The record names the extension exactly - the digits plus the number they
+    # belong to - so this call and a call from another line's 101 stay apart.
+    assert started.json["call"]["extension"] == "101@+13025559901"
+    assert started.json["call"]["caller_id_number"] == "+13025559901"
 
     preference = client.post(
         "/admin/api/profile/recording", json={"enabled": True},
         headers={"X-CSRF-Token": state.json["csrf_token"]},
     )
     assert preference.status_code == 200
-    assert next(row for row in settings.list_extensions() if row["extension"] == "101")["recording_enabled"] == 1
+    assert next(row for row in settings.list_extensions(user_id) if row["digits"] == "101")["recording_enabled"] == 1
     # The platform switch (the administrator's) is untouched by that: an
     # extension user's opt-in is their own switch, nothing more.
     assert settings.get_settings()["recording_enabled"] == "true"
@@ -576,9 +703,10 @@ def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
     _, account_one = provision("device-one", "301", "+13025550301")
     _, account_two = provision("device-two", "302", "+13025550302", "device302", linked=False)
 
-    # ARI reports resources as <extension> / <sip_username> / device-<sip_username>.
+    # ARI reports resources as the endpoint a device registers as: the line's own
+    # endpoint name (<digits>-<number>) / the sip_username / device-<sip_username>.
     service.asterisk = FakeEndpointList([
-        {"technology": "pjsip", "resource": "301", "state": "online"},
+        {"technology": "pjsip", "resource": "301-13025550301", "state": "online"},
         {"technology": "pjsip", "resource": "device-device302", "state": "unavailable"},
         {"technology": "chan_sip", "resource": "302", "state": "online"},   # not pjsip: ignored
     ])
@@ -590,6 +718,9 @@ def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
     }
 
     # When ARI cannot be reached the stored status is reported instead of failing.
+    # Endpoint states are cached for a few seconds so console refreshes do not
+    # hammer Asterisk, so the test drops that cache and asks again.
+    service._endpoint_states = (0.0, {})
     service.asterisk = FakeAsterisk()
     assert client.get("/admin/api/device-status").json["devices"] == [
         {"id": account_one, "registration_status": "offline"},
@@ -604,3 +735,73 @@ def test_device_status_overlays_live_state_and_scopes_to_the_owner(tmp_path):
     scoped = customer.get("/admin/api/device-status")
     assert scoped.status_code == 200
     assert [row["id"] for row in scoped.json["devices"]] == [account_one]
+
+
+def test_registration_helpers_read_the_endpoint_names_a_phone_uses():
+    """The names a phone can register under, and no guessing without Asterisk."""
+    from app.admin import device_registration, extension_registration
+
+    live = {"101": "online", "AUMPNO_101": "offline", "device-desk302": "unavailable"}
+    # A device account registers as its own username or as the generated device id.
+    assert device_registration({"sip_username": "desk302", "extension": ""}, live) == "offline"
+    # An extension is online when the name it registers under is: the generated
+    # identity, or the plain three-digit name when it owns that name.
+    assert extension_registration(
+        {"extension": "101", "sip_username": "AUMPNO_101", "mailbox": "101"}, live, []
+    ) == "online"
+    # A line's own extension registers under its identity, not the digits.
+    assert extension_registration(
+        {"extension": "101@+13025550001", "sip_username": "AUMPNO_101", "mailbox": "101-13025550001"},
+        {"101": "online", "AUMPNO_101": "offline"}, [],
+    ) == "offline"
+    # A device account that answers the extension counts as well.
+    accounts = [{"extension": "105@+13025550001", "sip_username": "AUMPNO_105"}]
+    assert extension_registration(
+        {"extension": "105@+13025550001", "sip_username": "X_105", "mailbox": "105-13025550001"},
+        {"AUMPNO_105": "online"}, accounts,
+    ) == "online"
+    # Asterisk answered, and nothing of this extension is signed in.
+    assert extension_registration(
+        {"extension": "105@+13025550001", "sip_username": "X_105", "mailbox": "105-13025550001"}, live, []
+    ) == "offline"
+
+
+def test_admin_webhook_test_reports_the_endpoint_answer(tmp_path, monkeypatch):
+    client = app_client(tmp_path)
+    login = client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"})
+    assert login.status_code == 200
+    csrf = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
+    # Customers create their endpoints; the administrator tests the one that exists.
+    store = client.application.extensions["telephony_service"].settings_store
+    store.save_webhook({
+        "name": "CRM", "url": "https://crm.example.com/events", "token": "secret",
+        "events": "call.started,call.completed", "active": True,
+    }, None)
+    webhook_id = store.list_webhooks()[0]["id"]
+
+    sent = []
+
+    class Accepted:
+        ok = True
+        status_code = 200
+
+    class Refused:
+        ok = False
+        status_code = 503
+
+    def accept(url, **kwargs):
+        sent.append((url, kwargs["data"]))
+        return Accepted()
+
+    monkeypatch.setattr("app.services.requests.post", accept)
+    response = client.post(f"/admin/api/webhooks/{webhook_id}/test", headers=csrf)
+    assert response.status_code == 200
+    assert response.json == {"ok": True, "status_code": 200, "error": None}
+    assert sent and b'"event":"webhook.test"' in sent[0][1]
+
+    monkeypatch.setattr("app.services.requests.post", lambda url, **kwargs: Refused())
+    response = client.post(f"/admin/api/webhooks/{webhook_id}/test", headers=csrf)
+    assert response.status_code == 502
+    assert response.json == {"ok": False, "status_code": 503, "error": "HTTP 503"}
+
+    assert client.post("/admin/api/webhooks/999999/test", headers=csrf).status_code == 404

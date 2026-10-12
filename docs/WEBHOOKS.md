@@ -7,21 +7,26 @@ Telephony emits normalized events to active database-managed webhook endpoints. 
 The current service can emit:
 
 - `call.started`
+- `call.ringing` (outbound call's first leg is ringing)
 - `call.employee_ringing`
 - `call.employee_answered`
 - `call.customer_dialing`
 - `call.bridged`
 - `call.answered`
+- `call.ivr_extension_selected` (caller chose an extension from a menu; carries `digits` and `extension`)
+- `call.ivr_fallback` (menu sent the caller to its fallback)
+- `call.voicemail` (call handed to extension voicemail; `reason` is `ivr_no_selection` or `inbound_not_answered`)
+- `call.missed` (inbound call unanswered and not sent to voicemail)
 - `call.recording_started`
 - `call.recording_finished`
 - `call.recording_failed`
 - `call.recording_announcement_failed`
 - `call.recording_deleted`
-- `call.voicemail` (inbound call handed to extension voicemail)
-- `call.completed`
-- `call.failed`
-- `call.hangup_requested`
+- `call.completed` (answered calls end here; `reason` says why, and an API hangup is `hangup_requested`)
+- `call.failed` (unanswered calls end here, including an API hangup with `reason: hangup_requested`)
 - `call.disposition`
+
+The console's event picker offers exactly this list, and `tests/test_api_docs.py` fails if the server and the documentation drift apart.
 
 ## Payload
 

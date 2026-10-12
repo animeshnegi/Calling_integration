@@ -8,7 +8,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
-from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, MetaData, String, Table, Text, create_engine, inspect, text
+from contextlib import contextmanager
+
+from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, inspect, text
+from sqlalchemy.dialects import mysql as _mysql_dialect
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
@@ -28,23 +31,36 @@ def _timestamps():
 
 admin_users = Table("admin_users", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("username", String(80), unique=True, nullable=False),
-    Column("email", String(254), nullable=False, server_default=""), Column("extension", String(3), nullable=False, server_default=""),
+    Column("email", String(254), nullable=False, server_default=""), Column("extension", String(64), nullable=False, server_default=""),
     Column("full_name", String(120), nullable=False, server_default=""), Column("company_name", String(160), nullable=False, server_default=""),
     Column("job_role", String(120), nullable=False, server_default=""), Column("phone", String(30), nullable=False, server_default=""),
     Column("password_hash", String(512), nullable=False), Column("role", String(20), nullable=False, server_default="user"),
     Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
 settings = Table("settings", metadata, Column("key", String(100), primary_key=True), Column("value", Text, nullable=False), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 extensions = Table("extensions", metadata,
-    Column("extension", String(3), primary_key=True), Column("display_name", String(120), nullable=False, server_default=""),
+    # An extension is identified by the phone number it belongs to and its
+    # digits: `101` on +13025550001 and `101` on +13025550002 are two different
+    # desks. `id` is the stable internal handle an extension keeps for its whole
+    # life, including while it is moved between numbers. `phone_number_id` is
+    # NULL for a platform row (the operator's own phones, which have no customer
+    # line) - a customer row always names one of that customer's numbers, and the
+    # migration places every legacy row on the number it belongs to.
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("extension", String(64), nullable=False, server_default=""),
+    Column("phone_number_id", BigInteger), Column("display_name", String(120), nullable=False, server_default=""),
     Column("sip_username", String(80), nullable=False), Column("sip_password_enc", Text, nullable=False),
     Column("webrtc_enabled", Integer, nullable=False, server_default="0"), Column("recording_enabled", Integer, nullable=False, server_default="0"),
     Column("voicemail_enabled", Integer, nullable=False, server_default="0"), Column("voicemail_pin_enc", String(2048), nullable=False, server_default=""),
     Column("voicemail_email", String(254), nullable=False, server_default=""), Column("active", Integer, nullable=False, server_default="1"),
-    Column("owner_user_id", BigInteger), *_timestamps())
+    Column("owner_user_id", BigInteger), *_timestamps(),
+    # One `101` per phone number. Two numbers of the same customer - and two
+    # different customers - may each have their own 101; the same number may not
+    # hold the same digits twice.
+    UniqueConstraint("phone_number_id", "extension", name="uq_extensions_number_extension"))
 phone_numbers = Table("phone_numbers", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("number", String(16), unique=True, nullable=False),
     Column("provider", String(80), nullable=False, server_default=""), Column("description", String(160), nullable=False, server_default=""),
-    Column("inbound_extension", String(3), nullable=False, server_default=""), Column("default_outbound", Integer, nullable=False, server_default="0"),
+    Column("inbound_extension", String(64), nullable=False, server_default=""), Column("default_outbound", Integer, nullable=False, server_default="0"),
     Column("active", Integer, nullable=False, server_default="1"), Column("owner_user_id", BigInteger),
     Column("monthly_price_cents", Integer, nullable=False, server_default="500"), Column("billing_start", String(10), nullable=False, server_default=""),
     Column("billing_cycle_day", Integer, nullable=False, server_default="1"), Column("discontinue_at", String(10), nullable=False, server_default=""), *_timestamps())
@@ -75,7 +91,7 @@ email_config = Table("email_config", metadata, Column("id", Integer, primary_key
     Column("from_email", String(254), nullable=False, server_default=""), Column("from_name", String(120), nullable=False, server_default="EIP Telephony Voicemail"),
     Column("enabled", Integer, nullable=False, server_default="0"), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 voicemail_deliveries = Table("voicemail_deliveries", metadata,
-    Column("fingerprint", String(128), primary_key=True), Column("mailbox", String(3), nullable=False), Column("recipient", String(254), nullable=False),
+    Column("fingerprint", String(128), primary_key=True), Column("mailbox", String(64), nullable=False), Column("recipient", String(254), nullable=False),
     Column("status", String(20), nullable=False, server_default="pending"), Column("attempts", Integer, nullable=False, server_default="0"),
     Column("last_error", Text), Column("delivered_at", DateTime), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 billing_invoices = Table("billing_invoices", metadata,
@@ -93,7 +109,7 @@ customer_sip_accounts = Table("customer_sip_accounts", metadata,
     Column("label", String(120), nullable=False), Column("sip_username", String(100), unique=True, nullable=False),
     Column("sip_password_enc", Text, nullable=False), Column("server", String(255), nullable=False),
     Column("port", Integer, nullable=False, server_default="5060"), Column("transport", String(10), nullable=False, server_default="udp"),
-    Column("phone_number", String(16), nullable=False, server_default=""), Column("extension", String(3), nullable=False, server_default=""),
+    Column("phone_number", String(16), nullable=False, server_default=""), Column("extension", String(64), nullable=False, server_default=""),
     Column("registration_status", String(20), nullable=False, server_default="offline"), Column("last_registered_at", DateTime),
     Column("active", Integer, nullable=False, server_default="1"), *_timestamps())
 call_routes = Table("call_routes", metadata,
@@ -121,7 +137,7 @@ notifications = Table("notifications", metadata,
     Column("read_at", DateTime), Column("created_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 calls = Table("calls", metadata,
     Column("call_id", String(128), primary_key=True), Column("contact_id", String(255)), Column("member_id", String(255)),
-    Column("extension", String(3), nullable=False), Column("phone", String(16), nullable=False), Column("caller_id_number", String(16)),
+    Column("extension", String(64), nullable=False), Column("phone", String(16), nullable=False), Column("caller_id_number", String(16)),
     Column("provider", String(80)), Column("direction", String(20), nullable=False), Column("status", String(40), nullable=False),
     Column("answered", Integer, nullable=False, server_default="0"), Column("started_at", String(40), nullable=False),
     Column("answered_at", String(40)), Column("ended_at", String(40)), Column("duration_seconds", Integer, nullable=False, server_default="0"),
@@ -136,6 +152,53 @@ Index("idx_calls_employee_channel", calls.c.employee_channel_id)
 Index("idx_calls_customer_channel", calls.c.customer_channel_id)
 Index("idx_calls_recording_name", calls.c.recording_name)
 Index("idx_calls_started_at", calls.c.started_at)
+
+
+def mysql_column_sql(column) -> str:
+    """The MySQL column definition for a metadata column (name, type, NULL, default)."""
+    sql = f"{column.name} {column.type.compile(dialect=_mysql_dialect.dialect())}"
+    if not column.nullable:
+        sql += " NOT NULL"
+    default = column.server_default
+    if default is not None:
+        arg = default.arg
+        if isinstance(arg, str):
+            sql += " DEFAULT '" + arg.replace("'", "''") + "'"
+        else:
+            sql += f" DEFAULT {arg.text}"
+    return sql
+
+
+def reconcile_statements(existing_columns: dict[str, dict[str, dict]]) -> list[str]:
+    """Return ALTER statements that bring existing MySQL tables up to the metadata.
+
+    ``create_all`` only creates tables that are missing, so a table created by an
+    older release never gains a column added later. This adds every missing
+    non-key column, and widens a VARCHAR the metadata declares longer than the
+    live column (an extension stored as ``101@+13025550001`` cannot fit in
+    VARCHAR(3)). It never narrows a column and never drops anything.
+
+    Primary keys are not handled here: a key change has to be planned around the
+    rows that already exist, so the store's identity migration owns it.
+    """
+    statements: list[str] = []
+    for table in metadata.sorted_tables:
+        table_info = existing_columns.get(table.name)
+        if not table_info:
+            continue
+        key_columns = set(table.primary_key.columns.keys())
+        for column in table.columns:
+            if column.name in key_columns:
+                continue
+            info = table_info.get(column.name)
+            if info is None:
+                statements.append(f"ALTER TABLE {table.name} ADD COLUMN {mysql_column_sql(column)}")
+                continue
+            wanted = getattr(column.type, "length", None)
+            live = getattr(info.get("type"), "length", None)
+            if isinstance(column.type, String) and wanted and live is not None and live < wanted:
+                statements.append(f"ALTER TABLE {table.name} MODIFY COLUMN {mysql_column_sql(column)}")
+    return statements
 
 
 def timestamp_column_fixes(existing_columns: dict[str, dict[str, dict]]) -> list[str]:
@@ -282,6 +345,28 @@ class Database:
             raise ValueError("DATABASE_URI must use mysql+pymysql:// or sqlite:///")
 
     _SCHEMA_LOCK = "eip_telephony.schema_init"
+    MIGRATION_LOCK = "eip_telephony.schema_migrate"
+
+    @contextmanager
+    def advisory_lock(self, name: str):
+        """Hold a server-side MySQL lock for the duration of the block.
+
+        Used to serialise one-time schema migrations across the gunicorn workers
+        and the ARI worker, which all boot against the same database at once.
+        Raises if the lock cannot be taken, so a migration never runs unguarded.
+        """
+        if not self.is_mysql:
+            yield
+            return
+        with self.engine.connect() as conn:
+            got = conn.execute(text("SELECT GET_LOCK(:name, 120)"), {"name": name}).scalar()
+            if not got:
+                raise RuntimeError(f"Could not take the database lock {name!r}; another process is migrating.")
+            try:
+                yield
+            finally:
+                conn.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": name})
+                conn.commit()
 
     def create_all(self):
         if not self.is_mysql:
@@ -319,7 +404,7 @@ class Database:
             for table in metadata.sorted_tables
             if inspector.has_table(table.name)
         }
-        for statement in timestamp_column_fixes(existing):
+        for statement in reconcile_statements(existing) + timestamp_column_fixes(existing):
             conn.execute(text(statement))
         conn.commit()
 

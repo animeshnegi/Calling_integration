@@ -68,16 +68,21 @@ Calling_integration/
 │       ├── modules.conf
 │       ├── pjsip.conf
 │       └── rtp.conf
-├── web/
+├── web/                     # landing, sign-in, console, docs, phone PWA
 │   ├── index.html
+│   ├── admin.html
+│   ├── admin-login.html
+│   ├── phone.html · phone.css · phone.js · manifest.json · sw.js
 │   ├── app.js
 │   └── style.css
 ├── tests/
 │   ├── test_api.py
 │   ├── test_asterisk_client.py
 │   ├── test_call_store.py
+│   ├── test_pages.py
 │   ├── test_services.py
 │   └── test_telephony.py
+├── tools/                   # jsdom and HTTP harnesses (see docs/UI_CONSOLE.md)
 ├── docker-compose.yml
 ├── Dockerfile
 ├── .env.example

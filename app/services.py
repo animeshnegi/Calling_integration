@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -13,6 +14,7 @@ from typing import Any
 
 import requests
 
+from .admin import endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox, extension_scope
 from .config import Config
 from .models import Call, CallStore
 
@@ -43,6 +45,8 @@ class TelephonyService:
         # Channel id -> call id for every leg of a call that is ringing several
         # devices; rebuilt from the stored call record after a worker restart.
         self._leg_index: dict[str, str] = {}
+        # When the endpoint states below were fetched, and what came back.
+        self._endpoint_states: tuple[float, dict[str, str]] = (0.0, {})
 
     def ari_ready(self) -> bool:
         try:
@@ -50,6 +54,91 @@ class TelephonyService:
             return ready.exists() and (datetime.now(timezone.utc).timestamp() - ready.stat().st_mtime) <= ARI_READY_STALE_SECONDS
         except OSError:
             return False
+
+    # How long an answer from Asterisk about registered endpoints is reused.
+    # Every console refresh asks, and Asterisk should not be asked twice for the
+    # same state.
+    ENDPOINT_STATE_SECONDS = 5
+
+    def endpoint_states(self) -> dict[str, str]:
+        """Which PJSIP endpoints are signed in right now, from ARI.
+
+        Registration is what makes a phone ring, so the console shows it against
+        every extension and device. An empty answer means Asterisk could not be
+        asked - which callers must not read as "nothing is registered".
+        """
+        now = time.monotonic()
+        stamped, states = self._endpoint_states
+        if now - stamped < self.ENDPOINT_STATE_SECONDS:
+            return states
+        collected: dict[str, str] = {}
+        if self.ari_ready():
+            try:
+                collected = {
+                    str(row.get("resource") or ""): str(row.get("state") or "offline").lower()
+                    for row in self.asterisk.list_endpoints()
+                    if str(row.get("technology") or "").lower() == "pjsip"
+                }
+            except Exception:
+                collected = {}
+        self._endpoint_states = (now, collected)
+        return collected
+
+
+    def dial_endpoint(self, extension: str, number: str = "") -> str:
+        """The PJSIP endpoint a call to this extension is placed towards.
+
+        Media is negotiated by the endpoint a call is dialled on, so this is what
+        decides whether a device can answer with audio: a browser needs the
+        WebRTC endpoint (DTLS-SRTP, ICE, RTCP-mux) and a hardware phone or
+        softphone the plain one - a WebRTC offer sent to a hardware phone is
+        refused. An extension the operator marked as answering in the browser is
+        dialled on the WebRTC endpoint; everything else keeps the plain one.
+
+        `extension` is the stored key (`104@+13025550001`) whenever the caller
+        knows which number the call is on, which is what keeps two lines' 104s
+        apart even when a row is stale.
+        """
+        digits = extension_digits(extension)
+        # The name is built the same way the renderer builds it: the extension's
+        # globally unique identity, digits plus the line they belong to
+        # (`101-13025550001`), because a PJSIP section name cannot hold the `@`
+        # the stored key has. The digits alone name nothing here.
+        plain = f"PJSIP/{extension_endpoint(extension)}" if digits else ""
+        if not self.settings_store or not digits:
+            return plain
+        try:
+            row = None
+            if extension_scope(extension):
+                row = self.settings_store._extension_row(str(extension))
+            if row is None and number:
+                # Only the digits, or a stale reference: they are read against
+                # the number the call is on and nothing else.
+                row = self.settings_store.resolve_extension(number, digits)
+            if row is None and not number:
+                # No number was named: the digits are read only while exactly one
+                # extension carries them. Several mean the caller has to say
+                # which line, so nothing is guessed here.
+                matches = [
+                    item for item in self.settings_store.list_extensions()
+                    if extension_digits(item.get("key") or item.get("extension")) == digits
+                ]
+                if len(matches) > 1:
+                    # A row with no number of its own is named by its digits -
+                    # that is its key - so the plain digits are exactly that row.
+                    plain = [item for item in matches if not item.get("number")]
+                    matches = plain
+                row = matches[0] if len(matches) == 1 else None
+        except Exception:
+            return plain
+        if row is None:
+            return plain
+        username = str(row.get("sip_username") or "")
+        if row.get("active") and row.get("webrtc_enabled") and username and username != extension_endpoint(str(row["key"])):
+            # An extension that answers in the browser is dialled on its WebRTC
+            # alias; its plain endpoint keeps working for every other device.
+            return f"PJSIP/{username}"
+        return f"PJSIP/{extension_endpoint(str(row['key']))}"
 
     def _provider_endpoint(self, provider_name: str | None) -> tuple[str, str]:
         if not self.settings_store:
@@ -80,8 +169,28 @@ class TelephonyService:
         # customer's opt-in cannot overrule it.
         extension_enabled = False
         if extension and self.settings_store:
-            row = next((item for item in self.settings_store.list_extensions() if item["extension"] == extension), None)
-            extension_enabled = bool(row and row["active"] and row["recording_enabled"])
+            # The console and the API speak the three digits a person dials; the
+            # row is stored under its key (`101@+13025550001`). A store that only
+            # holds the bare digits still answers, by exact name.
+            resolver = getattr(self.settings_store, "extension_row", None)
+            row = resolver(extension) if resolver else None
+            if row is None:
+                # The digits name one extension while exactly one of them carries
+                # them; with several, the phone number has to be named.
+                rows = self.settings_store.list_extensions()
+                if extension_scope(extension):
+                    row = next(
+                        (item for item in rows
+                         if str(item.get("key") or item.get("extension")) == str(extension)),
+                        None,
+                    )
+                else:
+                    matches = [
+                        item for item in rows
+                        if extension_digits(item.get("key") or item.get("extension")) == extension_digits(extension)
+                    ]
+                    row = matches[0] if len(matches) == 1 else None
+            extension_enabled = bool(row and row.get("active") and row.get("recording_enabled"))
         platform_enabled = bool(self.settings_store and self.settings_store.recording_platform_enabled())
         return {
             "enabled": extension_enabled and platform_enabled,
@@ -198,6 +307,7 @@ class TelephonyService:
             self.asterisk.create_outbound_call(
                 call_id, extension, phone, provider_endpoint,
                 {"contact_id": contact_id, "member_id": member_id},
+                endpoint=self.dial_endpoint(extension, source["number"] if source else ""),
             )
         except Exception:
             current = self.store.get(call_id)
@@ -273,8 +383,65 @@ class TelephonyService:
         promptly instead of every thirty seconds."""
         return bool(self._ivr_sessions_map())
 
+    def _resolve_inbound_extension(self, did: str, extension: str) -> dict | None:
+        """The device the dial plan named, by key or by the digits a caller reads.
+
+        The generated plan passes the stored key. A hand-written entry, a plan
+        from before this change, or an operator's test passes the three digits -
+        and those are read against the number that received the call, which is
+        what keeps one line's 101 apart from another's.
+        """
+        if not self.settings_store:
+            return None
+        wanted = str(extension or "").strip()
+        if not wanted:
+            return None
+        rows = self.settings_store.list_extensions()
+        exact = next((row for row in rows if str(row["key"]) == wanted), None)
+        if exact is not None:
+            return exact
+        number = next(
+            (row for row in self.settings_store.list_numbers()
+             if str(row["number"]).lstrip("+") == str(did).lstrip("+")),
+            None,
+        )
+        if wanted.isdigit() and number is not None:
+            # Three digits are read against the number that received the call -
+            # and only against it: another line's 104, the account's lowest line
+            # and another customer's desk are all wrong answers here.
+            resolved = self.settings_store.resolve_extension(number["number"], wanted, number.get("owner_user_id"))
+            if resolved is not None:
+                return resolved
+        return None
+
     def start_inbound(self, channel: dict[str, Any], did: str, extension: str) -> Call | None:
-        if not self.settings_store or not any(row["extension"] == extension and row["active"] for row in self.settings_store.list_extensions()):
+        current = self._resolve_inbound_extension(did, extension)
+        if current is not None and not current["active"]:
+            current = None
+        if current is None:
+            self.asterisk.hangup(str(channel.get("id") or ""))
+            return None
+        extension = str(current["extension"])
+        # The DID decides which organisation this call belongs to, and it may only
+        # ring that organisation's phones. A stale link pointing a number at
+        # another customer's extension is refused here as well as in the dialplan,
+        # so a mis-routed DID is a missed call and never a crossed line.
+        number = next(
+            (row for row in (self.settings_store.list_numbers() if self.settings_store else [])
+             if str(row["number"]).lstrip("+") == str(did).lstrip("+")),
+            None,
+        )
+        if (
+            number is not None and current.get("number") not in (None, "")
+            and str(current.get("number")) != str(number.get("number"))
+        ):
+            # A call on a DID may only ring an extension of that very number.
+            self.asterisk.hangup(str(channel.get("id") or ""))
+            return None
+        if (
+            number and number.get("owner_user_id") is not None and current.get("owner_user_id") is not None
+            and int(number["owner_user_id"]) != int(current["owner_user_id"])
+        ):
             self.asterisk.hangup(str(channel.get("id") or ""))
             return None
         channel_id = str(channel.get("id") or "")
@@ -285,7 +452,15 @@ class TelephonyService:
             return existing
         call_id = str(uuid.uuid4())
         caller = str((channel.get("caller") or {}).get("number") or "unknown")[:32]
-        owned = next((row for row in self.settings_store.list_numbers() if row["inbound_extension"] == extension and did.lstrip("+") == row["number"].lstrip("+")), None)
+        # The link is stored as the key - `101@+13025550001` - so it is the key
+        # that says which line this call arrived on, and the record carries that
+        # line's own spelling of the number.
+        owned = next(
+            (row for row in self.settings_store.list_numbers()
+             if str(row["inbound_extension"]) == str(current["key"])
+             and did.lstrip("+") == row["number"].lstrip("+")),
+            None,
+        )
         number = owned["number"] if owned else did
         # The stored flow decides what happens next: a menu asks the caller for
         # an extension, anything else rings the devices it names - one device for
@@ -309,7 +484,9 @@ class TelephonyService:
         legs: list[tuple[str, str]] = []
         for index, destination in enumerate(destinations):
             try:
-                leg = self.asterisk.create_inbound_employee_leg(call_id, destination, channel_id, index=index)
+                leg = self.asterisk.create_inbound_employee_leg(
+                    call_id, destination, channel_id, index=index, endpoint=self.dial_endpoint(destination, number),
+                )
             except Exception:
                 continue
             legs.append((str(leg), destination))
@@ -330,10 +507,13 @@ class TelephonyService:
             return None
         self._ivr_sessions_map()[channel_id] = {
             "call_id": call.call_id, "channel_id": channel_id,
-            "extension": call.extension or "", "digits": "", "tries": 0,
+            "extension": call.extension or "", "number": call.caller_id_number or "", "digits": "", "tries": 0,
             "attempts": max(1, int(plan.get("attempts") or 2)),
             "input_timeout": max(2, int(plan.get("input_timeout") or 6)),
-            "extensions": [str(value) for value in (plan.get("extensions") or [])],
+            # The digits a caller may type on this line, in order. A menu never
+            # hears a key: it hears 104, which is that number's 104.
+            "keys": [str(value) for value in (plan.get("extensions") or [])],
+            "extensions": [extension_digits(value) for value in (plan.get("extensions") or [])],
             "plan": plan, "resolve_after": 0.0,
         }
         self._ivr_prompt(channel_id)
@@ -376,17 +556,23 @@ class TelephonyService:
         digits = str(session["digits"])
         if not digits:
             return
-        extensions = [ext for ext in (session["extensions"] or [])]
-        if not extensions and self.settings_store:
-            row = next((item for item in self.settings_store.list_extensions() if item["extension"] == session["extension"]), None)
+        keys = [str(key) for key in (session.get("keys") or [])]
+        if not keys and self.settings_store:
+            row = self._extension_row(session["extension"])
             owner = row.get("owner_user_id") if row else None
-            if owner is not None:
-                extensions = [item["extension"] for item in self.settings_store.list_extensions(int(owner)) if item["active"]]
-                session["extensions"] = extensions
+            number = str(session.get("number") or "")
+            if owner is not None and number:
+                # The menu of one line offers that line's extensions and nothing
+                # else: 104 is this number's 104.
+                keys = self.settings_store.scoped_extension_keys(number, int(owner))
+                session["keys"] = keys
+                session["extensions"] = [extension_digits(key) for key in keys]
+        extensions = [extension_digits(key) for key in keys]
         candidates = [ext for ext in extensions if ext.startswith(digits)]
         longest = max((len(ext) for ext in extensions), default=0)
         if digits in extensions and (len(candidates) == 1 or final or len(digits) >= longest):
-            return self._ivr_dial(session, digits)
+            key = next((item for item in keys if extension_digits(item) == digits), digits)
+            return self._ivr_dial(session, key)
         if candidates and not final:
             # "1" cannot be dialled while "101" and "106" both exist: give the
             # caller a moment for the next digit.
@@ -409,7 +595,10 @@ class TelephonyService:
         self._ivr_sessions_map().pop(channel_id, None)
         self.asterisk.stop_playback(f"ivr-{session['call_id']}-{session['tries']}")
         try:
-            leg = self.asterisk.create_inbound_employee_leg(session["call_id"], extension, channel_id, index=0)
+            leg = self.asterisk.create_inbound_employee_leg(
+                session["call_id"], extension, channel_id, index=0,
+                endpoint=self.dial_endpoint(extension, session.get("number") or ""),
+            )
         except Exception:
             updated = self.store.update(session["call_id"], status="failed", ended_at=iso_now())
             self.notify_crm("call.failed", updated, {"reason": "ivr_extension_originate_failed"})
@@ -434,7 +623,10 @@ class TelephonyService:
             legs: list[tuple[str, str]] = []
             for index, destination in enumerate(destinations):
                 try:
-                    leg = self.asterisk.create_inbound_employee_leg(session["call_id"], destination, channel_id, index=index)
+                    leg = self.asterisk.create_inbound_employee_leg(
+                        session["call_id"], destination, channel_id, index=index,
+                        endpoint=self.dial_endpoint(destination, session.get("number") or ""),
+                    )
                 except Exception:
                     continue
                 legs.append((str(leg), destination))
@@ -447,7 +639,7 @@ class TelephonyService:
                 self.notify_crm("call.ivr_fallback", self.store.get(session["call_id"]), {"digits": digits})
                 return
         call = self.store.get(session["call_id"])
-        mailbox = str(plan.get("voicemail") or "")
+        mailbox = extension_mailbox(plan.get("voicemail") or "")
         if mailbox:
             self.notify_crm("call.voicemail", call, {"reason": "ivr_no_selection"})
             try:
@@ -487,19 +679,104 @@ class TelephonyService:
         self._finalize(call_id, "hangup_requested")
         return self.store.get(call_id)
 
+    def _platform_line(self, number: str) -> dict | None:
+        """The active phone number the platform owns with these digits, whoever holds it.
+
+        Typing a full number reaches it - the same customer's or another's - so
+        this is the test for "internally owned" that decides between the platform
+        and the carrier. A number the platform does not own returns None.
+        """
+        store = self.settings_store
+        digits = re.sub(r"[^0-9]", "", str(number or ""))
+        if not store or not digits:
+            return None
+        try:
+            return next(
+                (
+                    row for row in store.list_numbers()
+                    if row.get("active") and re.sub(r"[^0-9]", "", str(row["number"])) == digits
+                ),
+                None,
+            )
+        except Exception:
+            return None
+
+    def _local_target(self, number_row: dict) -> str:
+        """The extension that answers when a full number of the platform is dialled, or "".
+
+        It is the same answer the dial plan gives for that number
+        (TelephonyConfigSync.number_route): the number's own inbound extension,
+        then its account's fallback, then the operator's last resort - each
+        read against that very number, so a line can never ring another line's
+        device. "" means the number has no reachable extension: NOT IN SERVICE,
+        never the carrier, because the number is one the platform owns.
+        """
+        store = self.settings_store
+        if not store or not number_row:
+            return ""
+        number = str(number_row["number"])
+        owner = number_row.get("owner_user_id")
+        owner_id = int(owner) if str(owner or "").strip().isdigit() else None
+        try:
+            candidates = [str(number_row.get("inbound_extension") or "")]
+            if owner_id is not None:
+                candidates.append(str(store.customer_call_defaults(owner_id).get("fallback") or ""))
+            candidates.append(str(store.get_settings().get("inbound_fallback_extension") or ""))
+            for candidate in candidates:
+                found = store.resolve_extension(number, extension_digits(candidate), owner_id)
+                if found is not None:
+                    return str(found["key"])
+        except Exception:
+            return ""
+        return ""
+
+    def _is_local_extension(self, extension: str, owner: int, number: str = "") -> bool:
+        """True when this extension is active, on this number, and this account's."""
+        try:
+            rows = self.settings_store.list_extensions()
+        except Exception:
+            return False
+        key = str(extension)
+        row = next((item for item in rows if str(item["key"]) == key), None)
+        if row is None and not extension_scope(key):
+            matches = [item for item in rows if item["digits"] == extension_digits(key)]
+            row = matches[0] if len(matches) == 1 else None
+        if not row or not row["active"]:
+            return False
+        if number and str(row["number"]) != str(number):
+            return False
+        found = row.get("owner_user_id")
+        return found in (None, "") or str(found) == str(owner)
+
     def _start_customer(self, call: Call) -> None:
         if call.customer_channel_id or call.status in {"completed", "failed"}:
             return
-        endpoint, _ = self._provider_endpoint(call.provider)
+        # A full number the platform owns - of this customer or of another - is
+        # reached on the platform, never over the carrier. If it has no reachable
+        # extension it is NOT IN SERVICE, and the call stops here.
+        line = self._platform_line(call.phone)
+        local = self._local_target(line) if line else ""
+        if line is not None and not local:
+            updated = self.store.update(call.call_id, status="failed", ended_at=iso_now())
+            self.notify_crm("call.failed", updated, {"reason": "number_not_in_service"})
+            self.asterisk.hangup(call.employee_channel_id or "")
+            return
         customer_channel = f"{call.call_id}-customer"
         prepared = self.store.update(call.call_id, customer_channel_id=customer_channel, status="dialing_customer")
         if not prepared:
             return
         self.notify_crm("call.customer_dialing", prepared)
         try:
-            self.asterisk.create_customer_leg(
-                call.call_id, call.phone, endpoint, call.employee_channel_id or "", call.caller_id_number
-            )
+            if local:
+                self.asterisk.create_local_leg(
+                    call.call_id, local, call.employee_channel_id or "", call.caller_id_number,
+                    endpoint=self.dial_endpoint(local, call.phone),
+                )
+            else:
+                endpoint, _ = self._provider_endpoint(call.provider)
+                self.asterisk.create_customer_leg(
+                    call.call_id, call.phone, endpoint, call.employee_channel_id or "", call.caller_id_number
+                )
         except Exception:
             self.asterisk.hangup(call.employee_channel_id or "")
             updated = self.store.update(call.call_id, status="failed", ended_at=iso_now())
@@ -699,7 +976,7 @@ class TelephonyService:
                 # Nobody picked up. Only a flow that ends in voicemail keeps the
                 # caller; the default flow simply ends the call.
                 plan = self.settings_store.inbound_plan(call.caller_id_number or "", call.extension) if self.settings_store else {}
-                mailbox = str(plan.get("voicemail") or "")
+                mailbox = extension_mailbox(plan.get("voicemail") or "")
                 if mailbox:
                     self.notify_crm("call.voicemail", call, {"reason": "inbound_not_answered"})
                     try:

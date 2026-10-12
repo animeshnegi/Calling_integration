@@ -35,8 +35,11 @@ function section(title) {
   output += `\n=== ${title} ===\n`;
 }
 
+// Each response is a copy: the console normalises the rows it is given, and a
+// shared fixture object must not carry those changes into the next page.
 function json(payload) {
-  return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => payload };
+  const copy = payload === undefined ? payload : JSON.parse(JSON.stringify(payload));
+  return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => copy };
 }
 
 /* A console wired to fixtures, with the network replaced by a router so every
@@ -84,6 +87,22 @@ const settle = (ms = 220) => new Promise(resolve => setTimeout(resolve, ms));
 /* A picker that offers one flat list: no optgroups, no line-by-line labels. */
 const flatPicker = picker => picker.querySelectorAll('optgroup').length === 0
   && !/Answers|Other extensions|Your extensions/.test(picker.innerHTML);
+
+/* The page scope bar: the customer (administrator only) and the number, the same
+   two selects on every page. Choosing one re-scopes everything below it. */
+const scopeSelect = (w, d, kind) => d.querySelector(`#page-${w.eval('currentPage')} ${kind === 'customer' ? '.scope-customer-select' : '.customer-number-select'}`);
+function chooseScope(w, d, { customer, number }) {
+  if (customer !== undefined) {
+    const select = scopeSelect(w, d, 'customer');
+    select.value = String(customer);
+    select.dispatchEvent(new w.Event('change', { bubbles: true }));
+  }
+  if (number !== undefined) {
+    const select = scopeSelect(w, d, 'number');
+    select.value = number;
+    select.dispatchEvent(new w.Event('change', { bubbles: true }));
+  }
+}
 
 /* Count DOM mutations inside a host while `task` runs. */
 async function mutations(d, selector, task) {
@@ -263,6 +282,8 @@ async function main() {
     await settle(320);
     admin.w.eval("showPage('routing')");
     await settle(260);
+    chooseScope(admin.w, admin.d, { customer: 2 });
+    await settle(200);
     check('the administrator sees the customer call path', !!admin.d.getElementById('flow-nodes') && !!admin.d.getElementById('route-target'));
     check('the administrator can save a flow for the chosen customer', admin.d.getElementById('save-route').hidden === false);
     const saveButton = admin.d.getElementById('save-route');
@@ -272,8 +293,8 @@ async function main() {
     check('and it has a line to say what it is doing',
       !!admin.d.getElementById('flow-save-hint'));
     check('the administrator can add steps to it', admin.d.querySelector('.palette').hidden === false);
-    check('the routing page opens on a customer that has lines', admin.d.getElementById('route-owner').value !== '',
-      admin.d.getElementById('route-owner').value);
+    check('the routing page opens on a customer that has lines', scopeSelect(admin.w, admin.d, 'customer').value !== '',
+      scopeSelect(admin.w, admin.d, 'customer').value);
     check('their extensions are listed as flow targets',
       /optgroup label="Extensions"/.test(admin.d.getElementById('route-target').innerHTML));
     check('a number is never offered as a target',
@@ -293,7 +314,7 @@ async function main() {
 
     // Cross-customer safety: an administrator choosing one customer must never
     // be offered another customer's numbers, extensions or groups.
-    admin.w.eval("routeOwner = 3; document.getElementById('route-owner').value = '3'; renderRouteTargets(); renderFlow(); renderGroups();");
+    chooseScope(admin.w, admin.d, { customer: 3 });
     await settle(180);
     check('another customer\'s lines are not offered as targets',
       !/\+1302555000[0-9]/.test(admin.d.getElementById('route-target').innerHTML),
@@ -309,9 +330,9 @@ async function main() {
 
     /* The customer navigates number → extension. A number is never an editable
        target: its calls follow the workflow of the extension that answers it. */
-    const numberPicker = customer.d.getElementById('route-number');
+    const numberPicker = scopeSelect(customer.w, customer.d, 'number');
     const extensionPicker = customer.d.getElementById('route-extension');
-    check('the customer picks a number first', !!numberPicker && numberPicker.hidden === false);
+    check('the customer picks a number first, on the page scope bar', !!numberPicker && !numberPicker.disabled);
     check('then the extension that answers it', !!extensionPicker && extensionPicker.hidden === false);
     check('and the flat target list is gone',
       customer.d.getElementById('route-target').hidden === true
@@ -319,18 +340,18 @@ async function main() {
     check('the number picker lists only the customer\'s assigned numbers',
       [...numberPicker.options].map(o => o.value).join(',') === '+13025550001,+13025550002,+13025550003',
       [...numberPicker.options].map(o => o.value).join(','));
-    check('the extension picker offers the customer\'s own extensions',
-      [...extensionPicker.options].map(o => o.value).join(',') === '101,102'
+    check('the extension picker offers only the extensions on the chosen number',
+      [...extensionPicker.options].map(o => o.value).join(',') === '101@+13025550001'
       && /101 — Meridian Health 101/.test(extensionPicker.innerHTML),
       extensionPicker.innerHTML.slice(0, 120));
     check('one plain list, with no line-by-line grouping',
       extensionPicker.querySelectorAll('optgroup').length === 0
       && !/Answers|Other extensions|Your extensions/.test(extensionPicker.innerHTML),
       extensionPicker.innerHTML.slice(0, 120));
-    check('and it starts on the extension answering the chosen number', extensionPicker.value === '101',
+    check('and it starts on the extension answering the chosen number', extensionPicker.value === '101@+13025550001',
       extensionPicker.value);
     check('and the builder is editing that extension\'s workflow',
-      customer.w.eval('currentFlowKey()') === 'extension:101',
+      customer.w.eval('currentFlowKey()') === 'extension:101@+13025550001',
       customer.w.eval('currentFlowKey()'));
     check('the canvas names the extension, not the number',
       /101/.test(customer.d.getElementById('flow-entry-number').textContent),
@@ -340,30 +361,30 @@ async function main() {
     numberPicker.dispatchEvent(new customer.w.Event('change', { bubbles: true }));
     await settle(220);
     check('choosing another number re-scopes the extensions',
-      extensionPicker.value === '102' && customer.w.eval('currentFlowKey()') === 'extension:102',
+      extensionPicker.value === '102@+13025550002' && customer.w.eval('currentFlowKey()') === 'extension:102@+13025550002',
       `${extensionPicker.value} / ${customer.w.eval('currentFlowKey()')}`);
-    check('and the same list of extensions is offered for the next number',
-      flatPicker(extensionPicker) && extensionPicker.value === '102',
+    check('and the next number offers only its own extension',
+      flatPicker(extensionPicker) && extensionPicker.value === '102@+13025550002' && extensionPicker.options.length === 1,
       `${extensionPicker.value} — ${extensionPicker.innerHTML.slice(0, 90)}`);
 
     numberPicker.value = '+13025550003';   // no extension wired to it yet
     numberPicker.dispatchEvent(new customer.w.Event('change', { bubbles: true }));
     await settle(200);
-    check('a number with nothing wired to it still offers an editor',
-      extensionPicker.options.length === 2 && extensionPicker.value === '101',
+    check('a number with no extension offers no editor, and says why - it never borrows 101',
+      extensionPicker.options.length === 1 && extensionPicker.value === '' && /No extensions on this number/.test(extensionPicker.innerHTML),
       `${extensionPicker.value} — ${extensionPicker.innerHTML.slice(0, 90)}`);
 
     // Saving writes an extension flow - never a number flow.
     numberPicker.value = '+13025550001';
     numberPicker.dispatchEvent(new customer.w.Event('change', { bubbles: true }));
     await settle(200);
-    customer.w.eval("flowNodes = [{type:'extension', extension:'101', label:'Ring 101', configured:true}]; renderFlowNodes();");
+    customer.w.eval("flowNodes = [{type:'extension', extension:'101@+13025550001', label:'Ring 101', configured:true}]; renderFlowNodes();");
     customer.d.getElementById('save-route').click();
     await settle(320);
     const routingPost = customer.seen.filter(row => row.url === '/admin/api/call-routes' && row.method === 'POST').pop();
     const posted = routingPost ? JSON.parse(routingPost.body) : {};
     check('saving the workflow posts an extension target',
-      posted.target_type === 'extension' && String(posted.target) === '101',
+      posted.target_type === 'extension' && String(posted.target) === '101@+13025550001',
       JSON.stringify(posted).slice(0, 140));
     check('and never a number target',
       posted.target_type !== 'number' && !('phone_number' in posted), JSON.stringify(posted).slice(0, 120));
@@ -373,13 +394,13 @@ async function main() {
     await settle(240);
     const numberFlowButton = customer.d.querySelector('#number-list [data-extension-flow], #number-list [data-number-flow]');
     check('a number row opens the workflow of the extension answering it',
-      !!numberFlowButton && numberFlowButton.dataset.extensionFlow === '101'
+      !!numberFlowButton && numberFlowButton.dataset.extensionFlow === '101@+13025550001'
       && numberFlowButton.dataset.numberFlow === undefined,
       numberFlowButton ? JSON.stringify(numberFlowButton.dataset) : 'no button');
     numberFlowButton.click();
     await settle(300);
     check('and the builder lands on that extension',
-      customer.w.eval('currentFlowKey()') === 'extension:101'
+      customer.w.eval('currentFlowKey()') === 'extension:101@+13025550001'
       && customer.d.getElementById('page-routing').classList.contains('active'),
       `${customer.w.eval('currentFlowKey()')} on ${customer.w.eval('currentPage')}`);
 
@@ -407,8 +428,8 @@ async function main() {
     // Saving is the one action here with consequences, so it says when it lands.
     // The builder holds a configured step - the same shape the fixture's saved
     // flows have - and the button is pressed for real.
-    admin.w.eval("routeOwner = 2; document.getElementById('route-owner').value = '2'; renderRouteTargets(); renderFlow(); renderGroups();"
-      + "flowNodes = [{type:'ring_group', extensions:['101','102'], timeout:25, label:'Ring 2 devices for 25s', configured:true}]; renderFlowNodes();");
+    chooseScope(admin.w, admin.d, { customer: 2 });
+    admin.w.eval("flowNodes = [{type:'ring_group', extensions:['101','102'], timeout:25, label:'Ring 2 devices for 25s', configured:true}]; renderFlowNodes();");
     await settle(220);
     check('a configured flow can be saved from the button',
       Number(admin.w.eval('flowNodes.length')) > 0 && Number(admin.w.eval('flowNodes.filter(n => n.configured).length')) === Number(admin.w.eval('flowNodes.length')),
@@ -439,7 +460,7 @@ async function main() {
 
   section('SIP identity');
   {
-    const { w, d } = boot();
+    const { w, d, seen } = boot();
     await settle(320);
     w.eval("showPage('extensions')");
     await settle(200);
@@ -455,6 +476,38 @@ async function main() {
     check('typing an extension fills in its SIP username', username.value === '104', username.value);
     check('the form explains that the name is fixed', /Fixed by the platform/.test(d.getElementById('modal-fields').textContent));
     check('the password is still the customer’s to set', !!d.querySelector('#modal-fields [name=sip_password]'));
+
+    // Extension numbers are unique platform-wide, so the dialog names the account
+    // that already holds the number being typed instead of letting the save fail.
+    numberField.value = '101';
+    numberField.dispatchEvent(new w.Event('input', { bubbles: true }));
+    const note = d.getElementById('extension-note');
+    check('a number another account holds is called out before saving',
+      note.hidden === false && /already belongs to Meridian/.test(note.textContent), note.textContent);
+    numberField.value = '104';
+    numberField.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('a free number says nothing', note.hidden === true && note.textContent === '', note.textContent);
+    w.eval('closeModal()');
+
+    // Editing an extension and changing its account is how a live number is
+    // moved; the console asks the API for exactly that, and nowhere else.
+    w.eval("openModal('extension', state.extensions.find(x => x.key === '101@+13025550001'))");
+    await settle(160);
+    const ownerSelect = d.querySelector('#modal-fields [name=owner_user_id]');
+    const currentOwner = state.extensions.find(x => x.key === '101@+13025550001').owner_user_id;
+    const newOwner = state.users.find(u => u.role === 'user' && String(u.id) !== String(currentOwner));
+    ownerSelect.value = String(newOwner.id);
+    ownerSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const moveNote = d.getElementById('extension-note');
+    check('moving an extension to another account is described as a move',
+      moveNote.hidden === false && /Saving moves extension 101/.test(moveNote.textContent), moveNote.textContent);
+    const sent = seen.length;
+    d.getElementById('modal-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(240);
+    const payload = seen.slice(sent).map(row => row.body).find(body => body && /"extension"/.test(body));
+    check('and the move is sent as a deliberate reassignment',
+      !!payload && JSON.parse(payload).reassign === true && JSON.parse(payload).owner_user_id === String(newOwner.id),
+      payload);
     w.eval('closeModal()');
   }
 
@@ -465,21 +518,24 @@ async function main() {
     await settle(320);
     w.eval("showPage('routing')");
     await settle(240);
-    const owner = d.getElementById('route-owner');
-    check('the administrator picks the customer being routed', !!owner && owner.options.length === state.users.filter(u => u.role === 'user').length, owner && owner.options.length);
+    const owner = scopeSelect(w, d, 'customer');
+    check('the administrator picks the customer being routed, on the page scope bar', !!owner && owner.options.length === state.customers.length, owner && owner.options.length);
     const meridian = state.users.find(u => u.username === 'meridian');
-    owner.value = String(meridian.id);
-    owner.dispatchEvent(new w.Event('change', { bubbles: true }));
+    chooseScope(w, d, { customer: meridian.id });
     await settle(240);
     const targets = [...d.getElementById('route-target').options].map(option => option.value);
     check('the target list is limited to that customer',
       targets.every(value => /^(extension|group):/.test(value)) && targets.length > 0, targets.join(' '));
     check('no number is offered as a target', !targets.some(value => value.startsWith('number:')), targets.join(' '));
-    check('their extensions are offered', targets.includes('extension:101') && targets.includes('extension:102'));
+    check('the extensions on the chosen number are offered', targets.includes('extension:101@+13025550001') && !targets.includes('extension:102@+13025550002'), targets.join(' '));
+    chooseScope(w, d, { number: '+13025550002' });
+    await settle(200);
+    check('and choosing the next number offers its own extension', [...d.getElementById('route-target').options].map(option => option.value).includes('extension:102@+13025550002'), [...d.getElementById('route-target').options].map(option => option.value).join(' '));
+    chooseScope(w, d, { number: '+13025550001' });
+    await settle(160);
     check('group flows are offered', targets.some(value => value.startsWith('group:')));
 
-    owner.value = String(state.users.find(u => u.username === 'northwind').id);
-    owner.dispatchEvent(new w.Event('change', { bubbles: true }));
+    chooseScope(w, d, { customer: state.users.find(u => u.username === 'northwind').id });
     await settle(240);
     const scoped = [...d.getElementById('route-target').options].map(option => option.textContent);
     check('switching customer re-scopes the builder', scoped.every(label => !/101/.test(label)) && scoped.some(label => /201/.test(label)), scoped.join(' | '));
@@ -498,9 +554,7 @@ async function main() {
     await settle(240);
     // Both panels are customer-first now, so look at the customer that has the
     // group, exactly as an operator would.
-    const ownerSelect = d.getElementById('route-owner');
-    ownerSelect.value = String(state.users.find(u => u.username === 'meridian').id);
-    ownerSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
+    chooseScope(w, d, { customer: state.users.find(u => u.username === 'meridian').id });
     await settle(220);
     check('saved groups are listed with their members', d.querySelectorAll('#group-list .row').length > 0,
       d.getElementById('group-list').textContent.slice(0, 60));
@@ -508,14 +562,14 @@ async function main() {
       !!d.querySelector('#group-list [data-edit-group]') && !!d.querySelector('#group-list [data-group-flow]') && !!d.querySelector('#group-list [data-delete-group]'));
     // The real path: a row action or a workspace jump, which also switches the
     // builder to the customer that owns the target.
-    w.eval("openModal('extension', state.extensions.find(x => x.extension === '101')); closeModal(); focusRouteTarget('extension:101')");
+    w.eval("openModal('extension', state.extensions.find(x => x.key === '101@+13025550001')); closeModal(); focusRouteTarget('extension:101@+13025550001')");
     await settle(200);
     check('an extension flow loads into the builder', d.querySelectorAll('#flow-nodes .flow-node').length > 0);
     check('the canvas names the target', /101/.test(d.getElementById('flow-entry-number').textContent),
       d.getElementById('flow-entry-number').textContent);
     check('jumping to a flow switches the builder to its customer',
-      d.getElementById('route-owner').value === String(state.users.find(u => u.username === 'meridian').id),
-      d.getElementById('route-owner').value);
+      scopeSelect(w, d, 'customer').value === String(state.users.find(u => u.username === 'meridian').id),
+      scopeSelect(w, d, 'customer').value);
     w.eval("showPage('extensions')");
     await settle(200);
     check('each extension row offers its credentials', !!d.querySelector('[data-extension-credentials]'));
@@ -529,11 +583,11 @@ async function main() {
     await settle(320);
     w.eval("showPage('sipaccounts')");
     await settle(240);
-    check('the devices page opens on a customer picker', d.querySelectorAll('#sip-picker [data-owner]').length > 0);
-    d.querySelector('#sip-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    check('the devices page opens on a customer, on the page scope bar', scopeSelect(w, d, 'customer').options.length > 0);
+    chooseScope(w, d, { customer: 2 });
     await settle(200);
     check('choosing a customer scopes the device list to them', d.querySelectorAll('#extension-credential-list .row').length > 0);
-    check('the chosen customer is marked as chosen', d.querySelector('#sip-picker [data-owner="2"]').classList.contains('active'));
+    check('the chosen customer is the one the bar shows', scopeSelect(w, d, 'customer').value === '2');
     check('extension credentials can be revealed', !!d.querySelector('#extension-credential-list [data-extension-credentials]'));
     check('the operator\'s rows tag the device the platform generated first',
       /Primary/.test(d.querySelector('#extension-credential-list .row .tag.violet')?.textContent || ''),
@@ -542,9 +596,16 @@ async function main() {
     check('the device search filters both lists on the page', !!d.getElementById('sip-search'));
     check('the administrator still gets the platform\'s device boxes',
       d.getElementById('sip-account-list').closest('.panel').hidden === false);
-    check('and exactly one number picker, above, for the customer alone',
-      d.getElementById('device-number').hidden === true
-      && !!d.querySelector('#sip-picker [data-owner]'));
+    // The number picker moved into the pages' shared header, and it is a
+    // customer's control: the operator picks a customer instead.
+    const bars = [...d.querySelectorAll('#page-sipaccounts .scope-bar')];
+    check('one scope bar on the page: the customer, then the number',
+      bars.length === 1 && !!bars[0].querySelector('.scope-customer-select') && !!bars[0].querySelector('.customer-number-select'));
+    // The list is the chosen number's extensions, so the search is tried on
+    // number 2, where 102 lives; clearing it must bring back that number's list.
+    chooseScope(w, d, { number: '+13025550002' });
+    await settle(120);
+    const before = d.querySelectorAll('#extension-credential-list .row').length;
     d.getElementById('sip-search').value = '102';
     d.getElementById('sip-search').dispatchEvent(new w.Event('input', { bubbles: true }));
     await settle(120);
@@ -553,7 +614,7 @@ async function main() {
     d.getElementById('sip-search').value = '';
     d.getElementById('sip-search').dispatchEvent(new w.Event('input', { bubbles: true }));
     await settle(120);
-    check('clearing the search brings everyone back', d.querySelectorAll('#extension-credential-list .row').length > 1);
+    check('clearing the search brings the whole number back', before >= 1 && d.querySelectorAll('#extension-credential-list .row').length === before, `${before}`);
   }
 
   /* ------------------------------------------------------------ workspace */
@@ -577,9 +638,9 @@ async function main() {
       wsNumber ? [...wsNumber.options].map(o => o.value).join(',') : 'missing');
     check('and opens on the primary number', wsNumber.value === '+13025550001', wsNumber.value);
     const wsCards = [...d.querySelectorAll('#ws-body .ext-card')];
-    check('its extensions are cards, the answering one marked',
-      wsCards.length === 2 && wsCards[0].classList.contains('on-number') && wsCards[1].classList.contains('other-number'),
-      wsCards.map(card => card.className).join(' | '));
+    check('its extensions are the ones on the chosen number, and only those',
+      wsCards.length === 1 && /101/.test(wsCards[0].textContent) && !/102/.test(wsCards[0].textContent),
+      wsCards.map(card => card.textContent.replace(/\s+/g, ' ').slice(0, 40)).join(' | '));
     check('and the primary device is tagged for the operator too',
       /Primary/.test(wsCards[0].textContent), wsCards[0].textContent.replace(/\s+/g, ' ').slice(0, 80));
 
@@ -587,8 +648,8 @@ async function main() {
     wsNumber.dispatchEvent(new w.Event('change', { bubbles: true }));
     await settle(220);
     const wsSwitched = [...d.querySelectorAll('#ws-body .ext-card')];
-    check('choosing a number in the workspace re-marks the cards',
-      /102/.test(wsSwitched[0].textContent) && wsSwitched[0].classList.contains('on-number'),
+    check('choosing a number in the workspace re-lists the cards for that number',
+      wsSwitched.length === 1 && /102/.test(wsSwitched[0].textContent),
       wsSwitched.map(card => card.textContent.replace(/\s+/g, ' ').slice(0, 26)).join(' | '));
   }
 
@@ -599,11 +660,11 @@ async function main() {
     await settle(320);
     w.eval("showPage('numbers')");
     await settle(260);
-    check('the numbers page opens on a customer picker', d.querySelectorAll('#number-picker [data-owner]').length > 1);
-    const pickerText = d.getElementById('number-picker').textContent;
-    check('each customer chip states what they hold', /number/.test(pickerText), pickerText.slice(0, 80));
+    check('the numbers page opens on a customer picker', scopeSelect(w, d, 'customer').options.length > 1);
+    check('the numbers page scopes by customer only - a list of numbers has no number to pick',
+      !d.querySelector('#page-numbers .customer-number-select'));
     const before = d.querySelectorAll('#number-list .row').length;
-    d.querySelector('#number-picker [data-owner="3"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    chooseScope(w, d, { customer: 3 });
     await settle(240);
     check('choosing another customer re-scopes the numbers', d.querySelectorAll('#number-list .row').length !== before
       || /Northwind/.test(d.getElementById('number-list').textContent), `${before} rows before`);
@@ -644,12 +705,12 @@ async function main() {
     await settle(340);
     w.eval("showPage('webhooks')");
     await settle(240);
-    check('the administrator picks a customer to inspect integrations', d.querySelectorAll('#integration-picker [data-owner]').length > 0);
+    check('the administrator picks a customer to inspect integrations', scopeSelect(w, d, 'customer').options.length > 0);
     const createKey = [...d.querySelectorAll('[data-open="apikey"]')].every(button => button.hidden === true);
     const createHook = [...d.querySelectorAll('[data-open="webhook"]')].every(button => button.hidden === true);
     check('the administrator cannot create an API key', createKey);
     check('the administrator cannot add a webhook', createHook);
-    d.querySelector('#integration-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    chooseScope(w, d, { customer: 2 });
     await settle(240);
     check('the keys listed belong to the chosen customer', /Meridian CRM/.test(d.getElementById('api-key-list').textContent));
     check('nothing from another customer leaks in', !/Northwind/.test(d.getElementById('api-key-list').textContent),
@@ -658,7 +719,7 @@ async function main() {
       !/Northwind/.test(d.getElementById('webhook-list').textContent), d.getElementById('webhook-list').textContent.slice(0, 60));
     check('the endpoints of the chosen customer stay listed', d.querySelectorAll('#webhook-list .row').length > 0);
     // Switching customers switches the integrations with them.
-    d.querySelector('#integration-picker [data-owner="3"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    chooseScope(w, d, { customer: 3 });
     await settle(220);
     check('choosing another customer shows their key', /Northwind warehouse/.test(d.getElementById('api-key-list').textContent));
     check('and drops the first customer\'s', !/Meridian CRM/.test(d.getElementById('api-key-list').textContent));
@@ -667,7 +728,7 @@ async function main() {
 
     // Managing what exists: the administrator can rename a key and narrow its
     // scopes, but the secret is never editable.
-    d.querySelector('#integration-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    chooseScope(w, d, { customer: 2 });
     await settle(200);
     const editButton = d.querySelector('#api-key-list [data-edit-apikey]');
     check('the administrator can open a customer key for editing', !!editButton);
@@ -735,18 +796,18 @@ async function main() {
     await settle(260);
     // Meridian owns two devices (101, 102), which is the customer a main line
     // has to reach.
-    d.querySelector('#number-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    chooseScope(w, d, { customer: 2 });
     await settle(220);
     const button = d.querySelector('#number-list [data-extension-flow]');
     check('a number row links to the workflow of the extension answering it',
-      !!button && button.dataset.extensionFlow === '101' && button.dataset.numberFlow === undefined,
+      !!button && button.dataset.extensionFlow === '101@+13025550001' && button.dataset.numberFlow === undefined,
       button ? JSON.stringify(button.dataset) : 'no button');
     button.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     await settle(260);
     check('the click lands on the flow builder',
       d.getElementById('page-routing').classList.contains('active'), d.getElementById('page-routing').className);
     check('and the administrator is editing that extension, not the number',
-      w.eval('currentFlowKey()') === 'extension:101' && /101/.test(d.getElementById('flow-entry-number').textContent),
+      w.eval('currentFlowKey()') === 'extension:101@+13025550001' && /101/.test(d.getElementById('flow-entry-number').textContent),
       `${w.eval('currentFlowKey()')} — ${d.getElementById('flow-entry-number').textContent}`);
     check('whose steps are on the canvas',
       d.querySelectorAll('#flow-nodes .flow-node').length > 0,
@@ -763,9 +824,9 @@ async function main() {
     const chosen = [...d.querySelectorAll('#flow-config-fields [name=extensions] option')]
       .filter(option => option.selected).map(option => option.value);
     check('a fresh ring step starts from the extension this workflow belongs to',
-      chosen.length === 1 && chosen[0] === '101', chosen.join(','));
+      chosen.length === 1 && chosen[0] === '101@+13025550001', chosen.join(','));
     check('and the sheet offers that customer\'s devices only',
-      [...d.querySelectorAll('#flow-config-fields [name=extensions] option')].every(o => ['101', '102'].includes(o.value)),
+      [...d.querySelectorAll('#flow-config-fields [name=extensions] option')].every(o => ['101@+13025550001', '102@+13025550002'].includes(o.value)),
       [...d.querySelectorAll('#flow-config-fields [name=extensions] option')].map(o => o.value).join(','));
   }
 
@@ -776,7 +837,7 @@ async function main() {
     await settle(340);
     w.eval("showPage('numbers')");
     await settle(260);
-    d.querySelector('#number-picker [data-owner="2"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    chooseScope(w, d, { customer: 2 });
     await settle(220);
     d.querySelector('#number-list [data-extension-flow]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     await settle(280);
@@ -812,10 +873,12 @@ async function main() {
     check('the wait and the number of attempts work before anyone edits them',
       !!timeout && timeout.value === '6' && !!attempts && attempts.value === '2',
       `${timeout && timeout.value}s / ${attempts && attempts.value} attempts`);
-    check('the fallback is a list of the customer\'s own extensions',
-      !!fallback && fallback.options.length === 3
-      && [...fallback.options].some(option => option.value === '102')
-      && ![...fallback.options].some(option => option.value === '201'),
+    // A flow on a number can only reach that number's extensions: the fallback
+    // of the 101 flow on +13025550001 offers 101 there, and never 102 on another line.
+    check('the fallback is a list of the extensions on this flow\'s number',
+      !!fallback && fallback.options.length === 2
+      && [...fallback.options].some(option => option.value === '101@+13025550001')
+      && ![...fallback.options].some(option => /^102|^201/.test(option.value)),
       fallback ? fallback.innerHTML.slice(0, 140) : 'missing');
 
     // The text and the voice belong to the customer who owns the line.
@@ -823,7 +886,7 @@ async function main() {
     voice.value = 'es-us';
     timeout.value = '8';
     attempts.value = '3';
-    fallback.value = '102';
+    fallback.value = '101@+13025550001';
     d.getElementById('flow-config-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
     await settle(260);
     check('the sheet closes when the menu is saved',
@@ -831,7 +894,7 @@ async function main() {
     const menu = w.eval('JSON.stringify(flowNodes[flowNodes.length - 1])');
     check('the menu keeps the wording, the voice, the wait, the attempts and the fallback',
       /Meridian Health/.test(menu) && /"voice":"es-us"/.test(menu) && /"input_timeout":8/.test(menu)
-      && /"attempts":3/.test(menu) && /"fallback":"102"/.test(menu), menu);
+      && /"attempts":3/.test(menu) && /"fallback":"101@\+13025550001"/.test(menu), menu);
 
     d.getElementById('save-route').click();
     await settle(340);
@@ -857,7 +920,7 @@ async function main() {
     await settle(340);
     big.w.eval("showPage('numbers')");
     await settle(260);
-    big.d.querySelector('#number-picker [data-owner="2"]').dispatchEvent(new big.w.MouseEvent('click', { bubbles: true }));
+    chooseScope(big.w, big.d, { customer: 2 });
     await settle(220);
     big.d.querySelector('#number-list [data-extension-flow]').dispatchEvent(new big.w.MouseEvent('click', { bubbles: true }));
     await settle(280);
@@ -865,6 +928,84 @@ async function main() {
     check('past five extensions the console says the menu is added for the customer',
       hint.hidden === false && /6 extensions/.test(hint.textContent) && /automatically/.test(hint.textContent),
       `${hint.hidden} ${hint.textContent}`);
+  }
+
+  /* -------------------------------------------- one set of numbers per line */
+  section('Every number carries its own extensions');
+  {
+    // The payload the server sends now: an extension is its key, and the line
+    // it belongs to is what tells two 101s apart. Two lines of one customer
+    // both start at 101, which is the whole point of the change.
+    const line1 = '+13025550001', line2 = '+13025550002';
+    const perNumber = {
+      ...JSON.parse(JSON.stringify(state)),
+      primary_extension: `101@${line1}`,
+      phone_numbers: [
+        { id: 1, number: line1, owner_user_id: 2, inbound_extension: `101@${line1}`, active: 1, default_outbound: 1, monthly_price_cents: 500, description: 'Main line' },
+        { id: 2, number: line2, owner_user_id: 2, inbound_extension: `101@${line2}`, active: 1, default_outbound: 0, monthly_price_cents: 500, description: 'Warehouse' },
+      ],
+      extensions: [
+        { extension: `101@${line1}`, key: `101@${line1}`, digits: '101', number: line1, mailbox: '101-13025550001', sip_username: 'ABC123_101', display_name: 'Front desk', owner_user_id: 2, active: 1 },
+        { extension: `102@${line1}`, key: `102@${line1}`, digits: '102', number: line1, mailbox: '102-13025550001', sip_username: 'ABC123_102', display_name: 'Accounts', owner_user_id: 2, active: 1 },
+        { extension: `101@${line2}`, key: `101@${line2}`, digits: '101', number: line2, mailbox: '101-13025550002', sip_username: 'ABC123_901', display_name: 'Warehouse desk', owner_user_id: 2, active: 1 },
+      ],
+      sip_accounts: [],
+      call_routes: [],
+      routing_flows: [],
+    };
+    const { w, d, seen } = boot({
+      state: perNumber,
+      routes: { '/admin/api/extensions/next': () => ({ extension: '102' }) },
+    });
+    await settle(340);
+    w.eval("showPage('extensions')");
+    await settle(260);
+    // Extensions are a flat list for the number on the bar: one line at a time.
+    const rows = [...d.querySelectorAll('#extension-list .row')];
+    check('the list shows the extensions of the chosen line, and only those',
+      rows.length === 2 && rows.every(row => /· \+13025550001/.test(row.textContent)),
+      rows.map(row => row.textContent.replace(/\s+/g, ' ').slice(0, 48)).join(' | '));
+    check('and carries no per-number accordion', d.querySelectorAll('#extension-list .acc-item').length === 0);
+    chooseScope(w, d, { number: line2 });
+    await settle(200);
+    const rows2 = [...d.querySelectorAll('#extension-list .row')];
+    check('the second line lists its own 101, which is a different extension',
+      rows2.length === 1 && /Warehouse desk/.test(rows2[0].textContent) && /· \+13025550002/.test(rows2[0].textContent),
+      rows2.map(row => row.textContent.replace(/\s+/g, ' ').slice(0, 60)).join(' | '));
+
+    w.eval("showPage('numbers')");
+    await settle(260);
+    const cards = [...d.querySelectorAll('#number-list .row')];
+    check('each number says which of its own extensions answers it',
+      cards.length === 2
+      && /Rings 101/.test(cards[0].textContent) && /Rings 101/.test(cards[1].textContent)
+      && /2 extensions on this number/.test(cards[0].textContent)
+      && /1 extension on this number/.test(cards[1].textContent),
+      cards.map(row => row.textContent.replace(/\s+/g, ' ').slice(0, 90)).join(' | '));
+
+    // Adding a device to the second line: the dialog is a create on that very
+    // number, its line select is that number, and the suggestion is asked of
+    // that line - 102 on it, even though the first line already has a 102.
+    const addToSecond = cards[1].querySelector('[data-add-extension]');
+    check('a number offers its own "add extension" action',
+      !!addToSecond && addToSecond.dataset.addExtension === line2,
+      addToSecond && addToSecond.outerHTML.slice(0, 90));
+    addToSecond.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await settle(260);
+    const fields = d.getElementById('modal-fields');
+    check('the dialog opens on that number, not on the customer\'s first line',
+      fields.querySelector('#extension-number')?.value === line2,
+      fields.querySelector('#extension-number')?.value);
+    check('and that line\'s own next extension is suggested for it',
+      /102/.test(fields.querySelector('[name=extension]').value),
+      `${fields.querySelector('[name=extension]').value} after ${seen.filter(row => row.url === '/admin/api/extensions/next').length} suggestion request(s)`);
+    const typed = fields.querySelector('[name=extension]');
+    typed.value = '101';
+    typed.dispatchEvent(new w.Event('input', { bubbles: true }));
+    const note = d.getElementById('extension-note');
+    check('typing a number that line already holds is said before saving',
+      note.hidden === false && /101 is on this number already/.test(note.textContent),
+      `${note.hidden} ${note.textContent}`);
   }
 
   /* --------------------------------------------------------- setup journey */
@@ -1082,8 +1223,12 @@ async function main() {
     check('APIs & Webhooks links to the documentation at the top', !!link && link.getAttribute('href') === '/documentation',
       link ? link.getAttribute('href') : 'missing');
     check('it opens outside the console', link.getAttribute('target') === '_blank');
+    // The first thing the reader sees: role-scoped headers (the shared number
+    // picker, the customer picker) come before it, but no panel does.
+    const firstContent = [...d.getElementById('page-webhooks').children]
+      .find(el => !el.hasAttribute('data-customer-only') && !el.hasAttribute('data-admin-only'));
     check('the link is the first thing on the page',
-      d.getElementById('page-webhooks').firstElementChild.classList.contains('doc-link'));
+      firstContent?.classList.contains('doc-link'), firstContent?.className);
     check('the sidebar offers the same documentation',
       !!d.querySelector('.nav-item[href="/documentation"]'));
     const customer = boot({ isAdmin: false, state: customerState });
@@ -1109,11 +1254,20 @@ async function main() {
     check('and is told why, instead of a switch that does nothing',
       /switched off for this whole platform/.test(d.getElementById('profile-recording-help').textContent),
       d.getElementById('profile-recording-help').textContent.slice(0, 90));
+    // Extensions are read one line at a time: 102 lives on +13025550002.
+    w.eval("showPage('extensions')");
+    await settle(200);
+    chooseScope(w, d, { number: '+13025550002' });
+    await settle(200);
     const rows = d.getElementById('extension-list')?.textContent || '';
     check('a device that opted in reads as paused, not recording',
       /Recording paused/.test(rows), rows.replace(/\s+/g, ' ').slice(0, 120));
     const allowed = boot({ isAdmin: false, state: customerState });
     await settle(320);
+    allowed.w.eval("showPage('extensions')");
+    await settle(200);
+    chooseScope(allowed.w, allowed.d, { number: '+13025550002' });
+    await settle(200);
     check('with the platform switch on, the same device reads as recording',
       /Recording on/.test(allowed.d.getElementById('extension-list')?.textContent || ''),
       (allowed.d.getElementById('extension-list')?.textContent || '').replace(/\s+/g, ' ').slice(0, 120));
@@ -1133,7 +1287,7 @@ async function main() {
     await settle(240);
     check('the customer manages devices',
       d.querySelectorAll('#extension-credential-list .ext-card, #extension-credential-list .row').length > 0);
-    const deviceNumber = d.getElementById('device-number');
+    const deviceNumber = d.querySelector('#page-sipaccounts .customer-number-select');
     check('the customer\'s page offers a number to look at',
       !!deviceNumber && [...deviceNumber.options].map(o => o.value).join(',') === '+13025550001,+13025550002,+13025550003',
       deviceNumber ? [...deviceNumber.options].map(o => o.value).join(',') : 'missing');
@@ -1142,17 +1296,16 @@ async function main() {
       /Extensions on \+13025550001/.test(d.getElementById('device-extension-title').textContent),
       d.getElementById('device-extension-title').textContent);
     const cards = [...d.querySelectorAll('#extension-credential-list .ext-card')];
-    check('every extension is a card with its credentials to hand',
-      cards.length === 2 && cards.every(card => card.querySelector('[data-extension-credentials]')),
+    check('every extension on the chosen number is a card with its credentials to hand',
+      cards.length === 1 && cards.every(card => card.querySelector('[data-extension-credentials]')),
       `${cards.length} cards`);
     check('the extension answering the chosen number is marked',
       cards[0].classList.contains('on-number') && /Answers \+13025550001/.test(cards[0].textContent),
       cards[0].className);
-    check('the others stay quiet until their number is chosen',
-      cards[1].classList.contains('other-number'), cards[1].className);
+    check('the other line\'s extensions are not listed on this number',
+      !cards.some(card => /102/.test(card.textContent)), cards.map(card => card.textContent.replace(/\s+/g, ' ').slice(0, 60)).join(' | '));
     check('the platform\'s primary device is named as such',
-      /Primary/.test(cards[0].textContent) && !/Primary/.test(cards[1].textContent),
-      cards.map(card => card.textContent.replace(/\s+/g, ' ').slice(0, 60)).join(' | '));
+      /Primary/.test(cards[0].textContent), cards.map(card => card.textContent.replace(/\s+/g, ' ').slice(0, 60)).join(' | '));
     check('the device behind an extension is named on its card',
       /Meridian Health desk phone 101/.test(cards[0].textContent),
       cards[0].textContent.replace(/\s+/g, ' ').slice(0, 120));
@@ -1184,6 +1337,218 @@ async function main() {
     const customerSwapped = customerWatched.filter(sel => customerBefore.get(sel) && d.querySelector(`${sel} > *`) !== customerBefore.get(sel));
     check('a customer refresh does not repaint what did not change', customerSwapped.length === 0, customerSwapped.join(', '));
     check('a customer refresh does not rebuild the visited list either', customerChurn === 0, `${customerChurn} mutations`);
+  }
+
+  /* ------------------------------------------------------------- voicemail */
+  section("The customer's voicemail, named per number");
+  {
+    // Mailboxes are number-scoped (`101-13025550001`) while the chosen number's
+    // extensions are keys (`101@+13025550001`), so the page has to compare the two
+    // by mailbox - and name the line - or a customer sees the wrong number's
+    // messages, or none at all.
+    const lineA = '+13025550001';
+    const lineB = '+13025550002';
+    const first101 = customerState.extensions.find(row => String(row.extension) === '101');
+    const scoped = {
+      ...customerState,
+      primary_extension: `101@${lineA}`,
+      phone_numbers: customerState.phone_numbers.map(row => (
+        String(row.number) === lineA ? { ...row, inbound_extension: `101@${lineA}` }
+          : String(row.number) === lineB ? { ...row, inbound_extension: `101@${lineB}` }
+            : row
+      )),
+      extensions: [
+        ...customerState.extensions.map(row => (
+          String(row.extension) === '101'
+            ? { ...row, extension: `101@${lineA}`, key: `101@${lineA}`, digits: '101', number: lineA, mailbox: '101-13025550001' }
+            : row
+        )),
+        {
+          ...first101, extension: `101@${lineB}`, key: `101@${lineB}`, digits: '101', number: lineB,
+          mailbox: '101-13025550002', display_name: 'Meridian Health line 2',
+        },
+      ],
+    };
+    const messages = {
+      voicemails: [
+        {
+          mailbox: '101-13025550001', folder: 'inbox', message: 'msg0000',
+          caller_id: 'Line one <+919000000001>', duration_seconds: 5, received_at: '2026-09-25 10:00:00',
+        },
+        {
+          mailbox: '101-13025550002', folder: 'inbox', message: 'msg0001',
+          caller_id: 'Line two <+919000000002>', duration_seconds: 6, received_at: '2026-09-25 10:01:00',
+        },
+      ],
+      total: 2,
+    };
+    const { w, d, errors } = boot({
+      isAdmin: false, state: scoped, routes: { '/admin/api/voicemails': messages },
+    });
+    w.eval("showPage('voicemails')");
+    await settle(320);
+    const list = () => d.querySelector('#voicemail-list').textContent.replace(/\s+/g, ' ');
+    check('the voicemail page renders without errors', errors.length === 0, errors[0]);
+    check('the mailbox is named with its own line, so two 101s are told apart',
+      /Mailbox 101 · \+13025550001/.test(list()), list().slice(0, 200));
+    check('the chosen line\'s own messages are the ones shown',
+      /Line one/.test(list()) && !/Line two/.test(list()), list().slice(0, 240));
+
+    w.eval("applyCustomerNumber('+13025550002')");
+    await settle(320);
+    check('and switching the line switches the mailbox',
+      /Line two/.test(list()) && !/Line one/.test(list()), list().slice(0, 240));
+  }
+
+  /* ---------------------------------------------------- extension with no line */
+  section('An extension added later');
+  {
+    // The field report: 101 answers +13025550001, then 102 is created from the
+    // console and answers nothing inbound. Caller ID comes from the phone number,
+    // so 102 - which has no number of its own yet - must say it calls out once a
+    // number is assigned rather than naming a line that would not answer for it.
+    // Its phone's registration comes from the same poll the device boxes use.
+    const unlinked = {
+      ...customerState,
+      phone_numbers: customerState.phone_numbers.map(row => (
+        String(row.inbound_extension) === '102@+13025550002' ? { ...row, inbound_extension: '' } : row
+      )),
+      sip_accounts: (customerState.sip_accounts || []).filter(row => String(row.extension) !== '102@+13025550002'),
+    };
+    const { w, d, errors } = boot({
+      isAdmin: false, state: unlinked,
+      routes: { '/admin/api/device-status': { devices: [], extensions: [{ extension: '102@+13025550002', registration_status: 'online' }] } },
+    });
+    w.eval("showPage('sipaccounts')");
+    await settle(320);
+    // 102 belongs to +13025550002, so its card is listed on that number's view.
+    chooseScope(w, d, { number: '+13025550002' });
+    await settle(200);
+    const cards = () => [...d.querySelectorAll('#extension-credential-list .ext-card')];
+    const card = () => cards().find(node => /102/.test(node.querySelector('h3')?.textContent || '')) || cards()[0];
+    const text = () => card().textContent.replace(/\s+/g, ' ');
+    check('the customer console renders the extension card without errors', errors.length === 0 && !!card(), errors[0]);
+    check('an extension no number answers says so in plain words',
+      /Numbers\s*Not answering a number yet/.test(text()), text().slice(0, 240));
+    check('and it never claims a number that does not answer for it',
+      !/Answers \+13025550002/.test(text()) && !/None linked yet/.test(text()), text().slice(0, 240));
+    check('nobody signed in yet is said in plain words',
+      /Sign in as QWERTY_102/.test(text()) && !/No device linked yet/.test(text()), text().slice(0, 240));
+
+    await w.eval('refreshDeviceStatus()');
+    await settle(240);
+    // The device-status poll carries each extension's own registration state,
+    // which is what tells a customer their phone really is signed in.
+    check('the registration poll reaches the extension card',
+      /Phone registered/.test(text()), text().slice(0, 240));
+
+    // An extension that answers in the browser is dialled on its WebRTC
+    // endpoint, and the card says so rather than leaving it to the credentials.
+    const browserState = {
+      ...customerState,
+      extensions: customerState.extensions.map(row => (
+        row.extension === '102' ? { ...row, webrtc_enabled: 1 } : row
+      )),
+    };
+    const web = boot({ isAdmin: false, state: browserState });
+    web.w.eval("showPage('sipaccounts')");
+    await settle(320);
+    chooseScope(web.w, web.d, { number: '+13025550002' });
+    await settle(200);
+    const webCard = [...web.d.querySelectorAll('#extension-credential-list .ext-card')]
+      .find(node => /102/.test(node.querySelector('h3')?.textContent || ''));
+    check('an extension answering in the browser is marked as one',
+      !!webCard && /Browser phone/.test(webCard.textContent), webCard?.textContent.replace(/\s+/g, ' ').slice(0, 200));
+    check('and the extensions that do not are not',
+      ![...web.d.querySelectorAll('#extension-credential-list .ext-card')]
+        .some(node => /101/.test(node.querySelector('h3')?.textContent || '') && /Browser phone/.test(node.textContent)));
+
+    // The Softphone button: each extension card opens the softphone signed in as
+    // that extension, keyed by the extension key so two 101s are two buttons.
+    const keyOf = { '101': '101@+13025550001', '102': '102@+13025550002' };
+    const keyed = {
+      ...customerState,
+      extensions: customerState.extensions.map(row => ({
+        ...row, key: keyOf[row.extension] || `${row.extension}@+13025550001`,
+        number: row.extension === '102' ? '+13025550002' : '+13025550001', webrtc_enabled: 0,
+      })),
+    };
+    const credsUrl = `/admin/api/extensions/${encodeURIComponent('102@+13025550002')}/credentials`;
+    const softCredentials = {
+      credentials: {
+        key: '102@+13025550002', digits: '102', number: '+13025550002',
+        sip_username: 'MERIDIANHEALTH_102_13025550002', sip_password: 'soft-secret',
+        server: 'sip.engineerip.com', managed_address: true, port: 5060,
+      },
+    };
+    const plain = boot({ isAdmin: false, state: keyed, routes: { [credsUrl]: softCredentials } });
+    plain.w.eval("showPage('sipaccounts')");
+    await settle(320);
+    chooseScope(plain.w, plain.d, { number: '+13025550002' });
+    await settle(200);
+    const shownCards = plain.d.querySelectorAll('#extension-credential-list .ext-card').length;
+    check('every extension card offers a Softphone button, keyed by the extension',
+      shownCards === 1
+      && plain.d.querySelectorAll('#extension-credential-list [data-softphone]').length === shownCards
+      && !!plain.d.querySelector('[data-softphone="102@+13025550002"]')
+      && !plain.d.querySelector('[data-softphone="101@+13025550001"]'),
+      `${shownCards} cards`);
+    check('the credentials button uses the same key, so a duplicate 101 cannot pick the wrong card',
+      !!plain.d.querySelector('[data-extension-credentials="102@+13025550002"]'));
+    plain.d.querySelector('[data-extension-credentials="102@+13025550002"]').click();
+    await settle(200);
+    check('the credential sheet offers Open softphone for that same extension',
+      !!plain.d.querySelector('#modal [data-softphone="102@+13025550002"]'));
+
+    const plainOpened = [];
+    plain.w.open = (...args) => { plainOpened.push(args); return { closed: false, postMessage() {} }; };
+    plain.d.querySelector('[data-softphone="102@+13025550002"]').click();
+    await settle(60);
+    check('without Browser phone the softphone is not opened, and the card says why',
+      plainOpened.length === 0 && /Tick Browser phone/.test(plain.d.body.textContent), String(plainOpened.length));
+
+    const soft = boot({
+      isAdmin: false,
+      state: { ...keyed, extensions: keyed.extensions.map(row => (row.key === '102@+13025550002' ? { ...row, webrtc_enabled: 1 } : row)) },
+      routes: { [credsUrl]: softCredentials },
+    });
+    soft.w.eval("showPage('sipaccounts')");
+    await settle(320);
+    chooseScope(soft.w, soft.d, { number: '+13025550002' });
+    await settle(200);
+    const opened = [];
+    const consoleWindow = { closed: false, posted: [], postMessage(message, origin) { this.posted.push({ message, origin }); } };
+    soft.w.open = (...args) => { opened.push(args); return consoleWindow; };
+    soft.d.querySelector('[data-softphone="102@+13025550002"]').click();
+    await settle(80);
+    check('the softphone opens in its own window, on the phone page',
+      opened.length === 1 && opened[0][0] === '/phone?connect=extension', JSON.stringify(opened));
+    check('the extension is looked up by its key',
+      soft.seen.some(entry => entry.url === credsUrl && entry.method === 'GET'));
+    check('the sign-in is not in the address of the new window or anywhere in the page',
+      !/soft-secret/.test(JSON.stringify(opened)) && !/soft-secret/.test(soft.d.documentElement.outerHTML));
+    check('nothing is sent until the new window says it is ready', consoleWindow.posted.length === 0);
+
+    const fromWindow = (data, origin, source) => {
+      const event = new soft.w.Event('message');
+      Object.defineProperty(event, 'data', { value: data });
+      Object.defineProperty(event, 'origin', { value: origin });
+      Object.defineProperty(event, 'source', { value: source });
+      soft.w.dispatchEvent(event);
+    };
+    fromWindow({ type: 'eip-softphone:ready' }, 'https://evil.example.com', consoleWindow);
+    await settle(40);
+    check('a ready message from another origin gets no sign-in', consoleWindow.posted.length === 0);
+    fromWindow({ type: 'eip-softphone:ready' }, 'http://localhost', consoleWindow);
+    await settle(60);
+    const handed = consoleWindow.posted.find(entry => entry.message.type === 'eip-softphone:connect');
+    check('the sign-in is handed to that window once it is ready, on this origin only',
+      !!handed && handed.origin === 'http://localhost' && consoleWindow.posted.length === 1, JSON.stringify(consoleWindow.posted.length));
+    check('it carries the extension\'s own SIP identity, domain and WebSocket address',
+      !!handed && handed.message.sip_username === 'MERIDIANHEALTH_102_13025550002'
+      && handed.message.sip_password === 'soft-secret' && handed.message.domain === 'sip.engineerip.com'
+      && handed.message.wss === 'wss://sip.engineerip.com/ws' && handed.message.extension === '102@+13025550002',
+      JSON.stringify(handed && handed.message).slice(0, 200));
   }
 
   output += `\n${failures.length ? `${failures.length} CHECK(S) FAILED\n${failures.map(f => `  - ${f}`).join('\n')}\n` : 'ALL CHECKS PASSED'}\n`;

@@ -17,6 +17,23 @@ class AsteriskError(RuntimeError):
     pass
 
 
+def endpoint_name(extension: Any) -> str:
+    """The channel a leg rings when the caller did not name the endpoint.
+
+    The same identity the renderer writes: digits plus the line they belong to
+    (`PJSIP/101-13025550001`). A stored key holds an `@`, which a PJSIP section
+    name cannot - and the digits alone are never dialled, because every line
+    carries its own 101. The call engine always passes an endpoint from
+    `dial_endpoint()`; this is the safe floor under it.
+    """
+    text = str(extension or "").strip()
+    digits, _, scope = text.partition("@")
+    scope_digits = "".join(character for character in scope if character.isdigit())
+    if digits.isdigit() and scope_digits:
+        return f"PJSIP/{digits}-{scope_digits}"
+    return f"PJSIP/{digits or text}"
+
+
 class AsteriskClient:
     def __init__(self, config: type[Config] = Config):
         self.base_url = config.ASTERISK_ARI_URL.rstrip("/")
@@ -59,14 +76,20 @@ class AsteriskClient:
         phone: str,
         provider_endpoint: str,
         metadata: dict[str, Any] | None = None,
+        endpoint: str | None = None,
     ) -> str:
-        """Ring the employee first; the customer leg is created after answer."""
+        """Ring the employee first; the customer leg is created after answer.
+
+        `endpoint` overrides the channel to ring: media is negotiated by the
+        endpoint a call is placed towards, so an extension that answers in the
+        browser is rung on its WebRTC endpoint instead of its plain one.
+        """
         employee_channel = f"{call_id}-employee"
         self._request(
             "POST",
             "/channels",
             params={
-                "endpoint": f"PJSIP/{extension}",
+                "endpoint": endpoint or endpoint_name(extension),
                 "app": self.app,
                 "appArgs": f"employee,{call_id},{provider_endpoint},{phone}",
                 "channelId": employee_channel,
@@ -76,17 +99,22 @@ class AsteriskClient:
         )
         return call_id
 
-    def create_inbound_employee_leg(self, call_id: str, extension: str, customer_channel_id: str, index: int = 0) -> str:
+    def create_inbound_employee_leg(
+        self, call_id: str, extension: str, customer_channel_id: str, index: int = 0, endpoint: str | None = None,
+    ) -> str:
         """Ring one device for an inbound call.
 
         A main line rings several devices at once, so each leg gets its own
         channel id: the first keeps the historical name and the rest are numbered.
+        `endpoint` overrides the channel to ring, the same way it does for an
+        outbound call - a device signed in on the browser answers on the WebRTC
+        endpoint only.
         """
         employee_channel = f"{call_id}-employee" if int(index) <= 0 else f"{call_id}-employee-{int(index)}"
         self._request(
             "POST", "/channels",
             params={
-                "endpoint": f"PJSIP/{extension}", "app": self.app,
+                "endpoint": endpoint or endpoint_name(extension), "app": self.app,
                 "appArgs": f"inbound_employee,{call_id}", "channelId": employee_channel,
                 "originator": customer_channel_id, "timeout": 30,
             },
@@ -94,25 +122,45 @@ class AsteriskClient:
         )
         return employee_channel
 
-    def create_customer_leg(
-        self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str,
-        caller_id_number: str | None = None,
-    ) -> str:
+    def _customer_leg(self, call_id: str, endpoint: str, employee_channel_id: str, caller_id_number: str | None, timeout: int) -> str:
         customer_channel = f"{call_id}-customer"
         self._request(
             "POST",
             "/channels",
             params={
-                "endpoint": f"PJSIP/{phone}@{provider_endpoint}",
+                "endpoint": endpoint,
                 "app": self.app,
                 "appArgs": f"customer,{call_id}",
                 "channelId": customer_channel,
                 "originator": employee_channel_id,
                 "callerId": caller_id_number or "",
-                "timeout": 60,
+                "timeout": timeout,
             },
         )
         return customer_channel
+
+    def create_customer_leg(
+        self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str,
+        caller_id_number: str | None = None,
+    ) -> str:
+        return self._customer_leg(
+            call_id, f"PJSIP/{phone}@{provider_endpoint}", employee_channel_id, caller_id_number, 60
+        )
+
+    def create_local_leg(
+        self, call_id: str, extension: str, employee_channel_id: str, caller_id_number: str | None = None,
+        endpoint: str | None = None,
+    ) -> str:
+        """Ring an extension on this platform instead of a carrier number.
+
+        Used when the number being called is one of the customer's own: the
+        lookup already resolved it to the extension it is set to ring, so the
+        call is an internal one and never leaves through the trunk. `endpoint`
+        overrides the channel to ring, the same way it does for an outbound call
+        - an extension that belongs to a line is reached on the PJSIP endpoint
+        named after its identity, not by the key that holds `@`.
+        """
+        return self._customer_leg(call_id, endpoint or endpoint_name(extension), employee_channel_id, caller_id_number, 30)
 
     def list_channels(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/channels")

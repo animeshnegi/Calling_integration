@@ -34,6 +34,13 @@ def create_app(config_class=Config, *, start_ari: bool = False, sync_config: boo
     service = TelephonyService(asterisk, config_class, settings_store=settings_store)
     app.extensions["telephony_service"] = service
     app.extensions["voicemail_store"] = VoicemailStore(config_class.VOICEMAIL_PATH, config_class.VOICEMAIL_CONTEXT)
+    # An install that predates number-scoped extensions filed `101` under the
+    # folder `101`: the messages are moved to `101-<number>` once, here, so an
+    # upgrade keeps every message and two lines never share a mailbox.
+    try:
+        settings_store.adopt_legacy_mailboxes(app.extensions["voicemail_store"])
+    except Exception:
+        app.logger.exception("Legacy voicemail mailboxes could not be adopted")
     app.extensions["voicemail_notifier"] = VoicemailEmailNotifier(app.extensions["voicemail_store"], settings_store)
 
     if sync_config:
@@ -47,7 +54,11 @@ def create_app(config_class=Config, *, start_ari: bool = False, sync_config: boo
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Cache-Control"] = "no-store"
+        # API answers and pages are never cached. Static assets that declare
+        # themselves publicly cacheable (the phone shell, the console
+        # stylesheet, the favicon redirect) keep their own policy.
+        if "public" not in response.headers.get("Cache-Control", ""):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     register_routes(app, service)
