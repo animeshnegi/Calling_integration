@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends \
        build-essential ca-certificates curl openssl libedit-dev libjansson-dev \
        libncurses5-dev libnewt-dev libogg-dev libopus-dev libsamplerate0-dev \
-       libsndfile1-dev libspeex-dev libspeexdsp-dev libsqlite3-dev libssl-dev \
+       libsndfile1-dev libsrtp2-dev libspeex-dev libspeexdsp-dev libsqlite3-dev libssl-dev \
        libtool libvorbis-dev libxml2 libxml2-dev pkg-config procps uuid-dev xmlstarlet \
     && cd /tmp/asterisk-download \
     && if [ ! -s "asterisk-${ASTERISK_VERSION}.tar.gz" ]; then \
@@ -31,10 +31,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && ./configure --with-jansson-bundled --with-pjproject-bundled \
     && make -j"${ASTERISK_MAKE_JOBS}" \
     && make install && ldconfig \
+    && if [ ! -f /usr/lib/asterisk/modules/res_srtp.so ]; then \
+         echo "ERROR: res_srtp.so was not built. WebRTC endpoints negotiate DTLS-SRTP" >&2; \
+         echo "       and every browser call would fail at media setup. Was libsrtp2-dev" >&2; \
+         echo "       installed before ./configure? Refusing to ship this image." >&2; \
+         exit 1; \
+       fi \
     && cd / \
     && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" \
-    && apt-get purge -y --auto-remove build-essential curl libedit-dev libjansson-dev libncurses5-dev libnewt-dev libogg-dev libopus-dev libsamplerate0-dev libsndfile1-dev libspeex-dev libspeexdsp-dev libsqlite3-dev libssl-dev libtool libvorbis-dev libxml2-dev pkg-config uuid-dev xmlstarlet \
-    && apt-get install -y --no-install-recommends libxml2 libsqlite3-0 libedit2 libcurl4 libspeex1 libspeexdsp1 libogg0 libvorbis0a libvorbisenc2 libvorbisfile3
+    && apt-get purge -y --auto-remove build-essential curl libedit-dev libjansson-dev libncurses5-dev libnewt-dev libogg-dev libopus-dev libsamplerate0-dev libsndfile1-dev libsrtp2-dev libspeex-dev libspeexdsp-dev libsqlite3-dev libssl-dev libtool libvorbis-dev libxml2-dev pkg-config uuid-dev xmlstarlet \
+    && apt-get install -y --no-install-recommends libxml2 libsqlite3-0 libedit2 libcurl4 libsrtp2-1 libspeex1 libspeexdsp1 libogg0 libvorbis0a libvorbisenc2 libvorbisfile3
 
 COPY config/ /etc/asterisk/
 # Recordings the operator supplies (see sounds/custom/README.md). The directory

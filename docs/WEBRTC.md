@@ -134,6 +134,18 @@ change:
   listener, so the `transport-wss` section only takes effect after Asterisk
   starts again. The phone itself needs no restart - it re-registers.
 
+If calls fail at media setup and Asterisk logs `SRTP support module is not
+loaded or available. Try loading res_srtp.so.` followed by `Couldn't negotiate
+stream ... (nothing)`, the image was built without libsrtp2 and contains no
+`res_srtp.so` at all (`asterisk -rx "module show like res_srtp"` lists nothing).
+A `webrtc=yes` endpoint always negotiates DTLS-SRTP, so every browser call dies
+exactly there while registration keeps working. No reload or config change can
+add a module that was never compiled: rebuild the Asterisk image -
+`asterisk/Dockerfile` compiles with `libsrtp2-dev`, keeps `libsrtp2-1` at
+runtime, and refuses to finish the build unless `res_srtp.so` was produced -
+then recreate the container. The entrypoint also warns at startup when the
+module is missing, so an old image cannot fail quietly.
+
 ## HD voice
 
 A call is "HD" when the audio is wideband - 16 kHz, roughly 7 kHz of speech

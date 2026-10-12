@@ -145,4 +145,16 @@ if [ ! -s "$KEY_DIR/asterisk.key" ] || [ ! -s "$KEY_DIR/asterisk.crt" ]; then
     chmod 0644 "$KEY_DIR/asterisk.crt"
 fi
 
+# WebRTC endpoints negotiate DTLS-SRTP, which is provided by res_srtp.so and
+# cannot work without it. An image built before libsrtp2 was added to the build
+# simply has no such module (Asterisk skips what it cannot compile), and every
+# browser call then dies at media setup with "SRTP support module is not loaded".
+# Say so once at startup instead of letting each call fail.
+if [ ! -f /usr/lib/asterisk/modules/res_srtp.so ]; then
+    echo "WARNING: /usr/lib/asterisk/modules/res_srtp.so is missing from this image." >&2
+    echo "         WebRTC (DTLS-SRTP) calls cannot negotiate media. Rebuild the" >&2
+    echo "         asterisk image so the SIP stack is compiled with libsrtp2" >&2
+    echo "         (see asterisk/Dockerfile), then recreate the container." >&2
+fi
+
 exec asterisk -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"
