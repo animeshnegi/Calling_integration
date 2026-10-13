@@ -89,6 +89,25 @@ curl http://127.0.0.1:5000/health
 
 A 503 during the first few seconds is normal while ARI connects. It should become HTTP 200.
 
+Then gate the release on the three things a browser call cannot work without -
+each of these has silently regressed at least once:
+
+```bash
+# 1. the softphone's SIP stack ships in the API image and is served
+curl -s http://127.0.0.1:5000/jssip.min.js | head -c 40      # JsSIP v3.10.1 banner
+
+# 2. the outbound guard compares inside $[...] (the ] belongs after the comparison)
+docker exec engineerip-asterisk sh -lc \
+  "grep GotoIf /etc/asterisk/dynamic/extensions.dynamic.conf | head -1"
+
+# 3. DTLS-SRTP is compiled in, or every WebRTC call fails at media setup
+docker exec engineerip-asterisk asterisk -rx "module show like res_srtp"
+```
+
+After importing a release, reload each open phone page once. The phone's service
+worker deletes every cache of an earlier release when the new one activates; a
+page opened before that can still show the previous release.
+
 ## 6. Admin console
 
 The API/admin port binds to VM loopback only. Use an HTTPS reverse proxy, a VPN, or an SSH tunnel:

@@ -543,9 +543,14 @@ def register_routes(app, service):
         """The vendored JsSIP browser build the softphone registers with.
 
         It is served from this origin - not from a CDN - so opening the
-        softphone never depends on a third-party host being reachable.
+        softphone never depends on a third-party host being reachable. The
+        JavaScript MIME type is explicit: every response carries nosniff, and a
+        script the browser cannot classify is a script the browser refuses to
+        run - "SIP library is not loaded" again.
         """
-        response = send_from_directory(str(Path(app.root_path).parent / "web"), "jssip.min.js")
+        response = send_from_directory(
+            str(Path(app.root_path).parent / "web"), "jssip.min.js", mimetype="text/javascript"
+        )
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 

@@ -96,6 +96,21 @@ def test_the_softphone_loads_its_sip_stack_from_this_origin(tmp_path: Path):
     assert ".JsSIP=" in body  # the browser build defines window.JsSIP
 
 
+def test_scripts_are_served_as_javascript_so_nosniff_browsers_run_them(tmp_path: Path):
+    """Every response carries X-Content-Type-Options: nosniff - which is good -
+    but it means a script served with an unknown or wrong type is a script the
+    browser refuses to execute, and the phone then says "SIP library is not
+    loaded" even though the file arrived."""
+    client = page_client(tmp_path)
+    for path in ("/phone.js", "/jssip.min.js"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["X-Content-Type-Options"] == "nosniff", path
+        assert response.mimetype in ("text/javascript", "application/javascript"), (path, response.content_type)
+    css = client.get("/phone.css")
+    assert css.mimetype == "text/css"
+
+
 def test_static_assets_keep_their_cache_policy_and_api_answers_are_not_cached(tmp_path: Path):
     client = page_client(tmp_path)
     for path in ("/phone.css", "/phone.js", "/jssip.min.js", "/manifest.json"):
