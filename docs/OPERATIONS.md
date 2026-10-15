@@ -111,7 +111,18 @@ curl -s -o /dev/null -w '%{http_code}\n' --http1.1 \
   -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
   https://YOUR_SIP_HOST/ws                                              # 101 through the reverse proxy
+
+# 5. the media path - a call that connects and stays completely silent is
+#    almost always RTP going to (or coming from) an address nobody can reach
+docker exec engineerip-asterisk asterisk -rx "pjsip show transport transport-wss" | grep -i external
+#   ExternalMediaAddress must be a NUMERIC public IP (the renderer resolves the
+#   Service address); the host firewall must also pass the RTP range (default
+#   UDP 10000-10100) from the internet, not just 5060 and 443
 ```
+
+Transport changes now restart Asterisk automatically when the rendered
+transports change - `pjsip reload` never rebinds them - so a Service address
+set after first boot reaches the running system without a manual restart.
 
 After importing a release, reload each open phone page once. The phone's service
 worker deletes every cache of an earlier release when the new one activates; a

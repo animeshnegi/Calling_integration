@@ -72,3 +72,14 @@ class AsteriskAMI:
 
     def reload_voicemail(self) -> dict[str, str]:
         return self.action("Reload", Module="app_voicemail.so")
+
+    def restart(self) -> None:
+        """Restart Asterisk: transport changes only take effect at startup.
+
+        The restart can drop the AMI connection before the reply lands, so a
+        failed read here is not a failure - the restart is already under way.
+        """
+        try:
+            self.action("Command", Command="core restart now")
+        except (AMIError, OSError):
+            pass

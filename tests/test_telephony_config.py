@@ -1,4 +1,5 @@
 import re
+import socket
 from pathlib import Path
 
 from app.admin import SettingsStore
@@ -14,6 +15,20 @@ class DummyAMI:
 
     def reload_voicemail(self):
         return {}
+
+    def restart(self):
+        return {}
+
+
+def fake_dns(monkeypatch, mapping):
+    """Deterministic name resolution: the media address is resolved at render
+    time, and tests must not depend on the sandbox's real DNS."""
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host not in mapping:
+            raise OSError(f"no DNS for {host}")
+        return [(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP, "", (mapping[host], 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", getaddrinfo)
 
 
 def test_provider_allowlist_renders_identify(tmp_path: Path):
@@ -99,6 +114,7 @@ def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypa
     """The admin panel's Service address is the single public-address source;
     .env's ASTERISK_EXTERNAL_ADDRESS is only a fallback until it is set."""
     monkeypatch.setenv("ASTERISK_EXTERNAL_ADDRESS", "198.51.100.99")
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
 
@@ -109,9 +125,10 @@ def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypa
     text = sync.render_transports()
     assert "[transport-udp]" in text and "[transport-tcp]" in text
     # Media address on all three transports: the browser's ICE candidates come
-    # from the WSS transport. Signalling stays off it - that leg already came in
-    # through the reverse proxy.
-    assert text.count("external_media_address=sip.example.com") == 3
+    # from the WSS transport. It is the resolved IP - SDP and ICE cannot use a
+    # hostname. Signalling stays on the hostname and off the WSS transport -
+    # that leg already came in through the reverse proxy.
+    assert text.count("external_media_address=203.0.113.10") == 3
     assert text.count("external_signaling_address=sip.example.com") == 2
     assert "external_signaling_address=198.51.100.99" not in text
     # Docker and LAN destinations are exempt from NAT rewriting.
@@ -120,6 +137,7 @@ def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypa
     sync.apply()
     rendered = (tmp_path / "pjsip.transports.conf").read_text()
     assert "external_signaling_address=sip.example.com" in rendered
+    assert "external_media_address=203.0.113.10" in rendered
 
 
 def test_voicemail_mailbox_and_routes_are_rendered(tmp_path: Path):
@@ -455,20 +473,98 @@ def test_internal_calls_negotiate_hd_voice_first(tmp_path: Path):
     assert TelephonyConfigSync._codecs(TelephonyConfigSync.INTERNAL_CODECS) == TelephonyConfigSync.INTERNAL_CODECS
 
 
-def test_browser_media_advertises_the_public_address(tmp_path: Path):
+def test_browser_media_advertises_the_public_address(tmp_path: Path, monkeypatch):
     """A WebRTC call's ICE candidates come from the WSS transport, so it needs
     the admin panel's service address just like the UDP/TCP transports - a
     browser cannot send audio to the container's private address."""
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
     store.set_settings({"service_host": "sip.engineerip.com"})
+    fake_dns(monkeypatch, {"sip.engineerip.com": "203.0.113.20"})
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
 
     wss = sync.render_transports().split("[transport-wss]")[1]
-    assert "external_media_address=sip.engineerip.com" in wss
+    # The resolved IP, not the hostname: SDP c= and ICE candidates cannot use
+    # a name, and a name leaves the browser sending audio to the container's
+    # private address - a call that connects and stays completely silent.
+    assert "external_media_address=203.0.113.20" in wss
+    assert "external_media_address=sip.engineerip.com" not in wss
     assert "local_net=10.0.0.0/8" in wss
     # Signalling continues on the WebSocket the proxy already opened.
     assert "external_signaling_address" not in wss
+
+
+def test_media_address_resolves_hostnames_and_keeps_numeric_values(monkeypatch):
+    """SDP and ICE need a numeric address; anything else is kept as configured
+    rather than dropped."""
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
+    resolve = TelephonyConfigSync._media_address
+    assert resolve("198.51.100.99") == "198.51.100.99"       # numeric stays
+    assert resolve("sip.example.com") == "203.0.113.10"       # names resolve
+    assert resolve("no-dns.example.com") == "no-dns.example.com"  # fallback keeps it
+    assert resolve("") == ""
+
+
+def test_apply_restarts_asterisk_when_the_transports_change(tmp_path: Path):
+    """Transports are read at startup only - `pjsip reload` never rebinds them.
+    A Service address set after first boot must therefore reach the running
+    system through a restart, or every call advertises the container's private
+    media address and stays silent."""
+    class RecordingAMI(DummyAMI):
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def reload_pjsip(self):
+            self.calls.append("reload_pjsip")
+            return {}
+
+        def reload_voicemail(self):
+            self.calls.append("reload_voicemail")
+            return {}
+
+        def reload_dialplan(self):
+            self.calls.append("reload_dialplan")
+            return {}
+
+        def restart(self):
+            self.calls.append("restart")
+
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    ami = RecordingAMI()
+    sync = TelephonyConfigSync(store, ami, str(tmp_path / "pjsip.dynamic.conf"))
+
+    sync.apply()
+    assert ami.calls == ["restart"]  # first render differs from the empty state
+    ami.calls.clear()
+    sync.apply()
+    assert ami.calls == ["reload_pjsip", "reload_voicemail", "reload_dialplan"]  # nothing changed
+    ami.calls.clear()
+    store.set_settings({"service_host": "sip.example.com"})
+    sync.apply()
+    assert ami.calls == ["restart"]  # transport-affecting change
+
+
+def test_webticked_extension_falls_back_to_its_plain_endpoint(tmp_path: Path):
+    """A plain softphone registered on a WebRTC-ticked extension cannot answer
+    the browser endpoint's DTLS-SRTP offer and rejects the call outright - it
+    would never ring. The dial plan must fall back to the plain endpoint."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_password": "secret", "webrtc_enabled": True, "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    web_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+
+    block = sync.render_dialplan().split("exten => 101,1,")[1].split("\nexten")[0]
+    # The browser endpoint is rung first; the plain endpoint is the fallback.
+    assert f"Dial(PJSIP/{web_username},30)" in block
+    assert 'GotoIf($["${DIALSTATUS}"="CHANUNAVAIL"]?plain)' in block
+    assert 'GotoIf($["${DIALSTATUS}"="FAILED"]?plain)' in block
+    assert "same => n(plain),Dial(PJSIP/101,30)" in block
+
+    # An extension without the WebRTC switch keeps a single, direct ring.
+    store.save_extension({"extension": "102", "sip_password": "secret", "active": True})
+    desk = sync.render_dialplan().split("exten => 102,1,")[1].split("\nexten")[0]
+    assert "same => n(plain)," not in desk
+    assert desk.count("Dial(PJSIP/") == 1
 
 
 def test_every_number_has_its_own_extension_set(tmp_path: Path):
@@ -788,7 +884,12 @@ def test_an_extension_that_answers_in_the_browser_is_dialled_on_its_webRTC_endpo
     dialplan = sync.render_dialplan()
     browser = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
     assert f"Dial(PJSIP/{web_username},30)" in browser
-    assert "Dial(PJSIP/101,30)" not in browser
+    # The plain endpoint is only the labeled fallback, reached after the
+    # guards: a plain softphone registered on a WebRTC-ticked extension cannot
+    # answer the DTLS-SRTP offer and would otherwise never ring at all.
+    assert "same => n(plain),Dial(PJSIP/101,30)" in browser
+    assert browser.count("Dial(PJSIP/101,30)") == 1
+    assert 'GotoIf($["${DIALSTATUS}"="CHANUNAVAIL"]?plain)' in browser
     desk = dialplan.split("exten => 102,1,")[1].split("\nexten")[0]
     assert "Dial(PJSIP/102,30)" in desk
     assert f"PJSIP/{desk_username}" not in desk
