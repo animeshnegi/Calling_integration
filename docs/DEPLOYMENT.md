@@ -269,8 +269,36 @@ server {
 }
 ```
 
-Nothing is proxied for `sip.example.com` — it only needs the direct DNS record
-plus open firewall ports 5060/udp and the RTP range.
+SIP and RTP on `sip.example.com` are never proxied - the plain DNS record plus
+open firewall ports 5060/udp and the RTP range are all a desk phone or a
+desktop softphone needs. The browser softphone is the one exception: it signs
+in over a WebSocket at `wss://sip.example.com/ws`, so the SIP domain needs a
+TLS listener with exactly one proxied path, forwarded to Asterisk's
+HTTP/WebSocket server on loopback (the compose file publishes `127.0.0.1:8088`
+for this; `127.0.0.1:8089` is the same listener over Asterisk's own TLS):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name sip.example.com;
+    # ssl_certificate ...; ssl_certificate_key ...;   # a trusted certificate
+
+    location /ws {
+        proxy_pass http://127.0.0.1:8088;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+Without that block (or with `/ws` falling through to the Flask app), the
+softphone reports **"SIP WebSocket disconnected."** while desk phones keep
+working fine - the sign-in never reaches Asterisk. The softphone's settings
+offer the WebSocket address explicitly; it defaults to `wss://<SIP domain>/ws`
+exactly to match this path.
 
 ## 15. Production hardening
 

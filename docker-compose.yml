@@ -128,6 +128,14 @@ services:
       - telephony-internal
     ports:
       - "5060:5060/udp"
+      # The browser softphone signs in over a WebSocket (wss://<service host>/ws):
+      # the reverse proxy terminates TLS and forwards that one path to Asterisk's
+      # HTTP/WebSocket server (res_http_websocket). Publish that listener on
+      # loopback only - like the web app's 5000 - so the proxy can reach it and
+      # the internet cannot. Without these two lines the softphone can only
+      # report "SIP WebSocket disconnected."
+      - "127.0.0.1:8088:8088"
+      - "127.0.0.1:8089:8089"
       # Must match Asterisk's rtp.conf - the entrypoint renders it from the
       # same two variables, so published ports and RTP range cannot drift.
       - "${ASTERISK_RTP_START:-10000}-${ASTERISK_RTP_END:-10100}:${ASTERISK_RTP_START:-10000}-${ASTERISK_RTP_END:-10100}/udp"

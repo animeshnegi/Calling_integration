@@ -102,6 +102,15 @@ docker exec engineerip-asterisk sh -lc \
 
 # 3. DTLS-SRTP is compiled in, or every WebRTC call fails at media setup
 docker exec engineerip-asterisk asterisk -rx "module show like res_srtp"
+
+# 4. the softphone's WebSocket path reaches Asterisk - this is what
+#    "SIP WebSocket disconnected." means when it is broken
+docker exec engineerip-asterisk asterisk -rx "module show like res_pjsip_transport_websocket"
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8088/ws        # any HTTP answer (400 expected) proves the listener is up
+curl -s -o /dev/null -w '%{http_code}\n' --http1.1 \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  https://YOUR_SIP_HOST/ws                                              # 101 through the reverse proxy
 ```
 
 After importing a release, reload each open phone page once. The phone's service

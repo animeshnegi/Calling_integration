@@ -233,6 +233,23 @@ async function ensureSipLibrary(){
   return !!window.JsSIP;
 }
 
+/* "SIP WebSocket disconnected." cannot say on its own whether the reverse
+   proxy has no /ws route, cannot reach Asterisk's listener, or the host is
+   unreachable. Ask the HTTPS endpoint behind the wss:// URL what it answers
+   and say so - every answer maps to one of those failures. */
+async function wssDiagnosis(wssUrl){
+  let probe;
+  try{probe=new URL(wssUrl);probe.protocol=probe.protocol==="wss:"?"https:":"http:"}catch{return""}
+  try{
+    const r=await fetch(probe.href);
+    if(r.status===404)return" "+probe.href+" answered HTTP 404 - the reverse proxy has no route for this WebSocket path; it must forward /ws to Asterisk's HTTP listener.";
+    if(r.status>=500)return" "+probe.href+" answered HTTP "+r.status+" - the reverse proxy cannot reach Asterisk's WebSocket listener.";
+    return" "+probe.href+" answered HTTP "+r.status+" instead of a WebSocket upgrade.";
+  }catch{
+    return" "+probe.href+" could not be reached from this page (network, DNS, TLS or cross-origin).";
+  }
+}
+
 async function connectSip(s){
   if(!(await ensureSipLibrary())){
     /* "Not loaded" alone cannot tell a stale cached page from a server that is
@@ -254,7 +271,14 @@ async function connectSip(s){
       let settled=false;
       const fail=message=>{if(settled)return;settled=true;setState("Registration failed");reject(new Error(message||"SIP registration failed"))};
       ua.on("connected",()=>setState("Online",true));
-      ua.on("disconnected",()=>{setState("Offline");if(!settled)fail("SIP WebSocket disconnected.")});
+      ua.on("disconnected",()=>{
+        setState("Offline");
+        if(settled)return;
+        /* A refused proxy path, an unreachable listener and a dead host all
+           arrive as this one event before registration - probe the endpoint
+           and let the error name the actual failure. */
+        wssDiagnosis(s.wss).then(hint=>fail("SIP WebSocket disconnected."+hint))
+      });
       ua.on("registered",()=>{setState("Ready",true);showPhone();$("login-status").className="login-status ok";$("login-status").textContent="Authenticated and registered.";if(!settled){settled=true;resolve(true)}});
       ua.on("registrationFailed",e=>fail(e.cause||"SIP authentication failed."));
       ua.on("newRTCSession",e=>{
