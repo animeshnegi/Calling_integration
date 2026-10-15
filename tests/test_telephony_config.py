@@ -508,22 +508,57 @@ def test_browser_media_advertises_the_public_address(tmp_path: Path, monkeypatch
     assert "external_signaling_address" not in wss
 
 
-def test_media_address_resolves_hostnames_and_keeps_numeric_values(monkeypatch):
-    """SDP and ICE need a numeric address; anything else is kept as configured
-    rather than dropped."""
+def test_media_address_resolves_hostnames_and_rejects_unresolvable_ones(monkeypatch):
+    """SDP and ICE need a numeric address, in every case.
+
+    A name is resolved at render time; a name that will not resolve is a
+    configuration error and is raised as one. Keeping it would render a media
+    address SDP cannot use - a call that connects and stays completely silent,
+    which is exactly what this function exists to prevent."""
     fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
     resolve = TelephonyConfigSync._media_address
     assert resolve("198.51.100.99") == "198.51.100.99"       # numeric stays
     assert resolve("sip.example.com") == "203.0.113.10"       # names resolve
-    assert resolve("no-dns.example.com") == "no-dns.example.com"  # fallback keeps it
-    assert resolve("") == ""
+    assert resolve("") == ""                                  # unset stays unset
+
+    import pytest
+    with pytest.raises(ValueError) as refused:
+        resolve("no-dns.example.com")
+    # The error names the cause and the fix - the message has to explain itself.
+    assert "does not resolve" in str(refused.value)
+    assert "public IP" in str(refused.value)
 
 
-def test_apply_restarts_asterisk_when_the_transports_change(tmp_path: Path):
+def test_an_unresolvable_service_address_stops_the_sync_and_keeps_the_last_good_config(tmp_path: Path, monkeypatch):
+    """A broken Service address must not half-apply.
+
+    The transports file carries the media address every call is advertised on,
+    so a name that will not resolve aborts the render before anything is
+    written: Asterisk keeps running the last configuration that rendered, and
+    the operator gets one self-explaining error instead of a silent phone."""
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    ami = DummyAMI()
+    sync = TelephonyConfigSync(store, ami, str(tmp_path / "pjsip.dynamic.conf"))
+    store.set_settings({"service_host": "sip.example.com"})
+    sync.apply()
+    good_transports = (tmp_path / "pjsip.transports.conf").read_text()
+    assert "external_media_address=203.0.113.10" in good_transports
+
+    store.set_settings({"service_host": "gone.example.com"})
+    import pytest
+    with pytest.raises(ValueError) as refused:
+        sync.apply()
+    assert "does not resolve" in str(refused.value)
+    assert (tmp_path / "pjsip.transports.conf").read_text() == good_transports
+
+
+def test_apply_restarts_asterisk_when_the_transports_change(tmp_path: Path, monkeypatch):
     """Transports are read at startup only - `pjsip reload` never rebinds them.
     A Service address set after first boot must therefore reach the running
     system through a restart, or every call advertises the container's private
     media address and stays silent."""
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
     class RecordingAMI(DummyAMI):
         def __init__(self):
             self.calls: list[str] = []
@@ -574,7 +609,11 @@ def test_webticked_extension_rings_browser_and_plain_endpoints_separately(tmp_pa
 
     block = sync.render_dialplan().split("exten => 101,1,")[1].split("\nexten")[0]
     # One parallel Dial: browser identity first, then the plain phone's.
-    assert f"Dial(PJSIP/{web_username}-webrtc,PJSIP/101,30)" in block
+    # Asterisk separates parallel channels with `&` inside the first argument -
+    # a comma separates Dial()'s own arguments, so `Dial(a,b,30)` would ring
+    # only `a` with a garbage timeout and never reach the phone at all.
+    assert f"Dial(PJSIP/{web_username}-webrtc&PJSIP/101,30)" in block
+    assert f"PJSIP/{web_username}-webrtc,PJSIP/" not in block
     assert block.count("Dial(PJSIP/") == 1
     # No GotoIf fallback dance: each endpoint rings only its own contacts, so
     # an unavailable browser can never stand between the caller and the phone.
@@ -959,7 +998,7 @@ def test_an_extension_that_answers_in_the_browser_is_dialled_on_both_endpoints(t
 
     dialplan = sync.render_dialplan()
     browser = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
-    assert f"Dial(PJSIP/{web_username}-webrtc,PJSIP/101,30)" in browser
+    assert f"Dial(PJSIP/{web_username}-webrtc&PJSIP/101,30)" in browser
     desk = dialplan.split("exten => 102,1,")[1].split("\nexten")[0]
     assert "Dial(PJSIP/102,30)" in desk
     assert f"PJSIP/{desk_username}" not in desk

@@ -3942,12 +3942,21 @@ def register_admin(app, config, on_telephony_change=None):
     app.extensions["settings_store"] = store
     web_dir = str(Path(app.root_path).parent / "web")
 
-    def apply_change():
+    def apply_change() -> str:
+        """Re-render the Asterisk configuration; return why it did not apply.
+
+        A change is saved even when the render fails - a platform that cannot
+        reach Asterisk must not refuse a customer - but the failure is never
+        silent: it is logged, and the route that knows the caller can pass the
+        reason back to the console.
+        """
         if on_telephony_change:
             try:
                 on_telephony_change()
-            except Exception:
+            except Exception as exc:
                 app.logger.exception("Failed to apply telephony configuration change")
+                return str(exc) or exc.__class__.__name__
+        return ""
 
     def login_required(fn):
         @wraps(fn)
@@ -4900,7 +4909,11 @@ def register_admin(app, config, on_telephony_change=None):
                 "service_host", "service_web_host", "service_sip_port", "sip_auth_digest",
             }
             store.set_settings({k: data[k] for k in data if k in allowed})
-            apply_change(); return jsonify({"ok": True})
+            # A saved address that will not render is not a reason to refuse
+            # the save - DNS can come up after it is entered - but the console
+            # is told exactly why the running configuration did not change.
+            warning = apply_change()
+            return jsonify({"ok": True, **({"warning": warning} if warning else {})})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
     @app.post("/admin/api/groups")

@@ -1127,6 +1127,11 @@ def test_the_registration_address_is_the_platforms_own_not_the_carriers(tmp_path
 
     saved = admin.post("/admin/api/settings", json={"service_host": "pbx.meridian-voice.test", "service_sip_port": "5080"})
     assert saved.status_code == 200, saved.json
+    # Saved but not applied: the name resolves to nothing, and SDP and ICE need
+    # a numeric media address. The save is accepted (DNS can come up after the
+    # address is entered) but the console is told exactly why the running
+    # Asterisk configuration did not change - never silently left stale.
+    assert "does not resolve" in saved.json.get("warning", ""), saved.json
     for client in (admin, customer):
         credentials = client.get("/admin/api/extensions/101/credentials").json["credentials"]
         assert credentials["server"] == "pbx.meridian-voice.test"

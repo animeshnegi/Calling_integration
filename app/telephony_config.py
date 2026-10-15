@@ -194,9 +194,14 @@ class TelephonyConfigSync:
         to; a hostname there can leave the browser dialling the container's
         private address - the call connects, the carrier bills, and nobody
         hears a thing. Resolve at render time (the API container has DNS): an
-        already-numeric address is kept as is, and a value that will not
-        resolve is kept as configured rather than dropping the external
-        address entirely."""
+        already-numeric address is kept as is, and a name is resolved to one.
+
+        A name that does not resolve is a configuration error and is raised as
+        one - keeping it would silently render a media address SDP cannot use,
+        which is exactly the silence this function exists to prevent. The error
+        stops the configuration sync; the last rendered configuration keeps
+        running until the Service address is fixed.
+        """
         value = (value or "").strip()
         if not value:
             return value
@@ -207,12 +212,25 @@ class TelephonyConfigSync:
             pass
         try:
             infos = socket.getaddrinfo(value, None, proto=socket.IPPROTO_UDP)
-        except OSError:
-            return value
+        except OSError as exc:
+            raise ValueError(
+                f"Service address {value!r} does not resolve to an IP address. "
+                "SDP and ICE must advertise a numeric media address, so the Service "
+                "address has to resolve to this server's own public IP - never a CDN "
+                "or proxy record, which points call audio at a machine that does not "
+                "carry it. Fix the DNS record or set the address to the public IP; "
+                "the Asterisk configuration keeps running unchanged until then."
+            ) from exc
+        if not infos:
+            raise ValueError(
+                f"Service address {value!r} resolved to no IP address. Set it to "
+                "this server's own public IP - SDP and ICE must advertise a numeric "
+                "media address."
+            )
         for info in infos:
             if info[0] == socket.AF_INET:
                 return info[4][0]
-        return infos[0][4][0] if infos else value
+        return infos[0][4][0]
 
     def render_transports(self) -> str:
         external = self.external_address()
@@ -616,7 +634,12 @@ class TelephonyConfigSync:
                 if key in voicemail_exts else
                 [' same => n,ExecIf($["${DIALSTATUS}" = "CHANUNAVAIL"]?Playback(ss-noservice))']
             )
-            return [f" same => n,Dial({','.join(ring_targets(key))},30)", *tail, " same => n,Hangup()"]
+            # Asterisk separates parallel channels inside one Dial() with
+            # `&` - a comma separates the application's arguments instead, so
+            # `Dial(PJSIP/a,PJSIP/b,30)` would ring only `PJSIP/a` with a
+            # garbage timeout. Targets are joined with `&`; the timeout follows
+            # after the comma.
+            return [f" same => n,Dial({'&'.join(ring_targets(key))},30)", *tail, " same => n,Hangup()"]
 
         def extension_route(dialed: str, key: str) -> list[str]:
             """One dialable three-digit number in this context, ringing one device."""
@@ -809,7 +832,7 @@ class TelephonyConfigSync:
         lines.extend([
             "exten => s,1,NoOp(Inbound provider call ${CALLERID(all)})",
             *(
-                [f" same => n,Dial({','.join(ring_targets(default_key))},30)"]
+                [f" same => n,Dial({'&'.join(ring_targets(default_key))},30)"]
                 if default_key else
                 [" same => n,Playback(ss-noservice)"]
             ),

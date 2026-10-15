@@ -3985,8 +3985,9 @@ wire('platform-recording', 'change', async event => {
   const wanted = toggle.checked;
   toggle.disabled = true;
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ recording_enabled: wanted }) });
+    const result = await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ recording_enabled: wanted }) });
     notify(wanted ? 'Recording allowed platform-wide' : 'Recording stopped platform-wide');
+    if (result?.warning) notify(`Saved, but the running Asterisk configuration did not change: ${result.warning}`, true);
     await loadState();
   } catch (error) {
     toggle.checked = !wanted;
@@ -4001,19 +4002,23 @@ wire('platform-recording', 'change', async event => {
 wire('service-address-form', 'submit', async event => {
   event.preventDefault();
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
+    const result = await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
       service_host: val('service-host').trim(), service_sip_port: val('service-sip-port').trim() || '5060',
       service_web_host: val('service-web-host').trim(),
       sip_auth_digest: val('service-sip-digest') || 'md5',
     }) });
-    notify('Server addresses saved');
+    // Saved, but not applied: the renderer refuses to advertise a media
+    // address SDP cannot use, so say exactly why the phones saw no change.
+    if (result?.warning) notify(`Saved, but the running Asterisk configuration did not change: ${result.warning}`, true);
+    else notify('Server addresses saved');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
 wire('service-address-reset', 'click', async () => {
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_web_host: '', service_sip_port: '5060', sip_auth_digest: 'md5' }) });
-    notify('Server addresses cleared — the console address is used');
+    const result = await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_web_host: '', service_sip_port: '5060', sip_auth_digest: 'md5' }) });
+    if (result?.warning) notify(`Saved, but the running Asterisk configuration did not change: ${result.warning}`, true);
+    else notify('Server addresses cleared — the console address is used');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });

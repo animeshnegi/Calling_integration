@@ -31,7 +31,16 @@ redeploy.
 
 `ASTERISK_EXTERNAL_ADDRESS` is only the first-boot fallback for the public SIP/RTP
 address: once the admin panel's **Service address** is configured it becomes the
-single source of truth (restart the `asterisk` container after changing it).
+single source of truth, and the configuration sync restarts Asterisk by itself
+when the rendered transports change - no manual restart needed. The Service
+address must be a name or IP that resolves to **this server's own public IP**.
+Call audio travels directly to whatever it resolves to, so a CDN or proxy DNS
+record (for example a proxied/“orange-cloud” Cloudflare record) points RTP at a
+machine that does not carry it and every call connects in silence; use a
+DNS-only record or the bare IP. A name that does not resolve at all is refused
+as a configuration error - the sync stops with a message naming the address,
+and the last configuration that rendered keeps running until the record is
+fixed.
 `ASTERISK_RTP_START`/`ASTERISK_RTP_END` (default `10000-10100`) drive both
 Asterisk's RTP range and Docker's published UDP ports, so they only need to match
 the range opened in the firewall.

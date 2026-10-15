@@ -118,6 +118,12 @@ docker exec engineerip-asterisk asterisk -rx "pjsip show transport transport-wss
 #   ExternalMediaAddress must be a NUMERIC public IP (the renderer resolves the
 #   Service address); the host firewall must also pass the RTP range (default
 #   UDP 10000-10100) from the internet, not just 5060 and 443
+dig +short YOUR_SIP_HOST | head -2                    # must equal the VM's public IP
+#   call audio travels DIRECTLY to whatever the Service address resolves to:
+#   a CDN/proxy record (e.g. a proxied Cloudflare record) hands out an edge IP
+#   that never carries RTP, and a name that resolves to nothing now stops the
+#   config sync with a self-explaining error instead of shipping a name into
+#   SDP. The console's Server-addresses page shows the same error when it fires.
 
 # 6. browser and phone identities are separate - a Zoiper matched to the
 #    WebRTC endpoint gets DTLS-SRTP it cannot speak: connected, billed, silent
