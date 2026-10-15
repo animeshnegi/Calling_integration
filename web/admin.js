@@ -1412,6 +1412,11 @@ function renderServiceAddress() {
   if (digest && document.activeElement !== digest) {
     digest.value = String((state.settings || {}).sip_auth_digest || 'md5').toLowerCase();
   }
+  const ice = $('service-ice-servers');
+  if (ice && document.activeElement !== ice) {
+    const configured = String((state.settings || {}).ice_servers || '').trim();
+    ice.value = configured ? JSON.stringify(JSON.parse(configured)) : '';
+  }
   const stateTag = $('service-address-state');
   if (stateTag) {
     stateTag.textContent = service.configured ? 'Set by the platform' : (service.host ? 'Using this console\'s address' : 'Not set');
@@ -2340,6 +2345,9 @@ async function openSoftphone(key) {
       sip_password: credentials.sip_password,
       domain: credentials.server,
       wss: `wss://${credentials.server}/ws`,
+      // The platform's ICE servers (blank = the phone's built-in STUN default).
+      ...(Array.isArray(credentials.ice_servers) && credentials.ice_servers.length
+        ? { iceServers: credentials.ice_servers } : {}),
     };
     sendSoftphone(entry);
   } catch (error) {
@@ -4006,6 +4014,7 @@ wire('service-address-form', 'submit', async event => {
       service_host: val('service-host').trim(), service_sip_port: val('service-sip-port').trim() || '5060',
       service_web_host: val('service-web-host').trim(),
       sip_auth_digest: val('service-sip-digest') || 'md5',
+      ice_servers: val('service-ice-servers').trim(),
     }) });
     // Saved, but not applied: the renderer refuses to advertise a media
     // address SDP cannot use, so say exactly why the phones saw no change.

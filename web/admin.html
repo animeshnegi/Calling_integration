@@ -498,6 +498,10 @@
                 </select>
                 <small>How Asterisk challenges phones at sign-in. Keep MD5 unless every device supports SHA-256 digest (RFC 8760) — some softphones, including Zoiper 5, abandon a challenge that contains SHA-256.</small>
               </label>
+              <label class="field">Browser media (ICE servers)
+                <input id="service-ice-servers" name="ice_servers" placeholder='[{"urls": "stun:stun.example.com"}]' autocomplete="off" spellcheck="false">
+                <small>How the browser softphone finds a path its audio can travel. Blank uses the built-in public STUN servers — enough for most networks. A phone behind a strict NAT needs your own TURN server here, as JSON (<code>[{"urls": "turn:turn.example.com", "username": "u", "credential": "p"}]</code>), and every softphone opened from the console receives it automatically.</small>
+              </label>
               <div class="field-actions">
                 <button class="btn primary" type="submit">Save addresses</button>
                 <button class="btn ghost" type="button" id="service-address-reset">Clear</button>

@@ -230,7 +230,8 @@ function shellWorker({ offline = false } = {}) {
 
 /* The page as a browser receives it, with phone.js executed for real. */
 function boot({ settings = null, recents = null, contacts = null, password = null,
-                clipboard = '', prompts = [], fetchImpl = null, search = '', opener = null } = {}) {
+                clipboard = '', prompts = [], fetchImpl = null, search = '', opener = null,
+                audioOutputs = null } = {}) {
   const page = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8')
     .replace(/<script[^>]*jssip[^>]*><\/script>/i, '');
   const errors = [];
@@ -253,6 +254,17 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
       });
       Object.defineProperty(window.navigator, 'clipboard', {
         configurable: true, value: { readText: async () => clipboard },
+      });
+      /* The speaker button switches to a device id the browser itself reports;
+         the seam hands it the output list the test wants it to see. */
+      Object.defineProperty(window.navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          enumerateDevices: async () => audioOutputs || [
+            { kind: 'audiooutput', deviceId: 'default', label: 'Default output' },
+            { kind: 'audiooutput', deviceId: 'speaker-1', label: 'Loudspeaker' },
+          ],
+        },
       });
       window.prompt = () => (prompts.length ? prompts.shift() : null);
       window.alert = () => {};
@@ -443,6 +455,10 @@ async function main() {
       placed && placed.target === 'sip:15555123456@sip.engineerip.com', placed && placed.target);
     check('audio-only media is negotiated',
       placed.options.mediaConstraints.video === false && placed.options.mediaConstraints.audio !== false);
+    check('the call gathers candidates through STUN, or a NAT-ed browser offers only its private address',
+      Array.isArray(placed.options.pcConfig.iceServers) && placed.options.pcConfig.iceServers.length > 0
+      && placed.options.pcConfig.iceServers.every(s => /^stun:|^turn/.test(String(s.urls))),
+      JSON.stringify(placed.options.pcConfig));
     check("the microphone is captured with the browser's own call processing",
       placed.options.mediaConstraints.audio.echoCancellation === true
       && placed.options.mediaConstraints.audio.noiseSuppression === true
@@ -486,10 +502,15 @@ async function main() {
     d.getElementById('hold-btn').click();
     check('unhold releases it', placed.session._held === false);
     d.getElementById('speaker-btn').click();
-    check('speaker mutes the earpiece output where the browser has no output routing',
-      d.getElementById('remote-audio').muted === true && d.getElementById('speaker-btn').classList.contains('active'));
+    await settle(20);
+    check('without output routing the speaker button explains itself and never silences the call',
+      d.getElementById('remote-audio').muted === false
+      && !d.getElementById('speaker-btn').classList.contains('active')
+      && /cannot switch audio output/i.test(d.getElementById('active-status').textContent),
+      d.getElementById('active-status').textContent);
     d.getElementById('speaker-btn').click();
-    check('and unmutes it again', d.getElementById('remote-audio').muted === false);
+    await settle(20);
+    check('and trying again keeps the far end audible too', d.getElementById('remote-audio').muted === false);
     d.getElementById('mute-btn').click();
     d.getElementById('hold-btn').click();
     d.getElementById('speaker-btn').click();
@@ -528,16 +549,33 @@ async function main() {
     await settle(20);
     rerouted.d.getElementById('speaker-btn').click();
     await settle(20);
-    check('a browser that can route audio is asked for the loudspeaker',
-      rerouted.d.getElementById('remote-audio')._sink === 'speaker',
+    check('a browser that can route audio is handed a device id it reported',
+      rerouted.d.getElementById('remote-audio')._sink === 'speaker-1',
       rerouted.d.getElementById('remote-audio')._sink);
-    check('and the earpiece is left audible while it does',
-      rerouted.d.getElementById('remote-audio').muted === false);
+    check('and the far end is left audible while it does',
+      rerouted.d.getElementById('remote-audio').muted === false
+      && rerouted.d.getElementById('speaker-btn').classList.contains('active'));
     rerouted.d.getElementById('speaker-btn').click();
     await settle(20);
     check('turning speaker off goes back to the default output',
-      rerouted.d.getElementById('remote-audio')._sink === 'default');
+      rerouted.d.getElementById('remote-audio')._sink === ''
+      && !rerouted.d.getElementById('speaker-btn').classList.contains('active'));
     rerouted.dom.window.close();
+
+    const refused = boot();
+    refused.w.HTMLMediaElement.prototype.setSinkId = function () { return Promise.reject(new Error('device is gone')); };
+    await signIn(refused);
+    typeDigits(refused.d, '15550002222');
+    refused.d.getElementById('call-btn').click();
+    await settle(20);
+    refused.d.getElementById('speaker-btn').click();
+    await settle(20);
+    check('a failed output switch says why and keeps the call audible',
+      refused.d.getElementById('remote-audio').muted === false
+      && !refused.d.getElementById('speaker-btn').classList.contains('active')
+      && /Could not switch audio output/i.test(refused.d.getElementById('active-status').textContent),
+      refused.d.getElementById('active-status').textContent);
+    refused.dom.window.close();
 
     const failing = boot();
     await signIn(failing);
@@ -572,6 +610,9 @@ async function main() {
     check('answering accepts the call with the same audio-only media',
       incoming._answered && incoming._answered.mediaConstraints.video === false
       && incoming._answered.mediaConstraints.audio !== false);
+    check('and the same STUN configuration the outgoing calls use',
+      incoming._answered && Array.isArray(incoming._answered.pcConfig.iceServers)
+      && incoming._answered.pcConfig.iceServers.length > 0);
     check('the in-call controls replace the answer buttons',
       !shown(d, 'incoming-actions') && shown(d, 'hangup-btn')
       && d.getElementById('active-label').textContent === 'Call');
@@ -1017,10 +1058,11 @@ async function main() {
       Object.defineProperty(event, 'source', { value: source });
       env.w.dispatchEvent(event);
     };
-    const handoffMessage = (password = 'handed-secret') => ({
+    const handoffMessage = (password = 'handed-secret', extra = {}) => ({
       type: 'eip-softphone:connect', extension: '101@+13025550002', label: '101 · +13025550002',
       sip_username: 'MERIDIANHEALTH_101_13025550002', sip_password: password,
       domain: 'sip.engineerip.com', wss: 'wss://sip.engineerip.com/ws',
+      ...extra,
     });
 
     const stored = boot({
@@ -1056,6 +1098,20 @@ async function main() {
     check('the sign-in is never written to local storage', clean.w.localStorage.getItem('eip-phone-settings') === null,
       clean.w.localStorage.getItem('eip-phone-settings'));
     check('nor to session storage', clean.w.sessionStorage.getItem('eip-phone-sip-password') === null);
+
+    const iced = boot({ search: CONNECT, opener: consoleWindow });
+    await settle(40);
+    fromWindow(iced, handoffMessage('handed-secret', {
+      iceServers: [{ urls: 'turn:turn.internal.example', username: 'u', credential: 'p' }],
+    }), ORIGIN, consoleWindow);
+    await settle(60);
+    typeDigits(iced.d, '15550003333');
+    iced.d.getElementById('call-btn').click();
+    await settle(20);
+    check('the platform\'s ICE servers ride along with the sign-in',
+      session(iced).options.pcConfig.iceServers[0].urls === 'turn:turn.internal.example',
+      JSON.stringify(session(iced).options.pcConfig));
+    iced.dom.window.close();
 
     const denied = boot({ search: CONNECT, opener: consoleWindow });
     await settle(40);

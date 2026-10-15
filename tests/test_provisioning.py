@@ -963,6 +963,48 @@ def test_the_browser_softphone_gets_its_own_identity_beside_the_phone(tmp_path):
     assert both["sip_password"] == plain["sip_password"]
 
 
+def test_browser_ice_servers_travel_with_the_softphone_sign_in(tmp_path):
+    """The softphone needs STUN (or TURN) to find a media path at all.
+
+    A browser behind a router only offers its private address without one and
+    every call rings in silence. The platform's list is validated as the
+    browser's own RTCIceServer shape and handed to every softphone window the
+    console opens; blank means the built-in public STUN default.
+    """
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    admin = admin_client(app)
+    customer, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")
+
+    # A TURN server with credentials, as a network behind strict NAT needs.
+    saved = admin.post("/admin/api/settings", json={
+        "ice_servers": '[{"urls": "turn:turn.example.com", "username": "u", "credential": "p"}]',
+    })
+    assert saved.status_code == 200, saved.json
+    credentials = customer.get("/admin/api/extensions/101/credentials").json["credentials"]
+    assert credentials["ice_servers"] == [
+        {"urls": "turn:turn.example.com", "username": "u", "credential": "p"}
+    ]
+
+    # Malformed JSON, wrong shapes and non-ICE schemes are refused up front -
+    # an RTCPeerConnection would reject them at call time, mid-call.
+    for bad in (
+        "not json",
+        '{"urls": "stun:host"}',
+        '[{"urls": "http://turn.example.com"}]',
+        '[{"urls": "stun:host", "username": 5}]',
+        "[]junk",
+    ):
+        refused = admin.post("/admin/api/settings", json={"ice_servers": bad})
+        assert refused.status_code == 400, (bad, refused.json)
+
+    # Blank falls back to the built-in STUN list, and the sheet says so.
+    assert admin.post("/admin/api/settings", json={"ice_servers": ""}).status_code == 200
+    credentials = customer.get("/admin/api/extensions/101/credentials").json["credentials"]
+    assert credentials["ice_servers"] == []
+
+
 def test_the_effective_password_is_the_one_that_rotates(tmp_path):
     """Changing the password changes what the phone actually registers with."""
     app = make_app(tmp_path)

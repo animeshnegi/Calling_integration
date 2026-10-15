@@ -26,6 +26,15 @@ function saveSettings(s){
    suppression and automatic gain keep the far end intelligible on a laptop or a
    handset without a headset, which is what a softphone is judged on. */
 const MIC_CONSTRAINTS={audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false};
+/* How the browser finds a path its audio can travel. With no STUN server a
+   browser behind a router only offers its private address - Asterisk has
+   nothing to send audio to and the call rings in silence. These public STUN
+   servers let it discover its own public address; the console can hand the
+   phone a different list (own STUN, or TURN where the network needs it) with
+   the extension's sign-in. */
+const DEFAULT_ICE_SERVERS=[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}];
+let iceServers=DEFAULT_ICE_SERVERS;
+const iceConfig=()=>({iceServers:Array.isArray(iceServers)&&iceServers.length?iceServers:DEFAULT_ICE_SERVERS});
 const cleanNumber=v=>String(v||"").replace(/[^0-9+*#]/g,"");
 const sipDomain=()=>settings().domain||location.hostname;
 const defaultWss=domain=>"wss://"+String(domain||location.hostname).replace(/^https?:\/\//,"").replace(/\/$/,"")+"/ws";
@@ -299,7 +308,7 @@ async function startCall(){
   if(!ua){showLogin("Sign in to your SIP account first.");return}
   if(currentSession)return;
   try{
-    const session=ua.call(sipTarget(number),{mediaConstraints:MIC_CONSTRAINTS,pcConfig:{iceServers:[]},rtcOfferConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
+    const session=ua.call(sipTarget(number),{mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig(),rtcOfferConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
     attachSession(session,false);$("call-btn").disabled=true
   }catch(err){$("dial-hint").textContent=err.message}
 }
@@ -307,23 +316,44 @@ $("call-btn").onclick=startCall;
 
 $("answer-btn").onclick=()=>{
   if(!currentSession)return;
-  try{currentSession.answer({mediaConstraints:MIC_CONSTRAINTS,pcConfig:{iceServers:[]}});currentCallAnswered=true;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";callStartedAt=Date.now();startTimer()}catch(e){$("active-status").textContent=e.message}
+  try{currentSession.answer({mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig()});currentCallAnswered=true;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";callStartedAt=Date.now();startTimer()}catch(e){$("active-status").textContent=e.message}
 };
 $("decline-btn").onclick=()=>endCall("Call declined",true,"declined");
 $("hangup-btn").onclick=()=>endCall("Call ended",true,"completed");
 $("mute-btn").onclick=()=>{if(!currentSession)return;muted=!muted;currentSession.mute({audio:muted});$("mute-btn").classList.toggle("active",muted)};
 $("hold-btn").onclick=()=>{if(!currentSession)return;held=!held;held?currentSession.hold():currentSession.unhold();$("hold-btn").classList.toggle("active",held)};
-$("speaker-btn").onclick=()=>{
+$("speaker-btn").onclick=async()=>{
   const on=!$("speaker-btn").classList.contains("active");
-  $("speaker-btn").classList.toggle("active",on);
-  // Chrome can move the call to the loudspeaker; where the browser has no
-  // output routing (iOS Safari), the button falls back to muting the earpiece
-  // so the caller's own microphone is never what gets silenced.
-  if(typeof remoteAudio.setSinkId==="function"){
-    remoteAudio.setSinkId(on?"speaker":"default").catch(()=>{remoteAudio.muted=on})
-    return
+  /* Route the remote audio to another output where the browser can pick one.
+     "speaker" is not a device id - setSinkId only accepts an id the browser
+     itself reported - and a failed switch must never fall back to muting the
+     far end. Where the browser cannot route outputs at all (iOS Safari), the
+     button says so and leaves the call playing exactly where it was. */
+  const say=message=>{const el=currentSession?$("active-status"):$("dial-hint");if(el)el.textContent=message;$("speaker-btn").title=message};
+  if(typeof remoteAudio.setSinkId!=="function"){
+    say("This browser cannot switch audio output. The call keeps playing on the default output.");
+    return;
   }
-  remoteAudio.muted=on
+  try{
+    let target="";
+    if(on){
+      const devices=navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices
+        ? await navigator.mediaDevices.enumerateDevices() : [];
+      const outputs=devices.filter(d=>d.kind==="audiooutput"&&d.deviceId);
+      const chosen=outputs.find(d=>d.deviceId!=="default")||outputs[0];
+      if(!chosen){
+        say("No second audio output was found. The call keeps playing on the default output.");
+        return;
+      }
+      target=chosen.deviceId;
+    }
+    await remoteAudio.setSinkId(target);   // "" returns to the default output
+    $("speaker-btn").classList.toggle("active",on);
+    $("speaker-btn").title=on?"Remote audio is on the loudspeaker":"Remote audio is on the default output";
+  }catch(err){
+    $("speaker-btn").classList.toggle("active",false);
+    say("Could not switch audio output: "+(err&&err.message||err)+". The call keeps playing on the current output.");
+  }
 };
 
 $("login-form").onsubmit=async e=>{
@@ -353,7 +383,7 @@ $("connect-btn").onclick=async()=>{
   try{await connectSip(s);$("settings-status").className="settings-status ok";$("settings-status").textContent="Phone connected."}catch(err){$("settings-status").className="settings-status error";$("settings-status").textContent=err.message}
 };
 $("logout-btn").onclick=()=>{
-  try{if(ua)ua.stop()}catch{}ua=null;handoff=null;currentSession=null;sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
+  try{if(ua)ua.stop()}catch{}ua=null;handoff=null;iceServers=DEFAULT_ICE_SERVERS;currentSession=null;sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
 };
 $("refresh-recents").onclick=loadRecents;
 $("contacts-btn").onclick=()=>nav("contacts-view");
@@ -400,6 +430,9 @@ if(fromConsole){
 }
 async function startConsoleSession(m){
   const label=m.label||m.sip_username;
+  // The console may hand over the platform's ICE servers (its own STUN/TURN);
+  // without them the built-in STUN list applies.
+  iceServers=Array.isArray(m.iceServers)&&m.iceServers.length?m.iceServers:DEFAULT_ICE_SERVERS;
   handoff={extension:m.extension||"",username:m.sip_username,password:m.sip_password,domain:m.domain,wss:m.wss||defaultWss(m.domain),apiToken:""};
   try{if(ua)ua.stop()}catch{}ua=null;
   showConsoleScreen(label,`Signing in as ${label}…`);

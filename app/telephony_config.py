@@ -186,6 +186,63 @@ class TelephonyConfigSync:
         configured = self._clean(self.store.get_settings().get("service_host") or "").strip()
         return configured or self._clean(os.environ.get("ASTERISK_EXTERNAL_ADDRESS", "")).strip()
 
+    # Address ranges that can never carry a stranger's RTP, checked against
+    # every media address the renderer advertises. Note the documentation
+    # ranges (TEST-NET etc.) are deliberately NOT listed: they are public for
+    # the purpose of this check and the tests and examples rely on them.
+    UNREACHABLE_MEDIA_NETWORKS = [
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+        "172.16.0.0/12", "192.168.0.0/16", "198.18.0.0/15",
+        "::/128", "::1/128", "fc00::/7", "fe80::/10",
+    ]
+    # Cloudflare's proxy edge - a proxied ("orange-cloud") DNS record resolves
+    # there. It is reachable, and still wrong: an HTTP proxy does not carry
+    # call audio. Keep in sync with https://www.cloudflare.com/ips/.
+    CLOUDFLARE_MEDIA_NETWORKS = [
+        "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+        "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+        "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+        "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+        "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+        "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+    ]
+
+    @classmethod
+    def _check_media_address(cls, address: str) -> None:
+        """Raise unless `address` is somewhere the internet can deliver RTP.
+
+        SDP and ICE promise the far end that audio has a path; an address that
+        cannot carry it produces the worst failure there is - a call that
+        connects, bills, and says nothing. So the promise is checked, not
+        assumed: private and special ranges are unreachable for a browser on
+        the internet, and Cloudflare's edge is an HTTP proxy that never
+        carries RTP.
+        """
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError:
+            raise ValueError(
+                f"Media address {address!r} is not an IP address. SDP and ICE "
+                "must advertise a numeric address; resolve the Service address "
+                "before it reaches this check."
+            ) from None
+        for network in cls.UNREACHABLE_MEDIA_NETWORKS:
+            if parsed in ipaddress.ip_network(network):
+                raise ValueError(
+                    f"Media address {address} sits in {network}, which no browser "
+                    "on the internet can reach - the Service address must resolve "
+                    "to this server's own public IP (check for split-horizon DNS, "
+                    "or a record pointing at an internal address)."
+                )
+        for network in cls.CLOUDFLARE_MEDIA_NETWORKS:
+            if parsed in ipaddress.ip_network(network):
+                raise ValueError(
+                    f"Media address {address} is Cloudflare's proxy edge ({network}). "
+                    "A proxied (orange-cloud) DNS record hands out that edge, and an "
+                    "HTTP proxy never carries call audio: point the Service address "
+                    "at this server's own public IP with a DNS-only record."
+                )
+
     @staticmethod
     def _media_address(value: str) -> str:
         """The numeric IP the SDP c= line and the ICE candidates must carry.
@@ -207,9 +264,11 @@ class TelephonyConfigSync:
             return value
         try:
             ipaddress.ip_address(value)
-            return value
         except ValueError:
             pass
+        else:
+            TelephonyConfigSync._check_media_address(value)
+            return value
         try:
             infos = socket.getaddrinfo(value, None, proto=socket.IPPROTO_UDP)
         except OSError as exc:
@@ -227,10 +286,9 @@ class TelephonyConfigSync:
                 "this server's own public IP - SDP and ICE must advertise a numeric "
                 "media address."
             )
-        for info in infos:
-            if info[0] == socket.AF_INET:
-                return info[4][0]
-        return infos[0][4][0]
+        resolved = next((info[4][0] for info in infos if info[0] == socket.AF_INET), infos[0][4][0])
+        TelephonyConfigSync._check_media_address(resolved)
+        return resolved
 
     def render_transports(self) -> str:
         external = self.external_address()

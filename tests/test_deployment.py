@@ -32,3 +32,18 @@ def test_the_documented_proxy_route_matches_the_one_the_softphone_dials():
     deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert "proxy_pass http://127.0.0.1:8088;" in deployment
     assert "Upgrade" in deployment and "websocket" in deployment.lower()
+
+
+def test_the_docs_never_ask_for_a_manual_restart_after_the_service_address():
+    """The configuration sync restarts Asterisk itself when transports change.
+
+    `pjsip reload` never rebinds a transport, so `apply()` restarts Asterisk
+    when the rendered transports change - and a doc that tells operators to
+    restart the container by hand contradicts the code and invites a double
+    restart that drops live calls for nothing.
+    """
+    for name in ("OPERATIONS.md", "DEPLOYMENT.md", "WEBRTC.md"):
+        text = (ROOT / "docs" / name).read_text(encoding="utf-8")
+        assert "restart the `asterisk` container after changing it" not in text, name
+    assert "restarts Asterisk by itself" in (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+

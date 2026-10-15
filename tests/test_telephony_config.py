@@ -529,6 +529,42 @@ def test_media_address_resolves_hostnames_and_rejects_unresolvable_ones(monkeypa
     assert "public IP" in str(refused.value)
 
 
+def test_media_address_refuses_addresses_the_internet_cannot_reach(monkeypatch):
+    """An address can resolve and still be the wrong machine for call audio.
+
+    SDP and ICE promise the far end that audio has a path. A private address
+    is unreachable for a browser on the internet (split-horizon DNS, a record
+    pointing inside), and Cloudflare's edge is an HTTP proxy that never
+    carries RTP - a proxied record hands out exactly that. Both are refused
+    with the fix spelled out rather than rendered into a silent call."""
+    import pytest
+
+    resolve = TelephonyConfigSync._media_address
+    for broken, explains in (
+        ("192.168.1.10", "public IP"),
+        ("10.0.0.5", "public IP"),
+        ("127.0.0.1", "public IP"),
+        ("104.16.100.100", "Cloudflare"),
+        ("172.64.1.1", "Cloudflare"),
+        ("2606:4700:4700::1111", "Cloudflare"),
+    ):
+        with pytest.raises(ValueError) as refused:
+            resolve(broken)
+        assert explains in str(refused.value), (broken, refused.value)
+
+    # A name that resolves to one of those is refused the same way...
+    fake_dns(monkeypatch, {"inside.example.com": "192.168.1.10", "edge.example.com": "104.16.100.100"})
+    with pytest.raises(ValueError):
+        resolve("inside.example.com")
+    with pytest.raises(ValueError):
+        resolve("edge.example.com")
+
+    # ...and real public addresses - including the documentation ranges the
+    # tests and examples are written in - still render.
+    assert resolve("198.51.100.99") == "198.51.100.99"
+    assert resolve("203.0.113.20") == "203.0.113.20"
+
+
 def test_an_unresolvable_service_address_stops_the_sync_and_keeps_the_last_good_config(tmp_path: Path, monkeypatch):
     """A broken Service address must not half-apply.
 

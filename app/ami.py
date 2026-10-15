@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import time
 import uuid
 
 
@@ -32,6 +33,24 @@ class AsteriskAMI:
                 message[key.strip()] = value.strip()
         return message
 
+    def _login(self, sock: socket.socket) -> None:
+        # Asterisk's AMI banner is not a CRLF-terminated AMI message on all
+        # versions/configurations. Do not block waiting for a blank-line
+        # terminator before sending the Login action. If the banner is
+        # present, _read_message() below simply parses it together with the
+        # Login response.
+        login = (
+            "Action: Login\r\n"
+            f"ActionID: {uuid.uuid4()}\r\n"
+            f"Username: {self.username}\r\n"
+            f"Secret: {self.password}\r\n"
+            "Events: off\r\n\r\n"
+        )
+        sock.sendall(login.encode())
+        response = self._read_message(sock)
+        if response.get("Response") != "Success":
+            raise AMIError("AMI authentication failed")
+
     def action(self, action: str, **headers: str) -> dict[str, str]:
         action_id = headers.pop("ActionID", str(uuid.uuid4()))
         payload = [f"Action: {action}", f"ActionID: {action_id}"]
@@ -40,24 +59,7 @@ class AsteriskAMI:
         payload.append("")
         with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
             sock.settimeout(self.timeout)
-
-            # Asterisk's AMI banner is not a CRLF-terminated AMI message on all
-            # versions/configurations. Do not block waiting for a blank-line
-            # terminator before sending the Login action. If the banner is
-            # present, _read_message() below simply parses it together with the
-            # Login response.
-            login = (
-                "Action: Login\r\n"
-                f"ActionID: {uuid.uuid4()}\r\n"
-                f"Username: {self.username}\r\n"
-                f"Secret: {self.password}\r\n"
-                "Events: off\r\n\r\n"
-            )
-            sock.sendall(login.encode())
-            response = self._read_message(sock)
-            if response.get("Response") != "Success":
-                raise AMIError("AMI authentication failed")
-
+            self._login(sock)
             sock.sendall("\r\n".join(payload).encode())
             response = self._read_message(sock)
             if response.get("Response") != "Success":
@@ -73,13 +75,60 @@ class AsteriskAMI:
     def reload_voicemail(self) -> dict[str, str]:
         return self.action("Reload", Module="app_voicemail.so")
 
-    def restart(self) -> None:
-        """Restart Asterisk: transport changes only take effect at startup.
+    def restart(self, verify_timeout: float = 20.0) -> None:
+        """Restart Asterisk and verify it comes back.
 
-        The restart can drop the AMI connection before the reply lands, so a
-        failed read here is not a failure - the restart is already under way.
+        Transport changes only take effect at startup, so the configuration
+        sync restarts Asterisk when the rendered transports change - and a
+        dropped endpoint section can only be cleared that way too. Asterisk
+        reads the just-written configuration files as it boots, which is why
+        the files are written before this runs.
+
+        The failure modes are not the same and must not be swallowed alike:
+        failing to reach or authenticate with AMI means the restart NEVER
+        happened - the running Asterisk keeps the old configuration while the
+        files on disk hold the new one, which is exactly the split state this
+        must prevent - so those raise. The restart itself can drop the AMI
+        connection before the reply lands; a lost connection AFTER the command
+        was dispatched means the restart is under way. Once it is, AMI is
+        polled until Asterisk answers again; if it never does, that is raised
+        too rather than assumed away.
         """
-        try:
-            self.action("Command", Command="core restart now")
-        except (AMIError, OSError):
-            pass
+        with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
+            sock.settimeout(self.timeout)
+            try:
+                self._login(sock)
+            except AMIError as exc:
+                raise AMIError("AMI authentication failed; Asterisk was not restarted") from exc
+            sock.sendall(
+                f"Action: Command\r\nActionID: {uuid.uuid4()}\r\nCommand: core restart now\r\n\r\n".encode()
+            )
+            try:
+                reply = self._read_message(sock)
+            except OSError:
+                reply = {}
+            if reply and reply.get("Response") != "Success":
+                raise AMIError(
+                    f"Asterisk refused the restart: {reply.get('Message', 'AMI action failed')}"
+                )
+        # The command landed - either the reply arrived or the connection died
+        # as the process went down. Wait it out and confirm Asterisk returns.
+        self._verify_running(verify_timeout)
+
+    def _verify_running(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        last: Exception | None = None
+        time.sleep(min(1.0, timeout))  # let the process actually go down first
+        while True:
+            try:
+                self.action("Command", Command="core show version")
+                return
+            except (AMIError, OSError) as exc:
+                last = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        raise AMIError(
+            f"Asterisk did not come back within {timeout:.0f}s after the restart; "
+            f"check the asterisk container logs. Last error: {last}"
+        )

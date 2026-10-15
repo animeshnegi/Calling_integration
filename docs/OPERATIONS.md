@@ -29,7 +29,7 @@ chmod 600 .env
 nano .env
 ```
 
-Set every `GENERATE...`/`CHANGE-ME` value. `ASTERISK_EXTERNAL_ADDRESS` is the first-boot fallback for the public SIP/RTP address; after setup the admin panel's **Service address** is the single source of truth (restart the `asterisk` container after changing it). Keep the same `SECRET_KEY` after first deployment because it encrypts SIP and webhook secrets in the settings database.
+Set every `GENERATE...`/`CHANGE-ME` value. `ASTERISK_EXTERNAL_ADDRESS` is the first-boot fallback for the public SIP/RTP address; after setup the admin panel's **Service address** is the single source of truth - and when it changes, the configuration sync writes the transports and restarts Asterisk by itself (`pjsip reload` never rebinds a transport), so no manual restart is needed or helpful. Confirm it landed with `docker compose logs asterisk` (the restart is logged) and `pjsip show transport transport-wss | grep -i external` (the new numeric address, without touching the container). Keep the same `SECRET_KEY` after first deployment because it encrypts SIP and webhook secrets in the settings database.
 
 Generate secrets, for example:
 
@@ -125,7 +125,15 @@ dig +short YOUR_SIP_HOST | head -2                    # must equal the VM's publ
 #   config sync with a self-explaining error instead of shipping a name into
 #   SDP. The console's Server-addresses page shows the same error when it fires.
 
-# 6. browser and phone identities are separate - a Zoiper matched to the
+# 6. the browser softphone can find a media path: without a STUN server a
+#    phone behind a router only offers its private address and every call
+#    rings in silence. Blank "Browser media (ICE servers)" on the console's
+#    Server-addresses page means the built-in public STUN; a network that
+#    needs TURN must supply its own there - the console hands that list to
+#    every softphone it opens, and a test call from an external network is
+#    the only real proof of two-way audio
+
+# 7. browser and phone identities are separate - a Zoiper matched to the
 #    WebRTC endpoint gets DTLS-SRTP it cannot speak: connected, billed, silent
 docker exec engineerip-asterisk sh -lc \
   "grep -A2 'type=endpoint' /etc/asterisk/dynamic/pjsip.dynamic.conf | grep -B2 webrtc=yes | head -4"

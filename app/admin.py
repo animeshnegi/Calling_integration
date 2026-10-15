@@ -94,6 +94,48 @@ def browser_username(username: Any) -> str:
     return f"{text}-webrtc" if text else ""
 
 
+def parse_ice_servers(value: Any) -> list[dict[str, Any]]:
+    """The browser's ICE servers: STUN, plus TURN where the network needs it.
+
+    A softphone behind a router only offers its private address unless a STUN
+    server lets it discover the public one - Asterisk then has nothing to send
+    audio to and the call rings in silence. The shape is the browser's own
+    RTCIceServer list, handed to the softphone with its sign-in:
+    `[{"urls": "stun:host"}, {"urls": ["turn:host"], "username": "u", "credential": "p"}]`.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(
+            'ICE servers must be JSON, e.g. [{"urls": "stun:stun.example.com"}]'
+        ) from exc
+    if not isinstance(parsed, list):
+        raise ValueError("ICE servers must be a JSON list of {urls, username?, credential?} objects")
+    servers: list[dict[str, Any]] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            raise ValueError("Each ICE server must be an object with a urls field")
+        urls = entry.get("urls")
+        urls = [urls] if isinstance(urls, str) else urls
+        schemes = {"stun", "stuns", "turn", "turns"}
+        if (
+            not isinstance(urls, list) or not urls
+            or not all(isinstance(item, str) and item.split(":", 1)[0] in schemes for item in urls)
+        ):
+            raise ValueError("Each ICE server needs urls like stun:host or turn:host (or a list of them)")
+        clean: dict[str, Any] = {"urls": urls[0] if len(urls) == 1 else urls}
+        for field in ("username", "credential"):
+            if entry.get(field) is not None:
+                if not isinstance(entry[field], str):
+                    raise ValueError(f"ICE server {field} must be text")
+                clean[field] = entry[field]
+        servers.append(clean)
+    return servers
+
+
 def extension_mailbox(key: Any) -> str:
     """The voicemail mailbox of an extension: unique, readable, filename-safe.
 
@@ -1771,6 +1813,10 @@ class SettingsStore:
             "port": int(service["port"] if service["host"] else ((device or provider or {}).get("port") or 5060)),
             "transport": (device or provider or {}).get("transport") or "udp",
             "registration": "device" if device else "extension",
+            # The browser's ICE servers travel with the sign-in, so the
+            # softphone gathers candidates the platform's network can reach -
+            # blank means the built-in STUN default.
+            "ice_servers": parse_ice_servers(self.get_settings().get("ice_servers") or ""),
             "device_label": (device or {}).get("label", ""),
             "numbers": [item["number"] for item in numbers],
             "answers": [item["number"] for item in answers],
@@ -3658,13 +3704,19 @@ class SettingsStore:
             "service_web_host",
             "service_sip_port",
             "sip_auth_digest",
+            "ice_servers",
         }
         for key, value in values.items():
             if key not in allowed:
                 continue
             text = str(value)
-            if len(text) > 2000:
+            if len(text) > (4000 if key == "ice_servers" else 2000):
                 raise ValueError("Setting is too long")
+            if key == "ice_servers":
+                # Blank is the built-in STUN default; anything else must be a
+                # browser RTCIceServer list or the softphone would be handed
+                # config its RTCPeerConnection rejects at call time.
+                parse_ice_servers(text)
             if key == "recording_format" and text not in {"wav", "wav49", "gsm", "slin16"}:
                 raise ValueError("Unsupported recording format")
             if key in {"recording_enabled", "recording_announcement", "recording_beep", "webrtc_enabled"} and text.lower() not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
@@ -3712,6 +3764,8 @@ class SettingsStore:
                     text = "true" if text.strip().lower() in {"true", "1", "yes", "on"} else "false"
                 if key in {"service_host", "service_web_host"}:
                     text = text.strip()
+                if key == "ice_servers":
+                    text = json.dumps(parse_ice_servers(text)) if text.strip() else ""
                 db.execute(
                     "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
                     (str(key), text),
@@ -4907,6 +4961,7 @@ def register_admin(app, config, on_telephony_change=None):
                 "recording_announcement_media", "recording_beep", "recording_max_duration_seconds",
                 "default_extension", "inbound_fallback_extension", "webrtc_enabled",
                 "service_host", "service_web_host", "service_sip_port", "sip_auth_digest",
+                "ice_servers",
             }
             store.set_settings({k: data[k] for k in data if k in allowed})
             # A saved address that will not render is not a reason to refuse
