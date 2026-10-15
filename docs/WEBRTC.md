@@ -47,23 +47,23 @@ Asterisk renders a `transport-wss` PJSIP transport and, **only for extensions wh
 
 ### Opening the softphone from the console
 
-Each extension card in the customer console has a **Softphone** button. It opens `/phone?connect=extension` in a new window, signed in as *that* extension - the card's own key (`101@+13025550002`) names the identity, so two 101s on two numbers open two different softphones. The page reports ready to the console that opened it; the console answers with the extension's SIP username, password, domain and WebSocket address over `postMessage`, checking origin and source on both sides. The password never appears in a URL or in server storage, and the new window keeps the sign-in in memory only: a phone session saved in the same browser is not picked up.
+Each extension card in the customer console has a **Softphone** button. It opens `/phone?connect=extension` in a new window, signed in as *that* extension - the card's own key (`101@+13025550002`) names the identity, so two 101s on two numbers open two different softphones. The page reports ready to the console that opened it; the console answers with the extension's browser SIP username (its own `-webrtc` identity), password, domain and WebSocket address over `postMessage`, checking origin and source on both sides. The password never appears in a URL or in server storage, and the new window keeps the sign-in in memory only: a phone session saved in the same browser is not picked up.
 
 The window opens at phone size (390 × 860, centred, no toolbars). The page lays itself out to whatever size the window is: the keypad rows shrink with the height, the call button and the navigation always stay on screen, and only the lists scroll. On a phone, or in a window no wider than 520 px, the phone fills the whole window.
 
-The Softphone button needs **Browser phone** (`webrtc_enabled`) on that extension. Without it the browser endpoint does not exist, so the console says so instead of opening a phone that cannot register.
+The Softphone button is shown only while **Browser phone** (`webrtc_enabled`) is on for that extension - without it the browser identity and endpoint do not exist, so the button is hidden for users and administrators alike rather than opening a phone that cannot register.
 It also needs the platform's **service host** set in Settings, because the phone registers with that address. Without it the console closes the window and says so, rather than handing over a server the browser cannot reach.
 
 ## Answering in the browser
 
 The two endpoints hold two media modes, and the endpoint a call is placed
 towards is what decides the media it is set up with - so a browser and a
-hardware phone cannot share one:
+hardware phone never share one identity, one endpoint or one contact space:
 
-| Device | Endpoint | Media |
-| --- | --- | --- |
-| Hardware phone, Zoiper, desk phone | `PJSIP/101-13025550001` (UDP/TCP) | plain RTP, G.722 first |
-| Browser PWA (switch on) | `PJSIP/MERIDIAN_101_13025550001` (WSS, `webrtc=yes`) | DTLS-SRTP, ICE, RTCP-mux |
+| Device | Sign-in (SIP username) | Endpoint | Media |
+| --- | --- | --- | --- |
+| Hardware phone, Zoiper, desk phone | `MERIDIAN_101_13025550001` | `PJSIP/101-13025550001` (UDP/TCP) | plain RTP, G.722 first |
+| Browser PWA (switch on) | `MERIDIAN_101_13025550001-webrtc` | `PJSIP/MERIDIAN_101_13025550001-webrtc` (WSS, `webrtc=yes`) | DTLS-SRTP, ICE, RTCP-mux |
 
 **A three-digit extension is resolved only within the current phone number**, so
 the endpoint name always carries both halves: `101-13025550001` is *101 on
@@ -76,27 +76,39 @@ they answer in the platform's single context. SIP usernames are technical
 identifiers that devices register with; **no person ever dials one**.
 
 A browser refuses an unencrypted RTP offer, and a hardware phone refuses a
-DTLS-SRTP offer (`UDP/TLS/RTP/SAVPF`). So calls are dialled towards the endpoint
-that fits the device that answers them:
+DTLS-SRTP offer (`UDP/TLS/RTP/SAVPF`). Each device kind therefore registers on
+its own SIP identity - the browser's carries `-webrtc`, with the same password -
+and PJSIP answers it on the endpoint named after it. A Zoiper signing in with
+the plain username is matched to the plain endpoint even when the WebRTC switch
+is on; before this separation it was matched to the WebRTC endpoint and every
+call carried media it could not speak: connected, billed, and silent.
 
-* An extension ticked **Answers in the browser (WebRTC)** is dialled on its
-  WebRTC endpoint - dialling extension, ringing a group, an IVR selection, a
-  call flow and the console's click-to-call all follow it. The extension card
-  then shows a *Browser phone* tag. Its plain endpoint is still rendered, so the
-  SIP device keeps working and the tick can be removed again at any time.
-* Every other extension is dialled on its plain endpoint, which is what the
-  credentials in the sheet are written for.
+Calls then ring **both** endpoints of a WebRTC-ticked extension in one parallel
+Dial - one leg per device kind, each with the media that device speaks - and the
+first to answer takes the call:
+
+* An extension ticked **Answers in the browser (WebRTC)** carries a second,
+  browser-only identity beside its plain one - dialling extension, ringing a
+  group, an IVR selection, a call flow and the console's click-to-call all ring
+  both. The extension card then shows a *Browser phone* tag, and the credentials
+  sheet lists the browser username beside the plain one.
+* Every extension is also dialled on its plain endpoint, which is what the
+  credentials in the sheet are written for, so a desk phone or softphone is
+  never disabled by the switch.
 * A full number the platform owns - of the same customer or of another one - is
-  reached inside the platform, and rings that number's own inbound destination,
-  so a browser calling it reaches the WebRTC endpoint of that destination. Only
-  numbers the platform does not own, and outside callers, arrive from the
-  carrier. A three-digit extension is resolved only within the current phone
-  number, and `<number>*<digits>` reaches another of the same customer's
-  extensions; another customer's extensions are not dialable.
+  reached inside the platform, and rings that number's own inbound destination
+  on every endpoint of that destination. Only numbers the platform does not
+  own, and outside callers, arrive from the carrier. A three-digit extension is
+  resolved only within the current phone number, and `<number>*<digits>` reaches
+  another of the same customer's extensions; another customer's extensions are
+  not dialable.
 
-Give a browser extension its own extension number rather than sharing one with a
-desk phone: the switch belongs to the extension, so a plain phone registered on
-a WebRTC-enabled extension is offered media it cannot accept.
+One extension number can serve a desk phone and a browser side by side: the
+switch adds the browser identity, never touches the plain one, and the console's
+**Softphone** button appears only while the switch is on. Switching WebRTC off
+removes the browser identity - Asterisk drops it through a restart that
+`apply()` performs automatically, because a reloaded-out endpoint can linger in
+memory.
 
 Open:
 

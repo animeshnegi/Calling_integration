@@ -78,6 +78,22 @@ def endpoint_name(value: Any) -> str:
     return f"{digits}-{re.sub(r'[^0-9]', '', scope)}"
 
 
+def browser_username(username: Any) -> str:
+    """The SIP identity the browser softphone signs in with.
+
+    A phone's identity is shared by every kind of device only in appearance:
+    Asterisk matches an inbound request to the endpoint named after the From
+    user, so a Zoiper signing in as `AUMPNO_101` would be answered by the
+    WebRTC endpoint that name once pointed at - and every call to it carried
+    DTLS-SRTP the softphone cannot speak. The browser therefore gets its own
+    identity, `AUMPNO_101-webrtc`, on its own endpoint, AOR and auth, and the
+    plain username belongs to plain SIP alone. The password is the same, so a
+    person only ever knows one secret.
+    """
+    text = str(username or "").strip()
+    return f"{text}-webrtc" if text else ""
+
+
 def extension_mailbox(key: Any) -> str:
     """The voicemail mailbox of an extension: unique, readable, filename-safe.
 
@@ -1733,6 +1749,7 @@ class SettingsStore:
         else:
             provider = self.get_provider(next((item["provider"] for item in numbers if item["provider"]), None)) or self.get_provider()
             server = (provider or {}).get("server", "")
+        sip_username = device["sip_username"] if device else (row["sip_username"] or row["key"])
         return {
             "extension": digits,
             "key": row["key"],
@@ -1742,8 +1759,14 @@ class SettingsStore:
             "mailbox": row["mailbox"],
             "display_name": row["display_name"],
             "active": bool(row["active"]),
-            "sip_username": device["sip_username"] if device else (row["sip_username"] or row["key"]),
+            "sip_username": sip_username,
             "sip_password": (device or {}).get("sip_password") or (self.decrypt(row["sip_password_enc"]) if row["sip_password_enc"] else ""),
+            # The browser softphone signs in on its own identity - the plain
+            # one belongs to desk phones and softphones like Zoiper. The sheet
+            # shows both only when the extension answers in the browser, and
+            # the Softphone button exists only then.
+            "webrtc_enabled": bool(row["webrtc_enabled"]),
+            "webrtc_sip_username": browser_username(sip_username) if row["webrtc_enabled"] else "",
             "server": server or "",
             "port": int(service["port"] if service["host"] else ((device or provider or {}).get("port") or 5060)),
             "transport": (device or provider or {}).get("transport") or "udp",

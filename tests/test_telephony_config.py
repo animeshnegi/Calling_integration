@@ -65,15 +65,28 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     # with the credential on its sheet and nothing here may take that away.
     assert f"[{username}]\ntype=aor" in text
     assert f"aors=101,{username}" in text
-    # The WebRTC alias endpoint - the “[username] type=endpoint” a browser signs in
-    # with - is rendered only for an extension whose WebRTC switch is on, so
-    # plain SIP is unaffected by it either way.
+    # The browser endpoint - a separate `[username-webrtc]` identity - is
+    # rendered only for an extension whose WebRTC switch is on, so plain SIP
+    # is unaffected by it either way. The two identities never share a name,
+    # an AOR or an auth object: a request is answered by the endpoint named
+    # after its From user, and one shared name used to answer a Zoiper with
+    # DTLS-SRTP - a call that connected and stayed completely silent.
     assert f"[{username}]\ntype=endpoint" not in text
-    assert text.count("auth=auth-101") == 1  # the canonical endpoint only
+    assert f"[{username}-webrtc]\ntype=endpoint" not in text
+    assert "auth=auth-101-webrtc" not in text
+    assert "webrtc=yes" not in text
     store.save_extension({"extension": "101", "webrtc_enabled": True})
     with_webrtc = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_pjsip()
-    assert f"[{username}]\ntype=endpoint" in with_webrtc
-    assert with_webrtc.count("auth=auth-101") == 2  # canonical + WebRTC alias
+    assert f"[{username}-webrtc]\ntype=endpoint" in with_webrtc
+    assert f"[{username}-webrtc]\ntype=aor" in with_webrtc
+    # The browser registers against its own AOR only, and the plain identity's
+    # contact space is never mixed into it (nor the reverse).
+    assert f"[{username}-webrtc]\ntype=endpoint\naors={username}-webrtc\n" in with_webrtc
+    assert f"[auth-101-webrtc]\ntype=auth\nauth_type=userpass\nusername={username}-webrtc" in with_webrtc
+    # One password, two identities: rotating the secret changes both.
+    assert with_webrtc.count("password=secret") == 2
+    # The plain identity still authenticates the phone exactly as before.
+    assert f"[auth-101]\ntype=auth\nauth_type=userpass\nusername={username}\npassword=secret" in with_webrtc
     assert f"aors=101,{username}" in with_webrtc
     # Challenge with plain MD5 digest only: offering SHA-256 (RFC 8760) makes
     # common softphones (Zoiper 5) silently abandon the challenge.
@@ -302,6 +315,7 @@ def test_webrtc_off_leaves_normal_sip_alone_and_on_adds_the_browser(tmp_path: Pa
     off = sync.render_pjsip()
     assert "\n[101-13025550098]\ntype=endpoint" in off
     assert f"\n[{username}]\ntype=endpoint" not in off
+    assert f"\n[{username}-webrtc]\ntype=endpoint" not in off
     assert off.count("webrtc=yes") == 0
 
     # Checking it registers the browser identity as a second endpoint over WSS
@@ -310,10 +324,13 @@ def test_webrtc_off_leaves_normal_sip_alone_and_on_adds_the_browser(tmp_path: Pa
     on = sync.render_pjsip()
     sip_before = off.split("[101-13025550098]\ntype=endpoint")[1].split("\n\n")[0]
     sip_after = on.split("[101-13025550098]\ntype=endpoint")[1].split("\n\n")[0]
-    alias = on.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    alias = on.split(f"[{username}-webrtc]\ntype=endpoint")[1].split("\n\n")[0]
     assert sip_before == sip_after                       # normal SIP untouched
     assert "transport=transport-wss" in alias and "webrtc=yes" in alias
     assert "transport=transport-udp" in sip_after        # the phone still registers here
+    # The plain phone keeps its own name even with the switch on: a request
+    # signed `AUMPNO_101` must be answered by THIS endpoint, never the browser's.
+    assert f"[{username}]\ntype=endpoint" not in on
 
 
 def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path):
@@ -411,16 +428,13 @@ def test_recording_defaults_to_allowed_globally_and_off_per_extension(tmp_path: 
     assert reopened.recording_platform_enabled() is False
 
 def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
-    """Both endpoints of an extension have to be ready for a browser.
+    """The browser signs in on its own identity, and that endpoint is WebRTC.
 
-    The browser signs in with the extension's generated SIP username, so the
-    endpoint named after that username carries the WSS transport, Asterisk's
-    WebRTC switch and mandatory encryption. Calls are placed *towards* an
-    extension through the canonical endpoint - which is therefore
-    WebRTC-capable too, with media_encryption_optimistic so a hardware phone or
-    softphone that only speaks plain RTP still connects. Without that, a call to
-    a phone signed in on the browser rings and then has no audio, because a
-    browser cannot accept an unencrypted media offer."""
+    The browser identity (`<SIP username>-webrtc`) carries the WSS transport,
+    Asterisk's WebRTC switch and mandatory encryption; the plain endpoint keeps
+    plain RTP on its own transport. Media is negotiated by the endpoint a call
+    is placed towards and a browser cannot accept an unencrypted offer - so the
+    two device kinds live on two endpoints and never trade places."""
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret", "webrtc_enabled": True})
     username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
@@ -433,7 +447,7 @@ def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
     assert transports.count("bind=0.0.0.0:5060") == 2
 
     text = sync.render_pjsip()
-    alias = text.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    alias = text.split(f"[{username}-webrtc]\ntype=endpoint")[1].split("\n\n")[0]
     assert "transport=transport-wss" in alias
     assert "webrtc=yes" in alias
     assert f"allow={TelephonyConfigSync.INTERNAL_CODECS}" in alias
@@ -544,27 +558,86 @@ def test_apply_restarts_asterisk_when_the_transports_change(tmp_path: Path):
     assert ami.calls == ["restart"]  # transport-affecting change
 
 
-def test_webticked_extension_falls_back_to_its_plain_endpoint(tmp_path: Path):
-    """A plain softphone registered on a WebRTC-ticked extension cannot answer
-    the browser endpoint's DTLS-SRTP offer and rejects the call outright - it
-    would never ring. The dial plan must fall back to the plain endpoint."""
+def test_webticked_extension_rings_browser_and_plain_endpoints_separately(tmp_path: Path):
+    """A WebRTC-ticked extension rings both of its identities at once.
+
+    A plain softphone cannot answer the browser endpoint's DTLS-SRTP offer and
+    a browser cannot answer an RTP offer - the wrong offer reaches the phone
+    and the call rejects before it rings. Each device kind therefore lives on
+    its own endpoint, and one Dial rings both in parallel: the browser on
+    `<username>-webrtc`, the phone on the plain identity. Whoever answers
+    first takes the call."""
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_password": "secret", "webrtc_enabled": True, "active": True})
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
     web_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
 
     block = sync.render_dialplan().split("exten => 101,1,")[1].split("\nexten")[0]
-    # The browser endpoint is rung first; the plain endpoint is the fallback.
-    assert f"Dial(PJSIP/{web_username},30)" in block
-    assert 'GotoIf($["${DIALSTATUS}"="CHANUNAVAIL"]?plain)' in block
-    assert 'GotoIf($["${DIALSTATUS}"="FAILED"]?plain)' in block
-    assert "same => n(plain),Dial(PJSIP/101,30)" in block
+    # One parallel Dial: browser identity first, then the plain phone's.
+    assert f"Dial(PJSIP/{web_username}-webrtc,PJSIP/101,30)" in block
+    assert block.count("Dial(PJSIP/") == 1
+    # No GotoIf fallback dance: each endpoint rings only its own contacts, so
+    # an unavailable browser can never stand between the caller and the phone.
+    assert "GotoIf" not in block
+    assert "n(plain)" not in block
 
     # An extension without the WebRTC switch keeps a single, direct ring.
     store.save_extension({"extension": "102", "sip_password": "secret", "active": True})
     desk = sync.render_dialplan().split("exten => 102,1,")[1].split("\nexten")[0]
     assert "same => n(plain)," not in desk
     assert desk.count("Dial(PJSIP/") == 1
+    assert "Dial(PJSIP/102,30)" in desk
+
+
+def test_apply_restarts_asterisk_when_an_endpoint_disappears(tmp_path: Path):
+    """A section removed from the file can linger in Asterisk's memory.
+
+    `pjsip reload` is documented to leave removed objects behind, so a WebRTC
+    endpoint that is switched off would keep answering a phone that must never
+    reach it again. `apply()` restarts exactly when the rendered file loses a
+    section - additions and edits still reload without touching live calls."""
+    class RecordingAMI(DummyAMI):
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def reload_pjsip(self):
+            self.calls.append("reload_pjsip")
+            return {}
+
+        def reload_voicemail(self):
+            self.calls.append("reload_voicemail")
+            return {}
+
+        def reload_dialplan(self):
+            self.calls.append("reload_dialplan")
+            return {}
+
+        def restart(self):
+            self.calls.append("restart")
+
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    ami = RecordingAMI()
+    sync = TelephonyConfigSync(store, ami, str(tmp_path / "pjsip.dynamic.conf"))
+    store.save_extension({"extension": "101", "sip_password": "secret", "active": True})
+    sync.apply()
+    ami.calls.clear()
+
+    # Switching WebRTC on only adds sections: a reload picks those up.
+    store.save_extension({"extension": "101", "webrtc_enabled": True})
+    sync.apply()
+    assert ami.calls == ["reload_pjsip", "reload_voicemail", "reload_dialplan"]
+    ami.calls.clear()
+
+    # ...and a settings edit that changes no section set also reloads.
+    store.set_settings({"sip_auth_digest": "md5"})
+    sync.apply()
+    assert "restart" not in ami.calls
+    ami.calls.clear()
+
+    # Switching it off removes the browser endpoint: only a restart drops it.
+    store.save_extension({"extension": "101", "webrtc_enabled": False})
+    sync.apply()
+    assert ami.calls == ["restart"]
 
 
 def test_every_number_has_its_own_extension_set(tmp_path: Path):
@@ -862,42 +935,46 @@ def test_dialling_an_extension_nobody_is_signed_in_as_says_so(tmp_path: Path):
     assert "CHANUNAVAIL" not in voicemail
 
 
-def test_an_extension_that_answers_in_the_browser_is_dialled_on_its_webRTC_endpoint(tmp_path: Path):
+def test_an_extension_that_answers_in_the_browser_is_dialled_on_both_endpoints(tmp_path: Path):
     """Media is decided by the endpoint a call is placed towards.
 
     A browser cannot answer the plain endpoint's RTP offer (no audio at all),
-    and a hardware phone refuses the WebRTC endpoint's DTLS-SRTP offer. So the
-    extension an operator marked as answering in the browser is dialled on its
-    WebRTC endpoint - and every other extension keeps the plain one, which is
-    what the credentials a customer is given are written for.
+    and a hardware phone refuses the WebRTC endpoint's DTLS-SRTP offer. Each
+    device kind therefore signs in on its own identity and lives on its own
+    endpoint, and a WebRTC-ticked extension is dialled on BOTH - a parallel
+    ring where every device hears the media it speaks. Every other extension
+    keeps the plain one, which is what the credentials a customer is given are
+    written for.
     """
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_password": "secret", "webrtc_enabled": True, "active": True})
     store.save_extension({"extension": "102", "sip_password": "secret", "active": True})
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
-    # The platform mints the SIP username an extension signs in with; that name
-    # is the WebRTC endpoint, so the test reads it back rather than assuming it.
+    # The platform mints the SIP username an extension signs in with; the
+    # browser identity is that name with `-webrtc`, so the test reads the
+    # username back rather than assuming it.
     web_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
     desk_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "102")
     assert web_username != desk_username
 
     dialplan = sync.render_dialplan()
     browser = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
-    assert f"Dial(PJSIP/{web_username},30)" in browser
-    # The plain endpoint is only the labeled fallback, reached after the
-    # guards: a plain softphone registered on a WebRTC-ticked extension cannot
-    # answer the DTLS-SRTP offer and would otherwise never ring at all.
-    assert "same => n(plain),Dial(PJSIP/101,30)" in browser
-    assert browser.count("Dial(PJSIP/101,30)") == 1
-    assert 'GotoIf($["${DIALSTATUS}"="CHANUNAVAIL"]?plain)' in browser
+    assert f"Dial(PJSIP/{web_username}-webrtc,PJSIP/101,30)" in browser
     desk = dialplan.split("exten => 102,1,")[1].split("\nexten")[0]
     assert "Dial(PJSIP/102,30)" in desk
     assert f"PJSIP/{desk_username}" not in desk
 
-    # The WebRTC settings really are on the endpoint that is now dialled.
-    endpoint = sync.render_pjsip().split(f"[{web_username}]\ntype=endpoint")[1].split("\n\n")[0]
+    # The WebRTC settings really are on the endpoint that is dialled for the
+    # browser - and only there: the plain endpoint of the very same extension
+    # stays plain, so a Zoiper signing in as the plain username is answered
+    # with RTP even though the WebRTC switch is on.
+    pjsip = sync.render_pjsip()
+    endpoint = pjsip.split(f"[{web_username}-webrtc]\ntype=endpoint")[1].split("\n\n")[0]
     assert "transport=transport-wss" in endpoint
     assert "webrtc=yes" in endpoint
+    plain_endpoint = pjsip.split("[101]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in plain_endpoint
+    assert "webrtc=yes" not in plain_endpoint
 
 
 def test_a_full_number_of_any_platform_line_is_dialled_inside_the_platform(tmp_path: Path):

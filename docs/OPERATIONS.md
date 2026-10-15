@@ -118,11 +118,22 @@ docker exec engineerip-asterisk asterisk -rx "pjsip show transport transport-wss
 #   ExternalMediaAddress must be a NUMERIC public IP (the renderer resolves the
 #   Service address); the host firewall must also pass the RTP range (default
 #   UDP 10000-10100) from the internet, not just 5060 and 443
+
+# 6. browser and phone identities are separate - a Zoiper matched to the
+#    WebRTC endpoint gets DTLS-SRTP it cannot speak: connected, billed, silent
+docker exec engineerip-asterisk sh -lc \
+  "grep -A2 'type=endpoint' /etc/asterisk/dynamic/pjsip.dynamic.conf | grep -B2 webrtc=yes | head -4"
+#   the webrtc=yes endpoint must be named <SIP username>-webrtc, and the plain
+#   <SIP username> must sit on the plain endpoint beside it
 ```
 
 Transport changes now restart Asterisk automatically when the rendered
 transports change - `pjsip reload` never rebinds them - so a Service address
-set after first boot reaches the running system without a manual restart.
+set after first boot reaches the running system without a manual restart. The
+same automatic restart fires whenever a generated endpoint disappears (switching
+WebRTC off, deleting an extension), because a removed section can linger in
+Asterisk's memory after a plain reload and keep answering for a device that must
+never reach it again.
 
 After importing a release, reload each open phone page once. The phone's service
 worker deletes every cache of an earlier release when the new one activates; a

@@ -9,10 +9,10 @@ class FakeAsterisk:
     def health(self):
         return {"system": "Asterisk Test"}
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None, index=0):
         return call_id
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, endpoint=None):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None):
         return f"{call_id}-employee"
 
     def continue_in_dialplan(self, channel_id, context, extension):

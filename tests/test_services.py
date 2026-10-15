@@ -17,6 +17,9 @@ class DummyAsterisk:
         self.customer_legs = []
         self.local_legs = []
         self.local_endpoints = []
+        self.outbound_endpoints = []
+        self.hung_up = []
+        self.live_channels = []
 
     def answer_channel(self, channel_id):
         self.answered.append(channel_id)
@@ -34,21 +37,21 @@ class DummyAsterisk:
         self.inbound_endpoints.append(endpoint)
         return leg
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata, endpoint=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata, endpoint=None, index=0):
         self.created_call = call_id
-        self.outbound_endpoint = endpoint
-        return call_id
+        self.outbound_endpoints.append(endpoint)
+        return f"{call_id}-employee" if int(index) <= 0 else f"{call_id}-employee-{int(index)}"
 
     def create_customer_leg(self, *args):
         self.customer_legs.append((args[0], args[1], args[2]))
         return f"{args[0]}-customer"
 
-    def create_local_leg(self, call_id, extension, employee_channel_id, caller_id_number=None, endpoint=None):
+    def create_local_leg(self, call_id, extension, employee_channel_id, caller_id_number=None, endpoint=None, index=0):
         self.local_legs.append((call_id, extension))
         # The channel the platform rings: the extension's own PJSIP endpoint, so
         # a line's 105 is reached by name and a key never reaches Asterisk.
         self.local_endpoints.append(endpoint)
-        return f"{call_id}-customer"
+        return f"{call_id}-customer" if int(index) <= 0 else f"{call_id}-customer-{int(index)}"
 
     def create_bridge(self, call_id):
         return f"bridge-{call_id}"
@@ -72,7 +75,9 @@ class DummyAsterisk:
         return None
 
     def hangup(self, *args):
-        return None
+        channel = args[0] if args else ""
+        self.hung_up.append(channel)
+        self.live_channels = [item for item in self.live_channels if item != channel]
 
     def hangup_call(self, *args):
         return None
@@ -81,7 +86,7 @@ class DummyAsterisk:
         return 0
 
     def list_channels(self):
-        return []
+        return [{"id": channel} for channel in self.live_channels]
 
 
 def make_service(tmp_path: Path):
@@ -763,16 +768,20 @@ def test_endpoint_states_are_read_once_per_few_seconds_and_never_guessed(tmp_pat
     assert service.endpoint_states() == {}
 
 
-def test_an_extension_answering_in_the_browser_is_rung_on_its_webRTC_endpoint(tmp_path):
+def test_an_extension_answering_in_the_browser_is_rung_on_both_endpoints(tmp_path):
     """The panel follows the same rule the dial plan does.
 
-    Media is decided by the endpoint a call is placed towards, so an extension
-    marked as answering in the browser is rung on its WebRTC endpoint - both
-    when the panel dials out for it and when a caller rings it.
+    Media is decided by the endpoint a call is placed towards, and the two
+    device kinds never share one identity: the browser signs in as
+    `<username>-webrtc` on its WebRTC endpoint, a desk phone or Zoiper as
+    `<username>` on the plain one. An extension marked as answering in the
+    browser rings BOTH - when the panel dials out for it and when a caller
+    rings it - so a Zoiper on a WebRTC-ticked extension is rung with the media
+    it speaks and can actually answer.
     """
     from app.admin import SettingsStore
 
-    service, asterisk, _ = make_service(tmp_path)
+    service, asterisk, store = make_service(tmp_path)
     settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
     service.settings_store = settings
     owner = make_customer(settings, "browser-co", "Browser Co")
@@ -784,14 +793,60 @@ def test_an_extension_answering_in_the_browser_is_rung_on_its_webRTC_endpoint(tm
     web = next(row["sip_username"] for row in settings.list_extensions() if row["digits"] == "101")
 
     # The digits name one row of this account, so they are read exactly; the row
-    # behind them is the browser one, which is dialled on its WebRTC endpoint.
-    assert service.dial_endpoint(keys["101"]) == f"PJSIP/{web}"
-    assert service.dial_endpoint("101") == f"PJSIP/{web}"
+    # behind them is the browser one, whose WebRTC endpoint rings beside the
+    # plain one.
+    assert service.dial_endpoint(keys["101"]) == f"PJSIP/{web}-webrtc"
+    assert service.dial_endpoints("101") == [f"PJSIP/{web}-webrtc", "PJSIP/101-13025550077"]
     assert service.dial_endpoint(keys["102"]) == "PJSIP/102-13025550077"
+    assert service.dial_endpoints(keys["102"]) == ["PJSIP/102-13025550077"]
 
     service.start_outbound(phone="+13025559999", extension=keys["101"])
-    assert asterisk.outbound_endpoint == f"PJSIP/{web}"
+    assert asterisk.outbound_endpoints == [f"PJSIP/{web}-webrtc", "PJSIP/101-13025550077"]
+    started = store.get(next(c.call_id for c in store.all()))
+    assert started.employee_channel_ids == f"{started.call_id}-employee|{keys['101']},{started.call_id}-employee-1|{keys['101']}"
 
     asterisk.inbound_endpoints.clear()
     service.start_inbound({"id": "channel-browser", "caller": {"number": "+13025550000"}}, number, keys["101"])
-    assert asterisk.inbound_endpoints == [f"PJSIP/{web}"]
+    assert asterisk.inbound_endpoints == [f"PJSIP/{web}-webrtc", "PJSIP/101-13025550077"]
+
+
+def test_the_first_device_to_answer_wins_and_the_other_stays_silent_on_the_line(tmp_path):
+    """Two devices of one extension ring; the loser's cleanup never drops the call.
+
+    A WebRTC extension's browser and plain phone are two legs of one call.
+    Whoever answers first takes it and the other leg is cancelled - and when
+    the cancelled leg's destroy event arrives later, it is bookkeeping: tearing
+    the live call down there used to drop the answered call.
+    """
+    from app.admin import SettingsStore
+
+    service, asterisk, store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "browser-co", "Browser Co")
+    number = "+13025550077"
+    keys = line_setup(settings, number, owner, ("101",))
+    settings.save_extension({"extension": keys["101"], "webrtc_enabled": True}, owner)
+    settings.save_number({"number": number, "provider": "TestCarrier", "inbound_extension": keys["101"],
+                          "owner_user_id": owner, "default_outbound": True, "active": True})
+    web = next(row["sip_username"] for row in settings.list_extensions() if row["digits"] == "101")
+
+    asterisk.live_channels = ["caller-1"]
+    service.start_inbound({"id": "caller-1", "caller": {"number": "+13025550000"}}, number, keys["101"])
+    call = store.get(next(c.call_id for c in store.all()))
+    legs = [leg for leg, _ in service._leg_pairs(call)]
+    web_leg, plain_leg = legs[0], legs[1]
+    asterisk.live_channels += [web_leg, plain_leg]
+
+    # The plain phone answers first; the browser leg stops ringing.
+    service.handle_ari_event({"type": "ChannelStateChange", "channel": {"id": plain_leg, "state": "Up"}})
+    call = store.get(call.call_id)
+    assert call.employee_channel_id == plain_leg
+    assert call.status in {"employee_answered", "answered"}
+    assert web_leg in asterisk.hung_up
+
+    # The cancelled browser leg's destroy is bookkeeping, not a hangup.
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": web_leg}})
+    call = store.get(call.call_id)
+    assert call.status not in {"failed"}
+    assert call.ended_at is None

@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from .admin import (
-    SettingsStore, endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox,
-    extension_scope, same_account,
+    SettingsStore, browser_username, endpoint_name as extension_endpoint, extension_digits, extension_key,
+    extension_mailbox, extension_scope, same_account,
 )
 from .ami import AsteriskAMI
 
@@ -342,11 +342,14 @@ class TelephonyConfigSync:
                 # sheet.
                 aors.append(username)
                 alias_aor = [f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", ""]
-            # The endpoint the dial plan rings by default: plain RTP, so the
-            # hardware phones and softphones the credentials are shared with can
-            # answer it. A browser cannot use this media at all, which is why an
-            # extension that answers in the browser is dialled on its WebRTC
-            # endpoint instead - see `web_endpoints` in render_dialplan.
+            # The endpoint the dial plan rings for a desk phone or softphone:
+            # plain RTP on the phone's own transport. A browser cannot use this
+            # media at all - and, just as importantly, a Zoiper cannot use
+            # DTLS-SRTP. Media is negotiated by the endpoint a call is placed
+            # towards and PJSIP matches a request to the endpoint named after
+            # its From user, so the two device kinds must never share one
+            # identity: a shared name answers a Zoiper with a WebRTC offer and
+            # the call connects, bills, and stays completely silent.
             endpoint_body = [
                 f"context={context}", "disallow=all", f"allow={self.INTERNAL_CODECS}", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
@@ -355,15 +358,16 @@ class TelephonyConfigSync:
                 f"allow_subscribe={'yes' if ext.get('voicemail_enabled') else 'no'}",
                 *([f"mailboxes={mailbox}@engineerip"] if ext.get("voicemail_enabled") else []),
             ]
-            alias_endpoint = []
-            if ext.get("webrtc_enabled") and username and username != section:
-                # A browser needs a WebRTC-capable endpoint. It is created only
-                # for an extension whose WebRTC switch is on, so switching WebRTC
-                # on - or off - never touches the plain UDP/TCP endpoint above:
-                # hardware phones and softphones keep registering and answering
-                # either way. Both endpoints share the same auth and AORs, so a
-                # device signed in on the browser is reached whichever of the two
-                # is dialled.
+            browser_endpoint = []
+            if ext.get("webrtc_enabled") and username:
+                # A browser gets a WebRTC-capable endpoint of its own: its own
+                # name (`AUMPNO_101-webrtc`), its own AOR to register against,
+                # and its own auth object holding the same password. The plain
+                # identity above belongs to plain SIP alone, so a desk phone or
+                # Zoiper and a browser signed in "as the same extension" are
+                # two separate registrations that can never trade media modes.
+                # Switching WebRTC on or off only adds or removes this block.
+                browser_name = browser_username(username)
                 browser_endpoint_body = [
                     line for line in endpoint_body
                     if not line.startswith(("transport=", "allow="))
@@ -374,8 +378,11 @@ class TelephonyConfigSync:
                     "webrtc=yes",
                     f"allow={self.INTERNAL_CODECS}",
                 ]
-                alias_endpoint = [
-                    f"[{username}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{section}",
+                browser_endpoint = [
+                    f"[{browser_name}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                    f"[auth-{section}-webrtc]", "type=auth", "auth_type=userpass",
+                    f"username={browser_name}", f"password={password}", *auth_digest, "",
+                    f"[{browser_name}]", "type=endpoint", f"aors={browser_name}", f"auth=auth-{section}-webrtc",
                     f"callerid=<{digits}>", *browser_endpoint_body, "",
                 ]
             lines.extend([
@@ -386,7 +393,7 @@ class TelephonyConfigSync:
                 f"username={username}", f"password={password}", *auth_digest, "",
                 f"[{section}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{section}",
                 *endpoint_body, "",
-                *alias_endpoint,
+                *browser_endpoint,
             ])
 
         extension_owners = self._extension_owners()
@@ -568,19 +575,24 @@ class TelephonyConfigSync:
                     return key
             return ""
 
-        # An extension that answers in the browser (WebRTC enabled) is dialled on
-        # its WebRTC alias endpoint: media is negotiated by the endpoint the call
-        # is dialled *towards*, so a plain RTP offer to a browser arrives with no
-        # audio. Only extensions whose switch is on are affected - and their plain
-        # endpoint keeps working, so hardware phones are never disabled by it.
+        # An extension that answers in the browser (WebRTC enabled) carries a
+        # second, browser-only identity - see `render_pjsip`. Media is
+        # negotiated by the endpoint a call is dialled *towards*: a plain RTP
+        # offer reaches no browser, and a DTLS-SRTP offer reaches no Zoiper.
+        # The dial plan therefore rings both endpoints of such an extension in
+        # one Dial - a parallel ring, one leg per device kind, each with the
+        # media that device can speak - and the first to answer takes the call.
         web_endpoints: dict[str, str] = {}
         for row in self.store.list_extensions():
             username = self._clean(row.get("sip_username"))
-            if row.get("active") and row.get("webrtc_enabled") and username and username != extension_endpoint(str(row["key"])):
-                web_endpoints[str(row["key"])] = username
+            if row.get("active") and row.get("webrtc_enabled") and username:
+                web_endpoints[str(row["key"])] = browser_username(username)
 
-        def dial_target(key: str) -> str:
-            return web_endpoints.get(str(key)) or extension_endpoint(key)
+        def ring_targets(key: str) -> list[str]:
+            """Every endpoint one extension's devices live on."""
+            plain = f"PJSIP/{extension_endpoint(key)}"
+            web = web_endpoints.get(str(key))
+            return [f"PJSIP/{web}", plain] if web else [plain]
 
         def ring_extension(key: str, spoken: str = "") -> list[str]:
             """What it takes to ring one extension, wherever it was reached from.
@@ -591,32 +603,20 @@ class TelephonyConfigSync:
             signed in gets a spoken answer instead of the silence a failed Dial
             leaves behind.
 
-            A WebRTC-ticked extension is ringed on its browser endpoint first.
-            A plain softphone registered on the same extension cannot answer
-            that endpoint's DTLS-SRTP offer and rejects the call outright - it
-            would never ring at all - so when the browser endpoint reports no
-            usable device, the plain endpoint is tried before giving up.
+            An extension with the WebRTC switch on rings its browser identity
+            and its plain identity together: the browser answers DTLS-SRTP and
+            nothing else does, a desk phone or softphone answers plain RTP and
+            nothing else does, and one shared identity used to answer the wrong
+            device with the wrong media - a call that connected and stayed
+            silent.
             """
-            target = dial_target(key)
-            plain = extension_endpoint(key)
             mailbox = extension_mailbox(key)
             tail = (
                 [f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({mailbox}@engineerip,u))']
                 if key in voicemail_exts else
                 [' same => n,ExecIf($["${DIALSTATUS}" = "CHANUNAVAIL"]?Playback(ss-noservice))']
             )
-            if target == plain:
-                return [f" same => n,Dial(PJSIP/{target},30)", *tail, " same => n,Hangup()"]
-            return [
-                f" same => n,Dial(PJSIP/{target},30)",
-                ' same => n,GotoIf($["${DIALSTATUS}"="CHANUNAVAIL"]?plain)',
-                ' same => n,GotoIf($["${DIALSTATUS}"="FAILED"]?plain)',
-                *tail,
-                " same => n,Hangup()",
-                f" same => n(plain),Dial(PJSIP/{plain},30)",
-                *tail,
-                " same => n,Hangup()",
-            ]
+            return [f" same => n,Dial({','.join(ring_targets(key))},30)", *tail, " same => n,Hangup()"]
 
         def extension_route(dialed: str, key: str) -> list[str]:
             """One dialable three-digit number in this context, ringing one device."""
@@ -809,7 +809,7 @@ class TelephonyConfigSync:
         lines.extend([
             "exten => s,1,NoOp(Inbound provider call ${CALLERID(all)})",
             *(
-                [f" same => n,Dial(PJSIP/{dial_target(default_key)},30)"]
+                [f" same => n,Dial({','.join(ring_targets(default_key))},30)"]
                 if default_key else
                 [" same => n,Playback(ss-noservice)"]
             ),
@@ -832,19 +832,31 @@ class TelephonyConfigSync:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
 
+    @staticmethod
+    def _section_names(text: str) -> set[str]:
+        """The `[section]` headers of a generated config file."""
+        return set(re.findall(r"^\[([^\]]+)\]", text, re.MULTILINE))
+
     def apply(self) -> None:
         transports = self.render_transports()
-        previous = self.transports_path.read_text(encoding="utf-8") if self.transports_path.exists() else ""
+        previous_transports = self.transports_path.read_text(encoding="utf-8") if self.transports_path.exists() else ""
+        pjsip = self.render_pjsip()
+        previous_pjsip = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+        removed = self._section_names(previous_pjsip) - self._section_names(pjsip)
         self._atomic_write(self.transports_path, transports)
-        self._atomic_write(self.path, self.render_pjsip())
+        self._atomic_write(self.path, pjsip)
         self._atomic_write(self.dialplan_path, self.render_dialplan())
         self._atomic_write(self.voicemail_path, self.render_voicemail())
-        if transports != previous:
-            # Transports are read at startup only - `pjsip reload` never
-            # rebinds them. Restart once when they changed, or a Service
-            # address set after first boot never reaches the running system
-            # and every call advertises the container's private address for
-            # media: connected, billed, and completely silent.
+        if transports != previous_transports or removed:
+            # Two kinds of change only ever reach a running Asterisk through a
+            # restart. Transports are read at startup - `pjsip reload` never
+            # rebinds them, so a Service address set after first boot would
+            # leave every call advertising the container's private address for
+            # media: connected, billed, and completely silent. And a section
+            # that vanishes from the file (switching WebRTC off, deleting an
+            # extension) is documented to linger in memory after a reload -
+            # a stale WebRTC endpoint would keep answering a phone that must
+            # never see it again. Additions and edits reload cleanly.
             self.ami.restart()
             return
         self.ami.reload_pjsip()

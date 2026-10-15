@@ -29,7 +29,7 @@ class FakeAsterisk:
     def health(self):
         return {"system": "Asterisk Test"}
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None, index=0):
         return call_id
 
     def hangup(self, channel_id):
@@ -935,6 +935,32 @@ def test_sip_username_is_generated_and_cannot_be_changed(tmp_path):
     assert "idx_extensions_sip_username" in indexes
     for item in store.list_extensions(user_id):
         assert identity(item["extension"]).match(item["sip_username"]), item
+
+
+def test_the_browser_softphone_gets_its_own_identity_beside_the_phone(tmp_path):
+    """One password, two identities: the browser's carries `-webrtc`.
+
+    Asterisk answers a request on the endpoint named after its From user, so a
+    Zoiper and a browser sharing one username trade media modes - the phone is
+    offered DTLS-SRTP and every call connects and goes silent. The credentials
+    sheet therefore shows the browser identity only while the extension answers
+    in the browser, and the Softphone button exists only then.
+    """
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")
+    plain = store.reveal_extension_credentials("101", user_id)
+    assert plain["webrtc_enabled"] is False
+    assert plain["webrtc_sip_username"] == ""
+
+    store.save_extension({"extension": "101", "webrtc_enabled": True}, user_id)
+    both = store.reveal_extension_credentials("101", user_id)
+    assert both["webrtc_enabled"] is True
+    assert both["webrtc_sip_username"] == f"{both['sip_username']}-webrtc"
+    assert both["webrtc_sip_username"] != both["sip_username"]
+    # The password is shared on purpose: one secret to know, two identities.
+    assert both["sip_password"] == plain["sip_password"]
 
 
 def test_the_effective_password_is_the_one_that_rotates(tmp_path):

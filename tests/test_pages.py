@@ -119,3 +119,22 @@ def test_static_assets_keep_their_cache_policy_and_api_answers_are_not_cached(tm
         assert response.headers["Cache-Control"] == "public, max-age=3600", path
     for path in ("/phone", "/api/v1/extensions"):
         assert client.get(path).headers["Cache-Control"] == "no-store", path
+
+def test_the_softphone_button_only_shows_for_a_browser_extension():
+    """The console's Softphone button is rendered only inside a WebRTC check.
+
+    Without the extension's Browser phone option there is no browser identity
+    to sign in with, so the button must not appear for a user or an
+    administrator - a visible button that can only fail is worse than none.
+    Both consoles share this renderer, so one gate covers both roles.
+    """
+    admin_js = (Path(__file__).resolve().parents[1] / "web" / "admin.js").read_text()
+    assert '${x.webrtc_enabled ? `<button class="btn primary sm" data-softphone=' in admin_js
+    assert '${c.webrtc_enabled ? `<button class="btn primary sm" type="button" data-softphone=' in admin_js
+    for line in admin_js.splitlines():
+        if "<button" in line and "data-softphone=" in line:
+            assert "webrtc_enabled ?" in line, f"ungated softphone button: {line.strip()}"
+    # The window that opens signs in on the browser identity, never the plain
+    # one a desk phone or Zoiper uses.
+    assert "sip_username: credentials.webrtc_sip_username || credentials.sip_username" in admin_js
+

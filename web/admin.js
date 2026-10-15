@@ -1020,7 +1020,7 @@ function extensionCard(x, { wired, primary, index }) {
       ${kv('Device', deviceLine)}
     </div>
     <div class="ws-card-actions">
-      <button class="btn primary sm" data-softphone="${esc(x.key || x.extension)}" title="${x.webrtc_enabled ? 'Open the softphone signed in as this extension' : 'Tick Browser phone on this extension first'}">Softphone</button>
+      ${x.webrtc_enabled ? `<button class="btn primary sm" data-softphone="${esc(x.key || x.extension)}" title="Open the softphone signed in as this extension">Softphone</button>` : ''}
       <button class="btn primary sm" data-extension-credentials="${esc(x.key || x.extension)}">Show credentials</button>
       <button class="btn ghost sm" data-extension-flow="${esc(x.extension)}">Call flow</button>
     </div>
@@ -2216,6 +2216,7 @@ function credentialLines(c) {
     `Extension: ${extensionLabel(c.extension)}`,
     `SIP username: ${c.sip_username}`,
     `SIP password: ${c.sip_password}`,
+    ...(c.webrtc_enabled ? [`Browser softphone username: ${c.webrtc_sip_username}`] : []),
     `Registration server: ${c.server ? `${c.server}:${c.port}` : 'ask EIP for your registration host'}`,
     `Transport: ${String(c.transport || 'udp').toUpperCase()}`,
     `Number: ${(c.numbers || []).join(', ') || 'none assigned yet'}`,
@@ -2230,6 +2231,10 @@ function credentialSheetBody({ credentials: c, rotating }) {
     ['Extension', extensionLabel(c.extension), false],
     ['SIP username', c.sip_username, true],
     ['SIP password', c.sip_password, true],
+    // The browser softphone signs in on its own identity - the plain one
+    // belongs to desk phones and Zoiper. Shown only when this extension
+    // answers in the browser; the softphone fills it in on its own.
+    ...(c.webrtc_enabled ? [['Browser softphone username', c.webrtc_sip_username, true]] : []),
     ['Registration server', c.server ? `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}` : 'Ask EIP for your registration host', true],
     ['Numbers', (c.numbers || []).join(', ') || 'None assigned yet', false],
     ['Answers calls to', (c.answers || []).join(', ') || 'No number rings this yet. Set it as a number\'s incoming extension on the Numbers page.', false],
@@ -2249,7 +2254,7 @@ function credentialSheetBody({ credentials: c, rotating }) {
         </tr>`).join('')}</tbody>
     </table>
     <div class="cred-actions">
-      <button class="btn primary sm" type="button" data-softphone="${esc(c.key || c.extension)}" title="Open a softphone window signed in as this extension">Open softphone</button>
+      ${c.webrtc_enabled ? `<button class="btn primary sm" type="button" data-softphone="${esc(c.key || c.extension)}" title="Open a softphone window signed in as this extension">Open softphone</button>` : ''}
       <button class="btn ghost sm" type="button" data-cred-copy-all>Copy everything</button>
       <button class="btn ghost sm" type="button" data-cred-rotate="${esc(c.extension)}" aria-expanded="${rotating ? 'true' : 'false'}">${rotating ? 'Cancel' : 'Change password'}</button>
       <small>Anyone with these can place calls as this extension.</small>
@@ -2329,7 +2334,9 @@ async function openSoftphone(key) {
       type: 'eip-softphone:connect',
       extension: credentials.key || key,
       label: `${credentials.digits} · ${credentials.number || ''}`.replace(/ · $/, ''),
-      sip_username: credentials.sip_username,
+      // The browser signs in on its own identity (`AUMPNO_101-webrtc`); the
+      // plain username belongs to desk phones and softphones like Zoiper.
+      sip_username: credentials.webrtc_sip_username || credentials.sip_username,
       sip_password: credentials.sip_password,
       domain: credentials.server,
       wss: `wss://${credentials.server}/ws`,
@@ -2453,7 +2460,7 @@ const templates = {
         <label class="field">Voicemail PIN<input name="voicemail_pin" type="password" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="${existing ? 'Leave blank to keep existing' : '4 to 10 digits'}"></label>
       </div>
       <label class="field">Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(existing?.voicemail_email || '')}"><small>New messages are sent here when SendGrid is enabled.</small></label>
-      <label class="check"><input name="webrtc_enabled" type="checkbox" ${existing?.webrtc_enabled ? 'checked' : ''}> Answers in the browser (WebRTC)<small>Calls to this extension are set up as WebRTC media, which is what a browser needs. Register a hardware phone or softphone on its own extension: a plain phone refuses a WebRTC call.</small></label>`,
+      <label class="check"><input name="webrtc_enabled" type="checkbox" ${existing?.webrtc_enabled ? 'checked' : ''}> Answers in the browser (WebRTC)<small>Browser softphones sign in on their own WebRTC identity beside this extension's phones, so a desk phone or Zoiper keeps working here too - each device rings on the media it speaks. The Softphone button appears only while this is on.</small></label>`,
     };
   },
   group: item => ({
