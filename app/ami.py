@@ -20,8 +20,18 @@ class AsteriskAMI:
         self.timeout = timeout
 
     def _read_message(self, sock: socket.socket) -> dict[str, str]:
+        """Read one AMI reply, including the CLI body of a `Follows` reply.
+
+        `Action: Command` does not answer `Response: Success` like ordinary
+        actions: a command that ran answers `Response: Follows` with the CLI
+        output and an `--END COMMAND--` end marker - and on some versions no
+        blank line separates the header block from that output. Reading stops
+        at the header block's blank line (ordinary replies) or at the end
+        marker (Follows), then a Follows body is consumed through its marker,
+        so both layouts parse and the reply is fully drained.
+        """
         data = b""
-        while b"\r\n\r\n" not in data and len(data) < 64 * 1024:
+        while b"\r\n\r\n" not in data and b"--END COMMAND--" not in data and len(data) < 64 * 1024:
             chunk = sock.recv(4096)
             if not chunk:
                 break
@@ -31,6 +41,12 @@ class AsteriskAMI:
             if ":" in line:
                 key, value = line.split(":", 1)
                 message[key.strip()] = value.strip()
+        if message.get("Response") == "Follows" and b"--END COMMAND--" not in data:
+            while b"--END COMMAND--" not in data and len(data) < 1024 * 1024:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
         return message
 
     def _login(self, sock: socket.socket) -> None:
@@ -51,20 +67,39 @@ class AsteriskAMI:
         if response.get("Response") != "Success":
             raise AMIError("AMI authentication failed")
 
+    def _exchange(self, payload: str, accepted: set[str]) -> dict[str, str]:
+        with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
+            sock.settimeout(self.timeout)
+            self._login(sock)
+            sock.sendall(payload.encode())
+            response = self._read_message(sock)
+        if response.get("Response") not in accepted:
+            raise AMIError(response.get("Message", "AMI action failed"))
+        return response
+
     def action(self, action: str, **headers: str) -> dict[str, str]:
+        """Run an ordinary AMI action, which answers `Response: Success`."""
         action_id = headers.pop("ActionID", str(uuid.uuid4()))
         payload = [f"Action: {action}", f"ActionID: {action_id}"]
         payload.extend(f"{key}: {value}" for key, value in headers.items())
         payload.append("")
         payload.append("")
-        with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
-            sock.settimeout(self.timeout)
-            self._login(sock)
-            sock.sendall("\r\n".join(payload).encode())
-            response = self._read_message(sock)
-            if response.get("Response") != "Success":
-                raise AMIError(response.get("Message", "AMI action failed"))
-            return response
+        return self._exchange("\r\n".join(payload), accepted={"Success"})
+
+    def command(self, cli: str) -> dict[str, str]:
+        """Run a CLI command over AMI.
+
+        `Action: Command` is not an ordinary action: a command that ran
+        answers `Response: Follows` with the CLI output ended by
+        `--END COMMAND--` - judging it by the `Response: Success` contract
+        would call a healthy answer a failure. Both shapes are accepted
+        (some versions answer `Success` with `Output:` lines); only a
+        refusal (`Response: Error`, or anything else unexpected) raises.
+        """
+        return self._exchange(
+            f"Action: Command\r\nActionID: {uuid.uuid4()}\r\nCommand: {cli}\r\n\r\n",
+            accepted={"Success", "Follows"},
+        )
 
     def reload_pjsip(self) -> dict[str, str]:
         return self.action("Reload", Module="res_pjsip.so")
@@ -107,7 +142,9 @@ class AsteriskAMI:
                 reply = self._read_message(sock)
             except OSError:
                 reply = {}
-            if reply and reply.get("Response") != "Success":
+            # A command that ran answers `Response: Follows` (with the CLI
+            # output) or `Success` - only a real refusal is a failure here.
+            if reply and reply.get("Response") not in {"Success", "Follows"}:
                 raise AMIError(
                     f"Asterisk refused the restart: {reply.get('Message', 'AMI action failed')}"
                 )
@@ -121,7 +158,7 @@ class AsteriskAMI:
         time.sleep(min(1.0, timeout))  # let the process actually go down first
         while True:
             try:
-                self.action("Command", Command="core show version")
+                self.command("core show version")
                 return
             except (AMIError, OSError) as exc:
                 last = exc
