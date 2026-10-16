@@ -1693,7 +1693,10 @@ def test_three_101s_on_three_numbers_stay_three_devices(tmp_path):
     for number in keys:
         assert f"[101-{number.lstrip('+')}]\ntype=aor" in rendered
     assert "[101]\ntype=aor" not in rendered
-    assert rendered.count("identify_by=username,auth_username") == 3
+    # Each extension renders two endpoints - the canonical one and the alias
+    # named after its SIP username (the name endpoint identification looks
+    # up) - so identify_by appears twice per extension.
+    assert rendered.count("identify_by=username,auth_username") == 6
 
 
 def test_a_lines_device_is_dialled_by_its_endpoint_name(tmp_path):

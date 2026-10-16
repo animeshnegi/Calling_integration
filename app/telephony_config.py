@@ -461,6 +461,22 @@ class TelephonyConfigSync:
                     f"[{browser_name}]", "type=endpoint", f"aors={browser_name}", f"auth=auth-{section}-webrtc",
                     f"callerid=<{digits}>", *browser_endpoint_body, "",
                 ]
+            # The alias ENDPOINT named after the SIP username - the third
+            # object from the comment above. This is load-bearing: Asterisk's
+            # username/auth_username identification is a lookup of an endpoint
+            # object BY THAT NAME (res_pjsip_endpoint_identifier_user.c:
+            # find_endpoint()), so a request signed with the SIP username is
+            # unidentified and rejected unless an endpoint of that exact name
+            # exists. It shares the plain identity's auth and AORs but is its
+            # own endpoint: a request signed `AUMPNO_101` is answered with the
+            # plain RTP body here, never the browser's DTLS-SRTP - the media
+            # mode follows the endpoint name the client signed in with.
+            alias_endpoint: list[str] = []
+            if username and username != section:
+                alias_endpoint = [
+                    f"[{username}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{section}",
+                    *endpoint_body, "",
+                ]
             lines.extend([
                 f"; Extension {extension}",
                 f"[{section}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
@@ -469,6 +485,7 @@ class TelephonyConfigSync:
                 f"username={username}", f"password={password}", *auth_digest, "",
                 f"[{section}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{section}",
                 *endpoint_body, "",
+                *alias_endpoint,
                 *browser_endpoint,
             ])
 

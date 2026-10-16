@@ -45,11 +45,18 @@ def test_provider_allowlist_renders_identify(tmp_path: Path):
 
 
 def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
-    """A phone signs in as e.g. AUHFZH_101 while the endpoint is named 101.
+    """A phone signs in as e.g. AUHFZH_101 while the canonical endpoint is 101.
 
-    Asterisk identifies endpoints by matching the From-user against the
-    endpoint name, so without auth_username identification and an AOR named
-    after the SIP username every registration dies with InvalidAccountID.
+    Asterisk's username/auth_username identification is a lookup of an
+    endpoint object BY NAME: res_pjsip_endpoint_identifier_user.c takes the
+    From-header username (or the Authorization username) and retrieves an
+    endpoint whose id is exactly that string. It never reads auth objects or
+    AORs to decide identity - so without an endpoint literally named after
+    the SIP username the registration is unidentified (AccountID=<unknown>,
+    ChallengeResponseFailed, ExpectedResponse empty in the security log) and
+    no password is correct. The AOR named after the username is what the
+    registrar binds the contact against; the alias endpoint is what makes the
+    request identified at all.
     """
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
@@ -57,7 +64,6 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     assert username != "101" and username.endswith("_101")   # prefixed credential
 
     text = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_pjsip()
-    # The endpoint can be found through the Authorization header username.
     assert "identify_by=username,auth_username" in text
     # The registrar resolves the To-user against the endpoint's AOR list, so
     # the SIP username must exist as an AOR alongside the extension number -
@@ -65,18 +71,27 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     # with the credential on its sheet and nothing here may take that away.
     assert f"[{username}]\ntype=aor" in text
     assert f"aors=101,{username}" in text
+    # ...and it must exist as an ENDPOINT named after the username, sharing
+    # the plain identity's auth and AORs - the object identification looks
+    # up by name. Its body is the PLAIN body: a request signed with the phone
+    # username is answered with RTP, never DTLS-SRTP.
+    alias = text.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in alias and "webrtc=yes" not in alias
+    assert "auth=auth-101" in alias and f"aors=101,{username}" in alias
     # The browser endpoint - a separate `[username-webrtc]` identity - is
     # rendered only for an extension whose WebRTC switch is on, so plain SIP
     # is unaffected by it either way. The two identities never share a name,
     # an AOR or an auth object: a request is answered by the endpoint named
     # after its From user, and one shared name used to answer a Zoiper with
     # DTLS-SRTP - a call that connected and stayed completely silent.
-    assert f"[{username}]\ntype=endpoint" not in text
     assert f"[{username}-webrtc]\ntype=endpoint" not in text
     assert "auth=auth-101-webrtc" not in text
     assert "webrtc=yes" not in text
     store.save_extension({"extension": "101", "webrtc_enabled": True})
     with_webrtc = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_pjsip()
+    # The phone's alias endpoint stays plain whatever the switch says.
+    alias_on = with_webrtc.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in alias_on and "webrtc=yes" not in alias_on
     assert f"[{username}-webrtc]\ntype=endpoint" in with_webrtc
     assert f"[{username}-webrtc]\ntype=aor" in with_webrtc
     # The browser registers against its own AOR only, and the plain identity's
@@ -314,7 +329,10 @@ def test_webrtc_off_leaves_normal_sip_alone_and_on_adds_the_browser(tmp_path: Pa
     # browser endpoint exists at all.
     off = sync.render_pjsip()
     assert "\n[101-13025550098]\ntype=endpoint" in off
-    assert f"\n[{username}]\ntype=endpoint" not in off
+    # The phone signs in as `username`, so an endpoint of that name exists -
+    # identification is a name lookup and a registration without it is
+    # unidentified and rejected whatever the password is.
+    assert f"\n[{username}]\ntype=endpoint" in off
     assert f"\n[{username}-webrtc]\ntype=endpoint" not in off
     assert off.count("webrtc=yes") == 0
 
@@ -329,8 +347,11 @@ def test_webrtc_off_leaves_normal_sip_alone_and_on_adds_the_browser(tmp_path: Pa
     assert "transport=transport-wss" in alias and "webrtc=yes" in alias
     assert "transport=transport-udp" in sip_after        # the phone still registers here
     # The plain phone keeps its own name even with the switch on: a request
-    # signed `AUMPNO_101` must be answered by THIS endpoint, never the browser's.
-    assert f"[{username}]\ntype=endpoint" not in on
+    # signed `AUMPNO_101` is answered by the endpoint of that name - with the
+    # plain body - and never by the browser's `-webrtc` endpoint. Media mode
+    # follows the endpoint that identified the request.
+    phone_alias = on.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in phone_alias and "webrtc=yes" not in phone_alias
 
 
 def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path):
@@ -479,9 +500,10 @@ def test_internal_calls_negotiate_hd_voice_first(tmp_path: Path):
 
     assert TelephonyConfigSync.INTERNAL_CODECS == "g722,ulaw,alaw"
     # disallow=all first, so nothing outside the policy can be negotiated.
-    # The extension, and the device account - whose two sections (its hashed
-    # name and its SIP username) are the same registration contract.
-    assert text.count("disallow=all\nallow=g722,ulaw,alaw") == 3
+    # The extension (canonical + its SIP-username alias), and the device
+    # account - whose two sections (its hashed name and its SIP username) are
+    # the same registration contract.
+    assert text.count("disallow=all\nallow=g722,ulaw,alaw") == 4
     assert "allow=ulaw,alaw" not in text
     # Every codec on the list has to be one Asterisk can actually translate.
     assert TelephonyConfigSync._codecs(TelephonyConfigSync.INTERNAL_CODECS) == TelephonyConfigSync.INTERNAL_CODECS
