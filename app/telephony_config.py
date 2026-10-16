@@ -26,6 +26,12 @@ class TelephonyConfigSync:
         self.dialplan_path = self.path.with_name("extensions.dynamic.conf")
         self.voicemail_path = self.path.with_name("voicemail.dynamic.conf")
         self.transports_path = self.path.with_name("pjsip.transports.conf")
+        # A restart the sync still owes Asterisk. Written before the attempt
+        # and cleared after it, so a failure (AMI briefly down while the
+        # containers boot) is picked up by the next sync instead of being
+        # lost - the files are already updated by then, and an unchanged
+        # render would otherwise never retry the restart.
+        self.restart_marker = self.path.with_name("restart-pending")
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -286,7 +292,12 @@ class TelephonyConfigSync:
                 "this server's own public IP - SDP and ICE must advertise a numeric "
                 "media address."
             )
-        resolved = next((info[4][0] for info in infos if info[0] == socket.AF_INET), infos[0][4][0])
+        # DNS can hand out several A records in rotating order. Pick the
+        # lowest address so two renders of one setting never disagree: a
+        # flapping rendered value looks like a transport change and would
+        # restart Asterisk on every sync.
+        candidates = sorted({info[4][0] for info in infos if info[0] == socket.AF_INET})
+        resolved = candidates[0] if candidates else infos[0][4][0]
         TelephonyConfigSync._check_media_address(resolved)
         return resolved
 
@@ -945,7 +956,7 @@ class TelephonyConfigSync:
         self._atomic_write(self.path, pjsip)
         self._atomic_write(self.dialplan_path, self.render_dialplan())
         self._atomic_write(self.voicemail_path, self.render_voicemail())
-        if transports != previous_transports or removed:
+        if transports != previous_transports or removed or self.restart_marker.exists():
             # Two kinds of change only ever reach a running Asterisk through a
             # restart. Transports are read at startup - `pjsip reload` never
             # rebinds them, so a Service address set after first boot would
@@ -954,8 +965,11 @@ class TelephonyConfigSync:
             # that vanishes from the file (switching WebRTC off, deleting an
             # extension) is documented to linger in memory after a reload -
             # a stale WebRTC endpoint would keep answering a phone that must
-            # never see it again. Additions and edits reload cleanly.
+            # never see it again. Additions and edits reload cleanly. The
+            # restart itself waits for calls to clear (see AsteriskAMI).
+            self._atomic_write(self.restart_marker, "pending\n")
             self.ami.restart()
+            self.restart_marker.unlink(missing_ok=True)
             return
         self.ami.reload_pjsip()
         self.ami.reload_voicemail()

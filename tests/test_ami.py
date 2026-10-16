@@ -23,13 +23,13 @@ from app.ami import AMIError, AsteriskAMI
 
 SUCCESS_LOGIN = b"Response: Success\r\nMessage: Authentication accepted\r\n\r\n"
 ERROR_LOGIN = b"Response: Error\r\nMessage: Bad username or password\r\n\r\n"
-ERROR_COMMAND = b"Response: Error\r\nMessage: Command 'core restart now' is not permitted\r\n\r\n"
+ERROR_COMMAND = b"Response: Error\r\nMessage: Command 'core restart when convenient' is not permitted\r\n\r\n"
 
 # The normal CLI-command reply: Response: Follows, the output, end marker.
 FOLLOWS_RESTART = (
     b"Response: Follows\r\n"
     b"Privilege: Command\r\n"
-    b"Command: core restart now\r\n"
+    b"Command: core restart when convenient\r\n"
     b"\r\n"
     b"--END COMMAND--\r\n"
 )
@@ -84,6 +84,7 @@ class FakeSocket:
 def scripted(monkeypatch, connections, failures=0):
     """Route `create_connection` through `connections`; refuse the first N."""
     opened = []
+    sockets = []
     pending = list(connections)
     refused = [failures]
 
@@ -93,10 +94,11 @@ def scripted(monkeypatch, connections, failures=0):
             refused[0] -= 1
             raise OSError("connection refused")
         sock = FakeSocket(pending.pop(0) if pending else [])
+        sockets.append(sock)
         return sock
 
     monkeypatch.setattr(socket, "create_connection", create_connection)
-    return opened
+    return opened, sockets
 
 
 def ami():
@@ -163,15 +165,20 @@ def test_a_dropped_connection_after_the_command_is_the_restart_itself(monkeypatc
     monkeypatch.setattr("time.sleep", lambda _s: None)
 
     # The Follows reply for the restart lands, then the process goes down.
-    opened = scripted(monkeypatch, [
+    opened, sockets = scripted(monkeypatch, [
         [SUCCESS_LOGIN, FOLLOWS_RESTART],  # the command ran; process restarting
         [SUCCESS_LOGIN, FOLLOWS_VERSION],  # the verify poll: back up
     ])
     ami().restart(verify_timeout=5)
     assert len(opened) == 2
+    # The command is `core restart when convenient`, never `now`: a restart in
+    # the middle of a call tears it down without a BYE - the far end never
+    # learns and the caller hears silence as the call connects. "When
+    # convenient" runs at once on an idle PBX and waits out live calls.
+    assert b"Command: core restart when convenient" in sockets[0].sent
 
     # Same again when the connection dies before any reply reaches us.
-    opened = scripted(monkeypatch, [
+    opened, _ = scripted(monkeypatch, [
         [SUCCESS_LOGIN, b""],
         [SUCCESS_LOGIN, FOLLOWS_VERSION],
     ])

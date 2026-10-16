@@ -63,3 +63,17 @@ def test_the_docs_never_ask_for_a_manual_restart_after_the_service_address():
         assert "restart the `asterisk` container after changing it" not in text, name
     assert "restarts Asterisk by itself" in (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
 
+
+def test_asterisk_is_started_by_absolute_path_so_core_restart_stays_in_place():
+    """`core restart` re-executes argv[0] - that must not depend on PATH.
+
+    With a bare `exec asterisk`, the re-exec after `core restart` can fail
+    once the process has setuid'd to its runtime user; the process then exits
+    0 and Docker's restart policy turns an ordinary in-place restart into a
+    container restart - a RestartCount that climbs and every call dropped.
+    """
+    entrypoint = (ROOT / "asterisk" / "entrypoint.sh").read_text(encoding="utf-8")
+    assert 'ASTERISK_BIN="$(command -v asterisk)"' in entrypoint
+    assert 'exec "$ASTERISK_BIN"' in entrypoint
+    assert "exec asterisk " not in entrypoint
+

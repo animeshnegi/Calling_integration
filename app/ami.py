@@ -119,6 +119,12 @@ class AsteriskAMI:
         reads the just-written configuration files as it boots, which is why
         the files are written before this runs.
 
+        The restart is `core restart when convenient`, not `now`: it happens
+        at once on an idle PBX but waits for the current calls to finish
+        otherwise. A restart in the middle of a call tears it down without a
+        BYE - the far end never learns, and the caller hears silence the
+        moment the call connects - and no configuration change is worth that.
+
         The failure modes are not the same and must not be swallowed alike:
         failing to reach or authenticate with AMI means the restart NEVER
         happened - the running Asterisk keeps the old configuration while the
@@ -136,7 +142,7 @@ class AsteriskAMI:
             except AMIError as exc:
                 raise AMIError("AMI authentication failed; Asterisk was not restarted") from exc
             sock.sendall(
-                f"Action: Command\r\nActionID: {uuid.uuid4()}\r\nCommand: core restart now\r\n\r\n".encode()
+                f"Action: Command\r\nActionID: {uuid.uuid4()}\r\nCommand: core restart when convenient\r\n\r\n".encode()
             )
             try:
                 reply = self._read_message(sock)

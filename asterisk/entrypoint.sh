@@ -157,4 +157,11 @@ if [ ! -f /usr/lib/asterisk/modules/res_srtp.so ]; then
     echo "         (see asterisk/Dockerfile), then recreate the container." >&2
 fi
 
-exec asterisk -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"
+# Start Asterisk by absolute path. `core restart` re-executes argv[0]; a bare
+# "asterisk" depends on PATH surviving the setuid to the runtime user, and when
+# it does not the re-exec fails, the process exits 0, and Docker's restart
+# policy makes an ordinary in-place restart look like a crash (the container's
+# RestartCount climbs and every call is dropped).
+ASTERISK_BIN="$(command -v asterisk)"
+export PATH
+exec "$ASTERISK_BIN" -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"

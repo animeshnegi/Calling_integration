@@ -587,6 +587,85 @@ def test_media_address_refuses_addresses_the_internet_cannot_reach(monkeypatch):
     assert resolve("203.0.113.20") == "203.0.113.20"
 
 
+class CountingAMI(DummyAMI):
+    """A DummyAMI that counts restart attempts (and can fail the first)."""
+
+    def __init__(self, fail_first=0):
+        self.restarts = 0
+        self.fail_first = fail_first
+
+    def restart(self):
+        self.restarts += 1
+        if self.restarts <= self.fail_first:
+            raise OSError("connection refused")
+
+
+def test_syncing_twice_without_changes_restarts_asterisk_only_once(tmp_path):
+    """A restart is owed for real changes, not for every sync.
+
+    The ARI worker syncs at startup and the console syncs on every save; if
+    each sync invented a reason to restart, every call would eventually be
+    torn down mid-sentence by `core restart`. Transports and section removals
+    are the only restart-worthy changes, and an unchanged render owes
+    nothing."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    ami = CountingAMI()
+    sync = TelephonyConfigSync(store, ami, str(tmp_path / "pjsip.dynamic.conf"))
+    sync.apply()
+    sync.apply()
+    sync.apply()
+    assert ami.restarts == 1
+
+
+def test_a_failed_restart_is_retried_by_the_next_sync(tmp_path):
+    """A restart that never reached Asterisk must not be lost.
+
+    The files are written before the restart (Asterisk reads them at boot), so
+    after a failed attempt the next sync sees an unchanged render and would
+    never try again - leaving a running Asterisk on old transports forever.
+    The marker makes the next sync pick the owed restart back up."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    failing = CountingAMI(fail_first=1)
+    sync = TelephonyConfigSync(store, failing, str(tmp_path / "pjsip.dynamic.conf"))
+    try:
+        sync.apply()
+    except OSError:
+        pass
+    assert failing.restarts == 1
+    sync.apply()  # same rendered content - the restart is owed, not implied
+    assert failing.restarts == 2
+    sync.apply()  # now it is owed nothing more
+    assert failing.restarts == 2
+
+
+def test_the_media_address_is_stable_when_dns_rotates_records(monkeypatch):
+    """Several A records in rotating order must render the same address.
+
+    A rendered address that flaps between two syncs looks exactly like a
+    transport change and restarts Asterisk on every sync - so the renderer
+    always picks the lowest address of the answer set."""
+    import socket as socket_module
+
+    rotating = [
+        [("203.0.113.20", 0), ("203.0.113.10", 0)],
+        [("203.0.113.10", 0), ("203.0.113.20", 0)],
+    ]
+    calls = {"n": 0}
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        # Both records every time - only their order rotates, as round-robin
+        # DNS does.
+        addrs = rotating[calls["n"] % len(rotating)]
+        calls["n"] += 1
+        return [(socket_module.AF_INET, socket_module.SOCK_DGRAM, socket_module.IPPROTO_UDP, "", addr) for addr in addrs]
+
+    monkeypatch.setattr(socket_module, "getaddrinfo", getaddrinfo)
+    assert TelephonyConfigSync._media_address("sip.example.com") == "203.0.113.10"
+    assert TelephonyConfigSync._media_address("sip.example.com") == "203.0.113.10"
+
+
 def test_an_unresolvable_service_address_stops_the_sync_and_keeps_the_last_good_config(tmp_path: Path, monkeypatch):
     """A broken Service address must not half-apply.
 

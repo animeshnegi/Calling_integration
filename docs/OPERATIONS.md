@@ -29,7 +29,7 @@ chmod 600 .env
 nano .env
 ```
 
-Set every `GENERATE...`/`CHANGE-ME` value. `ASTERISK_EXTERNAL_ADDRESS` is the first-boot fallback for the public SIP/RTP address; after setup the admin panel's **Service address** is the single source of truth - and when it changes, the configuration sync writes the transports and restarts Asterisk by itself (`pjsip reload` never rebinds a transport), so no manual restart is needed or helpful. Confirm it landed with `docker compose logs asterisk` (the restart is logged) and `pjsip show transport transport-wss | grep -i external` (the new numeric address, without touching the container). Keep the same `SECRET_KEY` after first deployment because it encrypts SIP and webhook secrets in the settings database.
+Set every `GENERATE...`/`CHANGE-ME` value. `ASTERISK_EXTERNAL_ADDRESS` is the first-boot fallback for the public SIP/RTP address; after setup the admin panel's **Service address** is the single source of truth - and when it changes, the configuration sync writes the transports and restarts Asterisk by itself (`pjsip reload` never rebinds a transport), so no manual restart is needed or helpful. The restart waits for calls to clear (`core restart when convenient`) - it happens at once on an idle PBX and never tears down a live call. Confirm it landed with `docker compose logs asterisk` and `pjsip show transport transport-wss | grep -i external` (the new numeric address, without touching the container). Keep the same `SECRET_KEY` after first deployment because it encrypts SIP and webhook secrets in the settings database.
 
 Generate secrets, for example:
 
