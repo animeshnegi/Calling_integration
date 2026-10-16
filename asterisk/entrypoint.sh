@@ -30,6 +30,16 @@ touch "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "
 chown asterisk:telephony "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf" "$DYNAMIC_DIR/pjsip.transports.conf"
 chmod 0660 "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf" "$DYNAMIC_DIR/pjsip.transports.conf"
 
+# The container runs Asterisk as the `asterisk` user, but the runtime
+# directories arrive root-owned (tmpfs mounts and fresh volumes). A queue log
+# or call recording it cannot write surfaces exactly when a call connects -
+# "Unable to create queue log: Permission denied" at boot, "No audio available
+# on Recorder/..." on the call - and a recording failure used to take the live
+# call down with it. Own the whole runtime tree before Asterisk starts.
+mkdir -p /var/spool/asterisk/recording /var/spool/asterisk/voicemail
+chown -R asterisk:telephony /var/log/asterisk /var/run/asterisk /var/spool/asterisk
+chmod 0770 /var/spool/asterisk/recording
+
 # Seed the SIP transports on first boot only. Afterwards the telephony sync
 # renders this file from the admin panel's Service address (service_host),
 # which is the single source of truth; a container restart applies changes.

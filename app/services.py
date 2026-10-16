@@ -400,6 +400,30 @@ class TelephonyService:
             if channel and channel != keep:
                 self.asterisk.hangup(channel)
 
+    def _hangup_call_channels(self, call: Call, keep: str = "") -> None:
+        """Hang up every live channel this call still owns.
+
+        Not just the first leg: a call may ring several devices, and a call
+        that ends while some of them still ring leaves orphans. Answering an
+        orphan finds the far side long gone and the call cuts the instant it
+        is picked up - while the leftover devices keep ringing forever, which
+        looks like endless incoming calls.
+        """
+        for channel, _ in self._leg_pairs(call):
+            if channel and channel != keep:
+                self._hangup_quietly(channel)
+        head = str(call.customer_channel_id or "")
+        if head and head != keep:
+            self._hangup_quietly(head)
+        for channel in self._customer_leg_ids(call, keep):
+            self._hangup_quietly(channel)
+
+    def _hangup_quietly(self, channel: str) -> None:
+        try:
+            self.asterisk.hangup(channel)
+        except Exception:
+            pass
+
     # Callers being asked for an extension, keyed by the channel they are on:
     # the prompt they are hearing, the digits collected so far and the clock.
     # In memory on purpose - a session belongs to a live channel.
@@ -857,8 +881,25 @@ class TelephonyService:
             self.asterisk.create_bridge(current.call_id)
             self.asterisk.add_channel_to_bridge(bridge_id, current.employee_channel_id)
             self.asterisk.add_channel_to_bridge(bridge_id, current.customer_channel_id)
-            updated = self.store.update(current.call_id, bridge_id=bridge_id, status="bridged")
-            self.notify_crm("call.bridged", updated)
+        except Exception:
+            # The bridge itself could not be built: the call cannot run. Take
+            # down everything it still owns - every ringing leg included - so
+            # nothing keeps ringing a call that no longer exists.
+            try:
+                self.asterisk.destroy_bridge(bridge_id)
+            except Exception:
+                pass
+            self._hangup_call_channels(current)
+            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed")
+            self.notify_crm("call.failed", updated, {"reason": "bridge_setup_failed"})
+            return
+        updated = self.store.update(current.call_id, bridge_id=bridge_id, status="bridged")
+        self.notify_crm("call.bridged", updated)
+        # Everything below is enhancement on top of a live, bridged call. A
+        # failure here - a recorder that cannot write, a notification that
+        # cannot queue - must never hang up the people already talking: the
+        # recording is marked failed and the call carries on.
+        try:
             recording = self._recording_settings(updated.extension)
             if not recording["enabled"]:
                 return
@@ -872,11 +913,7 @@ class TelephonyService:
                 except Exception:
                     self.notify_crm("call.recording_announcement_failed", updated)
         except Exception:
-            self.asterisk.destroy_bridge(bridge_id)
-            self.asterisk.hangup(current.employee_channel_id or "")
-            self.asterisk.hangup(current.customer_channel_id or "")
-            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed")
-            self.notify_crm("call.failed", updated, {"reason": "bridge_setup_failed"})
+            self.store.update(current.call_id, recording_status="failed")
 
     def _finalize(self, call_id: str, reason: str) -> None:
         with self._finalize_lock:
@@ -888,6 +925,9 @@ class TelephonyService:
             if not call or call.status == "completed":
                 return
             ended = iso_now()
+            # The call is over: nothing it owns may keep ringing. Anything
+            # still up is an orphan of the same call and answers into a void.
+            self._hangup_call_channels(call)
             duration_start = call.answered_at or call.started_at
             try:
                 started = datetime.fromisoformat(duration_start)
@@ -1001,6 +1041,12 @@ class TelephonyService:
             current = self.store.get(call.call_id)
             if not current:
                 return
+            if current.status in {"completed", "failed"}:
+                # A device of a call that already ended picked up. There is
+                # nothing to bridge it to; hang the straggler up instead of
+                # building a bridge to a far side that is long gone.
+                self._hangup_quietly(str(channel_id))
+                return
             employee_legs = [leg for leg, _ in self._leg_pairs(current)]
             if current.direction == "inbound" and channel_id in employee_legs:
                 answered_extension = next((ext for leg, ext in self._leg_pairs(current) if leg == channel_id), current.extension)
@@ -1086,9 +1132,7 @@ class TelephonyService:
                     return
                 for leg in legs:
                     self._leg_index.pop(leg, None)
-                other = call.customer_channel_id if employee_leg else call.employee_channel_id
-                if other:
-                    self.asterisk.hangup(other)
+                self._hangup_call_channels(call, keep=channel_id)
                 self._finalize(call.call_id, "channel_destroyed")
                 return
             for leg in legs:

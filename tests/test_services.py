@@ -1,7 +1,7 @@
 import time
 from pathlib import Path
 
-from app.models import CallStore
+from app.models import Call, CallStore
 from app.services import TelephonyService
 
 
@@ -850,3 +850,99 @@ def test_the_first_device_to_answer_wins_and_the_other_stays_silent_on_the_line(
     call = store.get(call.call_id)
     assert call.status not in {"failed"}
     assert call.ended_at is None
+
+
+def _bridged_setup(tmp_path: Path):
+    """A call whose employee answered: two other desks still ring."""
+    service, asterisk, store = make_service(tmp_path)
+    call = Call(
+        call_id="cut-1", contact_id=None, member_id=None,
+        extension="main-1", phone="+13025551234", direction="inbound", status="ringing",
+        employee_channel_id="leg-answer",
+        employee_channel_ids="leg-answer|101,leg-two|102,leg-three|103",
+        customer_channel_id="cust-1",
+    )
+    store.create(call)
+    for channel in ("leg-answer", "leg-two", "leg-three", "cust-1"):
+        service._leg_index[channel] = call.call_id
+        asterisk.live_channels.append(channel)
+    return service, asterisk, store, call
+
+
+def test_a_recording_that_cannot_write_never_hangs_up_the_live_call(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+
+    def broken_recording(*args):
+        raise RuntimeError("Unable to open recording file: Permission denied")
+
+    asterisk.start_bridge_recording = broken_recording
+    service._recording_settings = lambda extension: {
+        "enabled": True, "format": "wav", "beep": False,
+        "max_duration": 60, "announcement": False, "announcement_media": "",
+    }
+    service.handle_ari_event({
+        "type": "ChannelStateChange",
+        "channel": {"id": "leg-answer", "state": "Up"},
+        "timestamp": "2026-10-17T10:00:00Z",
+    })
+    updated = store.get(call.call_id)
+    # The bridge stands and the people keep talking; only the recording failed.
+    # The only hangups are the losing sibling desks the answerer beat.
+    assert updated.bridge_id == "bridge-cut-1"
+    assert updated.recording_status == "failed"
+    assert set(asterisk.hung_up) == {"leg-two", "leg-three"}
+    assert "leg-answer" not in asterisk.hung_up
+    assert "cust-1" not in asterisk.hung_up
+
+
+def test_a_bridge_that_cannot_build_takes_down_every_leg_of_the_call(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+
+    def broken_bridge(*args):
+        raise RuntimeError("bridge is gone")
+
+    asterisk.add_channel_to_bridge = broken_bridge
+    service.handle_ari_event({
+        "type": "ChannelStateChange",
+        "channel": {"id": "leg-answer", "state": "Up"},
+        "timestamp": "2026-10-17T10:00:00Z",
+    })
+    # Every leg of the failed call goes down - not just the one that answered.
+    # Leftover ringing legs answer into a void and cut the instant they pick up.
+    assert {"cust-1", "leg-answer", "leg-two", "leg-three"} <= set(asterisk.hung_up)
+    assert store.get(call.call_id).status == "failed"
+
+
+def test_a_call_that_ends_hangs_up_every_leg_that_still_rings(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    service._finalize(call.call_id, "test_over")
+    # A finished call owns nothing: no desk of it may keep ringing. Without
+    # this sweep a call that ends leaves its devices ringing forever, and each
+    # answered leftover cuts the instant somebody picks up.
+    assert {"cust-1", "leg-answer", "leg-two", "leg-three"} <= set(asterisk.hung_up)
+    assert store.get(call.call_id).status in {"completed", "failed"}
+
+
+def test_a_straggler_of_a_finished_call_is_hung_up_not_bridged(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    store.update(call.call_id, status="failed", ended_at="2026-10-17T10:05:00Z")
+    service.handle_ari_event({
+        "type": "ChannelStateChange",
+        "channel": {"id": "leg-two", "state": "Up"},
+        "timestamp": "2026-10-17T10:05:30Z",
+    })
+    updated = store.get(call.call_id)
+    assert asterisk.hung_up == ["leg-two"]          # the straggler goes down
+    assert updated.status == "failed"               # no resurrection of the call
+    assert updated.bridge_id is None                # and no bridge was built
+
+
+def test_the_customer_giving_up_takes_down_every_desk_it_was_ringing(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    service.handle_ari_event({
+        "type": "ChannelDestroyed",
+        "channel": {"id": "cust-1", "name": "PJSIP/trunk-00000001"},
+        "timestamp": "2026-10-17T10:01:00Z",
+    })
+    # Every desk of the call goes down - the first leg alone is not enough.
+    assert {"leg-answer", "leg-two", "leg-three"} <= set(asterisk.hung_up)

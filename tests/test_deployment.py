@@ -77,3 +77,14 @@ def test_asterisk_is_started_by_absolute_path_so_core_restart_stays_in_place():
     assert 'exec "$ASTERISK_BIN"' in entrypoint
     assert "exec asterisk " not in entrypoint
 
+
+
+def test_entrypoint_gives_asterisk_the_runtime_directories_it_writes_to():
+    """Asterisk runs as the `asterisk` user and writes into /var/log and
+    /var/spool at call time. A root-owned queue log or recording directory
+    surfaces as "Permission denied" on the very first call and took the live
+    call down with the failed recording."""
+    entrypoint = Path("asterisk/entrypoint.sh").read_text()
+    assert "chown -R asterisk:telephony /var/log/asterisk" in entrypoint
+    assert "/var/spool/asterisk" in entrypoint.split("chown -R asterisk:telephony", 1)[1]
+    assert "mkdir -p /var/spool/asterisk/recording" in entrypoint
