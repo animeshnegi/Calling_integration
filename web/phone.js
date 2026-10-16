@@ -37,7 +37,14 @@ let iceServers=DEFAULT_ICE_SERVERS;
 const iceConfig=()=>({iceServers:Array.isArray(iceServers)&&iceServers.length?iceServers:DEFAULT_ICE_SERVERS});
 const cleanNumber=v=>String(v||"").replace(/[^0-9+*#]/g,"");
 const sipDomain=()=>settings().domain||location.hostname;
-const defaultWss=domain=>"wss://"+String(domain||location.hostname).replace(/^https?:\/\//,"").replace(/\/$/,"")+"/ws";
+/* Where the SIP WebSocket lives: this page's own host, never the SIP domain.
+   The SIP address is for REGISTER addressing only - it is deliberately a bare
+   IP or an unproxied DNS record (SIP/RTP are UDP and cannot traverse a web
+   proxy), so a wss:// URL built from it either fails TLS outright (an IP
+   literal cannot hold a certificate) or needs a second HTTPS vhost nobody
+   builds. The host serving this page already has HTTPS with a real
+   certificate; one proxied /ws path on it carries the signaling. */
+const defaultWss=()=>"wss://"+location.host+"/ws";
 const sipTarget=n=>{const d=sipDomain();return /^sip:/i.test(n)?n:"sip:"+cleanNumber(n)+"@"+d};
 
 function tickClock(){$("sb-time").textContent=new Date().toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}
@@ -248,14 +255,20 @@ async function ensureSipLibrary(){
    and say so - every answer maps to one of those failures. */
 async function wssDiagnosis(wssUrl){
   let probe;
-  try{probe=new URL(wssUrl);probe.protocol=probe.protocol==="wss:"?"https:":"http:"}catch{return""}
+  try{probe=new URL(wssUrl)}catch{return" "+wssUrl+" is not a valid WebSocket address."}
+  const isIp=/^\d{1,3}(\.\d{1,3}){3}$/.test(probe.hostname)||probe.hostname.includes(":");
+  if(isIp){
+    return" The WebSocket address points at a bare IP ("+probe.hostname+"): a TLS certificate cannot cover an IP literal, so every browser refuses it before connecting. Use the host this page is served from (wss://"+location.host+"/ws) or a DNS name with a valid certificate.";
+  }
+  probe.protocol=probe.protocol==="wss:"?"https:":"http:";
   try{
     const r=await fetch(probe.href);
-    if(r.status===404)return" "+probe.href+" answered HTTP 404 - the reverse proxy has no route for this WebSocket path; it must forward /ws to Asterisk's HTTP listener.";
+    if(r.status===404)return" "+probe.href+" answered HTTP 404 - the reverse proxy has no route for this WebSocket path. In the nginx server block that serves "+probe.hostname+", add: location /ws { proxy_pass http://127.0.0.1:8088; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection \"upgrade\"; }";
+    if(r.status===502||r.status===503||r.status===504)return" "+probe.href+" answered HTTP "+r.status+" - the reverse proxy cannot reach Asterisk's WebSocket listener: check the asterisk container is up and docker-compose publishes 127.0.0.1:8088:8088.";
     if(r.status>=500)return" "+probe.href+" answered HTTP "+r.status+" - the reverse proxy cannot reach Asterisk's WebSocket listener.";
     return" "+probe.href+" answered HTTP "+r.status+" instead of a WebSocket upgrade.";
   }catch{
-    return" "+probe.href+" could not be reached from this page (network, DNS, TLS or cross-origin).";
+    return" "+probe.href+" could not be reached from this page (network, DNS, or the TLS certificate for "+probe.hostname+").";
   }
 }
 
@@ -359,7 +372,7 @@ $("speaker-btn").onclick=async()=>{
 $("login-form").onsubmit=async e=>{
   e.preventDefault();
   const domain=$("login-domain").value.trim().replace(/^https?:\/\//,"").replace(/\/$/,"");
-  const s={...settings(),username:$("login-username").value.trim(),password:$("login-password").value,domain,wss:$("login-wss").value.trim()||defaultWss(domain)};
+  const s={...settings(),username:$("login-username").value.trim(),password:$("login-password").value,domain,wss:$("login-wss").value.trim()||defaultWss()};
   if(!s.username||!s.password||!s.domain)return;
   saveSettings(s);setLoginBusy(true);$("login-status").className="login-status";$("login-status").textContent="Connecting to SIP server…";
   try{await connectSip(s)}catch(err){$("login-status").className="login-status error";$("login-status").textContent=err.message||"Authentication failed.";setState("Offline");try{if(ua)ua.stop()}catch{}ua=null}
@@ -371,14 +384,14 @@ $("settings-btn").onclick=()=>{
   $("sip-extension").value=s.extension||"";
   $("sip-username").value=s.username||"";
   $("sip-domain").value=s.domain||"";
-  $("sip-wss").value=s.wss||defaultWss(s.domain);
+  $("sip-wss").value=s.wss||defaultWss();
   $("api-token").value=s.apiToken||"";
   settingsDialog.showModal()
 };
 $("connect-btn").onclick=async()=>{
   const old=settings(),domain=$("sip-domain").value.trim().replace(/^https?:\/\//,"").replace(/\/$/,"");
   const s={...old,extension:$("sip-extension").value.trim(),username:$("sip-username").value.trim(),domain,
-           wss:$("sip-wss").value.trim()||defaultWss(domain),apiToken:$("api-token").value.trim()};
+           wss:$("sip-wss").value.trim()||defaultWss(),apiToken:$("api-token").value.trim()};
   saveSettings(s);$("settings-status").className="settings-status";$("settings-status").textContent="Reconnecting…";
   try{await connectSip(s);$("settings-status").className="settings-status ok";$("settings-status").textContent="Phone connected."}catch(err){$("settings-status").className="settings-status error";$("settings-status").textContent=err.message}
 };
@@ -433,7 +446,7 @@ async function startConsoleSession(m){
   // The console may hand over the platform's ICE servers (its own STUN/TURN);
   // without them the built-in STUN list applies.
   iceServers=Array.isArray(m.iceServers)&&m.iceServers.length?m.iceServers:DEFAULT_ICE_SERVERS;
-  handoff={extension:m.extension||"",username:m.sip_username,password:m.sip_password,domain:m.domain,wss:m.wss||defaultWss(m.domain),apiToken:""};
+  handoff={extension:m.extension||"",username:m.sip_username,password:m.sip_password,domain:m.domain,wss:m.wss||defaultWss(),apiToken:""};
   try{if(ua)ua.stop()}catch{}ua=null;
   showConsoleScreen(label,`Signing in as ${label}…`);
   try{await connectSip(handoff);document.title=`Softphone · ${label}`;$("brand-title").textContent=label}

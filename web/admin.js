@@ -2344,7 +2344,12 @@ async function openSoftphone(key) {
       sip_username: credentials.webrtc_sip_username || credentials.sip_username,
       sip_password: credentials.sip_password,
       domain: credentials.server,
-      wss: `wss://${credentials.server}/ws`,
+      // The WebSocket rides the console's own host - the SIP address may be
+      // a bare IP (the media rules require it resolves straight to this VM),
+      // and an IP cannot hold a TLS certificate. One proxied /ws path on the
+      // web vhost carries it. (Set a different address in the phone's
+      // settings for unusual topologies.)
+      wss: `wss://${location.host}/ws`,
       // The platform's ICE servers (blank = the phone's built-in STUN default).
       ...(Array.isArray(credentials.ice_servers) && credentials.ice_servers.length
         ? { iceServers: credentials.ice_servers } : {}),

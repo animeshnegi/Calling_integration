@@ -355,8 +355,8 @@ async function main() {
     const ua = good.sip.instances[0];
     check('signing in registers the username with the SIP domain',
       ua && ua.config.uri === 'sip:KUDGTE_101@sip.engineerip.com', ua && ua.config.uri);
-    check('the WebSocket transport is derived from the domain',
-      good.sip.sockets[0] === 'wss://sip.engineerip.com/ws', good.sip.sockets[0]);
+    check("the WebSocket rides this page's own host, where HTTPS already works",
+      good.sip.sockets[0] === 'wss://phone.example.com/ws', good.sip.sockets[0]);
     check('the registration is started', ua.started === true);
     check('a registered phone shows the dialer', shown(good.d, 'phone-app') && !shown(good.d, 'login-screen'));
     check('the connection badge says the phone is ready',
@@ -378,6 +378,14 @@ async function main() {
       scheme.sip.instances[0].config.uri === 'sip:KUDGTE_101@sip.engineerip.com', scheme.sip.instances[0].config.uri);
     check('an explicit WebSocket server overrides the default',
       scheme.sip.sockets[0] === 'wss://edge.engineerip.com:8089/ws', scheme.sip.sockets[0]);
+
+    /* The SIP domain may be the bare VM IP - the media rules push operators
+       there - and an IP cannot hold a TLS certificate, so the WebSocket must
+       never follow it. */
+    const bareIp = boot();
+    await signIn(bareIp, { domain: '203.0.113.10' });
+    check('a bare-IP SIP address never becomes the WebSocket address - an IP cannot hold a TLS certificate',
+      bareIp.sip.sockets[0] === 'wss://phone.example.com/ws', bareIp.sip.sockets[0]);
 
     const denied = boot();
     await signIn(denied, { password: 'bad-password' });
@@ -914,7 +922,7 @@ async function main() {
     check('the dialog is prefilled with the signed-in account',
       d.getElementById('sip-username').value === 'KUDGTE_101'
       && d.getElementById('sip-domain').value === 'sip.engineerip.com'
-      && d.getElementById('sip-wss').value === 'wss://sip.engineerip.com/ws',
+      && d.getElementById('sip-wss').value === 'wss://phone.example.com/ws',
       d.getElementById('sip-wss').value);
 
     d.getElementById('sip-wss').value = 'wss://edge.engineerip.com/ws';

@@ -29,9 +29,25 @@ def test_the_http_listener_serves_the_websocket_modules():
 
 
 def test_the_documented_proxy_route_matches_the_one_the_softphone_dials():
+    """The WebSocket rides the web domain, and the docs say so.
+
+    The SIP address must resolve straight to the VM (or be the bare IP) so
+    call media can travel - and an IP cannot hold a TLS certificate, so a
+    wss:// URL built from the SIP address fails in every browser. The
+    softphone dials the host serving its page; the /ws route therefore
+    belongs on the web vhost, and the docs must show it there.
+    """
     deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert "proxy_pass http://127.0.0.1:8088;" in deployment
     assert "Upgrade" in deployment and "websocket" in deployment.lower()
+    assert "wss://<the host this page is served from>/ws" in deployment
+
+    phone = (ROOT / "web" / "phone.js").read_text(encoding="utf-8")
+    admin = (ROOT / "web" / "admin.js").read_text(encoding="utf-8")
+    # Never derive the WebSocket from the SIP domain or the Service address.
+    assert 'location.host+"/ws"' in phone
+    assert "credentials.server}/ws" not in admin
+    assert "wss://${location.host}/ws" in admin
 
 
 def test_the_docs_never_ask_for_a_manual_restart_after_the_service_address():

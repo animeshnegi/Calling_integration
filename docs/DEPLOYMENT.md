@@ -261,7 +261,11 @@ SIP port 5060). Every customer credential sheet, API example and webhook URL
 follows automatically: phones are told to register at `sip.example.com:5060`,
 and all API documentation is built on `https://tel.example.com`.
 
-Example nginx server block for the web domain:
+Example nginx server block for the web domain. It carries two proxied paths:
+the consoles/API (`/`) and the softphone's WebSocket (`/ws`), forwarded to
+Asterisk's HTTP/WebSocket server on loopback (the compose file publishes
+`127.0.0.1:8088` for this; `127.0.0.1:8089` is the same listener over
+Asterisk's own TLS):
 
 ```nginx
 server {
@@ -275,22 +279,6 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Real-IP $remote_addr;
     }
-}
-```
-
-SIP and RTP on `sip.example.com` are never proxied - the plain DNS record plus
-open firewall ports 5060/udp and the RTP range are all a desk phone or a
-desktop softphone needs. The browser softphone is the one exception: it signs
-in over a WebSocket at `wss://sip.example.com/ws`, so the SIP domain needs a
-TLS listener with exactly one proxied path, forwarded to Asterisk's
-HTTP/WebSocket server on loopback (the compose file publishes `127.0.0.1:8088`
-for this; `127.0.0.1:8089` is the same listener over Asterisk's own TLS):
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name sip.example.com;
-    # ssl_certificate ...; ssl_certificate_key ...;   # a trusted certificate
 
     location /ws {
         proxy_pass http://127.0.0.1:8088;
@@ -303,11 +291,24 @@ server {
 }
 ```
 
-Without that block (or with `/ws` falling through to the Flask app), the
+The softphone dials `wss://<the host this page is served from>/ws` - the web
+domain, not the SIP domain. That is deliberate: the SIP address must resolve
+straight to this VM (or even be the bare IP) so call media can travel, and an
+IP cannot hold a TLS certificate - while the web domain already has HTTPS with
+a real one. The phone's settings offer the WebSocket address explicitly, so a
+different topology (e.g. carrying `/ws` on a SIP-domain vhost instead) is one
+field away.
+
+SIP and RTP on `sip.example.com` are never proxied - the plain DNS record plus
+open firewall ports 5060/udp and the RTP range are all a desk phone or a
+desktop softphone needs.
+
+Without the `/ws` route (or with it falling through to the Flask app), the
 softphone reports **"SIP WebSocket disconnected."** while desk phones keep
-working fine - the sign-in never reaches Asterisk. The softphone's settings
-offer the WebSocket address explicitly; it defaults to `wss://<SIP domain>/ws`
-exactly to match this path.
+working fine - the sign-in never reaches Asterisk. The error names the URL it
+tried and what answered: HTTP 404 means no `/ws` route in the server block
+that serves that host, HTTP 502/503/504 means the proxy cannot reach
+`127.0.0.1:8088` (is `127.0.0.1:8088:8088` published in docker-compose?).
 
 ## 15. Production hardening
 
