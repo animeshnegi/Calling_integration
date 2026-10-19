@@ -1255,3 +1255,41 @@ def test_a_voicemail_step_in_a_flow_makes_the_mailbox_live(tmp_path: Path):
     dialplan = sync.render_dialplan()
     assert f"exten => {mailbox},1,VoiceMail({mailbox}@engineerip,u)" in dialplan
     assert f"VoiceMail({mailbox}@engineerip,u)" in dialplan    # and the ring-out tail reaches it
+
+
+def test_the_call_handling_tab_carries_the_mailbox_settings(tmp_path: Path):
+    """PIN and greeting belong to the desk's Call Handling, where the user
+    asked for them: the pin written on the voicemail step is the pin for the
+    box, and the greeting is recorded by dialing *97 from the desk itself."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "TestProvider", "server": "sip.example.com", "port": 5060,
+        "username": "user", "password": "password", "transport": "udp",
+        "codecs": "ulaw,alaw", "allowed_ips": "198.51.100.10/32",
+    })
+    store.save_user({
+        "username": "pin-co", "password": "customer-password-01", "role": "user",
+        "email": "pin@example.com", "full_name": "PIN Owner", "company_name": "PIN Co",
+    })
+    owner = int(next(row["id"] for row in store.list_users() if row["username"] == "pin-co"))
+    number = "+13025559909"
+    store.save_number({
+        "number": number, "description": "Main line", "provider": "TestProvider",
+        "owner_user_id": owner, "active": True,
+    })
+    row = store.add_extension_to_number(number, owner, {"extension": "101", "display_name": "Desk 101", "active": True})
+    key = str(row["key"])
+    store.save_routing_flow(owner, {
+        "name": "Call handling", "active": True,
+        "route": {"nodes": [
+            {"type": "extension", "extension": key, "timeout": 15, "configured": True},
+            {"type": "voicemail", "mailbox": key, "enabled": True, "pin": "1234", "configured": True},
+        ]},
+    }, target_type="extension", target=key)
+
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    voicemail = sync.render_voicemail()
+    assert "101-13025559909 => 1234," in voicemail          # the step's pin is the box's pin
+    dialplan = sync.render_dialplan()
+    assert "exten => *97,1,NoOp(EngineerIP voicemail login)" in dialplan
+    assert "VoiceMailMain(@engineerip)" in dialplan          # greetings are recorded here

@@ -2626,6 +2626,9 @@ class SettingsStore:
         return {
             "type": "ivr", "prompt": self.IVR_DEFAULT_PROMPT, "voice": "platform",
             "input_timeout": 6, "attempts": 2, "fallback": "",
+            # Single-key mappings ("press 1 for the front desk"). Empty means
+            # the classic menu: the caller types the full extension number.
+            "keys": [],
             "label": "Enter an extension", "configured": True,
         }
 
@@ -2666,6 +2669,19 @@ class SettingsStore:
                     "A desk flow can only ring the desk and take a message - "
                     f"move {', '.join(offenders)} to the main number's journey"
                 )
+        for node in route["nodes"]:
+            if not isinstance(node, dict) or node.get("type") != "ivr":
+                continue
+            seen = set()
+            for entry in node.get("keys") or []:
+                if not isinstance(entry, dict):
+                    raise ValueError("An IVR key mapping must be a key and a destination")
+                key = str(entry.get("key") or "").strip()
+                if not key.isdigit() or len(key) != 1 or key in seen:
+                    raise ValueError("IVR keys must be single digits, each used once")
+                seen.add(key)
+                if not str(entry.get("target") or "").strip():
+                    raise ValueError("An IVR key mapping needs a destination")
         owner_id = int(owner_user_id)
         scope = ""
         if target_type == "number":
@@ -2761,6 +2777,10 @@ class SettingsStore:
             for field in ("extension", "mailbox", "fallback"):
                 if str(node.get(field) or "").strip():
                     node[field] = self._resolve_flow_key(node[field], owner_user_id, number)
+            if isinstance(node.get("keys"), list):
+                for entry in node["keys"]:
+                    if isinstance(entry, dict) and str(entry.get("target") or "").strip():
+                        entry["target"] = self._resolve_flow_key(entry["target"], owner_user_id, number)
 
     def list_groups(self, owner_user_id: int | None = None):
         with self._connect() as db:
@@ -2884,6 +2904,10 @@ class SettingsStore:
             if answer is not None:
                 return answer
         plan = self._plan_nodes(nodes, owner, extension, number)
+        considered = list(dict.fromkeys([*(plan.get("destinations") or []), *( [extension] if extension else [] )]))
+        handling = self._desk_handling(considered, number, owner)
+        plan["timeouts"] = {**handling["timeouts"], **(plan.get("timeouts") or {})}
+        plan["fallbacks"] = handling["fallbacks"]
         if not plan.get("voicemail"):
             plan["voicemail"] = self._desk_voicemail(number, extension, owner)
         return plan
@@ -2907,6 +2931,42 @@ class SettingsStore:
                 return resolved
         return value
 
+    def _desk_handling(self, keys: list[str], number: str, owner) -> dict:
+        """What each rung desk asks for beyond the journey: how long it rings,
+        and where an unanswered call is handed if it says so.
+
+        The desk's flow is a small, ordered thing - ring the desk, optionally
+        hand an unanswered call to another desk, then the mailbox - so the
+        chain is read in that order and offered as the call's next step only
+        after everything already rung has died unanswered.
+        """
+        timeouts: dict[str, int] = {}
+        fallbacks: list[str] = []
+        allowed = {
+            item["key"] for item in self.list_extensions(int(owner))
+            if item["active"]
+        } if owner is not None else set()
+        if owner is not None and number:
+            allowed &= set(self.scoped_extension_keys(number, int(owner)))
+        for key in keys:
+            flow = next(
+                (item for item in self.list_routing_flows(int(owner) if owner is not None else None, target_type="extension")
+                 if str(item.get("target")) == str(key)),
+                None,
+            )
+            for node in ((flow or {}).get("route") or {}).get("nodes") or []:
+                if not isinstance(node, dict):
+                    continue
+                kind = str(node.get("type"))
+                if kind == "extension" and str(node.get("extension") or "") == str(key):
+                    if str(node.get("timeout") or "").isdigit():
+                        timeouts[str(key)] = max(5, min(120, int(node["timeout"])))
+                elif kind == "extension":
+                    value = str(node.get("extension") or "")
+                    if value and (not allowed or value in allowed) and value not in fallbacks and value not in keys:
+                        fallbacks.append(value)
+        return {"timeouts": timeouts, "fallbacks": fallbacks}
+
     def _desk_voicemail(self, number: str, extension: str, owner) -> str:
         """The mailbox of the desk the line answers with, when the flow is silent.
 
@@ -2928,7 +2988,7 @@ class SettingsStore:
             None,
         )
         for node in ((flow or {}).get("route") or {}).get("nodes") or []:
-            if isinstance(node, dict) and str(node.get("type")) == "voicemail":
+            if isinstance(node, dict) and str(node.get("type")) == "voicemail" and node.get("enabled") is not False:
                 return self._voicemail_key(number, str(node.get("mailbox") or key), owner)
         return ""
 
@@ -2958,12 +3018,23 @@ class SettingsStore:
             "voice": voice["id"], "voice_label": voice["label"], "media": f"sound:{voice['media']}",
             "input_timeout": int(node.get("input_timeout") or 6),
             "attempts": int(node.get("attempts") or 2),
+            "key_map": {
+                str(entry.get("key")): str(entry.get("target"))
+                for entry in (node.get("keys") or [])
+                if isinstance(entry, dict) and str(entry.get("target")) in allowed
+            },
             "fallback": fallback if fallback in allowed else "",
             "fallback_destinations": list(tail.get("destinations") or []),
             "voicemail": tail.get("voicemail") or self._desk_voicemail(number, extension, owner),
             "timeout": int(tail.get("timeout") or 30),
             "forward": tail.get("forward") or "",
             "outside_hours": bool(tail.get("outside_hours")),
+            "timeouts": tail.get("timeouts") or {},
+            "fallbacks": list(tail.get("fallbacks") or []) or self._desk_handling(
+                list(dict.fromkeys([*(tail.get("destinations") or []), *([extension] if extension else [])])),
+                number, owner,
+            )["fallbacks"],
+            "forward_timeout": int(tail.get("forward_timeout") or 25),
         }
 
     def _plan_nodes(self, nodes: list[dict], owner, extension: str, number: str = "") -> dict:
@@ -2978,6 +3049,7 @@ class SettingsStore:
         now = datetime.now()
         open_now, seen_hours = False, False
         destinations, timeout, voicemail, forward, forward_timeout = [], 30, "", "", 25
+        timeouts: dict[str, int] = {}
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -3010,7 +3082,11 @@ class SettingsStore:
                 value = str(node.get("extension") or "")
                 if value and (not allowed or value in allowed):
                     destinations.append(value)
-            elif kind == "voicemail" and not voicemail:
+                    # A desk says how long it rings: its own step carries the
+                    # seconds, and the leg is rung for exactly that long.
+                    if str(node.get("timeout") or "").isdigit():
+                        timeouts[value] = max(5, min(120, int(node["timeout"])))
+            elif kind == "voicemail" and not voicemail and node.get("enabled") is not False:
                 voicemail = self._voicemail_key(number, str(node.get("mailbox") or ""), owner)
             elif kind == "forward" and not forward:
                 forward = str(node.get("phone") or "")
@@ -3023,6 +3099,7 @@ class SettingsStore:
         return {
             "destinations": unique, "timeout": timeout, "voicemail": voicemail,
             "forward": forward, "forward_timeout": forward_timeout,
+            "timeouts": {key: timeouts[key] for key in unique if key in timeouts},
             "outside_hours": bool(seen_hours and not open_now),
         }
 
@@ -3053,9 +3130,15 @@ class SettingsStore:
         device even when another line has an extension with the same digits.
         """
         extension = str(extension)
-        nodes = [{"type": "extension", "extension": extension, "label": f"Ring extension {extension_digits(extension)}", "configured": True}]
+        nodes = [{
+            "type": "extension", "extension": extension, "timeout": 25,
+            "label": f"Ring extension {extension_digits(extension)}", "configured": True,
+        }]
         if voicemail:
-            nodes.append({"type": "voicemail", "mailbox": extension, "label": f"Voicemail {extension_digits(extension)}", "configured": True})
+            nodes.append({
+                "type": "voicemail", "mailbox": extension, "enabled": True,
+                "label": f"Voicemail {extension_digits(extension)}", "configured": True,
+            })
         return {"nodes": nodes}
 
     def extension_voicemail_enabled(self, extension: str) -> bool:

@@ -626,15 +626,24 @@ class TelephonyConfigSync:
                     return str(row["key"])
             return ""
 
+        pins: dict[str, str] = {}
         flows = [(row, str(row.get("phone_number") or "")) for row in self.store.list_call_routes()]
         flows += [(row, "") for row in self.store.list_routing_flows()]
         for flow, number in flows:
             for node in ((flow.get("route") or {}).get("nodes") or []):
                 if not isinstance(node, dict) or str(node.get("type")) != "voicemail":
                     continue
+                if node.get("enabled") is False:
+                    continue
                 key = resolve(node.get("mailbox"), number)
                 if key:
                     keys.add(key)
+                    pin = str(node.get("pin") or "").strip()
+                    if pin:
+                        # The Call Handling tab carries the mailbox settings;
+                        # the pin written there is the pin for the box.
+                        pins.setdefault(key, pin)
+        self._flow_voicemail_pins = pins
         return keys
 
     def render_voicemail(self) -> str:
@@ -654,7 +663,12 @@ class TelephonyConfigSync:
             # and never `101@engineerip`. The pin is the one stored for the row.
             mailbox = extension_mailbox(key)
             self.store.alias_voicemail_pin(mailbox, extension_digits(key))
-            pin = self._clean(self.store.get_voicemail_pin(mailbox) or self.store.get_voicemail_pin(key) or extension_digits(key))
+            pin = self._clean(
+                self.store.get_voicemail_pin(mailbox)
+                or self.store.get_voicemail_pin(key)
+                or (getattr(self, "_flow_voicemail_pins", {}) or {}).get(str(extension["key"]))
+                or extension_digits(key)
+            )
             display_name = self._clean(extension.get("display_name") or f"Extension {extension_digits(key)}")
             lines.append(f"{mailbox} => {pin},{display_name},,,attach=no|delete=no")
         lines.append("")

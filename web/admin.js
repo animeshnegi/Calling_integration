@@ -1982,7 +1982,30 @@ function nodeTypeAllowed(kind, targetType = flowTargetParts(currentFlowKey()).ty
 }
 function renderFlowPalette() {
   const { type } = flowTargetParts(currentFlowKey());
-  document.querySelectorAll('[data-node-type]').forEach(button => {
+  function syncIvrMapMode() {
+  const mode = document.querySelector('[data-map-mode]');
+  const rows = document.getElementById('ivr-map-rows');
+  const show = !!mode && mode.value === 'keys';
+  if (rows) rows.hidden = !show;
+  document.querySelectorAll('[data-add-map]').forEach(button => { button.hidden = !show; });
+}
+document.getElementById('flow-config-fields')?.addEventListener('click', event => {
+  if (event.target.closest('[data-add-map]')) {
+    const rows = document.getElementById('ivr-map-rows');
+    const mode = document.querySelector('[data-map-mode]');
+    if (mode) mode.value = 'keys';
+    if (rows) rows.insertAdjacentHTML('beforeend', ivrMapRow());
+    syncIvrMapMode();
+    return;
+  }
+  const remove = event.target.closest('[data-remove-map]');
+  if (remove) remove.closest('.map-row')?.remove();
+});
+document.getElementById('flow-config-fields')?.addEventListener('change', event => {
+  if (event.target.matches('[data-map-mode]')) syncIvrMapMode();
+});
+
+document.querySelectorAll('[data-node-type]').forEach(button => {
     const allowed = nodeTypeAllowed(button.dataset.nodeType, type);
     button.hidden = !allowed;
     button.draggable = allowed;
@@ -1990,7 +2013,7 @@ function renderFlowPalette() {
   const hint = $('palette-logic-hint');
   if (hint) {
     hint.textContent = type === 'extension'
-      ? 'A desk rings and takes messages. The journey for the line — phone menu, business hours, forwarding — is edited on the main number.'
+      ? 'Call handling for this desk: how long it rings, where an unanswered call goes next, and its mailbox. The journey for the line — phone menu, business hours, forwarding — is edited on the main number.'
       : '';
     hint.hidden = !hint.textContent;
   }
@@ -2077,6 +2100,21 @@ function flowStepDefaults(node) {
       input_timeout: node.input_timeout || 6, attempts: node.attempts || 2, fallback: node.fallback || '',
     };
   }
+  if (node?.type === 'extension' && !node.extension) {
+    const { type, target } = flowTargetParts(currentFlowKey() || $('route-target')?.value);
+    return {
+      ...node,
+      extension: type === 'extension' ? String(target) : '',
+      timeout: node.timeout || 25,
+    };
+  }
+  if (node?.type === 'voicemail' && !node.mailbox) {
+    const { type, target } = flowTargetParts(currentFlowKey() || $('route-target')?.value);
+    return { ...node, mailbox: type === 'extension' ? String(target) : '', enabled: node.enabled !== false, pin: node.pin || '' };
+  }
+  if (node?.type === 'ivr') {
+    return { ...node, keys: Array.isArray(node.keys) ? node.keys : [] };
+  }
   if (!['simultaneous', 'sequential', 'ring_group'].includes(node?.type)) return node;
   if ((node.extensions || []).length) return node;
   // The target is the workflow being edited, whichever picker opened it: the
@@ -2095,6 +2133,17 @@ function flowStepDefaults(node) {
   const group = (state.groups || []).find(x => String(x.id) === String(target));
   if (type === 'group' && group) return { ...node, extensions: [...group.members] };
   return node;
+}
+
+function ivrMapRow(entry = {}) {
+  const keyOptions = ['1','2','3','4','5','6','7','8','9','0']
+    .map(digit => `<option value="${digit}" ${String(entry.key) === digit ? 'selected' : ''}>${digit}</option>`).join('');
+  return `<div class="map-row" style="display:flex;gap:8px;align-items:center;margin:6px 0">
+    <select name="map_key" aria-label="Key">${keyOptions}</select>
+    <span aria-hidden="true">→</span>
+    <select name="map_target" aria-label="Destination"><option value="">Choose destination</option>${flowExtensionOptions(entry.target || '')}</select>
+    <button type="button" class="icon-btn" data-remove-map aria-label="Remove mapping">✕</button>
+  </div>`;
 }
 
 function openFlowConfig(index) {
@@ -2121,14 +2170,29 @@ function openFlowConfig(index) {
       <label class="field">Ring destinations<select name="extensions" multiple size="6" required>${flowExtensionOptions(node.extensions || [])}</select><small>Select at least one extension.</small></label>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
   } else if (node.type === 'extension') {
-    fields = `<label class="field">Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension || '')}</select></label>`;
+    const desk = flowTargetParts(currentFlowKey()).type === 'extension';
+    fields = `<label class="field">Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension || '')}</select>
+        <small>${desk ? 'The first step rings this desk itself; a later step is where an unanswered call is handed.' : 'The extension this step rings.'}</small></label>
+      <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required>
+        <small>How long this extension rings before the flow moves on.</small></label>`;
   } else if (node.type === 'voicemail') {
-    fields = `<label class="field">Voicemail mailbox<select name="mailbox" required><option value="">Choose mailbox</option>${flowExtensionOptions(node.mailbox || '')}</select></label>`;
+    fields = `<label class="field switch-line"><input type="checkbox" name="enabled" ${node.enabled !== false ? 'checked' : ''}> Take messages (voicemail on)</label>
+      <label class="field">Voicemail mailbox<select name="mailbox" required><option value="">Choose mailbox</option>${flowExtensionOptions(node.mailbox || '')}</select></label>
+      <label class="field">Mailbox PIN (4–8 digits)<input name="pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" value="${esc(node.pin || '')}" placeholder="Leave empty to keep the stored PIN"></label>
+      <p class="field-hint">Greeting: dial <b>*97</b> from the mailbox's own phone to record or change it. Messages and greetings live in the mailbox until deleted.</p>`;
   } else if (node.type === 'forward') {
     fields = `<label class="field">Forward to E.164 number<input name="phone" type="tel" pattern="\\+[1-9][0-9]{7,14}" placeholder="+13025550123" value="${esc(node.phone || '')}" required></label>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
   } else if (node.type === 'ivr') {
-    fields = `<label class="field">Spoken prompt<textarea name="prompt" rows="3" maxlength="400" required>${esc(node.prompt || '')}</textarea>
+    const mapRows = (node.keys || []).map(entry => ivrMapRow(entry)).join('');
+    fields = `<label class="field">Key mappings<select name="map_mode" data-map-mode>
+        <option value="keys" ${(node.keys || []).length ? 'selected' : ''}>Press a key (1, 2, 3 …) for a destination</option>
+        <option value="digits" ${(node.keys || []).length ? '' : 'selected'}>Callers type the full extension number</option>
+      </select>
+        <small>Mapped keys answer immediately; with no mappings the classic menu accepts full extension numbers.</small></label>
+      <div class="map-rows" id="ivr-map-rows">${mapRows}</div>
+      <button type="button" class="btn ghost sm" data-add-map>＋ Add key mapping</button>
+      <label class="field">Spoken prompt<textarea name="prompt" rows="3" maxlength="400" required>${esc(node.prompt || '')}</textarea>
         <small>Read out before the caller is asked to type an extension — 400 characters at most.</small></label>
       <div class="field-row">
         <label class="field">Voice<select name="voice">${ivrVoiceOptions(node.voice)}</select></label>
@@ -2140,6 +2204,7 @@ function openFlowConfig(index) {
   }
   $('flow-config-title').textContent = `Configure ${flowLabel(node.type)}`;
   $('flow-config-fields').innerHTML = common + fields;
+  if (node.type === 'ivr') syncIvrMapMode();
   openOverlay('flow-config-modal');
 }
 
@@ -2166,10 +2231,19 @@ function saveFlowConfig(event) {
     node.label = node.label || `${group ? `${group.name} · ` : ''}${node.extensions.join(', ')} · ${node.timeout}s`;
   } else if (node.type === 'extension') {
     node.extension = form.get('extension');
-    node.label = node.label || `Extension ${node.extension}`;
+    node.timeout = Number(form.get('timeout')) || 25;
+    const deskKey = String(flowTargetParts(currentFlowKey()).type === 'extension' ? flowTargetParts(currentFlowKey()).target : '');
+    node.label = !deskKey
+      ? (node.label || `Extension ${node.extension}`)
+      : (String(node.extension) === deskKey
+        ? `Ring ${extensionDigitsOf(node.extension)} · ${node.timeout}s`
+        : `If unanswered: ring ${extensionDigitsOf(node.extension)}`);
   } else if (node.type === 'voicemail') {
     node.mailbox = form.get('mailbox');
-    node.label = node.label || `Mailbox ${node.mailbox}`;
+    node.enabled = form.get('enabled') === 'on';
+    node.pin = String(form.get('pin') || '').trim();
+    if (node.pin && !/^[0-9]{4,8}$/.test(node.pin)) return notify('The mailbox PIN must be 4 to 8 digits', true);
+    node.label = node.enabled ? (node.label || `Mailbox ${node.mailbox}`) : 'Voicemail off';
   } else if (node.type === 'forward') {
     node.phone = form.get('phone');
     node.timeout = Number(form.get('timeout'));
@@ -2180,7 +2254,17 @@ function saveFlowConfig(event) {
     node.input_timeout = Number(form.get('input_timeout')) || 6;
     node.attempts = Number(form.get('attempts')) || 2;
     node.fallback = String(form.get('fallback') || '');
-    node.label = node.label || 'Enter an extension';
+    const mode = String(form.get('map_mode') || 'digits');
+    const mapKeys = form.getAll('map_key'), mapTargets = form.getAll('map_target');
+    node.keys = mode === 'keys'
+      ? mapKeys.map((key, index) => ({ key: String(key), target: String(mapTargets[index] || '') })).filter(row => row.target)
+      : [];
+    if (node.keys.length && new Set(node.keys.map(row => row.key)).size !== node.keys.length) {
+      return notify('Each IVR key can be used only once', true);
+    }
+    node.label = node.keys.length
+      ? node.keys.map(row => `Press ${row.key}`).join(' · ')
+      : (node.label === 'Enter an extension' ? '' : node.label) || 'Enter an extension';
   }
   node.configured = true;
   renderFlowNodes();

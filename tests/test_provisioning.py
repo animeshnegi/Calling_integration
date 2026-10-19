@@ -664,7 +664,7 @@ class RingingAsterisk(FakeAsterisk):
     def start_bridge_recording(self, *args, **kwargs):
         return None
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None, timeout=30):
         leg = f"{call_id}-employee" if index == 0 else f"{call_id}-employee-{index}"
         self.legs.append((leg, extension))
         self.live.append(leg)

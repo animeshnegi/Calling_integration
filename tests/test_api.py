@@ -12,7 +12,7 @@ class FakeAsterisk:
     def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None, index=0):
         return call_id
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None, timeout=30):
         return f"{call_id}-employee"
 
     def continue_in_dialplan(self, channel_id, context, extension):

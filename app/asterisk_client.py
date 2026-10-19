@@ -103,6 +103,7 @@ class AsteriskClient:
 
     def create_inbound_employee_leg(
         self, call_id: str, extension: str, customer_channel_id: str, index: int = 0, endpoint: str | None = None,
+        timeout: int = 30,
     ) -> str:
         """Ring one device for an inbound call.
 
@@ -118,7 +119,7 @@ class AsteriskClient:
             params={
                 "endpoint": endpoint or endpoint_name(extension), "app": self.app,
                 "appArgs": f"inbound_employee,{call_id}", "channelId": employee_channel,
-                "originator": customer_channel_id, "timeout": 30,
+                "originator": customer_channel_id, "timeout": max(5, min(120, int(timeout))),
             },
             json={"variables": self._variables(call_id)},
         )
