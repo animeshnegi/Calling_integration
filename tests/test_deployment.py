@@ -88,3 +88,21 @@ def test_entrypoint_gives_asterisk_the_runtime_directories_it_writes_to():
     assert "chown -R asterisk:telephony /var/log/asterisk" in entrypoint
     assert "/var/spool/asterisk" in entrypoint.split("chown -R asterisk:telephony", 1)[1]
     assert "mkdir -p /var/spool/asterisk/recording" in entrypoint
+
+
+def test_the_routing_canvas_puts_the_journey_on_the_main_number():
+    """The engine runs a number's journey; the panel must edit exactly that.
+
+    The old canvas offered menus, hours and forwarding on every extension and
+    refused to save a number's flow at all - the two halves of "the IVR and
+    voicemail do not work": everything was configured where the engine never
+    looks, and the one flow it does look at could not be edited.
+    """
+    js = Path("web/admin.js").read_text()
+    html = Path("web/admin.html").read_text()
+    assert "A number has no workflow of its own" not in js
+    assert "Main numbers" in js                       # the journey is a first-class target
+    assert "incoming journey" in js
+    assert "DESK_NODE_TYPES" in js                    # a desk only rings and takes messages
+    assert "palette-logic-hint" in html
+    assert "main number" in html                      # the toolbar says where the journey lives

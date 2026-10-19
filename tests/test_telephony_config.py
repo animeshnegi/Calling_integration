@@ -1210,3 +1210,48 @@ def test_a_full_number_of_any_platform_line_is_dialled_inside_the_platform(tmp_p
     # The carrier catch-all is only ever reached by numbers the platform does not own.
     assert context_a.index("exten => +13025550011,1") < context_a.index("exten => _+X.,1")
     assert "_+X." in context_a
+
+
+def test_a_voicemail_step_in_a_flow_makes_the_mailbox_live(tmp_path: Path):
+    """Answering "Voice Mail" in the journey is the decision to take messages.
+
+    Before, the renderer wrote mailboxes only for extensions whose separate SIP
+    toggle was on - so a journey that named a mailbox dropped the call at the
+    exact moment it should have taken a message. The flow step itself now
+    defines the mailbox and the dialplan entry behind it.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "TestProvider", "server": "sip.example.com", "port": 5060,
+        "username": "user", "password": "password", "transport": "udp",
+        "codecs": "ulaw,alaw", "allowed_ips": "198.51.100.10/32",
+    })
+    store.save_user({
+        "username": "vm-co", "password": "customer-password-01", "role": "user",
+        "email": "vm@example.com", "full_name": "VM Owner", "company_name": "VM Co",
+    })
+    owner = int(next(row["id"] for row in store.list_users() if row["username"] == "vm-co"))
+    number = "+13025559907"
+    store.save_number({
+        "number": number, "description": "Main line", "provider": "TestProvider",
+        "owner_user_id": owner, "active": True,
+    })
+    row = store.add_extension_to_number(number, owner, {"extension": "101", "display_name": "Desk 101", "active": True})
+    key = str(row["key"])
+    assert store.extension_voicemail_enabled(key) is False
+
+    store.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": [key], "timeout": 25, "configured": True},
+            {"type": "voicemail", "mailbox": key, "configured": True},
+        ]},
+    })
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    mailbox = f"101-13025559907"
+
+    voicemail = sync.render_voicemail()
+    assert f"{mailbox} => " in voicemail                       # the mailbox exists
+    dialplan = sync.render_dialplan()
+    assert f"exten => {mailbox},1,VoiceMail({mailbox}@engineerip,u)" in dialplan
+    assert f"VoiceMail({mailbox}@engineerip,u)" in dialplan    # and the ring-out tail reaches it

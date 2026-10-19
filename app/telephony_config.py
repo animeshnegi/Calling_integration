@@ -597,22 +597,64 @@ class TelephonyConfigSync:
                 ])
         return "\n".join(lines) + "\n"
 
+    def voicemail_keys(self, extensions: list[dict]) -> set[str]:
+        """Every extension whose mailbox must exist and take messages.
+
+        Two decisions lead here, and either one is enough: the desk's own
+        voicemail switch, and a "Voice Mail" step anywhere in a stored flow.
+        Before, only the switch counted - so a customer who answered Voice Mail
+        in the routing panel got a dead end ("the voicemail function is not
+        working"), because no mailbox and no dialplan extension were ever
+        written for it. The flow step is itself the decision to take messages.
+        """
+        keys = {str(row["key"]) for row in extensions if row.get("voicemail_enabled")}
+        by_key = {str(row["key"]): str(row["key"]) for row in extensions}
+        by_mailbox = {extension_mailbox(str(row["key"])): str(row["key"]) for row in extensions}
+
+        def resolve(value: str, number: str) -> str:
+            value = str(value or "").strip()
+            if not value:
+                return ""
+            if value in by_key:
+                return value
+            mailbox = extension_mailbox(value)
+            if mailbox in by_mailbox:
+                return by_mailbox[mailbox]
+            digits = extension_digits(value)
+            for row in extensions:
+                if number and str(row.get("number") or "") == number and str(row.get("digits") or "") == digits:
+                    return str(row["key"])
+            return ""
+
+        flows = [(row, str(row.get("phone_number") or "")) for row in self.store.list_call_routes()]
+        flows += [(row, "") for row in self.store.list_routing_flows()]
+        for flow, number in flows:
+            for node in ((flow.get("route") or {}).get("nodes") or []):
+                if not isinstance(node, dict) or str(node.get("type")) != "voicemail":
+                    continue
+                key = resolve(node.get("mailbox"), number)
+                if key:
+                    keys.add(key)
+        return keys
+
     def render_voicemail(self) -> str:
         lines = [
             "; AUTO-GENERATED EngineerIP voicemail mailboxes.",
             "[engineerip]",
         ]
-        for extension in self.store.list_extensions():
-            if not extension["active"] or not extension.get("voicemail_enabled"):
-                continue
+        extensions = [row for row in self.store.list_extensions() if row["active"]]
+        live = self.voicemail_keys(extensions)
+        for extension in extensions:
             key = self._clean(extension["key"])
+            if key not in {self._clean(item) for item in live}:
+                continue
             # Every extension has its own mailbox, and two 101s on different
             # numbers have two separate boxes: the mailbox is the digits plus the
             # number they belong to (`101-13025550001`), never the digits alone
             # and never `101@engineerip`. The pin is the one stored for the row.
             mailbox = extension_mailbox(key)
             self.store.alias_voicemail_pin(mailbox, extension_digits(key))
-            pin = self._clean(self.store.get_voicemail_pin(mailbox) or self.store.get_voicemail_pin(key))
+            pin = self._clean(self.store.get_voicemail_pin(mailbox) or self.store.get_voicemail_pin(key) or extension_digits(key))
             display_name = self._clean(extension.get("display_name") or f"Extension {extension_digits(key)}")
             lines.append(f"{mailbox} => {pin},{display_name},,,attach=no|delete=no")
         lines.append("")
@@ -638,7 +680,7 @@ class TelephonyConfigSync:
         """
         settings = self.store.get_settings()
         extensions = [row for row in self.store.list_extensions() if row["active"]]
-        voicemail_exts = {row["key"] for row in extensions if row.get("voicemail_enabled")}
+        voicemail_exts = self.voicemail_keys(extensions)
         numbers = [number for number in self.store.list_numbers() if number["active"]]
         default_digits = self._fallback_digits(str(settings.get("default_extension", "")).strip())
         fallback_digits = self._fallback_digits(str(settings.get("inbound_fallback_extension", "")).strip())

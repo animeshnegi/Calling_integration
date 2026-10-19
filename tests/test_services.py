@@ -20,6 +20,8 @@ class DummyAsterisk:
         self.outbound_endpoints = []
         self.hung_up = []
         self.live_channels = []
+        self.forwarded = []
+        self.continued = []
 
     def answer_channel(self, channel_id):
         self.answered.append(channel_id)
@@ -52,6 +54,15 @@ class DummyAsterisk:
         # a line's 105 is reached by name and a key never reaches Asterisk.
         self.local_endpoints.append(endpoint)
         return f"{call_id}-customer" if int(index) <= 0 else f"{call_id}-customer-{int(index)}"
+
+    def create_forward_leg(self, call_id, phone, provider_endpoint, employee_channel_id, caller_id_number=None, timeout=25, index=1):
+        channel = f"{call_id}-customer-{int(index)}"
+        self.forwarded.append({"phone": phone, "timeout": int(timeout), "caller_id": caller_id_number})
+        self.live_channels.append(channel)
+        return channel
+
+    def continue_in_dialplan(self, channel_id, context, extension):
+        self.continued.append((channel_id, context, extension))
 
     def create_bridge(self, call_id):
         return f"bridge-{call_id}"
@@ -411,7 +422,14 @@ def test_one_extension_never_gets_a_menu_by_itself(tmp_path):
     assert settings.auto_ivr_wanted(5) is False
 
 
-def test_past_five_extensions_every_flow_gains_the_menu(tmp_path):
+def test_past_five_extensions_the_main_line_gains_the_menu(tmp_path):
+    """The menu belongs to the journey of a line, never to a desk.
+
+    A desk's flow is its no-answer policy - ring the desk, then its mailbox.
+    Dropping menus on every extension was the panel offering journey steps
+    where nothing could run them: the engine answers a DID from the number's
+    journey, and a menu on a desk is configuration that never executes.
+    """
     from app.admin import SettingsStore
     settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
     owner = make_customer(settings, "bigco", "Big Co")
@@ -426,14 +444,13 @@ def test_past_five_extensions_every_flow_gains_the_menu(tmp_path):
 
     sixth = settings.add_extension_to_number(number, owner, {"extension": "106", "display_name": "Desk 106"})
     added = settings.sync_auto_ivr(owner)
-    assert f"number {number}" in added and f"extension {sixth['key']}" in added, added
-    assert len(added) >= 6, added                                       # the number, and every desk, menu first
+    assert added == [f"number {number}"], added                         # the main line, and only it
     for flow in settings.list_call_routes(owner):
         assert flow["route"]["nodes"][0]["type"] == "ivr"
         assert flow["route"]["nodes"][0]["prompt"] == settings.IVR_DEFAULT_PROMPT
         assert flow["route"]["nodes"][1]["type"] != "ivr"
     for flow in settings.list_routing_flows(owner):
-        assert flow["route"]["nodes"][0]["type"] == "ivr"
+        assert all(node["type"] != "ivr" for node in flow["route"]["nodes"])
 
     # Once again changes nothing - the rule adds, it never duplicates.
     assert settings.sync_auto_ivr(owner) == []
@@ -946,3 +963,191 @@ def test_the_customer_giving_up_takes_down_every_desk_it_was_ringing(tmp_path: P
     })
     # Every desk of the call goes down - the first leg alone is not enough.
     assert {"leg-answer", "leg-two", "leg-three"} <= set(asterisk.hung_up)
+
+
+# --------------------------------------------------------------- routing logic
+# The journey of a line - menu, hours, voicemail, forwarding - belongs to the
+# main number; a desk keeps only its no-answer policy. These tests hold that
+# split together: where the steps live, and that the engine runs them.
+
+
+def _routing_setup(tmp_path: Path, extensions=("101", "102")):
+    from app.admin import SettingsStore
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    owner = make_customer(settings, "route-co", "Route Co")
+    number = "+13025559904"
+    keys = line_setup(settings, number, owner, extensions)
+    return settings, owner, number, keys
+
+
+def _seed_legacy_desk_flow(settings, owner, key, nodes):
+    """Write a desk flow the way the old panel did - straight to the table.
+
+    The split between journey and desk policy is enforced on every save now, so
+    rows like these can only come from a deployment that ran the old UI. That
+    is exactly the data the compatibility layer has to keep working.
+    """
+    import json
+    route = json.dumps({"nodes": nodes})
+    with settings._connect() as db:
+        db.execute(
+            "INSERT INTO routing_flows(owner_user_id,target_type,target,name,route_json,active) VALUES(?,?,?,?,?,1) "
+            "ON CONFLICT(owner_user_id,target_type,target) DO UPDATE SET route_json=excluded.route_json",
+            (int(owner), "extension", str(key), "Extension call flow", route),
+        )
+
+
+def test_a_desk_flow_refuses_a_menu(tmp_path: Path):
+    settings, owner, _, keys = _routing_setup(tmp_path)
+    try:
+        settings.save_routing_flow(owner, {
+            "name": "Desk", "route": {"nodes": [settings.default_ivr_node()]}, "active": True,
+        }, target_type="extension", target=keys["101"])
+    except ValueError as error:
+        assert "main number" in str(error)
+    else:
+        raise AssertionError("a menu on a desk must be refused")
+
+
+def test_the_journey_configured_on_the_desk_still_answers_the_line(tmp_path: Path):
+    """Steps the panel put on a desk keep working until they are moved.
+
+    The routing canvas offered menus and hours on every extension, so that is
+    where customers built their line's journey - and then "the IVR does not
+    work", because the engine runs the number's journey. The desk the line
+    answers with fills in whatever the number flow leaves silent.
+    """
+    settings, owner, number, keys = _routing_setup(tmp_path)
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": settings.default_number_route([keys["101"], keys["102"]]),
+    })
+    menu = settings.default_ivr_node()
+    menu["prompt"] = "Welcome to the front desk. Enter an extension."
+    _seed_legacy_desk_flow(settings, owner, keys["101"],
+        [menu, {"type": "voicemail", "mailbox": keys["101"], "configured": True}])
+
+    plan = settings.inbound_plan(number, keys["101"])
+    assert plan["kind"] == "ivr"
+    assert plan["prompt"] == "Welcome to the front desk. Enter an extension."
+    assert plan["voicemail"] == keys["101"]
+
+
+def test_the_journey_on_the_number_wins_over_the_desks(tmp_path: Path):
+    settings, owner, number, keys = _routing_setup(tmp_path)
+    menu = settings.default_ivr_node()
+    menu["prompt"] = "The line's own greeting."
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [menu, {"type": "ring_group", "extensions": [keys["101"]], "timeout": 25, "configured": True}]},
+    })
+    desk_menu = settings.default_ivr_node()
+    desk_menu["prompt"] = "A desk greeting that must not run."
+    _seed_legacy_desk_flow(settings, owner, keys["101"], [desk_menu])
+
+    plan = settings.inbound_plan(number, keys["101"])
+    assert plan["kind"] == "ivr"
+    assert plan["prompt"] == "The line's own greeting."
+
+
+def test_the_desks_mailbox_answers_when_the_journey_is_silent(tmp_path: Path):
+    settings, owner, number, keys = _routing_setup(tmp_path)
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": settings.default_number_route([keys["101"]]),
+    })
+    settings.save_extension({"extension": keys["101"], "voicemail_enabled": True, "voicemail_pin": "2468"}, owner)
+
+    plan = settings.inbound_plan(number, keys["101"])
+    assert plan["voicemail"] == keys["101"]          # a ringed-out desk keeps its messages
+
+
+def test_the_voicemail_step_is_the_decision_to_take_messages(tmp_path: Path):
+    """Answering "Voice Mail" in the journey is itself the switch.
+
+    Before, a mailbox also needed a separate toggle buried in the SIP sheet -
+    without it the step pointed at a mailbox the renderer never wrote, and the
+    call was dropped instead ("the voicemail function is not working").
+    """
+    settings, owner, number, keys = _routing_setup(tmp_path)
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": [keys["101"], keys["102"]], "timeout": 25, "configured": True},
+            {"type": "voicemail", "mailbox": keys["102"], "configured": True},
+        ]},
+    })
+    assert settings.extension_voicemail_enabled(keys["102"]) is False   # the switch stays off
+
+    plan = settings.inbound_plan(number, keys["101"])
+    assert plan["voicemail"] == keys["102"]
+
+
+def test_when_nobody_answers_the_forward_number_is_rung(tmp_path: Path):
+    service, asterisk, store = make_service(tmp_path)
+    from app.admin import SettingsStore
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "fwd-co", "Fwd Co")
+    number = "+13025559905"
+    keys = line_setup(settings, number, owner, ("101",))
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": [keys["101"]], "timeout": 25, "configured": True},
+            {"type": "forward", "phone": "+13025550199", "timeout": 40, "configured": True},
+        ]},
+    })
+    channel = {"id": "chan-inbound-fwd", "caller": {"number": "+13025550000"}}
+    call = service.start_inbound(channel, number, keys["101"])
+    assert call is not None
+    leg = call.employee_channel_id
+
+    # The desk rings out; instead of killing the caller, the journey's forward
+    # number is dialled with the caller still waiting on the line.
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    assert asterisk.forwarded and asterisk.forwarded[0]["phone"] == "+13025550199"
+    assert asterisk.forwarded[0]["timeout"] == 40
+    assert "chan-inbound-fwd" not in asterisk.hung_up
+    updated = store.get(call.call_id)
+    assert updated.status == "forwarding"
+    assert updated.employee_channel_id in updated.employee_channel_ids
+
+    # A forward that dies unanswered ends the call - and never forwards twice.
+    forward_channel = updated.employee_channel_id
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": forward_channel}})
+    assert len(asterisk.forwarded) == 1
+    assert "chan-inbound-fwd" in asterisk.hung_up
+    assert store.get(call.call_id).status in {"completed", "failed"}
+
+
+def test_a_forward_answer_bridges_the_waiting_caller(tmp_path: Path):
+    service, asterisk, store = make_service(tmp_path)
+    from app.admin import SettingsStore
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "fwd2-co", "Fwd2 Co")
+    number = "+13025559906"
+    keys = line_setup(settings, number, owner, ("101",))
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": [keys["101"]], "timeout": 25, "configured": True},
+            {"type": "forward", "phone": "+13025550199", "timeout": 25, "configured": True},
+        ]},
+    })
+    channel = {"id": "chan-inbound-fwd2", "caller": {"number": "+13025550000"}}
+    call = service.start_inbound(channel, number, keys["101"])
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": call.employee_channel_id}})
+    forward_channel = store.get(call.call_id).employee_channel_id
+
+    # The outside number picks up: it is bridged to the waiting caller exactly
+    # like a desk that answered.
+    service.handle_ari_event({
+        "type": "ChannelStateChange",
+        "channel": {"id": forward_channel, "state": "Up"},
+        "timestamp": "2026-10-18T10:00:00Z",
+    })
+    updated = store.get(call.call_id)
+    assert updated.bridge_id == f"bridge-{call.call_id}"
+    assert updated.answered is True

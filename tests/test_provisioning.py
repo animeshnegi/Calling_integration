@@ -436,15 +436,19 @@ def test_extension_flows_are_validated_and_tenant_isolated(tmp_path):
     store.save_extension({"extension": "701", "sip_password": "theta-secret"}, user_id)
     store.save_extension({"extension": "801", "sip_password": "iota-secret"}, other_id)
 
+    # A desk's flow is its no-answer policy: ring the desk, take a message.
     own = customer.post("/admin/api/call-routes", json={
         "target_type": "extension", "target": "701",
-        "route": {"nodes": [{"type": "simultaneous", "extensions": ["701"], "timeout": 25, "configured": True}]},
+        "route": {"nodes": [
+            {"type": "extension", "extension": "701", "configured": True},
+            {"type": "voicemail", "mailbox": "701", "configured": True},
+        ]},
     })
     assert own.status_code == 200
 
     foreign_ring = customer.post("/admin/api/call-routes", json={
         "target_type": "extension", "target": "701",
-        "route": {"nodes": [{"type": "simultaneous", "extensions": ["801"], "timeout": 25, "configured": True}]},
+        "route": {"nodes": [{"type": "extension", "extension": "801", "configured": True}]},
     })
     assert foreign_ring.status_code == 400
 
@@ -454,8 +458,19 @@ def test_extension_flows_are_validated_and_tenant_isolated(tmp_path):
     })
     assert foreign_target.status_code == 400
 
-    bad_timeout = customer.post("/admin/api/call-routes", json={
+    # Journey steps on a desk are refused and named, so the customer knows to
+    # move them to the main number where the engine runs them.
+    journey = customer.post("/admin/api/call-routes", json={
         "target_type": "extension", "target": "701",
+        "route": {"nodes": [{"type": "simultaneous", "extensions": ["701"], "timeout": 25, "configured": True}]},
+    })
+    assert journey.status_code == 400
+    assert "main number" in (journey.get_json().get("error") or "")
+
+    store.save_group({"name": "Team", "members": ["701"], "timeout": 25}, user_id)
+    group_id = str(next(g["id"] for g in store.list_groups(user_id) if g["name"] == "Team"))
+    bad_timeout = customer.post("/admin/api/call-routes", json={
+        "target_type": "group", "target": group_id,
         "route": {"nodes": [{"type": "simultaneous", "extensions": ["701"], "timeout": 400}]},
     })
     assert bad_timeout.status_code == 400

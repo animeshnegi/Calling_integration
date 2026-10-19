@@ -1717,13 +1717,16 @@ function flowOwnerId() {
 function routeTargets() {
   const targets = [];
   const owner = routingOwner();
-  // A flow belongs to one customer, so the builder only offers that customer's
-  // own extensions and groups. A number is not a target for anyone: the
-  // workflow that answers its calls is the workflow of the extension wired to
-  // it, and the platform keeps the number's own ring plan in step with the
-  // devices a customer adds.
+  // The journey belongs to the main number: it is the one the engine runs when
+  // the line rings, and it is what carries menus, hours, voicemail and
+  // forwarding. A desk keeps a smaller flow of its own - ring, then take a
+  // message - and groups stay in the list below.
   const mine = row => !state.is_admin || owner === null || row.owner_user_id === owner;
   const line = chosenCustomerNumber();
+  (state.phone_numbers || []).filter(x => x.active && mine(x) && (!line || String(x.number) === line)).forEach(x => targets.push({
+    key: flowKey('number', x.number), section: 'Main numbers', type: 'number', target: String(x.number),
+    label: `Main line ${x.number} — incoming journey`,
+  }));
   (state.extensions || []).filter(x => x.active && mine(x) && (!line || String(x.number) === line)).forEach(x => targets.push({
     key: flowKey('extension', x.extension), section: 'Extensions', type: 'extension', target: x.extension,
     label: `${extensionLabel(x.extension)} — ${x.display_name || 'Extension'}`,
@@ -1763,7 +1766,7 @@ function renderRouteTargets(preferred) {
   if (!state.is_admin) { select.innerHTML = ''; return ''; }
   const targets = routeTargets();
   const prior = preferred ?? select.value;
-  const sections = ['Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
+  const sections = ['Main numbers', 'Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
   select.innerHTML = sections.map(section => `<optgroup label="${section}">${targets.filter(t => t.section === section)
     .map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}</optgroup>`).join('');
   if (targets.some(t => t.key === prior)) select.value = prior;
@@ -1822,6 +1825,7 @@ function currentFlowKey() {
 
 /* The name shown on the canvas's incoming-call node. */
 function flowEntryLabel(type, target) {
+  if (type === 'number') return `Main line ${target} — incoming journey`;
   if (state.is_admin) {
     const select = $('route-target');
     if (select && select.value === flowTargetKey) return select.selectedOptions[0]?.textContent || String(target);
@@ -1851,9 +1855,10 @@ function applyFlowTarget(key) {
   if (entry) {
     entry.textContent = flowTargetKey
       ? (flowEntryLabel(type, target) || flowTargetKey)
-      : (state.is_admin ? 'Add an extension or group to begin' : 'Pick a number, then an extension');
+      : (state.is_admin ? 'Choose a main line, extension or group' : 'Choose the main line or a desk');
   }
   renderFlowNodes();
+  renderFlowPalette();
   renderIvrHint();
 }
 
@@ -1904,23 +1909,27 @@ function numberAnsweredBy(extension) {
 function renderCustomerRoutePickers(preferred) {
   const extensionSelect = $('route-extension');
   if (!extensionSelect) return '';
-  // The number is the one on the scope bar; the extension list is that number's.
-  const wanted = flowTargetParts(preferred || '');
+  // The number is the one on the scope bar. Its journey answers the line; each
+  // desk below it owns only its no-answer behaviour.
   const effectiveNumber = chosenCustomerNumber();
   if (!state.is_admin) {
     customerNumber = effectiveNumber;
     renderScopeBars();
   }
   const { all } = extensionsForNumber(effectiveNumber);
-  const option = x => `<option value="${esc(x.extension)}" title="${esc(extensionLabel(x.extension))}">${esc(extensionDigitsOf(x.extension))} — ${esc(scopeShort(x.display_name || 'Unnamed', 24))}</option>`;
-  extensionSelect.innerHTML = all.map(option).join('') || '<option value="">No extensions on this number yet</option>';
+  const deskOption = x => `<option value="${esc(flowKey('extension', x.extension))}" title="${esc(extensionLabel(x.extension))}">Desk ${esc(extensionDigitsOf(x.extension))} — ${esc(scopeShort(x.display_name || 'Unnamed', 24))}</option>`;
+  const options = (effectiveNumber
+    ? [`<option value="${esc(flowKey('number', effectiveNumber))}">Main line ${esc(effectiveNumber)} — incoming journey</option>`]
+    : []).concat(all.map(deskOption));
+  extensionSelect.innerHTML = options.join('') || '<option value="">No number selected yet</option>';
 
-  const wantedExtension = wanted.type === 'extension' ? String(wanted.target) : extensionAnsweringNumber(effectiveNumber);
-  const effectiveExtension = all.some(x => String(x.extension) === String(wantedExtension))
-    ? String(wantedExtension)
-    : String(all[0]?.extension ?? '');
-  extensionSelect.value = effectiveExtension;
-  return effectiveExtension ? flowKey('extension', effectiveExtension) : '';
+  const wanted = String(preferred || '');
+  const known = options.length && [...extensionSelect.options].map(option => option.value);
+  const effective = known && known.includes(wanted)
+    ? wanted
+    : (known[0] || '');
+  extensionSelect.value = effective;
+  return effective;
 }
 
 function renderGroups() {
@@ -1962,6 +1971,31 @@ function flowGroupOptions(selected = '') {
     `<option value="${group.id}" ${String(selected) === String(group.id) ? 'selected' : ''}>${esc(group.name)} — ${group.members.length} member${group.members.length === 1 ? '' : 's'}</option>`).join('')}`;
 }
 
+/* What each kind of flow may carry. The journey - menu, hours, rings,
+   voicemail, forwarding - belongs to the main number's flow, because that is
+   the flow the engine runs for its calls. A desk's flow is its no-answer
+   policy: ring the desk, then its mailbox. A menu or a forward on a desk is
+   not a smaller journey; it is a step nothing will ever run. */
+const DESK_NODE_TYPES = new Set(['extension', 'voicemail']);
+function nodeTypeAllowed(kind, targetType = flowTargetParts(currentFlowKey()).type) {
+  return targetType !== 'extension' || DESK_NODE_TYPES.has(kind);
+}
+function renderFlowPalette() {
+  const { type } = flowTargetParts(currentFlowKey());
+  document.querySelectorAll('[data-node-type]').forEach(button => {
+    const allowed = nodeTypeAllowed(button.dataset.nodeType, type);
+    button.hidden = !allowed;
+    button.draggable = allowed;
+  });
+  const hint = $('palette-logic-hint');
+  if (hint) {
+    hint.textContent = type === 'extension'
+      ? 'A desk rings and takes messages. The journey for the line — phone menu, business hours, forwarding — is edited on the main number.'
+      : '';
+    hint.hidden = !hint.textContent;
+  }
+}
+
 function renderFlowNodes() {
   const host = $('flow-nodes');
   if (!host) return;
@@ -1998,7 +2032,7 @@ function renderIvrHint() {
   const extensions = (state.extensions || []).filter(x => x.active && (!owner || x.owner_user_id === owner));
   const threshold = Number(state.ivr_auto_above || 5);
   if (extensions.length > threshold) {
-    hint.textContent = `This account has ${extensions.length} extensions, so a phone menu is added to every call flow automatically. Edit its text and voice here whenever you like.`;
+    hint.textContent = `This account has ${extensions.length} extensions, so a phone menu is added to every main line automatically. Edit its text and voice here whenever you like.`;
     hint.hidden = false;
   } else {
     hint.hidden = true;
@@ -2046,13 +2080,17 @@ function flowStepDefaults(node) {
   if (!['simultaneous', 'sequential', 'ring_group'].includes(node?.type)) return node;
   if ((node.extensions || []).length) return node;
   // The target is the workflow being edited, whichever picker opened it: the
-  // administrator's list or the customer's number-then-extension pair.
+  // administrator's list or the customer's main-line-then-desk pair.
   const { type, target } = flowTargetParts(currentFlowKey() || $('route-target')?.value);
   const owner = flowOwnerId();
   const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || !owner || x.owner_user_id === owner));
-  // A number has no workflow of its own, but a key for one can still arrive from
-  // a stored link: it stands for every device the customer has.
-  if (type === 'number') return { ...node, extensions: mine.map(x => x.extension) };
+  // The line's journey starts by ringing every device on that very line: add a
+  // desk and its phone joins the ring. Other lines' desks never do.
+  if (type === 'number') {
+    const line = String(target || '');
+    const onLine = mine.filter(x => !line || String(x.number) === line);
+    return { ...node, extensions: (onLine.length ? onLine : mine).map(x => x.extension) };
+  }
   if (type === 'extension') return { ...node, extensions: [target] };
   const group = (state.groups || []).find(x => String(x.id) === String(target));
   if (type === 'group' && group) return { ...node, extensions: [...group.members] };
@@ -2565,7 +2603,7 @@ const templates = {
     fields: `<label class="field">Name<input name="name" maxlength="80" placeholder="Production CRM" required value="${esc(item?.name || '')}"></label>
       <label class="field">Endpoint URL<input name="url" type="url" maxlength="1000" placeholder="https://crm.example.com/api/telephony/events" required value="${esc(item?.url || '')}"></label>
       <label class="field">Signing secret<input name="token" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Optional shared secret'}"><small>When set, each delivery is signed with an HMAC-SHA256 header so your service can verify authenticity.</small></label>
-      <label class="field">Events<select name="events" multiple size="8" required>${['*','call.started','call.ringing','call.employee_ringing','call.employee_answered','call.customer_dialing','call.answered','call.bridged','call.ivr_extension_selected','call.ivr_fallback','call.voicemail','call.missed','call.recording_started','call.recording_finished','call.recording_failed','call.recording_announcement_failed','call.recording_deleted','call.completed','call.failed','call.disposition']
+      <label class="field">Events<select name="events" multiple size="8" required>${['*','call.started','call.ringing','call.employee_ringing','call.employee_answered','call.customer_dialing','call.answered','call.bridged','call.ivr_extension_selected','call.ivr_fallback','call.voicemail','call.forwarding','call.missed','call.recording_started','call.recording_finished','call.recording_failed','call.recording_announcement_failed','call.recording_deleted','call.completed','call.failed','call.disposition']
         .map(ev => `<option value="${ev}" ${(item?.events || '*').split(',').includes(ev) ? 'selected' : ''}>${ev === '*' ? 'All call events' : ev}</option>`).join('')}</select>
         <small>Select only the events this integration needs.</small></label>
       <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Endpoint is active</label>`,
@@ -3912,6 +3950,7 @@ document.querySelectorAll('[data-node-type]').forEach(button => {
   button.addEventListener('dragend', () => dragging(button, false));
   button.onclick = () => {
     if (!canDesignFlows()) return notify(flowDesignHint(), true);
+    if (!nodeTypeAllowed(button.dataset.nodeType)) return notify('This step belongs to the main number\'s journey, not to a desk', true);
     flowNodes.push({ type: button.dataset.nodeType, label: 'Click to configure' });
     renderFlowNodes();
   };
@@ -3928,25 +3967,24 @@ if (dragSurface) {
     depth = 0;
     dragSurface.classList.remove('drag-over');
     const type = canDesignFlows() ? event.dataTransfer.getData('text/plain') : '';
+    if (type && !nodeTypeAllowed(type)) return notify('This step belongs to the main number\'s journey, not to a desk', true);
     if (type) { flowNodes.push({ type, label: 'Click to configure' }); renderFlowNodes(); }
   });
 }
 wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
-wire('route-extension', 'change', () => { renderFlow(flowKey('extension', $('route-extension').value)); renderGroups(); });
+wire('route-extension', 'change', () => { renderFlow($('route-extension').value); renderGroups(); });
 wire('save-route', 'click', async () => {
   if (saveFlowBusy) return;                       // one save at a time
   if (!canDesignFlows()) { setSaveFlowState('blocked'); return notify(flowDesignHint(), true); }
   const { type, target } = flowTargetParts(currentFlowKey());
   if (!type || !target) {
-    return notify(state.is_admin ? 'Add a number, extension or group first' : 'Pick a number, then the extension to edit', true);
-  }
-  // A number carries no workflow of its own: the extension that answers it
-  // does. The pickers never offer one, and a stray key is refused the same way.
-  if (type === 'number') {
-    return notify('A number has no workflow of its own — edit the extension that answers it', true);
+    return notify(state.is_admin ? 'Add a number, extension or group first' : 'Pick the main line or a desk to edit', true);
   }
   if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);
-  const label = type === 'number' ? target : `${type} ${target}`;
+  if (type === 'extension' && flowNodes.some(n => !nodeTypeAllowed(n.type, 'extension'))) {
+    return notify('A desk can only ring and take messages — move the journey steps to the main number', true);
+  }
+  const label = type === 'number' ? `the main line ${target}` : `${type} ${target}`;
   saveFlowBusy = true;
   setSaveFlowState('saving');
   try {

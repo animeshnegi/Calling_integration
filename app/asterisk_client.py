@@ -149,6 +149,23 @@ class AsteriskClient:
             call_id, f"PJSIP/{phone}@{provider_endpoint}", employee_channel_id, caller_id_number, 60
         )
 
+    def create_forward_leg(
+        self, call_id: str, phone: str, provider_endpoint: str, employee_channel_id: str,
+        caller_id_number: str | None = None, timeout: int = 25, index: int = 1,
+    ) -> str:
+        """Ring an outside number on behalf of a caller who is still on the line.
+
+        Used when an inbound journey ends in its forward step and nobody picked
+        up: the waiting caller hears ringing while this leg dials the forward
+        number, and the two are bridged if it answers. The channel is named as
+        another customer-side leg of the same call so the event handlers and
+        the end-of-call sweep treat it as one more far side of that call.
+        """
+        return self._customer_leg(
+            call_id, f"PJSIP/{phone}@{provider_endpoint}", employee_channel_id,
+            caller_id_number, timeout, index=index,
+        )
+
     def create_local_leg(
         self, call_id: str, extension: str, employee_channel_id: str, caller_id_number: str | None = None,
         endpoint: str | None = None, index: int = 0,

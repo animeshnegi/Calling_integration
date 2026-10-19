@@ -570,6 +570,39 @@ class TelephonyService:
         self.store.update(call_id, employee_channel_id=legs[0][0], employee_channel_ids=",".join(f"{leg}|{ext}" for leg, ext in legs))
         return self.store.get(call_id)
 
+    def _forward_call(self, call: Call, plan: dict) -> bool:
+        """Nobody answered the desk: ring the journey's forward number instead.
+
+        The caller is still on the line here - that is why this path hangs them
+        up. Instead, the forward number is dialled as one more leg of the same
+        call: if it answers it is bridged to the caller exactly like a desk that
+        picked up, and when the call finally ends every channel it owns goes
+        down together. A forward that cannot be placed lets the ordinary
+        missed-call ending carry on. One forward per call: a forward leg that
+        dies unanswered never starts another.
+        """
+        phone = str(plan.get("forward") or "").strip()
+        if not phone:
+            return False
+        timeout = int(plan.get("forward_timeout") or 25)
+        try:
+            endpoint, _ = self._provider_endpoint(call.provider or "")
+            forward_channel = self.asterisk.create_forward_leg(
+                call.call_id, phone, endpoint, call.customer_channel_id or "",
+                call.caller_id_number, timeout=timeout, index=1,
+            )
+        except Exception:
+            return False
+        self._leg_index[str(forward_channel)] = call.call_id
+        self.store.update(
+            call.call_id,
+            status="forwarding",
+            employee_channel_id=str(forward_channel),
+            employee_channel_ids=f"{forward_channel}|{call.extension}",
+        )
+        self.notify_crm("call.forwarding", self.store.get(call.call_id), {"phone": phone})
+        return True
+
     # ---------------------------------------------------------------- the menu
     def _start_ivr(self, call: Call, channel: dict[str, Any], plan: dict[str, Any]) -> Call | None:
         """Answer, play the prompt, and wait for digits."""
@@ -1114,8 +1147,10 @@ class TelephonyService:
                     return
                 self._leg_index.pop(str(channel_id), None)
                 if employee_leg and call.direction == "inbound" and call.customer_channel_id:
-                    # Nobody picked up. Only a flow that ends in voicemail keeps
-                    # the caller; the default flow simply ends the call.
+                    # Nobody picked up. A journey that ends in voicemail keeps
+                    # the caller; one that ends in a forward number rings it
+                    # with the caller still waiting; the default flow simply
+                    # ends the call.
                     plan = self.settings_store.inbound_plan(call.caller_id_number or "", call.extension) if self.settings_store else {}
                     mailbox = extension_mailbox(plan.get("voicemail") or "")
                     if mailbox:
@@ -1125,6 +1160,8 @@ class TelephonyService:
                         except Exception:
                             self.asterisk.hangup(call.customer_channel_id)
                         self._finalize(call.call_id, "inbound_not_answered")
+                        return
+                    if call.status != "forwarding" and self._forward_call(call, plan):
                         return
                     self.notify_crm("call.missed", call, {"reason": "inbound_not_answered"})
                     self.asterisk.hangup(call.customer_channel_id)

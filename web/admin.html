@@ -225,9 +225,9 @@
       <section class="page" id="page-routing">
         <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <div class="flow-toolbar sheen">
-          <div><h2>Call flows</h2><p data-customer-only>Pick a number, then the extension that answers it. Groups keep their own flows, listed below.</p><p data-admin-only>Edit a customer's flows exactly as their callers meet them: choose the customer, then the number, extension or group.</p></div>
+          <div><h2>Call flows</h2><p data-customer-only>Design the journey for your main line, or the no-answer behaviour of one desk. Groups keep their own flows, listed below.</p><p data-admin-only>The journey belongs to the main number: menus, business hours, voicemail and forwarding live there. A desk only rings and takes messages.</p></div>
           <div class="tools">
-            <select id="route-extension" aria-label="Extension" data-customer-only></select>
+            <select id="route-extension" aria-label="Call flow target" data-customer-only></select>
             <select id="route-target" aria-label="Call flow target" data-admin-only></select>
             <button class="btn primary" id="save-route" data-state="ready">Save flow</button>
             <span class="flow-save-hint" id="flow-save-hint" hidden></span>
@@ -236,7 +236,8 @@
         <div class="flow-layout">
           <aside class="panel palette">
             <div class="title"><span>FLOW BLOCKS</span><h3>Build the caller journey</h3><p>Drag a block onto the canvas, or click to append it.</p>
-              <p class="palette-hint" id="ivr-palette-hint" hidden></p></div>
+              <p class="palette-hint" id="ivr-palette-hint" hidden></p>
+              <p class="palette-hint" id="palette-logic-hint" hidden></p></div>
             <button draggable="true" data-node-type="ivr"><b class="tile tile-ivr">⌨</b><span class="copy"><b>Phone menu (IVR)</b><small>Ask callers to enter an extension</small></span></button>
             <button draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>Open and closed schedules</small></span></button>
             <button draggable="true" data-node-type="simultaneous"><b class="tile tile-ring">⇉</b><span class="copy"><b>Simultaneous ring</b><small>Reach everyone at once</small></span></button>
