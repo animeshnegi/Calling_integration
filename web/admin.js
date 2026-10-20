@@ -820,7 +820,7 @@ function renderNumbers() {
           ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
           ${tag(x.inbound_extension ? `Rings ${extensionDigitsOf(x.inbound_extension)}` : 'No extension yet', 'info')}
           ${onLine.length ? tag(`${onLine.length} extension${onLine.length === 1 ? '' : 's'} on this number`, 'violet') : ''}
-          ${tag(`${money(x.monthly_price_cents ?? 500)}/mo`)}
+          ${tag(`${money(x.monthly_price_cents ?? 500)}/month`)}
           ${x.default_outbound ? tag('Default caller ID', 'violet') : ''}
           ${x.discontinue_at ? tag(`Ends ${fmtDay(x.discontinue_at)}`, expiring ? 'off' : 'warn') : ''}
         </div>
@@ -3622,7 +3622,7 @@ function wsBilling() {
     <div class="ws-cards">
       <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">▣</span>
         <div><small>Recurring monthly</small><h4>${money(recurring)}</h4>
-          <p>${workspace.numbers.length} number${workspace.numbers.length === 1 ? '' : 's'} at $5/month</p></div></div></article>
+          <p>${workspace.numbers.length} number${workspace.numbers.length === 1 ? '' : 's'} at ${money(workspace.numbers[0]?.monthly_price_cents ?? 500)}/month</p></div></div></article>
       <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,${open.length ? '#b45309,#d97706' : '#15803d,#16a34a'})">${open.length ? '!' : '✓'}</span>
         <div><small>Payment status</small><h4>${open.length ? `${open.length} invoice${open.length === 1 ? '' : 's'} open` : 'All invoices settled'}</h4>
           <p>${money(open.reduce((sum, i) => sum + i.amount_cents, 0))} outstanding</p></div></div></article>
