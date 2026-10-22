@@ -1941,3 +1941,61 @@ a.nav-item{
 .routing-studio .canvas .flow-node.incoming .step{color:var(--text-2)}
 body .routing-studio .flow-toolbar{background:transparent}
 @media(max-width:760px){.routing-studio .flow-toolbar .tools{gap:12px;align-items:stretch}.routing-studio .routing-target-label{flex-basis:100%}.routing-studio .canvas .flow-node .copy small{white-space:normal}}
+
+/* Workflow selection: one searchable, customer-scoped chooser for both roles. */
+.routing-studio .routing-heading{margin-bottom:22px}
+.routing-studio .routing-heading h2{font-size:clamp(23px,2vw,29px);letter-spacing:-.035em}
+.routing-studio .routing-modes{gap:12px;margin-bottom:20px}
+.routing-studio .routing-modes button{padding:18px 20px;gap:13px;box-shadow:none}
+.routing-studio .routing-modes button[aria-selected=true]{box-shadow:0 0 0 1px var(--acc-1)}
+.routing-mode-count{margin-left:auto;color:var(--text-2);font-size:10px;white-space:nowrap;padding:5px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface)}
+.routing-selection{padding:21px 23px;background:var(--surface-solid);border:1px solid var(--line-strong);border-radius:15px;box-shadow:var(--shadow-sm);margin-bottom:28px}
+.routing-selection-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:17px}
+.routing-selection-head .routing-eyebrow{font-size:9px;margin-bottom:6px;letter-spacing:.12em}
+.routing-selection-head h3{font-size:17px;font-weight:650;letter-spacing:-.025em}
+.routing-studio .routing-selection .scope-bar{margin:0;padding:0;border:0;background:transparent;gap:0;flex:0 1 280px;min-width:0}
+.routing-selection .scope-field{width:100%;gap:7px;align-items:flex-start;flex-direction:column}
+.routing-selection .scope-field>span{font-size:10px;letter-spacing:0;text-transform:none;color:var(--text-2)}
+.routing-selection .scope-field select{width:100%;max-width:none;min-height:38px;font-size:12px}
+.routing-studio .routing-line-scope,.routing-studio .routing-target-label{display:none!important}
+body.customer-theme .routing-selection .scope-bar{display:none}
+.routing-search-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:13px}
+.routing-search{display:flex;align-items:center;gap:8px;flex:1;max-width:480px;background:var(--input-bg);border:1px solid var(--line-strong);border-radius:9px;padding:0 12px;color:var(--text-3)}
+.routing-search:focus-within{border-color:var(--acc-1);box-shadow:0 0 0 3px #6366f119}
+.routing-search>span{font-size:22px;line-height:1}
+.routing-search input[type=search]{border:0;box-shadow:none;background:transparent;outline:none;min-width:0;min-height:40px;width:100%;padding:8px 0;font-size:12px;color:var(--text)}
+.routing-search input[type=search]:focus{box-shadow:none;outline:none}
+.routing-search kbd{font:10px var(--font-sans);font-weight:500;color:var(--text-3);border:1px solid var(--line);border-radius:4px;padding:3px 5px}
+#routing-workflow-count{font-size:11px;color:var(--text-2);white-space:nowrap}
+.routing-workflow-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;max-height:246px;overflow:auto;padding:2px;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+.routing-workflow-options button{display:flex;align-items:center;gap:10px;padding:14px 12px;border:1px solid var(--line-strong);border-radius:10px;color:var(--text);background:var(--surface-solid);text-align:left;min-width:0;transition:background .16s,border-color .16s}
+.routing-workflow-options button:hover{border-color:var(--acc-1);background:var(--routing-tint)}
+.routing-workflow-options button[aria-selected=true]{border-color:var(--acc-1);background:var(--routing-tint);box-shadow:inset 0 0 0 .5px var(--acc-1)}
+.workflow-choice-icon{display:grid;place-items:center;width:31px;height:34px;border-radius:8px;flex-shrink:0;background:var(--routing-tint);color:var(--tone-violet);font-size:18px}
+.workflow-choice-copy{min-width:0;flex:1}.workflow-choice-copy>b{display:block;font-size:12px;letter-spacing:.01em;font-weight:650;overflow-wrap:anywhere}
+.workflow-choice-copy>span{display:block;font-size:10.5px;line-height:1.6;color:var(--text-2);margin-top:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.workflow-choice-copy>small{display:block;font-size:9px;line-height:1.6;margin-top:3px;color:var(--text-3);overflow-wrap:anywhere}
+.workflow-choice-state{align-self:stretch;display:flex;flex-direction:column;align-items:flex-end;justify-content:space-between;gap:8px;flex-shrink:0}
+.workflow-choice-state>span{font-size:8px;white-space:nowrap;color:var(--text-3)}
+.workflow-choice-state>i{font-style:normal;font-size:10px;width:16px;height:16px;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line-strong);color:var(--text-3)}
+[aria-selected=true]>.workflow-choice-state>i{background:var(--fill-1);color:white;border-color:var(--fill-1)}
+.routing-no-results{padding:23px 12px;color:var(--text-2);font-size:12px;line-height:1.7;text-align:center;border:1px dashed var(--line-strong);border-radius:10px;margin:2px}
+.routing-studio .flow-toolbar{margin-bottom:19px;align-items:center}
+.routing-studio .routing-selected-meta{font-size:11px;line-height:1.6;color:var(--text-2);margin-top:6px}
+.routing-studio .flow-toolbar #routing-editor-description{font-size:11px;color:var(--text-3);margin-top:7px}
+.routing-studio .flow-toolbar .tools{margin-left:auto!important;width:auto!important;flex:0 0 auto}
+.routing-studio #save-route{min-width:128px}
+.routing-editor-empty{border:1px dashed var(--line-strong);border-radius:14px;background:var(--surface);text-align:center;padding:42px 20px;color:var(--text-2)}
+.routing-editor-empty>span{font-size:27px;color:var(--tone-violet)}
+.routing-editor-empty h3{font-size:16px;color:var(--text);margin-top:12px}.routing-editor-empty p{font-size:12px;line-height:1.8;margin-top:8px}
+.routing-studio[data-has-target=false] .flow-toolbar,.routing-studio[data-has-target=false] .routing-recipe,.routing-studio[data-has-target=false] .flow-layout{display:none}
+.routing-team-details{margin-top:25px;border:1px solid var(--line-strong);border-radius:13px;background:var(--surface-solid);box-shadow:var(--shadow-sm)}
+.routing-team-details>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:19px 22px;cursor:pointer;list-style:none;font-size:13px;font-weight:650;color:var(--text)}
+.routing-team-details>summary::-webkit-details-marker{display:none}.routing-team-details>summary small{display:block;color:var(--text-2);font-size:10.5px;font-weight:400;margin-top:5px}
+.routing-team-details>summary>span:last-child{font-size:21px;color:var(--text-3);font-weight:400}
+.routing-team-details[open]>summary{border-bottom:1px solid var(--line)}
+.routing-team-details[open]>summary>span:last-child{transform:rotate(45deg)}
+.routing-studio .routing-team-details .routing-departments{margin:0;border:0;box-shadow:none;border-radius:0 0 13px 13px}
+@media(max-width:1250px){.routing-workflow-options{grid-template-columns:repeat(2,minmax(0,1fr))}.routing-studio .routing-mode-count{display:none}}
+@media(max-width:760px){.routing-studio .routing-modes button{padding:15px 12px}.routing-studio .routing-modes b{font-size:12px;line-height:1.45}.routing-selection{padding:17px 15px;margin-bottom:22px}.routing-selection-head{align-items:stretch;flex-direction:column;gap:12px}.routing-studio .routing-selection .scope-bar{flex:0 1 auto;width:100%}.routing-workflow-options{grid-template-columns:1fr;max-height:250px}.routing-workflow-options button{padding:13px 12px}.routing-search-row{gap:10px;align-items:stretch;flex-wrap:wrap}.routing-search{max-width:none;flex-basis:100%}.routing-search kbd{display:none}#routing-workflow-count{font-size:10px}.routing-studio .flow-toolbar{gap:14px}.routing-studio .flow-toolbar .tools{width:100%!important;margin-left:0!important}.routing-studio #save-route{flex:1}.routing-studio .flow-toolbar h3{font-size:19px}.routing-team-details>summary{padding:17px 16px}.routing-studio .routing-team-details .routing-departments{padding:17px}}
+.routing-studio .flow-toolbar>div:first-child{min-width:0;max-width:100%;overflow-wrap:anywhere}

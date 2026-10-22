@@ -590,26 +590,32 @@ function renderScopeBars() {
 /* The customer an administrator picked changes the numbers the page offers. */
 function applyScopeOwner(value) {
   if (!state.is_admin) return;
-  scopeOwner = value === '' || value == null ? null : Number(value);
-  customerNumber = '';
+  const nextOwner = value === '' || value == null ? null : Number(value);
+  if (nextOwner === scopeOwner) { renderScopeBars(); return; }
+  if (!allowRoutingNavigation()) { renderScopeBars(); return; }
+  scopeOwner = nextOwner;
+  routingSearch.number = ''; routingSearch.extension = '';
+  const remembered = routingLastTarget.get(`${routingOwner()}:${routingMode}`);
+  customerNumber = routingMode === 'number' && remembered ? flowTargetParts(remembered).target : '';
   renderScopeBars();
-  refreshScope();
+  refreshScope(remembered);
 }
 /* The number picked on the bar changes every list below it. */
 function applyCustomerNumber(number) {
   const next = String(number || '');
   if (next && !scopeNumbers().some(x => String(x.number) === next)) return;
+  if (routingMode === 'number' && next !== chosenCustomerNumber() && !allowRoutingNavigation()) { renderScopeBars(); return; }
   customerNumber = next;
   renderScopeBars();
   refreshScope();
 }
 /* Re-read everything that follows the scope, once, from one place. */
-function refreshScope() {
+function refreshScope(preferredFlow) {
   callOffset = 0; recordingOffset = 0;
   renderScopeExtensionSelects();
   renderExtensions(); renderNumbers(); renderSipAccounts(); renderBilling(); renderDeviceNumbers();
   renderApiKeys(); renderWebhooks(); renderDeliveries();
-  renderFlow();
+  renderFlow(preferredFlow);
   renderGroups();
   loadCalls(); loadRecordings(); loadVoicemails();
 }
@@ -1724,8 +1730,7 @@ function routeTargets() {
   // forwarding. A desk keeps a smaller flow of its own - ring, then take a
   // message - and groups stay in the list below.
   const mine = row => !state.is_admin || owner === null || row.owner_user_id === owner;
-  const line = chosenCustomerNumber();
-  (state.phone_numbers || []).filter(x => x.active && mine(x) && (!line || String(x.number) === line)).forEach(x => targets.push({
+  (state.phone_numbers || []).filter(x => x.active && mine(x)).forEach(x => targets.push({
     key: flowKey('number', x.number), section: 'Main numbers', type: 'number', target: String(x.number),
     label: `Main line ${x.number} — incoming journey`,
   }));
@@ -1763,8 +1768,8 @@ function savedFlowFor(type, target) {
 function renderRouteTargets(preferred) {
   const select = $('route-target');
   if (!select) return '';
-  // A customer never sees this list: a number is not an editable target for
-  // them, and their navigation lives in the two pickers above.
+  // Compatibility select, kept in sync with the visible workflow chooser.
+  // Both roles use the same searchable number/extension cards.
   if (!state.is_admin) { select.innerHTML = ''; return ''; }
   const prior = preferred ?? select.value;
   const targets = routeTargets().filter(t => t.type === routingMode || (t.type === 'group' && t.key === preferred));
@@ -1784,14 +1789,12 @@ function flowTargetOwner(type, target) {
   return (state.groups || []).find(row => String(row.id) === String(target))?.owner_user_id;
 }
 
-/* Open the builder on one target, from any page. A number key stands for the
-   workflow of the extension that answers it - for the administrator as much as
-   for the customer - and an administrator lands on the customer that target
-   belongs to, so saving can never write across customers. */
+/* Open the exact workflow from any page; never redirect a number to its desk.
+   Confirm before discarding a draft, and follow the target's customer scope. */
 function focusRouteTarget(key) {
-  if (!key) return;
+  if (!key || key === currentFlowKey()) return;
+  if (!allowRoutingNavigation()) return;
   const { type, target } = flowTargetParts(key);
-  const extension = type === 'number' ? extensionAnsweringNumber(target) : (type === 'extension' ? String(target) : '');
   const number = type === 'number' ? String(target) : numberAnsweredBy(target);
   const resolved = key;
   routingMode = type === 'extension' ? 'extension' : 'number';
@@ -1818,17 +1821,17 @@ function focusRouteTarget(key) {
   renderGroups();
 }
 
-/* What the builder is editing, kept as state rather than re-read from a
-   picker: an administrator has one target picker, a customer navigates a number
-   and then an extension, and a group flow can be opened from its own row without
-   any picker changing. One value, however it was reached. */
+/* One exact target, independent of the compatibility selects. Both roles use
+   the searchable chooser; external links can also open an owned workflow. */
 let flowTargetKey = '';
 let routingMode = 'number';
 let deskRingSources = null;
 let routingDirty = false;
+const routingSearch = {number:'', extension:''};
+const routingLastTarget = new Map();
 
 function currentFlowKey() {
-  return flowTargetKey || (state.is_admin ? ($('route-target')?.value || '') : '');
+  return flowTargetKey;
 }
 
 /* The name shown on the canvas's incoming-call node. */
@@ -1850,16 +1853,19 @@ function flowEntryLabel(type, target) {
 }
 
 function applyFlowTarget(key) {
+  const changed = flowTargetKey !== (key || '');
   routingDirty = false;
   flowTargetKey = key || '';
   const { type, target } = flowTargetParts(flowTargetKey);
   if (type) routingMode = type === 'extension' ? 'extension' : 'number';
   deskRingSources = null;
+  if (flowTargetKey) routingLastTarget.set(`${routingOwner()}:${routingMode}`, flowTargetKey);
   const saved = flowTargetKey ? savedFlowFor(type, target) : null;
-  flowNodes = saved?.route?.nodes ? saved.route.nodes.map(node => ({ ...node })) : [];
+  // A draft must not share nested IVR mappings or destination arrays with state.
+  flowNodes = JSON.parse(JSON.stringify(saved?.route?.nodes || []));
   // Never re-label a button that is mid-save or showing its confirmation.
   const save = $('save-route');
-  if (save && !saveFlowBusy && save.dataset.state !== 'saved') {
+  if (save && !saveFlowBusy && (changed || save.dataset.state !== 'saved')) {
     setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked');
   }
   const entry = $('flow-entry-number');
@@ -1880,10 +1886,13 @@ function renderFlow(preferred) {
     const owner = flowTargetOwner(type, target);
     if ((!state.is_admin || Number(owner) === Number(routingOwner())) && (type !== 'number' || target === chosenCustomerNumber())) return;
   }
+  if (saveFlowBusy) return;
   if (preferred) routingMode = flowTargetParts(preferred).type === 'extension' ? 'extension' : 'number';
+  if (!routingResources().length) { applyFlowTarget(''); return; }
   if (state.is_admin) {
     if (!$('route-target')) return;
-    applyFlowTarget(renderRouteTargets(preferred));
+    const wanted = preferred || (routingMode === 'number' ? flowKey('number', chosenCustomerNumber()) : undefined);
+    applyFlowTarget(renderRouteTargets(wanted));
     return;
   }
   applyFlowTarget(renderCustomerRoutePickers(preferred));
@@ -2039,21 +2048,87 @@ document.querySelectorAll('[data-node-type]').forEach(button => {
   }
 }
 
+function routingResources(mode = routingMode) {
+  const owner = routingOwner();
+  if (state.is_admin && owner === null) return [];
+  const owns = row => !state.is_admin || Number(row.owner_user_id) === Number(owner);
+  return (mode === 'number' ? state.phone_numbers || [] : state.extensions || [])
+    .filter(row => row.active && owns(row)).map(row => {
+      const target = mode === 'number' ? String(row.number) : String(row.key || row.extension);
+      return {key:flowKey(mode, target), target, row,
+        title:mode === 'number' ? target : `Extension ${extensionDigitsOf(target)}`,
+        name:mode === 'number' ? (row.description || 'Business number') : (row.display_name || 'Unnamed extension'),
+        detail:mode === 'number' ? 'Incoming number' : `Primary number ${row.number || 'not assigned'}`};
+    });
+}
+
+function allowRoutingNavigation() {
+  if (saveFlowBusy) { notify('Please wait for this workflow to finish saving', true); return false; }
+  if (routingDirty && !confirm('Discard unsaved changes to this workflow?')) return false;
+  routingDirty = false;
+  return true;
+}
+
+function renderRoutingChoices() {
+  const host = $('routing-workflow-options');
+  if (!host) return;
+  const resources = routingResources();
+  const query = (routingSearch[routingMode] || '').trim().toLowerCase();
+  const compact = text => String(text).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const matches = resources.filter(item => !query || `${item.title} ${item.name} ${item.detail}`.toLowerCase().includes(query)
+    || (compact(query) && compact(`${item.target} ${item.row.number || ''}`).includes(compact(query))));
+  const selected = currentFlowKey();
+  const tabKey = matches.some(item => item.key === selected) ? selected : matches[0]?.key;
+  host.innerHTML = matches.map(item => {
+    const saved = savedFlowFor(routingMode, item.target);
+    const status = saved ? saved.active === false || saved.active === 0 ? 'Paused' : 'Saved flow' : 'Default';
+    return `<button type="button" role="option" aria-selected="${item.key === selected}" tabindex="${item.key === tabKey ? '0' : '-1'}" data-workflow-key="${esc(item.key)}" ${saveFlowBusy ? 'disabled' : ''}>
+      <span class="workflow-choice-icon" aria-hidden="true">${routingMode === 'number' ? '☎' : '⌁'}</span>
+      <span class="workflow-choice-copy"><b>${esc(item.title)}</b><span>${esc(item.name)}</span>${routingMode === 'extension' ? `<small>${esc(item.detail)}</small>` : ''}</span>
+      <span class="workflow-choice-state"><span>${status}</span><i aria-hidden="true">${item.key === selected ? '✓' : ''}</i></span>
+    </button>`;
+  }).join('');
+  $('routing-workflow-count').textContent = `${matches.length}${query ? ` of ${resources.length}` : ''} ${routingMode === 'number' ? 'number' : 'extension'}${matches.length === 1 ? '' : 's'}`;
+  const empty = $('routing-no-results');
+  empty.hidden = matches.length > 0;
+  empty.textContent = resources.length ? 'No matches. Try a different number, extension or name.'
+    : state.is_admin && routingOwner() === null ? 'Choose a customer to see their workflows.'
+    : routingMode === 'number' ? 'No active numbers yet. Assign a number before setting up its flow.'
+    : 'No active extensions yet. Add an extension before setting up call handling.';
+}
+
 function renderRoutingMode() {
   const desk = routingMode === 'extension';
+  const {type, target} = flowTargetParts(currentFlowKey());
+  const item = routingResources().find(item => item.key === currentFlowKey());
+  const valid = !!item || type === 'group';
   $('page-routing').dataset.flowMode = routingMode;
+  $('page-routing').dataset.hasTarget = String(valid);
   document.querySelectorAll('[data-routing-mode]').forEach(button => {
     const active = button.dataset.routingMode === routingMode;
     button.setAttribute('aria-selected', String(active));
     button.tabIndex = active ? 0 : -1;
   });
+  for (const mode of ['number', 'extension']) {
+    const count = routingResources(mode).length;
+    $(`${mode}-flow-count`).textContent = `${count} ${mode === 'number' ? 'number' : 'extension'}${count === 1 ? '' : 's'}`;
+  }
   $('routing-workspace').setAttribute('aria-labelledby', desk ? 'extension-flow-tab' : 'number-flow-tab');
-  $('routing-editor-kicker').textContent = desk ? 'EXTENSION HANDLING' : 'NUMBER FLOW';
-  $('routing-editor-title').textContent = desk ? 'One desk. More ways to reach it.' : 'The incoming journey';
+  $('routing-editor-kicker').textContent = desk ? 'EXTENSION CALL HANDLING' : 'NUMBER FLOW';
+  $('routing-editor-title').textContent = item ? `${item.title}${desk ? ` · ${item.name}` : ''}` : type === 'group' ? flowEntryLabel(type, target) : 'Choose a workflow';
+  $('routing-selected-meta').textContent = item ? (desk ? item.detail : item.name) : '';
   $('routing-editor-description').textContent = desk
-    ? 'Decide what rings this desk, and what happens when nobody answers.'
+    ? 'Ring device → No answer → Voicemail or forwarding'
     : 'Business hours → IVR → Department or extension → Fallback';
-  $('routing-target-caption').textContent = desk ? 'Choose a desk' : 'Editing number';
+  $('routing-choose-title').textContent = desk ? 'Choose an extension' : 'Choose a number';
+  $('routing-target-caption').textContent = desk ? 'Extension' : 'Number';
+  $('routing-editor-empty').hidden = valid;
+  const input = $('routing-workflow-search');
+  input.placeholder = desk ? 'Search by extension, name or primary number' : 'Search by number or label';
+  input.setAttribute('aria-label', desk ? 'Search extensions' : 'Search numbers');
+  input.value = routingSearch[routingMode] || '';
+  renderRoutingChoices();
+  if (!saveFlowBusy) $('save-route').disabled = !valid;
 }
 
 function markRoutingDirty() {
@@ -3894,9 +3969,6 @@ document.addEventListener('click', async event => {
     showPage('routing');
     if (number) {
       focusRouteTarget(flowKey('number', number));
-      $('flow-entry-number').textContent = number;
-      flowNodes = (state.call_routes || []).find(x => x.phone_number === number)?.route?.nodes || [];
-      renderFlowNodes();
     }
     return;
   }
@@ -4176,13 +4248,19 @@ const flowDesignHint = () => 'Choose a customer above to design their call flows
    what it is doing. A disabled button whose reason lives in a tooltip reads as
    broken; instead it stays live, and the toolbar prints the reason. */
 let saveFlowBusy = false;
+function lockRoutingSave(busy) {
+  const workspace = $('routing-workspace');
+  if (workspace) { workspace.inert = busy; workspace.toggleAttribute('inert', busy); }
+  document.querySelectorAll('[data-routing-mode]').forEach(button => { button.disabled = busy; });
+  $('save-route').disabled = busy || $('page-routing').dataset.hasTarget !== 'true';
+}
 const SAVE_FLOW_LABELS = { ready: 'Save flow', blocked: 'Save flow', saving: 'Saving…', saved: 'Saved ✓' };
 function setSaveFlowState(state, detail) {
   const save = $('save-route');
   if (!save) return;
   save.textContent = SAVE_FLOW_LABELS[state] || SAVE_FLOW_LABELS.ready;
   save.dataset.state = state;
-  save.disabled = state === 'saving';
+  lockRoutingSave(saveFlowBusy || state === 'saving');
   save.title = detail || (state === 'blocked' ? flowDesignHint() : '');
   const hint = $('flow-save-hint');
   if (hint) {
@@ -4221,12 +4299,14 @@ if (dragSurface) {
 }
 document.querySelectorAll('[data-routing-mode]').forEach(button => {
   button.addEventListener('click', () => {
-    if (routingDirty && !confirm('Discard unsaved routing changes and switch editors?')) return;
-    routingDirty = false;
-    routingMode = button.dataset.routingMode;
-    flowTargetKey = '';
-    renderFlow();
-    renderRoutingMode();
+    const mode = button.dataset.routingMode;
+    if (mode === routingMode || !allowRoutingNavigation()) return;
+    routingMode = mode;
+    const available = routingResources(mode);
+    const remembered = routingLastTarget.get(`${routingOwner()}:${mode}`);
+    const next = available.find(item => item.key === remembered) || available[0];
+    if (next) focusRouteTarget(next.key);
+    else applyFlowTarget('');
   });
   button.addEventListener('keydown', event => {
     if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
@@ -4235,6 +4315,28 @@ document.querySelectorAll('[data-routing-mode]').forEach(button => {
     const next = event.key === 'Home' ? buttons[0] : event.key === 'End' ? buttons[1] : buttons.find(other => other !== button);
     next.click(); next.focus();
   });
+});
+wire('routing-workflow-search', 'input', event => {
+  routingSearch[routingMode] = event.target.value;
+  renderRoutingChoices();
+});
+wire('routing-workflow-options', 'click', event => {
+  const option = event.target.closest('[data-workflow-key]');
+  if (option) {
+    focusRouteTarget(option.dataset.workflowKey);
+    event.currentTarget.querySelector('[aria-selected="true"]')?.focus({preventScroll:true});
+  }
+});
+wire('routing-workflow-options', 'keydown', event => {
+  if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key)) return;
+  const options = [...event.currentTarget.querySelectorAll('[data-workflow-key]')];
+  if (!options.length) return;
+  event.preventDefault();
+  const index = options.indexOf(document.activeElement);
+  const step = ['ArrowLeft','ArrowUp'].includes(event.key) ? -1 : 1;
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : (index + step + options.length) % options.length;
+  options.forEach((option, i) => { option.tabIndex = i === next ? 0 : -1; });
+  options[next].focus();
 });
 wire('flow-nodes', 'change', event => {
   if (event.target.closest('.desk-editor')) { markRoutingDirty(); syncDeskActionVisibility(); }
@@ -4247,8 +4349,8 @@ wire('flow-nodes', 'keydown', event => {
     event.preventDefault(); openFlowConfig(Number(event.target.dataset.flowIndex));
   }
 });
-wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
-wire('route-extension', 'change', () => { renderFlow($('route-extension').value); renderGroups(); });
+wire('route-target', 'change', () => { focusRouteTarget($('route-target').value); renderRouteTargets(currentFlowKey()); });
+wire('route-extension', 'change', () => { focusRouteTarget($('route-extension').value); renderCustomerRoutePickers(currentFlowKey()); });
 wire('save-route', 'click', async () => {
   if (saveFlowBusy) return;                       // one save at a time
   if (!canDesignFlows()) { setSaveFlowState('blocked'); return notify(flowDesignHint(), true); }
@@ -4279,12 +4381,14 @@ wire('save-route', 'click', async () => {
     await loadState();
     if (id) await openCustomer(id, tab, true);
     // Leave the confirmation up long enough to read, then go back to normal.
-    setTimeout(() => { if (!saveFlowBusy) setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked'); }, 1900);
+    setTimeout(() => { if (!saveFlowBusy && !routingDirty && $('save-route').dataset.state === 'saved') setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked'); }, 1900);
   } catch (error) {
     notify(error.message, true);
     setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked');
   } finally {
     saveFlowBusy = false;
+    lockRoutingSave(false);
+    renderRoutingChoices();
   }
 });
 

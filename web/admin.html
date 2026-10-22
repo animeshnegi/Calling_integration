@@ -223,18 +223,26 @@
 
       <!-- ============================================================ ROUTING -->
       <section class="page routing-studio" id="page-routing" data-flow-mode="number">
-        <div class="routing-heading"><div><span class="routing-eyebrow">CALL EXPERIENCE</span><h2>Every call. The right destination.</h2><p>Shape how your numbers answer, then decide how each desk handles the call.</p></div><span class="routing-badge">Incoming calls only</span></div>
+        <div class="routing-heading"><div><span class="routing-eyebrow">CALL EXPERIENCE</span><h2>Manage incoming calls</h2><p>Choose a workflow, select a number or extension, and decide how it answers.</p></div><span class="routing-badge">Incoming calls only</span></div>
         <div class="routing-modes" role="tablist" aria-label="Routing editor">
-          <button type="button" id="number-flow-tab" role="tab" aria-selected="true" aria-controls="routing-workspace" data-routing-mode="number"><span class="routing-mode-icon">☎</span><span><b>Number flow</b><small>Business hours, menus &amp; destinations</small></span><span class="routing-mode-arrow">↗</span></button>
-          <button type="button" id="extension-flow-tab" role="tab" aria-selected="false" aria-controls="routing-workspace" data-routing-mode="extension"><span class="routing-mode-icon">⌁</span><span><b>Extension handling</b><small>Ring devices &amp; handle unanswered calls</small></span><span class="routing-mode-arrow">↗</span></button>
+          <button type="button" id="number-flow-tab" role="tab" aria-selected="true" aria-controls="routing-workspace" data-routing-mode="number"><span class="routing-mode-icon">☎</span><span><b>Number Flow</b><small>Hours, IVR, teams &amp; fallback</small></span><span class="routing-mode-count" id="number-flow-count"></span></button>
+          <button type="button" id="extension-flow-tab" role="tab" aria-selected="false" aria-controls="routing-workspace" data-routing-mode="extension"><span class="routing-mode-icon">⌁</span><span><b>Extension Call Handling</b><small>Devices, ring time &amp; no-answer rules</small></span><span class="routing-mode-count" id="extension-flow-count"></span></button>
         </div>
         <div id="routing-workspace" role="tabpanel" aria-labelledby="number-flow-tab">
-          <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field routing-line-scope"><span>Incoming number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
+          <section class="routing-selection" aria-labelledby="routing-choose-title">
+            <div class="routing-selection-head"><div><span class="routing-eyebrow">SELECT A WORKFLOW</span><h3 id="routing-choose-title">Choose a number</h3></div>
+              <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field routing-line-scope" hidden><span>Incoming number</span><select class="customer-number-select" aria-label="Phone number" tabindex="-1"></select></label></div>
+            </div>
+            <div class="routing-search-row"><label class="routing-search"><span aria-hidden="true">⌕</span><input id="routing-workflow-search" type="search" autocomplete="off" aria-label="Search numbers" aria-controls="routing-workflow-options" placeholder="Search by number or label"><kbd aria-hidden="true">Search</kbd></label><span id="routing-workflow-count" role="status" aria-live="polite"></span></div>
+            <div class="routing-workflow-options" id="routing-workflow-options" role="listbox" aria-labelledby="routing-choose-title"></div>
+            <div class="routing-no-results" id="routing-no-results" role="status" hidden></div>
+          </section>
           <div class="flow-toolbar">
-            <div><span class="routing-eyebrow" id="routing-editor-kicker">NUMBER FLOW</span><h3 id="routing-editor-title">The incoming journey</h3><p id="routing-editor-description">One clear path from the first ring to the final fallback.</p></div>
-            <div class="tools"><label class="routing-target-label"><span id="routing-target-caption">Editing</span><select id="route-extension" aria-label="Call flow target" data-customer-only></select><select id="route-target" aria-label="Call flow target" data-admin-only></select></label><button class="btn primary" id="save-route" data-state="ready">Save flow</button></div>
+            <div><span class="routing-eyebrow" id="routing-editor-kicker">NUMBER FLOW</span><h3 id="routing-editor-title">Choose a number</h3><p id="routing-selected-meta" class="routing-selected-meta"></p><p id="routing-editor-description">One clear path from the first ring to the final fallback.</p></div>
+            <div class="tools"><label class="routing-target-label"><span id="routing-target-caption">Editing</span><select id="route-extension" aria-label="Call flow target" tabindex="-1" data-customer-only></select><select id="route-target" aria-label="Call flow target" tabindex="-1" data-admin-only></select></label><button class="btn primary" id="save-route" data-state="ready">Save flow</button></div>
           </div>
           <div class="routing-save-status" id="flow-save-hint" role="status" hidden></div>
+          <div class="routing-editor-empty" id="routing-editor-empty" hidden><span aria-hidden="true">⌁</span><h3>No workflow selected</h3><p>Select a number or extension above to configure incoming calls.</p></div>
           <div class="routing-recipe" id="routing-recipe" aria-label="Number flow stages"><span><i>01</i>Business hours</span><b>→</b><span><i>02</i>IVR</span><b>→</b><span><i>03</i>Department or extension</span><b>→</b><span><i>04</i>Fallback</span></div>
           <div class="flow-layout">
             <aside class="panel palette routing-library">
@@ -256,7 +264,7 @@
             </section>
           </div>
         </div>
-        <aside class="panel groups-panel routing-departments"><div class="title"><div><span class="routing-eyebrow">YOUR TEAM</span><h3>Departments &amp; ring groups</h3><p>A department can include desks from any of this customer's numbers.</p></div><button class="btn ghost" data-open="group">+ New department</button></div><div id="group-list" class="rows"></div></aside>
+        <details class="routing-team-details"><summary><span>Departments &amp; ring groups<small>Manage reusable teams for your number flows</small></span><span aria-hidden="true">+</span></summary><aside class="panel groups-panel routing-departments"><div class="title"><div><span class="routing-eyebrow">YOUR TEAM</span><h3>Departments &amp; ring groups</h3><p>A department can include extensions from any of this customer's numbers.</p></div><button class="btn ghost" data-open="group">+ New department</button></div><div id="group-list" class="rows"></div></aside></details>
       </section>
 
       <!-- ============================================================== CALLS -->

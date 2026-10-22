@@ -106,6 +106,7 @@ def test_the_routing_canvas_puts_the_journey_on_the_main_number():
     assert "DESK_NODE_TYPES" in js                    # a desk only rings and takes messages
     assert "palette-logic-hint" in html
     assert 'id="number-flow-tab"' in html
+    assert "Number Flow" in html
     assert 'id="extension-flow-tab"' in html
     assert "Department or extension" in html          # the number journey has its own stages
-    assert "Extension handling" in html              # a distinct no-answer editor
+    assert "Extension Call Handling" in html    # a distinct no-answer editor

@@ -263,8 +263,18 @@ one customer; customers only see their own resources. The two accessible tabs ar
 
 | Editor | Responsibility |
 | --- | --- |
-| **Number flow** | Business hours → IVR → Department or extension → Fallback |
-| **Extension handling** | Ring device on/off → No answer → Voicemail, another extension, external forwarding, or end call |
+| **Number Flow** | Business hours → IVR → Department or extension → Fallback |
+| **Extension Call Handling** | Ring device on/off → No answer → Voicemail, another extension, external forwarding, or end call |
+
+Both roles use one searchable resource chooser rather than separate number and
+extension dropdowns. Number cards show the DID and label; extension cards show the
+extension, name and primary number (so repeated extension digits stay distinct).
+The selected card and editor heading identify exactly what will be saved. Search
+accepts names and numbers, ignoring phone punctuation, and supports arrow keys,
+Home/End and Enter/Space selection. Counts, saved/default/paused badges and explicit
+empty/no-match states help with large inventories. Each customer/mode remembers its
+last selection for the current console session. Departments sit in a collapsible
+management section beneath the editors.
 
 Hours and IVR are optional. The number editor uses a small step library, a numbered
 journey overview and editable preview cards. The extension editor is a dedicated
@@ -306,8 +316,10 @@ fallback without playing the open-hours menu.
 
 Flow saves trigger the existing PBX configuration sync. Saved-but-not-applied
 warnings remain visible. Edits have an unsaved status, polling preserves the draft,
-and tab switches confirm before discarding it. The studio supports both skins,
-keyboard tab navigation and small screens. The independent regression harness is
+and changing the resource, customer or tab confirms before discarding it. Clicking
+the current resource/tab is a no-op. Editor and selection controls are locked while
+saving, and nested IVR draft mappings never mutate the saved state. The studio
+supports both skins, keyboard tab navigation and small screens. The independent regression harness is
 `NODE_PATH=/path/to/node_modules node tools/routingcheck.js`.
 
 ## The phone menu (IVR)
