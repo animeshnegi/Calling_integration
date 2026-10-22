@@ -309,3 +309,18 @@ A voicemail continuation failure and recording setup failure now log the call
 ID in the worker; an AMI apply failure is logged by the API and shown in the
 flow-save warning. These checks are live acceptance gates, not something unit
 tests alone can certify.
+
+### Shared incoming numbers in the routing studio
+
+Both roles now use **Number flow** and **Extension handling**. To share a desk,
+open Extension handling, select the desk, and tick its primary number and the
+company number under **Numbers that ring this desk**, then save. This edits the
+numbers' direct ring stages; it does not reassign the desk or change outbound
+calling. Existing IVR menus still run before the direct ring stage—map their
+keys separately if callers should choose that desk from the menu.
+
+After deploying, call both DIDs externally and confirm the same registered desk
+rings. Test ring-device off → voicemail, and ring-out → forwarding separately.
+When several desks ring, configure a number-level fallback for a deterministic
+shared ending; without one the first selected desk supplies the no-answer action.
+A general number can use a saved journey without provisioning a duplicate desk.

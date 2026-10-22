@@ -222,57 +222,41 @@
       </section>
 
       <!-- ============================================================ ROUTING -->
-      <section class="page" id="page-routing">
-        <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
-        <div class="flow-toolbar sheen">
-          <div><h2>Call flows</h2><p data-customer-only>Design the journey for your main line, or the no-answer behaviour of one desk. Groups keep their own flows, listed below.</p><p data-admin-only>The journey belongs to the main number: menus, business hours, voicemail and forwarding live there. A desk only rings and takes messages.</p></div>
-          <div class="tools">
-            <select id="route-extension" aria-label="Call flow target" data-customer-only></select>
-            <select id="route-target" aria-label="Call flow target" data-admin-only></select>
-            <button class="btn primary" id="save-route" data-state="ready">Save flow</button>
-            <span class="flow-save-hint" id="flow-save-hint" hidden></span>
+      <section class="page routing-studio" id="page-routing" data-flow-mode="number">
+        <div class="routing-heading"><div><span class="routing-eyebrow">CALL EXPERIENCE</span><h2>Every call. The right destination.</h2><p>Shape how your numbers answer, then decide how each desk handles the call.</p></div><span class="routing-badge">Incoming calls only</span></div>
+        <div class="routing-modes" role="tablist" aria-label="Routing editor">
+          <button type="button" id="number-flow-tab" role="tab" aria-selected="true" aria-controls="routing-workspace" data-routing-mode="number"><span class="routing-mode-icon">☎</span><span><b>Number flow</b><small>Business hours, menus &amp; destinations</small></span><span class="routing-mode-arrow">↗</span></button>
+          <button type="button" id="extension-flow-tab" role="tab" aria-selected="false" aria-controls="routing-workspace" data-routing-mode="extension"><span class="routing-mode-icon">⌁</span><span><b>Extension handling</b><small>Ring devices &amp; handle unanswered calls</small></span><span class="routing-mode-arrow">↗</span></button>
+        </div>
+        <div id="routing-workspace" role="tabpanel" aria-labelledby="number-flow-tab">
+          <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field routing-line-scope"><span>Incoming number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
+          <div class="flow-toolbar">
+            <div><span class="routing-eyebrow" id="routing-editor-kicker">NUMBER FLOW</span><h3 id="routing-editor-title">The incoming journey</h3><p id="routing-editor-description">One clear path from the first ring to the final fallback.</p></div>
+            <div class="tools"><label class="routing-target-label"><span id="routing-target-caption">Editing</span><select id="route-extension" aria-label="Call flow target" data-customer-only></select><select id="route-target" aria-label="Call flow target" data-admin-only></select></label><button class="btn primary" id="save-route" data-state="ready">Save flow</button></div>
+          </div>
+          <div class="routing-save-status" id="flow-save-hint" role="status" hidden></div>
+          <div class="routing-recipe" id="routing-recipe" aria-label="Number flow stages"><span><i>01</i>Business hours</span><b>→</b><span><i>02</i>IVR</span><b>→</b><span><i>03</i>Department or extension</span><b>→</b><span><i>04</i>Fallback</span></div>
+          <div class="flow-layout">
+            <aside class="panel palette routing-library">
+              <div class="title"><span>BUILD YOUR JOURNEY</span><h3>Add a step</h3><p>Start with your destinations. Add hours or a menu when you need them.</p><p class="palette-hint" id="ivr-palette-hint" hidden></p><p class="palette-hint" id="palette-logic-hint" hidden></p></div>
+              <button type="button" draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>When your team is available</small></span><span class="library-add">+</span></button>
+              <button type="button" draggable="true" data-node-type="ivr"><b class="tile tile-ivr">⌨</b><span class="copy"><b>IVR menu</b><small>Greet &amp; guide callers</small></span><span class="library-add">+</span></button>
+              <button type="button" draggable="true" data-node-type="ring_group"><b class="tile tile-group">◎</b><span class="copy"><b>Department / desks</b><small>Ring one or several extensions</small></span><span class="library-add">+</span></button>
+              <div class="library-divider">IF NOBODY ANSWERS</div>
+              <button type="button" draggable="true" data-node-type="voicemail"><b class="tile tile-vm">✉</b><span class="copy"><b>Voicemail</b><small>Let callers leave a message</small></span><span class="library-add">+</span></button>
+              <button type="button" draggable="true" data-node-type="forward"><b class="tile tile-fwd">↗</b><span class="copy"><b>Forward a call</b><small>Send it to an external number</small></span><span class="library-add">+</span></button>
+              <div class="routing-library-note">Hours and IVR are optional.<br>Without a number fallback, the first selected desk supplies its no-answer policy.</div>
+            </aside>
+            <section class="panel canvas" id="flow-canvas" aria-label="Call flow editor">
+              <div class="canvas-status"><span id="routing-preview-label">FLOW PREVIEW</span><small>Changes apply when you save</small></div>
+              <div class="canvas-empty"><div class="glyph">☎</div><h4>Start with who should answer</h4><p>Add a department or extension, then build the journey around your team.</p></div>
+              <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Choose an incoming number</small></div><span class="step">START</span></div>
+              <div id="flow-nodes"></div>
+              <div class="flow-drop"><span>Add a step from the library to continue the journey</span></div>
+            </section>
           </div>
         </div>
-        <div class="flow-layout">
-          <aside class="panel palette">
-            <div class="title"><span>FLOW BLOCKS</span><h3>Build the caller journey</h3><p>Drag a block onto the canvas, or click to append it.</p>
-              <p class="palette-hint" id="ivr-palette-hint" hidden></p>
-              <p class="palette-hint" id="palette-logic-hint" hidden></p></div>
-            <button draggable="true" data-node-type="ivr"><b class="tile tile-ivr">⌨</b><span class="copy"><b>Phone menu (IVR)</b><small>Ask callers to enter an extension</small></span></button>
-            <button draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>Open and closed schedules</small></span></button>
-            <button draggable="true" data-node-type="simultaneous"><b class="tile tile-ring">⇉</b><span class="copy"><b>Simultaneous ring</b><small>Reach everyone at once</small></span></button>
-            <button draggable="true" data-node-type="sequential"><b class="tile tile-seq">⇢</b><span class="copy"><b>Sequential ring</b><small>Try agents in order</small></span></button>
-            <button draggable="true" data-node-type="ring_group"><b class="tile tile-group">◎</b><span class="copy"><b>Ring group</b><small>Route to a department</small></span></button>
-            <button draggable="true" data-node-type="extension"><b class="tile tile-ext">⌁</b><span class="copy"><b>Extension</b><small>Send to one teammate</small></span></button>
-            <button draggable="true" data-node-type="voicemail"><b class="tile tile-vm">✉</b><span class="copy"><b>Voicemail</b><small>Capture unanswered calls</small></span></button>
-            <button draggable="true" data-node-type="forward"><b class="tile tile-fwd">↗</b><span class="copy"><b>Forward number</b><small>Route outside the system</small></span></button>
-          </aside>
-          <section class="panel canvas" id="flow-canvas">
-            <div class="canvas-orb a"></div><div class="canvas-orb b"></div>
-            <div class="canvas-status"><span><span class="live-dot"></span> LIVE CALL PATH</span><small data-customer-only>Drag nodes to reorder · click to configure</small><small data-admin-only>What the customer's callers hear</small></div>
-            <div class="canvas-empty">
-              <div class="glyph">⌘</div>
-              <h4>Design how this line answers</h4>
-              <p>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
-              <p data-admin-only>This is the journey the customer has built for this number. Provision their devices and numbers here; they decide how a call is answered.</p>
-              <ol data-customer-only>
-                <li>Choose a number, extension or group</li>
-                <li>Add routing blocks</li>
-                <li>Configure each step</li>
-                <li>Save the flow</li>
-              </ol>
-            </div>
-            <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Pick a number, then an extension</small></div><span class="step">START</span></div>
-            <div id="flow-nodes"></div>
-            <div class="flow-drop" data-customer-only><b>＋</b><span>Drop the next routing block here</span></div>
-          </section>
-        </div>
-        <aside class="panel palette groups-panel">
-          <div class="title"><span>RING GROUPS</span><h3>Teams and departments</h3>
-            <p>A group rings its members together and can carry its own call flow: choose it as the target above, or as a ring destination inside any flow.</p>
-            <button class="btn primary" data-open="group">＋ Add group</button></div>
-          <div id="group-list" class="rows"></div>
-        </aside>
+        <aside class="panel groups-panel routing-departments"><div class="title"><div><span class="routing-eyebrow">YOUR TEAM</span><h3>Departments &amp; ring groups</h3><p>A department can include desks from any of this customer's numbers.</p></div><button class="btn ghost" data-open="group">+ New department</button></div><div id="group-list" class="rows"></div></aside>
       </section>
 
       <!-- ============================================================== CALLS -->

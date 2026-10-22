@@ -444,7 +444,7 @@ def test_known_inbound_did_creates_crm_call_for_only_owner(tmp_path):
         "channel": {"id": "carrier-channel-1", "state": "Up", "caller": {"number": "+919999999999"}},
     })
     inbound = next(call for call in service.store.all() if call.direction == "inbound")
-    assert inbound.extension == "101"
+    assert inbound.extension == "101@+13025550101"  # Shared lines must retain the exact desk identity.
     assert inbound.caller_id_number == "+13025550101"
     assert inbound.customer_channel_id == "carrier-channel-1"
     assert inbound.employee_channel_id.endswith("-employee")

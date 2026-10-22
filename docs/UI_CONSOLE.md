@@ -150,8 +150,9 @@ Adding a device extends the line it was added to (`sync_primary_flows`), because
 line rings its own devices - but only while that flow is still the generated
 one: a single ring step, the default 25s timeout, no group and only that line's own
 devices. The moment the customer designs something of
-their own, it is never rewritten. A number's flow may only ring that number's
-extensions, so a menu on one line handing over 104 rings *that line's* 104.
+their own, it is never rewritten. A number flow can explicitly select another
+primary line's desk owned by the same customer. A bare `104` still resolves on
+the dialed line; sharing uses the full key, not an ambiguous three-digit name.
 
 A line does not take another line's digits: the dialog names the number that already
 holds them as they are typed, and the store refuses the write as well. A digits-only
@@ -255,80 +256,63 @@ numbers page is the other half of the same picture: every line shows the extensi
 it holds, how many there are, which one answers it, and an **Add extension** button
 that opens the dialog on *that* line with its next free number suggested.
 
-## Call flows: one builder, three kinds of target
+## Call Routing: two focused editors
 
-A flow can belong to an extension or a group. **A number is not an editable target for
-anyone**: a number's workflow does not live on the number - the extensions that answer it
-carry the flows, and the platform keeps the number's own ring plan in step with the
-devices a customer adds. An administrator picks from `#route-target`, which lists the
-chosen customer's extensions and groups; a **customer** navigates instead:
-`#route-number` lists their assigned numbers and `#route-extension` lists their active
-extensions (`extensionsForNumber`) - labelled `101 · +13025550001` so the same digits on
-two lines are told apart, and the number decides which extension the builder opens on.
-Ring steps name those same labels, and a destination is stored as the extension's key. A number with nothing wired to
-it still offers the customer's own extensions, so the picker is never empty. Every entry
-point resolves a number key to `extension:<the one that answers it>` (`focusRouteTarget`),
-so a number row on the Numbers page opens the workflow of the extension that answers it
-for both roles, and a stray number key is refused with a message on the save path.
+The same routing studio serves administrators and customers. Administrators choose
+one customer; customers only see their own resources. The two accessible tabs are:
 
-`currentFlowKey()` holds what the builder is editing, however it was reached - the
-administrator's picker, the customer's two pickers, or a group's own "Call flow" row -
-and the save button, the group highlight and the canvas's incoming-call label all read it.
-That is what keeps a group flow saveable while the customer's pickers still name an
-extension. The numbers page follows the same rule: a customer's "Call flow" button opens
-the workflow of the extension answering that number, while an operator's still opens the
-number's own flow.
+| Editor | Responsibility |
+| --- | --- |
+| **Number flow** | Business hours → IVR → Department or extension → Fallback |
+| **Extension handling** | Ring device on/off → No answer → Voicemail, another extension, external forwarding, or end call |
 
-The builder's storage is unchanged:
+Hours and IVR are optional. The number editor uses a small step library, a numbered
+journey overview and editable preview cards. The extension editor is a dedicated
+policy form, not a general-purpose block canvas. It includes ring timeout, the
+mailbox PIN/greeting instructions and a **Numbers that ring this desk** checklist.
+Departments are reusable groups selected in a number's destination step, rather
+than a third top-level editor.
 
-* **Numbers** — stored in `call_routes`, keyed by the number, as they always were.
-* **Extensions** and **groups** — stored in `routing_flows`, keyed by
-  `(owner_user_id, target_type, target)`. They live in their own table because
-  `call_routes.phone_number` carries a legacy `UNIQUE` constraint that a second kind of
-  target cannot satisfy, and rebuilding a table that holds customer data is not worth
-  the risk.
+A desk has one primary number/identity, but can be an incoming destination of
+multiple numbers owned by the same customer. For example, `101@+13025550002` can
+ring when either its primary number or the company switchboard `+13025550001` is
+called. Both routes dial the **same desk**, not a cloned extension. Its SIP
+credentials, primary number and outbound caller ID do not change. A shared number
+with no primary desk can use an explicitly saved number flow to reach existing
+desks; it does not need a duplicate SIP account.
 
-The **Save flow** button in `#flow-toolbar` reports its own state rather than sitting
-greyed out with the reason in a tooltip: it stays live (`Saving…` while the request is
-in flight, `Saved ✓` for a moment afterwards, with `#flow-save-hint` naming the target),
-takes one save at a time, and when it cannot save it says so in the toolbar. Its row
-wraps (`flex-wrap`) and the pickers beside it shrink (`flex:1 1 168px`) while the button
-keeps its own size (`flex:0 0 auto`, 40px - level with the pickers), so a narrow window
-or the workspace drawer folds it onto a second line instead of pushing it out of the
-panel.
+An explicit destination picker offers all active desks of the selected customer,
+with their primary numbers shown to distinguish repeated `101`s. Bare digits still
+resolve on the dialed line; no implicit cross-number guessing is introduced.
+IVR key mappings may explicitly name another owned desk. Typing full extension
+digits in the menu remains number-scoped.
 
-A **group** (`extension_groups`) is a named set of the customer's extensions with a
-ring timeout. A group can be the target of its own flow, and it can be chosen as the
-ring destination inside any flow: the step then carries `group_id` alongside the
-resolved `extensions`, and validation rejects a step whose destinations are not the
-group's members. Deleting a group removes its flow; deleting an extension removes its
-flow and takes it out of every group.
+`POST /admin/api/call-routes` retains the existing storage: number flows are in
+`call_routes`, extension policies in `routing_flows`. An extension save may include
+`ring_sources: ["+13025550001", "+13025550002"]`. The store validates every source
+and destination against ownership before writing the policy and affected number
+ring stages in **one transaction**. Removing a source removes only that desk from
+its direct ring stage. Other desks, timeouts, hours, IVR keys and terminal fallback
+steps are preserved. A named department's global membership is never edited as a
+side effect. Sources describe direct ring-stage membership, not IVR key mappings;
+a number's existing IVR still runs first.
 
-`POST /admin/api/call-routes` takes `target_type` (`number`, `extension`, `group`) and
-dispatches to the right store call. Customers can only target what they own; an
-administrator's request resolves the owner from the target itself (falling back to the
-customer named in `owner_user_id`), so a flow cannot be written across customers.
+Number fallback is the shared terminal ending when configured. Otherwise the first
+selected desk supplies the no-answer ending for multi-desk ringing. An internal
+no-answer transfer gets one round, not a recursive chain. Ringing disabled runs the
+no-answer action immediately, including when the desk is chosen by an IVR key.
+Business hours gate the menu as well as ringing; closed calls use the terminal
+fallback without playing the open-hours menu.
 
-A fresh ring step arrives pre-filled with what that target rings by default
-(`flowStepDefaults()`, reading `currentFlowKey()` so it follows whichever picker opened the
-builder): that device for an extension, the members for a group. A number key can still
-arrive from a stored link, and then every device of the customer is offered. The main
-line's own "rings everyone" plan is generated by provisioning and kept in step as the
-customer adds phones, because it is no longer something the console edits.
-
-> **What rings today.** Inbound calls are answered by the ARI worker through
-> `inbound_plan()`, the same planner the builder validates against: the customer's main
-> line rings every active device they own, a number tied to one extension rings just
-> that extension, and a flow that ends in voicemail falls back to the mailbox. Answer
-> connects the caller, no answer ends the call (or takes the message). A step the
-> customer adds - hours, groups, a second ring stage - is stored and validated, and the
-> primary/extension/voicemail shape above is executed today. A flow that starts with a
-> **phone menu** answers the call, asks for an extension and dials it; that path is
-> described in the next section.
+Flow saves trigger the existing PBX configuration sync. Saved-but-not-applied
+warnings remain visible. Edits have an unsaved status, polling preserves the draft,
+and tab switches confirm before discarding it. The studio supports both skins,
+keyboard tab navigation and small screens. The independent regression harness is
+`NODE_PATH=/path/to/node_modules node tools/routingcheck.js`.
 
 ## The phone menu (IVR)
 
-The **Phone menu (IVR)** block is the first tile in the palette. It answers the call with
+The **IVR menu** step lives in the Number flow library, after business hours. It answers the call with
 the recorded prompt, waits for the caller to key in an extension, checks that extension
 against the customer's own devices and dials it:
 
@@ -367,11 +351,10 @@ The operator's rule lives in one place, `SettingsStore.auto_ivr_wanted()`:
 * **One extension, or five** - no menu is added. A small account has nothing to choose
   from, and between one and five the block is the customer's own decision from the
   palette.
-* **More than five** (`IVR_AUTO_ABOVE = 5`) - a menu is prepended to **every** call flow,
-  including each extension's own flow.
+* **More than five** (`IVR_AUTO_ABOVE = 5`) - each main number journey gets a menu,
+  after any business-hours step. Extension handling never gets an IVR.
 
-`sync_auto_ivr(owner)` applies it: it prepends the default menu to every `call_routes` and
-`routing_flows` row that does not already start with one, and **never removes** a menu - a
+`sync_auto_ivr(owner)` applies it to `call_routes` rows without an existing menu, and **never removes** a menu - a
 greeting the customer wrote is theirs. It runs when a device is created
 (`POST /admin/api/extensions`), when a number is provisioned, and when a flow is saved,
 so a workflow written after the sixth device arrives with the menu already on it. Where

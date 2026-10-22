@@ -2637,10 +2637,9 @@ class SettingsStore:
 
         Ring destinations must be extensions the customer owns, and a step that
         names a saved group must belong to that customer with members drawn from
-        the group, so a flow can never ring somebody else's phone. A number's own
-        flow is stricter: 101 means that line's 101, so it may only ring the
-        extensions of that number - which is also what makes the routing canvas
-        show one line's set at a time.
+        the group, so a flow can never ring somebody else's phone. Explicit keys
+        may ring another primary line's desk within this customer; bare digits
+        still resolve on the dialed line. Sharing never changes desk ownership.
         """
         if not isinstance(route, dict) or not isinstance(route.get("nodes"), list) or len(route["nodes"]) > 100:
             raise ValueError("Call route must contain a nodes array with at most 100 nodes")
@@ -2658,17 +2657,31 @@ class SettingsStore:
         if any(not isinstance(node, dict) or node.get("type") not in self.ROUTE_NODE_TYPES for node in route["nodes"]):
             raise ValueError("Call route contains an unsupported node")
         # A desk's flow is its no-answer policy: ring the desk, then take a
-        # message. Menus, hours and forwarding belong to the journey of a line,
-        # where the engine runs them - a step here would be configuration that
-        # nothing can ever execute.
+        # message or forward an unanswered call. Menus and hours belong to the
+        # journey of the number, not to the desk's no-answer policy.
         if target_type == "extension":
-            desk_kinds = {"extension", "voicemail"}
+            desk_kinds = {"extension", "voicemail", "forward"}
             offenders = sorted({str(node.get("type")) for node in route["nodes"] if str(node.get("type")) not in desk_kinds})
             if offenders:
                 raise ValueError(
-                    "A desk flow can only ring the desk and take a message - "
+                    "A desk flow can only ring, take voicemail or forward unanswered calls - "
                     f"move {', '.join(offenders)} to the main number's journey"
                 )
+        if target_type == "extension":
+            policies = [node for node in route["nodes"] if "no_answer" in node]
+            if policies:
+                policy = policies[0]
+                rest = [node for node in route["nodes"] if node is not policy]
+                action = policy.get("no_answer")
+                if len(policies) != 1 or policy.get("type") != "extension" or policy.get("extension") != target:
+                    raise ValueError("Call handling must start with this extension's device")
+                expected = {"voicemail": "voicemail", "extension": "extension", "forward": "forward"}.get(action)
+                if (action == "hangup" and rest) or (action != "hangup" and (len(rest) != 1 or rest[0].get("type") != expected)):
+                    raise ValueError("Choose exactly one no-answer action")
+                if action == "extension" and rest[0].get("extension") == target:
+                    raise ValueError("An unanswered call cannot forward to the same extension")
+                if action == "voicemail" and (rest[0].get("mailbox") != target or rest[0].get("enabled") is False):
+                    raise ValueError("Desk voicemail must use its own enabled mailbox")
         for node in route["nodes"]:
             if not isinstance(node, dict) or node.get("type") != "ivr":
                 continue
@@ -2683,22 +2696,15 @@ class SettingsStore:
                 if not str(entry.get("target") or "").strip():
                     raise ValueError("An IVR key mapping needs a destination")
         owner_id = int(owner_user_id)
-        scope = ""
-        if target_type == "number":
-            scope = next((str(row["number"]) for row in self.list_numbers(owner_id) if str(row["number"]) == str(target)), "")
-        if scope:
-            # The line's own extensions only: three digits are resolved inside the
-            # current phone number, so another line's set is not reachable here.
-            allowed_keys = set(self.scoped_extension_keys(scope, owner_id))
-            owned_extensions = {row["key"] for row in self.list_extensions(owner_id) if row["key"] in allowed_keys}
-        else:
-            owned_extensions = {row["key"] for row in self.list_extensions(owner_id)}
+        # Explicit keys may name any desk of this customer. Bare digits are
+        # still resolved on the dialed line; sharing a desk never renames it.
+        owned_extensions = {row["key"] for row in self.list_extensions(owner_id)}
         owned_groups = {str(row["id"]): set(row["members"]) for row in self.list_groups(owner_id)}
         for node in route["nodes"]:
             node_type = node["type"]
             if node_type in {"simultaneous", "sequential", "ring_group"}:
                 destinations = node.get("extensions")
-                if not isinstance(destinations, list) or not destinations or any(str(ext) not in owned_extensions for ext in destinations):
+                if not isinstance(destinations, list) or (not destinations and node.get("enabled") is not False) or any(str(ext) not in owned_extensions for ext in destinations):
                     raise ValueError("Ring destinations must be extensions owned by this customer")
                 if not 5 <= int(node.get("timeout", 0)) <= 120:
                     raise ValueError("Ring timeout must be between 5 and 120 seconds")
@@ -2708,8 +2714,15 @@ class SettingsStore:
                         raise ValueError("Ring group is not owned by this customer")
                     if any(str(ext) not in owned_groups[group_id] for ext in destinations):
                         raise ValueError("Ring destinations must come from the selected group")
-            elif node_type == "extension" and str(node.get("extension", "")) not in owned_extensions:
-                raise ValueError("Route extension is not owned by this customer")
+            elif node_type == "extension":
+                if str(node.get("extension", "")) not in owned_extensions:
+                    raise ValueError("Route extension is not owned by this customer")
+                if "ring_enabled" in node and not isinstance(node["ring_enabled"], bool):
+                    raise ValueError("Ring device must be yes or no")
+                if "timeout" in node and not 5 <= int(node["timeout"]) <= 120:
+                    raise ValueError("Ring timeout must be between 5 and 120 seconds")
+                if node.get("no_answer") not in (None, "voicemail", "extension", "forward", "hangup"):
+                    raise ValueError("Unknown no-answer action")
             elif node_type == "voicemail" and str(node.get("mailbox", "")) not in owned_extensions:
                 raise ValueError("Voicemail mailbox is not owned by this customer")
             elif node_type == "forward":
@@ -2728,6 +2741,8 @@ class SettingsStore:
                     raise ValueError("IVR input timeout must be between 2 and 30 seconds")
                 if not 1 <= int(node.get("attempts", 0)) <= 5:
                     raise ValueError("IVR attempts must be between 1 and 5")
+                if any(str(entry.get("target") or "") not in owned_extensions for entry in (node.get("keys") or [])):
+                    raise ValueError("IVR destinations must be extensions owned by this customer")
                 fallback = str(node.get("fallback") or "")
                 if fallback and fallback not in owned_extensions:
                     raise ValueError("IVR fallback must be an extension owned by this customer")
@@ -2851,6 +2866,28 @@ class SettingsStore:
             db.execute("DELETE FROM routing_flows WHERE owner_user_id=? AND target_type='group' AND target=?", (row["owner_user_id"], str(group_id)))
             db.execute("DELETE FROM extension_groups WHERE id=?", (int(group_id),))
 
+    def number_flow_anchor(self, number: str) -> str:
+        """An owned PBX context for a shared DID without a primary desk.
+
+        This is not an implicit ring assignment. Only an explicitly saved number
+        journey gets an anchor, and its plan still decides which devices ring.
+        """
+        row = next((row for row in self.list_numbers() if row["number"] == number), None)
+        owner = (row or {}).get("owner_user_id")
+        if owner is None:
+            return ""
+        flow = next((flow for flow in self.list_call_routes(int(owner)) if flow["phone_number"] == number), None)
+        if not flow:
+            return ""
+        allowed = [row["key"] for row in self.list_extensions(int(owner)) if row["active"]]
+        for node in (flow.get("route") or {}).get("nodes") or []:
+            candidates = [*node.get("extensions", []), node.get("extension"), node.get("mailbox")]
+            candidates += [entry.get("target") for entry in (node.get("keys") or [])]
+            for key in candidates:
+                if key in allowed:
+                    return key
+        return allowed[0] if allowed else ""
+
     def inbound_plan(self, number: str, fallback_extension: str = "") -> dict:
         """Decide what rings when a DID is called, and what happens if nobody answers.
 
@@ -2871,10 +2908,10 @@ class SettingsStore:
             # extension it points at. The link holds the dialled digits, which
             # are read against this very number, so 101 means this line's 101.
             key = self.extension_key_for(number, extension, int(owner) if owner is not None else None) if extension else ""
-            mailbox = key if key and any(
-                item["key"] == key and item["voicemail_enabled"] for item in self.list_extensions(int(owner) if owner else None)
-            ) else ""
-            return {"destinations": [key] if key else [], "timeout": 30, "voicemail": mailbox, "forward": "", "outside_hours": False}
+            return self.apply_desk_handling(
+                {"destinations": [key] if key else [], "timeout": 30, "voicemail": "", "forward": "", "outside_hours": False},
+                [key] if key else [], number, owner,
+            )
         nodes = [node for node in ((flow.get("route") or {}).get("nodes") or []) if isinstance(node, dict)]
         # Journey steps once lived on every desk's flow, and customers put the
         # line's greeting there - which is why "the IVR and voicemail do not
@@ -2889,28 +2926,22 @@ class SettingsStore:
                  if str(item.get("target")) == str(extension)),
                 None,
             )
-            desk_journey = [
-                node for node in ((desk_flow or {}).get("route") or {}).get("nodes") or []
-                if isinstance(node, dict) and str(node.get("type")) in journey_kinds
-            ]
+            desk_nodes = ((desk_flow or {}).get("route") or {}).get("nodes") or []
+            legacy_journey = any(isinstance(node, dict) and node.get("type") in {"ivr", "business_hours"} for node in desk_nodes)
+            desk_journey = [node for node in desk_nodes if isinstance(node, dict) and node.get("type") in journey_kinds] if legacy_journey else []
             if desk_journey:
                 nodes = [*desk_journey, *nodes]
         # A flow that carries a menu asks the caller for an extension instead of
         # ringing anybody; whatever the flow says besides that step is where an
         # unanswered or invalid entry goes.
         ivr_node = next((node for node in nodes if str(node.get("type")) == "ivr"), None)
-        if ivr_node is not None:
+        if ivr_node is not None and not self._plan_nodes(nodes, owner, extension, number).get("outside_hours"):
             answer = self._ivr_answer_plan(ivr_node, owner, extension, nodes, number)
             if answer is not None:
                 return answer
         plan = self._plan_nodes(nodes, owner, extension, number)
-        considered = list(dict.fromkeys([*(plan.get("destinations") or []), *( [extension] if extension else [] )]))
-        handling = self._desk_handling(considered, number, owner)
-        plan["timeouts"] = {**handling["timeouts"], **(plan.get("timeouts") or {})}
-        plan["fallbacks"] = handling["fallbacks"]
-        if not plan.get("voicemail"):
-            plan["voicemail"] = self._desk_voicemail(number, extension, owner)
-        return plan
+        considered = list(plan.get("destinations") or [])
+        return self.apply_desk_handling(plan, considered, number, owner)
 
     def _voicemail_key(self, number: str, value: str, owner) -> str:
         """The extension key a voicemail step names on one number.
@@ -2942,12 +2973,12 @@ class SettingsStore:
         """
         timeouts: dict[str, int] = {}
         fallbacks: list[str] = []
+        disabled: list[str] = []
+        forward, forward_timeout = "", 25
         allowed = {
             item["key"] for item in self.list_extensions(int(owner))
             if item["active"]
         } if owner is not None else set()
-        if owner is not None and number:
-            allowed &= set(self.scoped_extension_keys(number, int(owner)))
         for key in keys:
             flow = next(
                 (item for item in self.list_routing_flows(int(owner) if owner is not None else None, target_type="extension")
@@ -2959,13 +2990,38 @@ class SettingsStore:
                     continue
                 kind = str(node.get("type"))
                 if kind == "extension" and str(node.get("extension") or "") == str(key):
+                    if node.get("ring_enabled") is False:
+                        disabled.append(str(key))
                     if str(node.get("timeout") or "").isdigit():
                         timeouts[str(key)] = max(5, min(120, int(node["timeout"])))
                 elif kind == "extension":
                     value = str(node.get("extension") or "")
-                    if value and (not allowed or value in allowed) and value not in fallbacks and value not in keys:
+                    if value and value in allowed and value not in fallbacks and value not in keys:
                         fallbacks.append(value)
-        return {"timeouts": timeouts, "fallbacks": fallbacks}
+                elif kind == "forward" and not forward:
+                    forward = str(node.get("phone") or "")
+                    forward_timeout = int(node.get("timeout") or 25)
+        return {"timeouts": timeouts, "fallbacks": fallbacks, "disabled": disabled,
+                "forward": forward, "forward_timeout": forward_timeout}
+
+    def apply_desk_handling(self, plan: dict, keys: list[str], number: str, owner) -> dict:
+        """A desk's policy follows it onto every explicitly assigned incoming line.
+
+        Number-level fallback wins when configured. When several desks ring,
+        the first selected desk supplies the shared no-answer ending; no
+        recursive forwarding chain is followed.
+        """
+        handling = self._desk_handling(keys, number, owner)
+        plan["destinations"] = [key for key in plan.get("destinations", []) if key not in handling["disabled"]]
+        plan["timeouts"] = {**(plan.get("timeouts") or {}), **handling["timeouts"]}
+        ending = self._desk_handling(keys[:1], number, owner)
+        plan["fallbacks"] = ending["fallbacks"]
+        if not plan.get("voicemail") and not plan.get("forward"):
+            plan["voicemail"] = self._desk_voicemail(number, keys[0], owner) if keys else ""
+            if not plan.get("voicemail"):
+                plan["forward"] = ending["forward"]
+                plan["forward_timeout"] = ending["forward_timeout"]
+        return plan
 
     def _desk_voicemail(self, number: str, extension: str, owner) -> str:
         """The mailbox of the desk the line answers with, when the flow is silent.
@@ -2977,20 +3033,22 @@ class SettingsStore:
         """
         if not extension:
             return ""
-        key = self.extension_key_for(number, extension, int(owner) if owner is not None else None) if number else str(extension)
+        key = str(extension) if extension_scope(extension) else (self.extension_key_for(number, extension, int(owner) if owner is not None else None) if number else str(extension))
         if not key:
             return ""
-        if self.extension_voicemail_enabled(key):
-            return key
         owner_id = int(owner) if owner is not None else None
         flow = next(
             (item for item in self.list_routing_flows(owner_id, target_type="extension") if item["target"] == key),
             None,
         )
-        for node in ((flow or {}).get("route") or {}).get("nodes") or []:
+        nodes = ((flow or {}).get("route") or {}).get("nodes") or []
+        policy = next((node for node in nodes if node.get("type") == "extension" and node.get("extension") == key and "no_answer" in node), None)
+        if policy and policy["no_answer"] != "voicemail":
+            return ""
+        for node in nodes:
             if isinstance(node, dict) and str(node.get("type")) == "voicemail" and node.get("enabled") is not False:
                 return self._voicemail_key(number, str(node.get("mailbox") or key), owner)
-        return ""
+        return key if self.extension_voicemail_enabled(key) and not policy else ""
 
     def _ivr_answer_plan(self, node: dict, owner, extension: str, nodes: list[dict], number: str = "") -> dict | None:
         """What happens when the caller is asked to enter an extension.
@@ -3003,6 +3061,7 @@ class SettingsStore:
             return None
         voice = self.ivr_voice(str(node.get("voice") or "platform"))
         active = {row["key"] for row in self.list_extensions(int(owner)) if row["active"]}
+        company_keys = set(active)
         if number:
             # A menu on one line asks for that line's extensions, so "104" is
             # this number's 104 rather than a device on another number.
@@ -3021,19 +3080,16 @@ class SettingsStore:
             "key_map": {
                 str(entry.get("key")): str(entry.get("target"))
                 for entry in (node.get("keys") or [])
-                if isinstance(entry, dict) and str(entry.get("target")) in allowed
+                if isinstance(entry, dict) and str(entry.get("target")) in company_keys
             },
-            "fallback": fallback if fallback in allowed else "",
+            "fallback": fallback if fallback in company_keys else "",
             "fallback_destinations": list(tail.get("destinations") or []),
-            "voicemail": tail.get("voicemail") or self._desk_voicemail(number, extension, owner),
+            "voicemail": tail.get("voicemail") or "",
             "timeout": int(tail.get("timeout") or 30),
             "forward": tail.get("forward") or "",
             "outside_hours": bool(tail.get("outside_hours")),
             "timeouts": tail.get("timeouts") or {},
-            "fallbacks": list(tail.get("fallbacks") or []) or self._desk_handling(
-                list(dict.fromkeys([*(tail.get("destinations") or []), *([extension] if extension else [])])),
-                number, owner,
-            )["fallbacks"],
+            "fallbacks": list(tail.get("fallbacks") or []),
             "forward_timeout": int(tail.get("forward_timeout") or 25),
         }
 
@@ -3043,8 +3099,6 @@ class SettingsStore:
             item["key"] for item in self.list_extensions(int(owner))
             if item["active"]
         } if owner is not None else set()
-        if owner is not None and number:
-            allowed &= set(self.scoped_extension_keys(number, int(owner)))
         groups = {str(item["id"]): item for item in self.list_groups(int(owner))} if owner is not None else {}
         now = datetime.now()
         open_now, seen_hours = False, False
@@ -3054,6 +3108,8 @@ class SettingsStore:
             if not isinstance(node, dict):
                 continue
             kind = str(node.get("type") or "")
+            if node.get("enabled") is False:
+                continue
             if kind == "business_hours" and not seen_hours:
                 seen_hours = True
                 days = [int(day) for day in (node.get("days") or []) if str(day).isdigit()]
@@ -3075,12 +3131,12 @@ class SettingsStore:
                 group = groups.get(str(node.get("group_id") or ""))
                 if group and not members:
                     members = [str(value) for value in (group.get("members") or [])]
-                destinations.extend(value for value in members if not allowed or value in allowed)
+                destinations.extend(value for value in members if value in allowed)
                 if str(node.get("timeout") or "").isdigit():
                     timeout = max(5, min(120, int(node["timeout"])))
             elif kind == "extension":
                 value = str(node.get("extension") or "")
-                if value and (not allowed or value in allowed):
+                if value and value in allowed:
                     destinations.append(value)
                     # A desk says how long it rings: its own step carries the
                     # seconds, and the leg is rung for exactly that long.
@@ -3094,8 +3150,9 @@ class SettingsStore:
                     forward_timeout = max(5, min(120, int(node["timeout"])))
         # A ring step may repeat an extension; ring each device once, in order.
         unique = list(dict.fromkeys(destinations))
-        if not unique and not voicemail and not forward and extension:
-            unique = [extension] if not allowed or extension in allowed else []
+        has_ring = any(node.get("type") in {"extension", "simultaneous", "sequential", "ring_group"} for node in nodes)
+        if not unique and not voicemail and not forward and extension and not has_ring and not (seen_hours and not open_now):
+            unique = [extension] if extension in allowed else []
         return {
             "destinations": unique, "timeout": timeout, "voicemail": voicemail,
             "forward": forward, "forward_timeout": forward_timeout,
@@ -3168,7 +3225,7 @@ class SettingsStore:
                 continue
             self.save_call_route(owner_user_id, {
                 "phone_number": flow["phone_number"], "name": flow.get("name") or "Main call flow",
-                "route": {"nodes": [dict(menu), *nodes]}, "active": bool(flow.get("active", True)),
+                "route": {"nodes": [*[node for node in nodes if node.get("type") == "business_hours"], dict(menu), *[node for node in nodes if node.get("type") != "business_hours"]]}, "active": bool(flow.get("active", True)),
             })
             added.append(f"number {flow['phone_number']}")
         return added
@@ -3306,6 +3363,60 @@ class SettingsStore:
             item = dict(row); item["route"] = json.loads(item.pop("route_json")); result.append(item)
         return result
 
+    def _ring_source_updates(self, owner: int, key: str, sources: Any) -> list[tuple[str, str]]:
+        """Prepare all DID membership edits before one transaction writes them.
+
+        A ring source is a direct ring-stage assignment, not number ownership.
+        Hours, IVR, mailboxes, caller IDs and other desks are left intact.
+        """
+        import copy
+        import json
+        if not isinstance(sources, list) or any(not isinstance(value, str) for value in sources):
+            raise ValueError("Ring sources must be a list of phone numbers")
+        numbers = {row["number"]: row for row in self.list_numbers(owner) if row["active"]}
+        if any(value not in numbers for value in sources):
+            raise ValueError("Ring sources must be active numbers owned by this customer")
+        selected = set(sources)
+        flows = {row["phone_number"]: row for row in self.list_call_routes(owner)}
+        groups = {str(row["id"]): row for row in self.list_groups(owner)}
+        updates = []
+        for number, row in numbers.items():
+            flow = flows.get(number)
+            route = copy.deepcopy(flow["route"] if flow else self.default_number_route([row["inbound_extension"]] if row.get("inbound_extension") else []))
+            nodes = route["nodes"]
+            present = False
+            changed = False
+            for node in nodes:
+                kind = node.get("type")
+                if kind not in {"extension", "ring_group", "simultaneous", "sequential"}:
+                    continue
+                members = ([node.get("extension")] if kind == "extension" else
+                           list(node.get("extensions") or (groups.get(str(node.get("group_id"))) or {}).get("members") or []))
+                if key not in members:
+                    continue
+                if number in selected:
+                    present = present or node.get("enabled") is not False
+                    continue
+                changed = True
+                members = [member for member in members if member != key]
+                if kind == "extension":
+                    node.pop("extension", None)
+                    node["type"] = "simultaneous"
+                node.pop("group_id", None)  # A per-number override, not a global group edit.
+                node.update(extensions=members, enabled=bool(members) and node.get("enabled") is not False, configured=True,
+                            label="Ring assigned desks" if members else "No direct ring destinations")
+            if number in selected and not present:
+                ring = {"type": "simultaneous", "extensions": [key], "timeout": 25,
+                        "configured": True, "label": "Additional desk"}
+                # Insert before a terminal fallback, without moving hours/IVR.
+                index = next((i for i, node in enumerate(nodes) if node.get("type") in {"voicemail", "forward"}), len(nodes))
+                nodes.insert(index, ring)
+                changed = True
+            if changed:
+                self._validate_route_nodes(route, owner, target_type="number", target=number)
+                updates.append((number, json.dumps(route, separators=(",", ":"))))
+        return updates
+
     def save_routing_flow(self, owner_user_id: int, data: dict, target_type: str | None = None, target: str | None = None):
         import json
         owner_user_id = int(owner_user_id)
@@ -3326,10 +3437,17 @@ class SettingsStore:
             target = str(group["id"])
         route = data.get("route")
         self._resolve_flow_nodes(route, owner_user_id)
-        self._validate_route_nodes(route, owner_user_id, target_type=target_type)
+        self._validate_route_nodes(route, owner_user_id, target_type=target_type, target=target)
+        source_updates = self._ring_source_updates(owner_user_id, target, data["ring_sources"]) if target_type == "extension" and "ring_sources" in data else []
         payload = json.dumps(route, separators=(",", ":"))
         default_name = "Extension call flow" if target_type == "extension" else "Group call flow"
         with self._connect() as db:
+            for number, route_payload in source_updates:
+                found = db.execute("SELECT id FROM call_routes WHERE owner_user_id=? AND phone_number=?", (owner_user_id, number)).fetchone()
+                if found:
+                    db.execute("UPDATE call_routes SET route_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (route_payload, found["id"]))
+                else:
+                    db.execute("INSERT INTO call_routes(owner_user_id,phone_number,name,route_json,active) VALUES(?,?,?,?,1)", (owner_user_id, number, "Main call flow", route_payload))
             existing = db.execute(
                 "SELECT id FROM routing_flows WHERE owner_user_id=? AND target_type=? AND target=?", (owner_user_id, target_type, target)
             ).fetchone()

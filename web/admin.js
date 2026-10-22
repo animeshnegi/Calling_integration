@@ -77,7 +77,7 @@ const pageMeta = {
   numbers: ['Numbers', 'Ownership, assignment and outbound caller ID'],
   sipaccounts: ['Devices & SIP', 'Credentials, connected devices and live registration'],
   extensions: ['Extensions', 'Internal destinations grouped by customer'],
-  routing: ['Call Routing', 'Design the incoming call journey visually'],
+  routing: ['Call Routing', 'Number journeys & extension call handling'],
   calls: ['Calls', 'Inbound and outbound activity across extensions'],
   recordings: ['Recordings', 'Search and play secure call audio'],
   voicemails: ['Voicemail', 'Messages organised by mailbox'],
@@ -609,7 +609,7 @@ function refreshScope() {
   renderScopeExtensionSelects();
   renderExtensions(); renderNumbers(); renderSipAccounts(); renderBilling(); renderDeviceNumbers();
   renderApiKeys(); renderWebhooks(); renderDeliveries();
-  renderFlow(state.is_admin ? undefined : flowKey('number', customerNumber));
+  renderFlow();
   renderGroups();
   loadCalls(); loadRecordings(); loadVoicemails();
 }
@@ -719,7 +719,7 @@ function renderCustomers() {
       <div class="tags">${u.active ? tag('Active', 'on') : tag('Disabled', 'off')}${tag('Administrator', 'violet')}</div>
       <div class="row-actions"><span class="cell-sub">Managed from the platform</span></div>
     </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂'));
-  if (currentPage === 'routing') { renderScopeBars(); renderFlow($('route-target')?.value); renderGroups(); }
+  if (currentPage === 'routing') { renderScopeBars(); renderFlow(); renderGroups(); }
   markStagger();
 }
 
@@ -818,7 +818,7 @@ function renderNumbers() {
         <p style="font-size:12px;color:var(--text-2)">${state.is_admin ? esc(sip?.label || 'No device linked') : 'Managed by EIP'}${onLine.length ? ` · ${esc(onLine.map(row => extensionDigitsOf(row.extension)).join(', '))}` : ''}</p>
         <div class="tags" style="margin-top:7px">
           ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
-          ${tag(x.inbound_extension ? `Rings ${extensionDigitsOf(x.inbound_extension)}` : 'No extension yet', 'info')}
+          ${tag(x.inbound_extension ? `Primary desk ${extensionDigitsOf(x.inbound_extension)}` : savedFlowFor('number', x.number) ? 'Shared number flow' : 'No journey yet', 'info')}
           ${onLine.length ? tag(`${onLine.length} extension${onLine.length === 1 ? '' : 's'} on this number`, 'violet') : ''}
           ${tag(`${money(x.monthly_price_cents ?? 500)}/month`)}
           ${x.default_outbound ? tag('Default caller ID', 'violet') : ''}
@@ -826,8 +826,8 @@ function renderNumbers() {
         </div>
       </div>
       <div class="row-actions">
-        ${x.inbound_extension
-          ? `<button class="btn ghost sm" data-extension-flow="${esc(x.inbound_extension)}">Call flow</button>`
+        ${x.owner_user_id
+          ? `<button class="btn ghost sm" data-number-flow="${esc(x.number)}">Number flow</button>`
           : ''}
         ${(x.owner_user_id !== null && x.owner_user_id !== undefined)
           ? `<button class="btn ghost sm" data-add-extension="${esc(x.number)}">Add extension</button>`
@@ -1712,7 +1712,7 @@ function flowOwnerId() {
   if (!state.is_admin) return routingOwner();
   const { type, target } = flowTargetParts($('route-target')?.value);
   if (type === 'number') return (state.phone_numbers || []).find(x => x.number === target)?.owner_user_id ?? routingOwner();
-  if (type === 'extension') return (state.extensions || []).find(x => x.extension === target)?.owner_user_id ?? routingOwner();
+  if (type === 'extension') return (state.extensions || []).find(x => (x.key || x.extension) === target)?.owner_user_id ?? routingOwner();
   if (type === 'group') return (state.groups || []).find(x => String(x.id) === String(target))?.owner_user_id ?? routingOwner();
   return routingOwner();
 }
@@ -1729,8 +1729,8 @@ function routeTargets() {
     key: flowKey('number', x.number), section: 'Main numbers', type: 'number', target: String(x.number),
     label: `Main line ${x.number} — incoming journey`,
   }));
-  (state.extensions || []).filter(x => x.active && mine(x) && (!line || String(x.number) === line)).forEach(x => targets.push({
-    key: flowKey('extension', x.extension), section: 'Extensions', type: 'extension', target: x.extension,
+  (state.extensions || []).filter(x => x.active && mine(x)).forEach(x => targets.push({
+    key: flowKey('extension', x.key || x.extension), section: 'Extensions', type: 'extension', target: x.key || x.extension,
     label: `${extensionLabel(x.extension)} — ${x.display_name || 'Extension'}`,
   }));
   (state.groups || []).filter(mine).forEach(group => targets.push({
@@ -1766,8 +1766,8 @@ function renderRouteTargets(preferred) {
   // A customer never sees this list: a number is not an editable target for
   // them, and their navigation lives in the two pickers above.
   if (!state.is_admin) { select.innerHTML = ''; return ''; }
-  const targets = routeTargets();
   const prior = preferred ?? select.value;
+  const targets = routeTargets().filter(t => t.type === routingMode || (t.type === 'group' && t.key === preferred));
   const sections = ['Main numbers', 'Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
   select.innerHTML = sections.map(section => `<optgroup label="${section}">${targets.filter(t => t.section === section)
     .map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}</optgroup>`).join('');
@@ -1793,12 +1793,14 @@ function focusRouteTarget(key) {
   const { type, target } = flowTargetParts(key);
   const extension = type === 'number' ? extensionAnsweringNumber(target) : (type === 'extension' ? String(target) : '');
   const number = type === 'number' ? String(target) : numberAnsweredBy(target);
-  const resolved = extension ? flowKey('extension', extension) : key;
+  const resolved = key;
+  routingMode = type === 'extension' ? 'extension' : 'number';
   if (state.is_admin) {
     // The scope follows the target: its customer, then the number it answers.
     const picked = flowTargetParts(resolved);
     const owner = flowTargetOwner(picked.type, picked.target);
     if (owner) scopeOwner = Number(owner);
+    if (picked.type === 'number') customerNumber = String(picked.target);
     if (picked.type === 'extension') {
       const line = (state.extensions || []).find(x => String(x.extension) === String(picked.target))?.number;
       if (line) customerNumber = String(line);
@@ -1809,7 +1811,8 @@ function focusRouteTarget(key) {
   } else {
     // The customer's pickers follow: the number they were sent to, then the
     // extension's workflow.
-    renderCustomerRoutePickers(number ? flowKey('number', number) : key);
+    if (number) customerNumber = number;
+    renderCustomerRoutePickers(resolved);
     applyFlowTarget(resolved);
   }
   renderGroups();
@@ -1820,6 +1823,9 @@ function focusRouteTarget(key) {
    and then an extension, and a group flow can be opened from its own row without
    any picker changing. One value, however it was reached. */
 let flowTargetKey = '';
+let routingMode = 'number';
+let deskRingSources = null;
+let routingDirty = false;
 
 function currentFlowKey() {
   return flowTargetKey || (state.is_admin ? ($('route-target')?.value || '') : '');
@@ -1844,8 +1850,11 @@ function flowEntryLabel(type, target) {
 }
 
 function applyFlowTarget(key) {
+  routingDirty = false;
   flowTargetKey = key || '';
   const { type, target } = flowTargetParts(flowTargetKey);
+  if (type) routingMode = type === 'extension' ? 'extension' : 'number';
+  deskRingSources = null;
   const saved = flowTargetKey ? savedFlowFor(type, target) : null;
   flowNodes = saved?.route?.nodes ? saved.route.nodes.map(node => ({ ...node })) : [];
   // Never re-label a button that is mid-save or showing its confirmation.
@@ -1859,12 +1868,19 @@ function applyFlowTarget(key) {
       ? (flowEntryLabel(type, target) || flowTargetKey)
       : (state.is_admin ? 'Choose a main line, extension or group' : 'Choose the main line or a desk');
   }
+  renderRoutingMode();
   renderFlowNodes();
   renderFlowPalette();
   renderIvrHint();
 }
 
 function renderFlow(preferred) {
+  if (!preferred && routingDirty && flowTargetKey) {
+    const {type, target} = flowTargetParts(flowTargetKey);
+    const owner = flowTargetOwner(type, target);
+    if ((!state.is_admin || Number(owner) === Number(routingOwner())) && (type !== 'number' || target === chosenCustomerNumber())) return;
+  }
+  if (preferred) routingMode = flowTargetParts(preferred).type === 'extension' ? 'extension' : 'number';
   if (state.is_admin) {
     if (!$('route-target')) return;
     applyFlowTarget(renderRouteTargets(preferred));
@@ -1918,14 +1934,13 @@ function renderCustomerRoutePickers(preferred) {
     customerNumber = effectiveNumber;
     renderScopeBars();
   }
-  const { all } = extensionsForNumber(effectiveNumber);
-  const deskOption = x => `<option value="${esc(flowKey('extension', x.extension))}" title="${esc(extensionLabel(x.extension))}">Desk ${esc(extensionDigitsOf(x.extension))} — ${esc(scopeShort(x.display_name || 'Unnamed', 24))}</option>`;
-  const options = (effectiveNumber
-    ? [`<option value="${esc(flowKey('number', effectiveNumber))}">Main line ${esc(effectiveNumber)} — incoming journey</option>`]
-    : []).concat(all.map(deskOption));
+  const all = (state.extensions || []).filter(x => x.active);
+  const deskOption = x => `<option value="${esc(flowKey('extension', x.key || x.extension))}">${esc(extensionLabel(x.key || x.extension))} — ${esc(x.display_name || 'Desk')}</option>`;
+  const options = routingMode === 'extension' ? all.map(deskOption) : (effectiveNumber
+    ? [`<option value="${esc(flowKey('number', effectiveNumber))}">${esc(effectiveNumber)} — number flow</option>`] : []);
   extensionSelect.innerHTML = options.join('') || '<option value="">No number selected yet</option>';
 
-  const wanted = String(preferred || '');
+  const wanted = String(preferred || flowTargetKey || '');
   const known = options.length && [...extensionSelect.options].map(option => option.value);
   const effective = known && known.includes(wanted)
     ? wanted
@@ -1946,10 +1961,9 @@ function renderGroups() {
     return `<div class="row${active ? ' selected' : ''}">
       <span class="row-icon">◎</span>
       <div><h3>${esc(group.name)}</h3><p>${group.members.length ? group.members.map(ext => esc(extensionLabel(ext))).join(' · ') : 'No members yet'} · rings for ${group.timeout}s</p></div>
-      <div class="tags">${flow ? tag(`${flow.route?.nodes?.length || 0} step flow`, 'info') : tag('Default flow', 'off')}${group.active ? '' : tag('Paused', 'off')}</div>
+      <div class="tags">${tag('Department', 'info')}${group.active ? '' : tag('Paused', 'off')}</div>
       <div class="row-actions">
         <button class="btn ghost sm" data-edit-group="${group.id}">Edit</button>
-        <button class="btn ghost sm" data-group-flow="${group.id}">Call flow</button>
         <button class="btn danger sm" data-delete-group="${group.id}">Delete</button>
       </div>
     </div>`;
@@ -1978,13 +1992,11 @@ function flowGroupOptions(selected = '') {
    the flow the engine runs for its calls. A desk's flow is its no-answer
    policy: ring the desk, then its mailbox. A menu or a forward on a desk is
    not a smaller journey; it is a step nothing will ever run. */
-const DESK_NODE_TYPES = new Set(['extension', 'voicemail']);
+const DESK_NODE_TYPES = new Set(['extension', 'voicemail', 'forward']);
 function nodeTypeAllowed(kind, targetType = flowTargetParts(currentFlowKey()).type) {
   return targetType !== 'extension' || DESK_NODE_TYPES.has(kind);
 }
-function renderFlowPalette() {
-  const { type } = flowTargetParts(currentFlowKey());
-  function syncIvrMapMode() {
+function syncIvrMapMode() {
   const mode = document.querySelector('[data-map-mode]');
   const rows = document.getElementById('ivr-map-rows');
   const show = !!mode && mode.value === 'keys';
@@ -2005,8 +2017,14 @@ document.getElementById('flow-config-fields')?.addEventListener('click', event =
 });
 document.getElementById('flow-config-fields')?.addEventListener('change', event => {
   if (event.target.matches('[data-map-mode]')) syncIvrMapMode();
+  if (event.target.matches('[name=group_id]')) {
+    const group = (state.groups || []).find(group => String(group.id) === event.target.value);
+    if (group) document.querySelectorAll('#flow-config-fields [name=extensions]').forEach(input => { input.checked = group.members.includes(input.value); });
+  }
 });
 
+function renderFlowPalette() {
+  const { type } = flowTargetParts(currentFlowKey());
 document.querySelectorAll('[data-node-type]').forEach(button => {
     const allowed = nodeTypeAllowed(button.dataset.nodeType, type);
     button.hidden = !allowed;
@@ -2015,23 +2033,154 @@ document.querySelectorAll('[data-node-type]').forEach(button => {
   const hint = $('palette-logic-hint');
   if (hint) {
     hint.textContent = type === 'extension'
-      ? 'Call handling for this desk: how long it rings, where an unanswered call goes next, and its mailbox. The journey for the line — phone menu, business hours, forwarding — is edited on the main number.'
+      ? 'Ring devices and handle unanswered calls here. Business hours and IVR belong to Number flow.'
       : '';
     hint.hidden = !hint.textContent;
   }
+}
+
+function renderRoutingMode() {
+  const desk = routingMode === 'extension';
+  $('page-routing').dataset.flowMode = routingMode;
+  document.querySelectorAll('[data-routing-mode]').forEach(button => {
+    const active = button.dataset.routingMode === routingMode;
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  $('routing-workspace').setAttribute('aria-labelledby', desk ? 'extension-flow-tab' : 'number-flow-tab');
+  $('routing-editor-kicker').textContent = desk ? 'EXTENSION HANDLING' : 'NUMBER FLOW';
+  $('routing-editor-title').textContent = desk ? 'One desk. More ways to reach it.' : 'The incoming journey';
+  $('routing-editor-description').textContent = desk
+    ? 'Decide what rings this desk, and what happens when nobody answers.'
+    : 'Business hours → IVR → Department or extension → Fallback';
+  $('routing-target-caption').textContent = desk ? 'Choose a desk' : 'Editing number';
+}
+
+function markRoutingDirty() {
+  routingDirty = true;
+  setSaveFlowState('ready', 'Unsaved changes — save to apply to incoming calls');
+}
+
+function addRoutingStep(kind) {
+  if (!canDesignFlows() || routingMode === 'extension') return;
+  const existing = flowNodes.findIndex(node => node.type === kind);
+  if (['business_hours', 'ivr', 'voicemail', 'forward'].includes(kind) && existing >= 0) {
+    openFlowConfig(existing);
+    return;
+  }
+  if (['voicemail', 'forward'].includes(kind)) {
+    const fallbackIndex = flowNodes.findIndex(node => ['voicemail', 'forward'].includes(node.type));
+    if (fallbackIndex >= 0) {
+      if (!confirm('Replace the existing number fallback with this action?')) return;
+      flowNodes[fallbackIndex] = flowStepDefaults({type:kind, configured:false});
+      markRoutingDirty(); renderFlowNodes(); openFlowConfig(fallbackIndex);
+      return;
+    }
+  }
+  const rank = type => ({business_hours:0, ivr:1, extension:2, simultaneous:2, sequential:2, ring_group:2, voicemail:3, forward:3}[type] ?? 2);
+  let index = flowNodes.findIndex(node => rank(node.type) > rank(kind));
+  if (index < 0) index = flowNodes.length;
+  const node = flowStepDefaults({type:kind, configured:false});
+  flowNodes.splice(index, 0, node);
+  markRoutingDirty();
+  renderFlowNodes();
+  openFlowConfig(index);
+}
+
+function directRingSources(key) {
+  const owner = flowOwnerId();
+  return (state.phone_numbers || []).filter(number => number.active && (!state.is_admin || Number(number.owner_user_id) === Number(owner))).filter(number => {
+    const flow = savedFlowFor('number', number.number);
+    if (!flow) return String(number.inbound_extension) === key;
+    return (flow.route?.nodes || []).some(node => {
+      if (node.enabled === false) return false;
+      if (node.type === 'extension') return node.extension === key;
+      if (!['ring_group','simultaneous','sequential'].includes(node.type)) return false;
+      const group = (state.groups || []).find(group => String(group.id) === String(node.group_id));
+      return (node.extensions?.length ? node.extensions : group?.members || []).includes(key);
+    });
+  }).map(number => number.number);
+}
+
+function renderDeskHandling() {
+  const {target:key} = flowTargetParts(currentFlowKey());
+  const row = (state.extensions || []).find(row => String(row.key || row.extension) === key);
+  if (!row) {
+    $('flow-nodes').innerHTML = '<div class="routing-blank"><h3>Choose an extension</h3><p>Add a desk to this customer to configure its incoming calls.</p></div>';
+    return;
+  }
+  const ring = flowNodes.find(node => node.type === 'extension' && node.extension === key) || {};
+  const vm = flowNodes.find(node => node.type === 'voicemail' && node.enabled !== false);
+  const nextDesk = flowNodes.find(node => node.type === 'extension' && node.extension !== key);
+  const forward = flowNodes.find(node => node.type === 'forward');
+  const action = ring.no_answer || (nextDesk ? 'extension' : vm ? 'voicemail' : forward ? 'forward' : row.voicemail_enabled ? 'voicemail' : 'hangup');
+  const checked = deskRingSources || directRingSources(key);
+  const owner = flowOwnerId();
+  const numbers = (state.phone_numbers || []).filter(number => number.active && (!state.is_admin || Number(number.owner_user_id) === Number(owner)));
+  const choices = [['voicemail','Send to voicemail'],['extension','Forward to another extension'],['forward','Forward to an external number'],['hangup','End the call']];
+  $('flow-canvas').classList.add('has-nodes');
+  $('flow-nodes').innerHTML = `<div class="desk-editor">
+    <div class="desk-policy">
+      <section class="handling-card"><header><span class="handling-step">01</span><div><h4>Ring this device</h4><p>All registered phones for this extension.</p></div><label class="routing-toggle"><input id="desk-ring-enabled" type="checkbox" ${ring.ring_enabled !== false ? 'checked' : ''}><span>Ring device</span></label></header>
+        <div class="handling-body"><label class="field">Ring for<select id="desk-ring-timeout">${[10,15,20,25,30,45,60,90,120,...(ring.timeout && ![10,15,20,25,30,45,60,90,120].includes(Number(ring.timeout)) ? [Number(ring.timeout)] : [])].sort((a,b)=>a-b).map(seconds => `<option value="${seconds}" ${Number(ring.timeout || 25) === seconds ? 'selected' : ''}>${seconds} seconds</option>`).join('')}</select></label><p class="routing-field-note" id="desk-ring-note">When ringing is off, the no-answer action runs immediately.</p></div>
+      </section>
+      <div class="handling-connector"><span>↓</span> No answer or device unavailable</div>
+      <section class="handling-card"><header><span class="handling-step">02</span><div><h4>Choose what happens next</h4><p>A clear ending, never a dead end.</p></div></header>
+        <div class="handling-body"><label class="field">No-answer action<select id="desk-no-answer">${choices.map(([value,label]) => `<option value="${value}" ${action === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+          <div data-desk-action="voicemail"><div class="routing-inline-note">✉ Messages go to <b>${esc(extensionLabel(key))}</b>'s private mailbox.</div><label class="field">Mailbox PIN<input id="desk-mailbox-pin" type="password" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,8}" maxlength="8" value="${esc(vm?.pin || '')}" placeholder="Keep existing PIN"></label><p class="routing-field-note">Dial <b>*97</b> from this desk to record your greeting and access the mailbox.</p></div>
+          <div data-desk-action="extension"><label class="field">Forward to extension<select id="desk-next-extension"><option value="">Choose an extension</option>${flowExtensionOptions(nextDesk?.extension || '')}</select></label><p class="routing-field-note">One forwarding round, so desks cannot create a loop.</p></div>
+          <div data-desk-action="forward"><label class="field">Forward to number<input id="desk-forward-number" type="tel" value="${esc(forward?.phone || '')}" placeholder="+13025550123" pattern="\\+[1-9][0-9]{7,14}"></label><p class="routing-field-note">Use international E.164 format. Carrier charges may apply.</p></div>
+        </div>
+      </section>
+      <div class="routing-policy-note">Number-level fallback takes precedence when configured. This desk's policy follows it across assigned incoming numbers.</div>
+    </div>
+    <aside class="ring-sources"><div class="routing-eyebrow">CONNECTED NUMBERS</div><h4>Numbers that ring this desk</h4><p>Choose a primary line, a shared company number, or both. Each selected number adds this desk to its direct ring stage.</p><div class="ring-source-list">${numbers.map(number => `<label class="ring-source"><input type="checkbox" name="desk-ring-source" value="${esc(number.number)}" ${checked.includes(number.number) ? 'checked' : ''}><span><b>${esc(number.number)}</b><small>${String(row.number) === String(number.number) ? 'Primary number' : esc(number.description || 'Shared incoming number')}</small></span>${String(row.number) === String(number.number) ? '<span class="source-primary">PRIMARY</span>' : ''}</label>`).join('') || '<p>No active numbers assigned yet.</p>'}</div><div class="ring-source-footnote">Your primary number, SIP credentials and outbound caller ID stay unchanged.<br><br>Numbers with an IVR still follow their menu first; these checkboxes control the direct ring stage, not IVR key mappings.</div></aside>
+  </div>`;
+  $('desk-next-extension')?.querySelectorAll('option').forEach(option => { if (option.value === key) option.remove(); });
+  syncDeskActionVisibility();
+}
+
+function syncDeskActionVisibility() {
+  const action = $('desk-no-answer')?.value;
+  document.querySelectorAll('[data-desk-action]').forEach(section => { section.hidden = section.dataset.deskAction !== action; });
+}
+
+function syncDeskHandling() {
+  const {target:key} = flowTargetParts(currentFlowKey());
+  if (!$('desk-ring-enabled')) return false;
+  const action = $('desk-no-answer').value;
+  const timeout = Number($('desk-ring-timeout').value);
+  const nodes = [{type:'extension', extension:key, timeout, ring_enabled:$('desk-ring-enabled').checked, no_answer:action, configured:true, label:`Ring device ${$('desk-ring-enabled').checked ? 'on' : 'off'} · ${timeout}s`}];
+  if (action === 'voicemail') {
+    const pin = $('desk-mailbox-pin').value.trim();
+    if (pin && !/^[0-9]{4,8}$/.test(pin)) { notify('The mailbox PIN must be 4 to 8 digits', true); return false; }
+    nodes.push({type:'voicemail', mailbox:key, enabled:true, pin, configured:true, label:'Send to voicemail'});
+  } else if (action === 'extension') {
+    const destination = $('desk-next-extension').value;
+    if (!destination || destination === key) { notify('Choose another extension for unanswered calls', true); return false; }
+    nodes.push({type:'extension', extension:destination, timeout:25, configured:true, label:'Forward unanswered call'});
+  } else if (action === 'forward') {
+    const phone = $('desk-forward-number').value.trim();
+    if (!/^\+[1-9]\d{7,14}$/.test(phone)) { notify('Use an international number, for example +13025550123', true); return false; }
+    nodes.push({type:'forward', phone, timeout:25, configured:true, label:'Forward unanswered call'});
+  }
+  flowNodes = nodes;
+  deskRingSources = [...document.querySelectorAll('[name="desk-ring-source"]:checked')].map(input => input.value);
+  return true;
 }
 
 function renderFlowNodes() {
   const host = $('flow-nodes');
   if (!host) return;
   host.innerHTML = flowNodes.map((node, index) => `
-    <div class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="${canDesignFlows()}" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
+    <div role="button" tabindex="0" aria-label="Configure ${esc(flowLabel(node.type))}" class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="${canDesignFlows()}" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
       <span class="icon ${FLOW_TILES[node.type] || 'tile-ext'}">${FLOW_ICONS[node.type] || '◇'}</span>
       <div class="copy"><b>${esc(flowLabel(node.type))}</b><small>${esc(node.label || (canDesignFlows() ? 'Click to configure this step' : 'Step in this call flow'))}</small></div>
       <span class="step">${String(index + 1).padStart(2, '0')}</span>
       ${canDesignFlows() ? `<button class="remove" data-remove-node="${index}" aria-label="Remove step">✕</button>` : ''}
     </div>`).join('');
   $('flow-canvas').classList.toggle('has-nodes', flowNodes.length > 0);
+  if (routingMode === 'extension') renderDeskHandling();
 }
 
 /* The voices the platform can read a prompt in, from the server, so the list
@@ -2084,15 +2233,23 @@ function flowExtensionOptions(selected = []) {
   const line = flowLineNumber();
   const available = (state.is_admin && owner
     ? state.extensions.filter(x => x.owner_user_id === owner)
-    : state.extensions).filter(x => !line || String(x.number) === line);
+    : state.extensions);
   return available.filter(x => x.active).map(x =>
-    `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+    `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('');
 }
 
 /* What a freshly added step should already contain. A ring step on a number
    starts with every device the customer owns, which is how their main line
    behaves: add an extension and its phone joins the ring. An extension step
    rings that device; a group step rings its members. */
+function flowDestinationCards(selected = []) {
+  const owner = flowOwnerId();
+  return `<div class="routing-destination-grid">${(state.extensions || []).filter(row => row.active && (!state.is_admin || Number(row.owner_user_id) === Number(owner))).map(row => {
+    const key = row.key || row.extension;
+    return `<label class="routing-destination"><input type="checkbox" name="extensions" value="${esc(key)}" ${selected.includes(key) ? 'checked' : ''}><span><b>${esc(extensionLabel(key))} — ${esc(row.display_name || 'Desk')}</b><small>Primary line ${esc(row.number || 'Unassigned')}</small></span></label>`;
+  }).join('')}</div>`;
+}
+
 function flowStepDefaults(node) {
   if (node?.type === 'ivr' && !node.prompt) {
     // The menu is usable the moment it is dropped in: the platform wording and
@@ -2169,7 +2326,7 @@ function openFlowConfig(index) {
   } else if (['simultaneous', 'sequential', 'ring_group'].includes(node.type)) {
     fields = `<label class="field">Ring a saved group<select name="group_id">${flowGroupOptions(node.group_id)}</select>
         <small>Choosing a group fills in its members below; you can still adjust them for this step.</small></label>
-      <label class="field">Ring destinations<select name="extensions" multiple size="6" required>${flowExtensionOptions(node.extensions || [])}</select><small>Select at least one extension.</small></label>
+      <div class="field"><span>Ring these extensions</span>${flowDestinationCards(node.extensions || [])}<small>Choose one or more desks from this customer's numbers.</small></div>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
   } else if (node.type === 'extension') {
     const desk = flowTargetParts(currentFlowKey()).type === 'extension';
@@ -2226,6 +2383,7 @@ function saveFlowConfig(event) {
     const groupId = String(form.get('group_id') || '');
     const group = (state.groups || []).find(x => String(x.id) === groupId);
     node.extensions = form.getAll('extensions');
+    node.enabled = true;
     if (group && !node.extensions.length) node.extensions = [...group.members];
     node.timeout = Number(form.get('timeout'));
     if (group) node.group_id = groupId; else delete node.group_id;
@@ -2269,6 +2427,7 @@ function saveFlowConfig(event) {
       : (node.label === 'Enter an extension' ? '' : node.label) || 'Enter an extension';
   }
   node.configured = true;
+  markRoutingDirty();
   renderFlowNodes();
   closeOverlay('flow-config-modal');
   notify('Routing step configured');
@@ -2325,7 +2484,7 @@ function groupMemberOptions(item) {
     ? state.extensions.filter(x => x.owner_user_id === Number(owner))
     : state.extensions;
   const selected = item?.members || [];
-  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('');
 }
 
 /* The credentials a device registers with. One sheet per extension: the whole
@@ -2660,7 +2819,7 @@ const templates = {
         <label class="field">Assigned number<select name="phone_number"><option value="">None</option>${state.phone_numbers
           .map(x => `<option value="${esc(x.number)}" ${item?.phone_number === x.number ? 'selected' : ''}>${esc(x.number)}</option>`).join('')}</select></label>
         <label class="field">Extension<select name="extension"><option value="">None</option>${state.extensions
-          .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('')}</select></label>
+          .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('')}</select></label>
       </div>
       <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Device is active</label>`,
   }),
@@ -2886,7 +3045,7 @@ function openModal(type, item = null) {
       number.innerHTML = '<option value="">None</option>' + state.phone_numbers.filter(x => x.owner_user_id === id)
         .map(x => `<option value="${esc(x.number)}" ${item?.phone_number === x.number ? 'selected' : ''}>${esc(x.number)}</option>`).join('');
       extension.innerHTML = '<option value="">None</option>' + state.extensions.filter(x => x.owner_user_id === id)
-        .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+        .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('');
     };
     owner?.addEventListener('change', update);
     update();
@@ -2899,7 +3058,7 @@ function openModal(type, item = null) {
       const fill = () => {
         members.innerHTML = state.extensions
           .filter(x => x.active && String(x.owner_user_id ?? '') === String(owner.value))
-          .map(x => `<option value="${esc(x.extension)}">${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+          .map(x => `<option value="${esc(x.extension)}">${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('');
       };
       owner.addEventListener('change', fill);
       fill();
@@ -3771,7 +3930,7 @@ document.addEventListener('click', async event => {
   if (d.credSave) return rotateExtensionPassword(d.credSave, ($('cred-new-password')?.value || '').trim());
   if (d.credGenerate) return rotateExtensionPassword(d.credGenerate, '');
 
-  if (d.removeNode !== undefined) { flowNodes.splice(Number(d.removeNode), 1); renderFlowNodes(); return; }
+  if (d.removeNode !== undefined) { markRoutingDirty(); flowNodes.splice(Number(d.removeNode), 1); renderFlowNodes(); return; }
   if (d.readNotification) {
     try { await api(`/admin/api/notifications/${d.readNotification}/read`, { method: 'POST' }); await loadState(); }
     catch (error) { notify(error.message, true); }
@@ -3825,6 +3984,7 @@ document.addEventListener('click', async event => {
   if (d.editExtension) return openModal('extension', state.extensions.find(x => (x.key || x.extension) === d.editExtension));
   if (d.softphone) return openSoftphone(d.softphone);
   if (d.extensionCredentials) return showExtensionCredentials(d.extensionCredentials);
+  if (d.numberFlow) { showPage('routing'); return focusRouteTarget(flowKey('number', d.numberFlow)); }
   if (d.extensionFlow) {
     showPage('routing');
     return focusRouteTarget(flowKey('extension', d.extensionFlow));
@@ -3993,9 +4153,12 @@ wire('flow-nodes', 'dragstart', event => {
 wire('flow-nodes', 'dragover', event => event.preventDefault());
 wire('flow-nodes', 'drop', event => {
   const target = event.target.closest('[data-flow-index]');
-  const source = Number(event.dataTransfer.getData('application/x-flow-index'));
+  const rawIndex = event.dataTransfer.getData('application/x-flow-index');
+  const source = rawIndex === '' ? NaN : Number(rawIndex);
   if (target && Number.isInteger(source) && canDesignFlows()) {
     event.preventDefault();
+    event.stopPropagation();
+    markRoutingDirty();
     const [node] = flowNodes.splice(source, 1);
     flowNodes.splice(Number(target.dataset.flowIndex), 0, node);
     renderFlowNodes();
@@ -4037,8 +4200,7 @@ document.querySelectorAll('[data-node-type]').forEach(button => {
   button.onclick = () => {
     if (!canDesignFlows()) return notify(flowDesignHint(), true);
     if (!nodeTypeAllowed(button.dataset.nodeType)) return notify('This step belongs to the main number\'s journey, not to a desk', true);
-    flowNodes.push({ type: button.dataset.nodeType, label: 'Click to configure' });
-    renderFlowNodes();
+    addRoutingStep(button.dataset.nodeType);
   };
 });
 wire('flow-nodes', 'dragstart', event => dragging(event.target.closest('[data-flow-index]'), true));
@@ -4054,15 +4216,44 @@ if (dragSurface) {
     dragSurface.classList.remove('drag-over');
     const type = canDesignFlows() ? event.dataTransfer.getData('text/plain') : '';
     if (type && !nodeTypeAllowed(type)) return notify('This step belongs to the main number\'s journey, not to a desk', true);
-    if (type) { flowNodes.push({ type, label: 'Click to configure' }); renderFlowNodes(); }
+    if (type) addRoutingStep(type);
   });
 }
+document.querySelectorAll('[data-routing-mode]').forEach(button => {
+  button.addEventListener('click', () => {
+    if (routingDirty && !confirm('Discard unsaved routing changes and switch editors?')) return;
+    routingDirty = false;
+    routingMode = button.dataset.routingMode;
+    flowTargetKey = '';
+    renderFlow();
+    renderRoutingMode();
+  });
+  button.addEventListener('keydown', event => {
+    if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = [...document.querySelectorAll('[data-routing-mode]')];
+    const next = event.key === 'Home' ? buttons[0] : event.key === 'End' ? buttons[1] : buttons.find(other => other !== button);
+    next.click(); next.focus();
+  });
+});
+wire('flow-nodes', 'change', event => {
+  if (event.target.closest('.desk-editor')) { markRoutingDirty(); syncDeskActionVisibility(); }
+});
+wire('flow-nodes', 'input', event => {
+  if (event.target.closest('.desk-editor')) markRoutingDirty();
+});
+wire('flow-nodes', 'keydown', event => {
+  if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-flow-index]')) {
+    event.preventDefault(); openFlowConfig(Number(event.target.dataset.flowIndex));
+  }
+});
 wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
 wire('route-extension', 'change', () => { renderFlow($('route-extension').value); renderGroups(); });
 wire('save-route', 'click', async () => {
   if (saveFlowBusy) return;                       // one save at a time
   if (!canDesignFlows()) { setSaveFlowState('blocked'); return notify(flowDesignHint(), true); }
   const { type, target } = flowTargetParts(currentFlowKey());
+  if (type === 'extension' && !syncDeskHandling()) return;
   if (!type || !target) {
     return notify(state.is_admin ? 'Add a number, extension or group first' : 'Pick the main line or a desk to edit', true);
   }
@@ -4077,11 +4268,12 @@ wire('save-route', 'click', async () => {
     const payload = type === 'number'
       ? { target_type: 'number', phone_number: target, target, owner_user_id: flowOwnerId(), name: savedFlowFor('number', target)?.name || 'Main call flow' }
       : { target_type: type, target, owner_user_id: flowOwnerId(), name: savedFlowFor(type, target)?.name || (type === 'group' ? 'Group call flow' : 'Extension call flow') };
-    const result = await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, route: { nodes: flowNodes }, active: true }) });
+    const result = await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, ...(type === 'extension' ? {ring_sources: deskRingSources} : {}), route: { nodes: flowNodes }, active: true }) });
     notify((result.auto_ivr || []).length
       ? `Call flow saved for ${label}; a phone menu was added automatically`
       : `Call flow saved for ${label}`);
     if (result.warning) notify(`Flow saved, but not applied to Asterisk: ${result.warning}`, true);
+    routingDirty = false;
     setSaveFlowState('saved', result.warning ? 'Saved — PBX apply failed' : `Saved for ${label}`);
     const id = workspace?.customer?.id, tab = wsTab;
     await loadState();

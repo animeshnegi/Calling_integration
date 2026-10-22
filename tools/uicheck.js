@@ -1557,7 +1557,9 @@ async function main() {
   process.exit(failures.length ? 1 : 0);
 }
 
-main().catch(error => {
+module.exports = {boot, settle, chooseScope, load};
+
+if (require.main === module) main().catch(error => {
   process.stdout.write(`${output}\nHARNESS ERROR: ${error && error.stack}\n`);
   process.exit(1);
 });

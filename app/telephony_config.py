@@ -733,7 +733,7 @@ class TelephonyConfigSync:
                 key = key_for(number, candidate)
                 if key:
                     return key
-            return ""
+            return self.store.number_flow_anchor(str(number["number"]))
 
         # An extension that answers in the browser (WebRTC enabled) carries a
         # second, browser-only identity - see `render_pjsip`. Media is
