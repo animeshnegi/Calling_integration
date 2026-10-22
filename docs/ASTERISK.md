@@ -4,7 +4,11 @@ The container is based on Debian Bookworm's Asterisk package. At the time this r
 
 ## ARI
 
-ARI is enabled on port 8088 inside the Docker network. It is **not published by `docker-compose.yml`**. The integration service reaches it as `http://asterisk:8088/ari`.
+ARI is enabled on port 8088 inside the private Docker network. The integration
+service reaches it as `http://asterisk:8088/ari`. Compose also publishes the HTTP
+listener on **host loopback only** (`127.0.0.1:8088`) so host nginx can forward the
+softphone's exact `/ws` path. Never proxy `/ari` or the full HTTP listener publicly;
+use `deploy/nginx/softphone-websocket.conf`.
 
 ARI credentials live in environment variables. Do not commit a real password to Git.
 

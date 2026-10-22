@@ -261,7 +261,9 @@ async function ensureSipLibrary(){
 /* "SIP WebSocket disconnected." cannot say on its own whether the reverse
    proxy has no /ws route, cannot reach Asterisk's listener, or the host is
    unreachable. Ask the HTTPS endpoint behind the wss:// URL what it answers
-   and say so - every answer maps to one of those failures. */
+   and report the evidence. A plain HTTP probe is not a WebSocket handshake:
+   a 404 may come from the proxy OR Asterisk, and 400/426 can be normal for a
+   handler that requires Upgrade and the SIP subprotocol. */
 async function wssDiagnosis(wssUrl){
   let probe;
   try{probe=new URL(wssUrl)}catch{return" "+wssUrl+" is not a valid WebSocket address."}
@@ -272,7 +274,8 @@ async function wssDiagnosis(wssUrl){
   probe.protocol=probe.protocol==="wss:"?"https:":"http:";
   try{
     const r=await fetch(probe.href);
-    if(r.status===404)return" "+probe.href+" answered HTTP 404 - the reverse proxy has no route for this WebSocket path. In the nginx server block that serves "+probe.hostname+", add: location /ws { proxy_pass http://127.0.0.1:8088; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection \"upgrade\"; }";
+    if(r.status===404)return" "+probe.href+" answered HTTP 404. This path has no working WebSocket handler: nginx may be sending /ws to the web app, or Asterisk may not have its WebSocket handler loaded. Check the active HTTPS vhost routes /ws to Asterisk and that res_http_websocket and res_pjsip_transport_websocket are loaded. Rebuilding the web app does not install a host nginx route.";
+    if(r.status===400||r.status===426)return" "+probe.href+" answered HTTP "+r.status+" to a plain HTTP probe; a WebSocket handler may be reachable. Verify a real HTTP 101 upgrade with the SIP subprotocol and check nginx forwards Upgrade, Connection and Sec-WebSocket-Protocol. This probe alone cannot identify why the socket closed.";
     if(r.status===502||r.status===503||r.status===504)return" "+probe.href+" answered HTTP "+r.status+" - the reverse proxy cannot reach Asterisk's WebSocket listener: check the asterisk container is up and docker-compose publishes 127.0.0.1:8088:8088.";
     if(r.status>=500)return" "+probe.href+" answered HTTP "+r.status+" - the reverse proxy cannot reach Asterisk's WebSocket listener.";
     return" "+probe.href+" answered HTTP "+r.status+" instead of a WebSocket upgrade.";
@@ -307,7 +310,7 @@ async function connectSip(s){
         if(settled)return;
         /* A refused proxy path, an unreachable listener and a dead host all
            arrive as this one event before registration - probe the endpoint
-           and let the error name the actual failure. */
+           and report the evidence without assuming which hop failed. */
         wssDiagnosis(s.wss).then(hint=>fail("SIP WebSocket disconnected."+hint))
       });
       ua.on("registered",()=>{setState("Ready",true);showPhone();$("login-status").className="login-status ok";$("login-status").textContent="Authenticated and registered.";if(!settled){settled=true;resolve(true)}});

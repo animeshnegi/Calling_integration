@@ -106,12 +106,16 @@ docker exec engineerip-asterisk asterisk -rx "module show like res_srtp"
 # 4. the softphone's WebSocket path reaches Asterisk - this is what
 #    "SIP WebSocket disconnected." means when it is broken (the softphone
 #    dials wss://<the host serving the phone page>/ws - probe YOUR_WEB_HOST)
+docker exec engineerip-asterisk asterisk -rx "http show status"
+docker exec engineerip-asterisk asterisk -rx "module show like res_http_websocket"
 docker exec engineerip-asterisk asterisk -rx "module show like res_pjsip_transport_websocket"
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8088/ws        # any HTTP answer (400 expected) proves the listener is up
-curl -s -o /dev/null -w '%{http_code}\n' --http1.1 \
-  -H "Connection: Upgrade" -H "Upgrade: websocket" \
-  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-  https://YOUR_WEB_HOST/ws                                              # 101 through the reverse proxy
+python3 scripts/check-softphone-websocket.py ws://127.0.0.1:8088/ws
+python3 scripts/check-softphone-websocket.py wss://YOUR_WEB_HOST/ws
+# Both must PASS a real 101 handshake selecting subprotocol sip. A plain
+# curl GET/HEAD does not test the upgrade. Direct PASS + public FAIL isolates
+# the public proxy path; direct 404 means investigate Asterisk's URI/modules.
+# Install/include deploy/nginx/softphone-websocket.conf in the active HTTPS
+# vhost as described in DEPLOYMENT.md; rebuilding the app cannot configure nginx.
 
 # 5. the media path - a call that connects and stays completely silent is
 #    almost always RTP going to (or coming from) an address nobody can reach

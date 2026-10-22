@@ -1164,6 +1164,27 @@ async function main() {
       plainOpen.sip.instances.length === 0 && shown(plainOpen.d, 'login-screen') && !plainOpen.w.opener);
   }
 
+  {
+    section('WebSocket diagnostics report evidence, not an assumed nginx cause');
+    for (const status of [404,400,426,502,503,504]) {
+      const env=boot({fetchImpl:async()=>({status})});
+      const message=await env.w.eval('wssDiagnosis("wss://phone.example.com/ws")');
+      check(`HTTP ${status} probe includes its actual status`,message.includes(`HTTP ${status}`));
+      if(status===404) {
+        check('404 distinguishes missing nginx routing from an Asterisk handler failure',message.includes('nginx may') && message.includes('or Asterisk'));
+        check('404 does not claim an unverified nginx root cause',!message.includes('the reverse proxy has no route'));
+        check('404 explains an app rebuild cannot install a host nginx route',message.includes('Rebuilding the web app does not install'));
+      }
+      if(status===400 || status===426)check(`HTTP ${status} plain probe is not mistaken for a failed real handshake`,message.includes('plain HTTP probe') && message.includes('real HTTP 101') && message.includes('SIP subprotocol'));
+      check(`HTTP ${status} diagnostic does not register or place a call`,env.sip.instances.length===0 && env.sip.calls.length===0);
+      env.dom.window.close();
+    }
+    const blocked=boot({fetchImpl:async()=>{throw new TypeError('network blocked');}});
+    const message=await blocked.w.eval('wssDiagnosis("wss://phone.example.com/ws")');
+    check('blocked diagnostic probe does not guess a proxy failure',message.includes('cannot determine whether DNS, TLS, the proxy or Asterisk'));
+    blocked.dom.window.close();
+  }
+
   output += `\n${failures.length ? `${failures.length} CHECK(S) FAILED\n${failures.map(f => `  - ${f}`).join('\n')}\n` : 'ALL CHECKS PASSED'}\n`;
   output += `${passed} checks passed\n`;
   process.stdout.write(output);

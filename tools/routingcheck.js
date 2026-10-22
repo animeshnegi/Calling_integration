@@ -64,7 +64,7 @@ async function run(isAdmin) {
     d.querySelector('[data-node-type=ring_group]').click();
     check(`${role}: ring destinations are accessible checkboxes across owned lines`,d.querySelectorAll('[name=extensions][type=checkbox]').length===2);
     check(`${role}: no runtime errors`,env.errors.length===0);
-  } finally {env.dom.window.close();}
+  } finally {await settle(25);env.dom.window.close();}
 }
 
 async function runSelection(isAdmin) {
@@ -150,7 +150,7 @@ async function runSelection(isAdmin) {
     w.eval('state.phone_numbers=[];renderFlow()');
     check(`${role}: no numbers shows empty state without stale target`,key()==='' && d.getElementById('page-routing').dataset.hasTarget==='false' && d.getElementById('save-route').disabled);
     check(`${role}: selection scenarios have no runtime errors`,env.errors.length===0);
-  } finally {env.dom.window.close();}
+  } finally {await settle(25);env.dom.window.close();}
 }
 
 (async()=>{await run(true);await run(false);await runSelection(true);await runSelection(false);console.log(`\n${checks} routing checks passed`);})().catch(error=>{console.error(error);process.exit(1);});

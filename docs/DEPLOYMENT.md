@@ -280,14 +280,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
     }
 
-    location /ws {
-        proxy_pass http://127.0.0.1:8088;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_read_timeout 3600s;
-    }
+    include /etc/nginx/snippets/engineerip-softphone-websocket.conf;
 }
 ```
 
@@ -303,12 +296,66 @@ SIP and RTP on `sip.example.com` are never proxied - the plain DNS record plus
 open firewall ports 5060/udp and the RTP range are all a desk phone or a
 desktop softphone needs.
 
-Without the `/ws` route (or with it falling through to the Flask app), the
-softphone reports **"SIP WebSocket disconnected."** while desk phones keep
-working fine - the sign-in never reaches Asterisk. The error names the URL it
-tried and what answered: HTTP 404 means no `/ws` route in the server block
-that serves that host, HTTP 502/503/504 means the proxy cannot reach
-`127.0.0.1:8088` (is `127.0.0.1:8088:8088` published in docker-compose?).
+### Apply and verify the softphone route (host nginx)
+
+The application does **not** serve `/ws`; Asterisk does. Rebuilding or importing
+the API image cannot add a route to an existing host nginx configuration. The
+ready-to-use snippet is `deploy/nginx/softphone-websocket.conf`. It exposes only
+`location = /ws`, preserves the Upgrade headers and SIP subprotocol, and uses
+`proxy_pass http://127.0.0.1:8088;` without rewriting the URI. It does not expose ARI.
+
+On the VM, from this repository:
+
+```bash
+sudo install -d -m 0755 /etc/nginx/snippets
+sudo install -m 0644 deploy/nginx/softphone-websocket.conf \
+  /etc/nginx/snippets/engineerip-softphone-websocket.conf
+sudo nginx -T 2>&1 | less
+```
+
+Find the **active HTTPS `server {}`** for your web domain, e.g.
+`server_name tel.engineerip.com;`. Back up its file, then include the snippet
+**inside that server block**, alongside `location /`, as shown above. Replace an
+existing `/ws` stanza rather than including it twice. Do not create a second
+`server_name` block or put the include at global/http scope. Copying the snippet
+without this include does not enable the route.
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+# No Asterisk restart is needed to add/reload this nginx route.
+docker port engineerip-asterisk 8088
+# Expected: 127.0.0.1:8088 (never 0.0.0.0).
+python3 scripts/check-softphone-websocket.py ws://127.0.0.1:8088/ws \
+  --origin https://tel.engineerip.com
+python3 scripts/check-softphone-websocket.py wss://tel.engineerip.com/ws
+```
+
+Use your own web hostname in place of `tel.engineerip.com`. The checker uses
+Python's standard library, verifies public TLS, sends `Sec-WebSocket-Protocol:
+sip`, validates the HTTP 101/accept/selected subprotocol, and exits nonzero on
+failure. It does not send SIP credentials, register a phone or place a call. A
+plain GET/HEAD is **not** a valid handshake test. Passing proves the transport
+upgrade only; registration and media still need their own checks.
+
+- **Direct check passes, public check returns 404:** inspect the active HTTPS
+  vhost, route precedence, and any upstream proxy/CDN. The public path is not
+  reaching a working Asterisk handler. Nginx may be forwarding it to Flask.
+- **Direct check also returns 404:** inspect Asterisk before changing nginx:
+  `docker exec engineerip-asterisk asterisk -rx "http show status"`,
+  `module show like res_http_websocket`, and
+  `module show like res_pjsip_transport_websocket`. The `/ws` URI and both modules
+  must be available. An HTTP 404 alone cannot prove which hop generated it.
+- **Direct connection refused:** check the running container/listener and its
+  loopback port mapping. If an older container needs recreation to apply changed
+  mappings, schedule it separately; recreating Asterisk can interrupt active calls.
+- **Public 502/503/504:** inspect nginx's error log and upstream connectivity.
+  If nginx itself runs in Docker, `127.0.0.1` is the nginx container, **not** the
+  host. Adapt the snippet's upstream to `asterisk:8088` on a shared private network;
+  do not expose the whole Asterisk HTTP server to the Internet.
+- **400/426:** with the checker (which sends proper Upgrade headers), inspect
+  header forwarding and the SIP subprotocol. With a plain HTTP probe these
+  responses may simply mean a handler requires a WebSocket upgrade.
+
 
 ## 15. Production hardening
 

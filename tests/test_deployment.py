@@ -39,6 +39,7 @@ def test_the_documented_proxy_route_matches_the_one_the_softphone_dials():
     """
     deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
     assert "proxy_pass http://127.0.0.1:8088;" in deployment
+    assert "include /etc/nginx/snippets/engineerip-softphone-websocket.conf;" in deployment
     assert "Upgrade" in deployment and "websocket" in deployment.lower()
     assert "wss://<the host this page is served from>/ws" in deployment
 

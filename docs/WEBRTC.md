@@ -138,8 +138,11 @@ change:
   in `/etc/asterisk/keys/` only so the listener can start; browsers reject it.
   Mount a real certificate and key there, or terminate TLS at the reverse proxy
   and forward the `/ws` path to the plain HTTP listener (`http://asterisk:8088/ws`).
-  The softphone's default WebSocket URL is `wss://<sip domain>/ws`, which is the
-  proxy path.
+  The softphone's default WebSocket URL is `wss://<web host serving the phone>/ws`,
+  not the SIP domain. Install/include `deploy/nginx/softphone-websocket.conf` in
+  that host's active HTTPS vhost (see DEPLOYMENT.md), then run
+  `python3 scripts/check-softphone-websocket.py wss://YOUR_WEB_HOST/ws`.
+  The Flask app cannot serve `/ws` or install routes into host nginx.
 * A restart of the Asterisk container once, on a deployment that predates the
   WSS transport: transports are rendered into
   `dynamic/pjsip.transports.conf` and a `pjsip reload` does not add a new

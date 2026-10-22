@@ -32,7 +32,7 @@ These controls address common OWASP API risks including broken authentication, u
 
 ### Asterisk
 
-- ARI port 8088 is private to the Docker network and is not published.
+- Asterisk HTTP/ARI port 8088 is available on the private Docker network and host loopback only. The public nginx snippet exposes only `/ws`, never `/ari`.
 - ARI WebSocket credentials are sent using an HTTP Authorization header rather than query-string credentials.
 - IPComms inbound SIP is matched against the configured provider IP/CIDR allow-list.
 - Local SIP endpoints require authentication.
@@ -62,7 +62,7 @@ OWASP recommends unprivileged container users, capability reduction and careful 
 3. Rotate any credential that has previously been exposed in chat, terminal output, screenshots or logs.
 4. Keep `.env` outside Git and restrict its filesystem permissions.
 5. Keep GCP/UFW rules limited to UDP 5060 and the exact RTP range required by the deployment.
-6. Do not publish Asterisk ARI 8088.
+6. Never publish Asterisk ARI 8088 on public interfaces; keep the host nginx upstream bound to `127.0.0.1`.
 7. Do not expose WSS 8089 directly until a trusted certificate and deliberate reverse-proxy/TLS design are in place.
 8. Put the Flask API behind the private CRM Docker network; if it must become externally reachable, add HTTPS, gateway authentication and centralized rate limiting first.
 9. Run dependency/container vulnerability scans before production release.
