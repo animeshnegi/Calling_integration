@@ -1813,3 +1813,56 @@ def test_extensions_run_from_101_to_999_only_and_the_card_softphone_key_is_uniqu
         response = admin.get(f"/admin/api/extensions/{quote(key, safe='')}/credentials")
         assert response.status_code == 200, (key, response.json)
         assert response.json["credentials"]["sip_username"].endswith(f"_101_{expected}"), response.json
+
+
+def test_saving_a_flow_applies_the_mailbox_and_dialplan(tmp_path, monkeypatch):
+    from app.telephony_config import TelephonyConfigSync
+    from app.admin import extension_mailbox
+    import app as app_module
+
+    app = make_app(tmp_path)
+    customer, owner = customer_client(app, "mailbox-save")
+    store = app.extensions["settings_store"]
+    store.save_extension({"extension": "401", "sip_password": "desk-password-401"}, owner)
+    applied = []
+
+    class ReloadAMI:
+        def reload_pjsip(self): applied.append("pjsip")
+        def reload_voicemail(self): applied.append("voicemail")
+        def reload_dialplan(self): applied.append("dialplan")
+        def restart(self): applied.append("restart")
+
+    real_sync = TelephonyConfigSync
+
+    def sync_with_fake_ami(settings, ami, path):
+        return real_sync(settings, ReloadAMI(), path)
+
+    monkeypatch.setattr(app_module, "TelephonyConfigSync", sync_with_fake_ami)
+    # Seed the current transport/PJSIP files so the flow edit exercises reload,
+    # not a first-boot restart. No network services are used by this test.
+    sync = real_sync(store, ReloadAMI(), app.config["ASTERISK_DYNAMIC_CONFIG_PATH"])
+    sync.apply()
+    applied.clear()
+    response = customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "401", "name": "Desk",
+        "route": {"nodes": [
+            {"type": "extension", "extension": "401", "timeout": 15, "configured": True},
+            {"type": "voicemail", "mailbox": "401", "pin": "4567", "enabled": True, "configured": True},
+        ]},
+    })
+    assert response.status_code == 200, response.json
+    assert not response.json["warning"]
+    assert applied == ["pjsip", "voicemail", "dialplan"]
+    assert f"{extension_mailbox('401')} => 4567," in sync.voicemail_path.read_text()
+    assert "[voicemail-inbound]" in sync.dialplan_path.read_text()
+
+    def broken_sync(*args):
+        raise RuntimeError("AMI unavailable")
+
+    monkeypatch.setattr(app_module, "TelephonyConfigSync", broken_sync)
+    response = customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "401", "name": "Desk",
+        "route": {"nodes": [{"type": "extension", "extension": "401", "configured": True}]},
+    })
+    assert response.status_code == 200
+    assert response.json["warning"] == "AMI unavailable"

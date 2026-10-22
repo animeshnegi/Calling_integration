@@ -1311,3 +1311,104 @@ def test_an_unmapped_key_is_invalid_input_then_the_fallback(tmp_path):
     digits(service, "9", channel_id="chan-inbound-badkey")     # second failure: the fallback
     assert service.has_ivr_sessions() is False
     assert any(ext == key_102 for (_, ext) in service._leg_pairs(store.get(call.call_id)))
+
+
+def test_recording_finish_during_teardown_is_not_overwritten(tmp_path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    name = f"call-{call.call_id}"
+    store.update(call.call_id, status="answered", answered=True,
+                 bridge_id=f"bridge-{call.call_id}", recording_name=name,
+                 recording_status="recording")
+
+    def finish_while_stopping(recording_name):
+        service.handle_ari_event({"type": "RecordingFinished", "recording": {"name": recording_name}})
+
+    asterisk.stop_recording = finish_while_stopping
+    service._finalize(call.call_id, "channel_destroyed")
+    assert store.get(call.call_id).recording_status == "finalized"
+    assert store.get(call.call_id).ended_at
+    # A late teardown cannot downgrade an already-finalized recording either.
+    store.mark_recording_finalizing(call.call_id)
+    assert store.get(call.call_id).recording_status == "finalized"
+
+
+def test_reconcile_recovers_recording_and_finalizing_but_leaves_live_and_unavailable(tmp_path):
+    service, asterisk, store = make_service(tmp_path)
+    for name, status, ended in (
+        ("missed", "recording", True), ("stopped", "finalizing", True),
+        ("live", "recording", False), ("unavailable", "finalizing", True),
+        ("failed", "failed", True), ("deleted", "deleted", True),
+    ):
+        store.create(Call(call_id=name, contact_id=None, member_id=None, extension="101",
+                          phone="+13025551234", recording_name=name, recording_status=status,
+                          ended_at="2026-10-22T10:00:00+00:00" if ended else None))
+    queried = []
+
+    def stored(name):
+        queried.append(name)
+        if name == "unavailable":
+            return None  # Also what the client returns on an ARI outage.
+        return {"name": name, "format": "wav", "filename": f"/recording/{name}.wav"}
+
+    asterisk.get_stored_recording = stored
+    service.reconcile_recordings()
+    for name in ("missed", "stopped"):
+        assert store.get(name).recording_status == "finalized"
+        assert store.get(name).recording_path == f"/recording/{name}.wav"
+        assert store.get(name).recording_format == "wav"
+    assert store.get("live").recording_status == "recording"
+    assert store.get("unavailable").recording_status == "finalizing"
+    assert set(queried) == {"missed", "stopped", "unavailable"}
+    queried.clear()
+    service.reconcile_recordings()
+    assert queried == ["unavailable"]  # Idempotent, no duplicate finish notifications.
+
+
+def test_fast_recording_finish_is_correlated_before_start_returns(tmp_path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    service._recording_settings = lambda extension: {
+        "enabled": True, "format": "wav", "beep": False, "max_duration": 0,
+        "announcement": False,
+    }
+
+    def start(bridge_id, name, *args):
+        service.handle_ari_event({"type": "RecordingFinished", "recording": {"name": name}})
+
+    asterisk.start_bridge_recording = start
+    service._start_bridge(call)
+    assert store.get(call.call_id).recording_status == "finalized"
+
+
+def test_failed_recording_attempt_stays_in_history_without_audio(tmp_path):
+    service, _, store = make_service(tmp_path)
+    for name, status in (("failed", "failed"), ("old", "deleted"), ("ok", "finalized")):
+        store.create(Call(call_id=name, contact_id=None, member_id=None, extension="101",
+                          phone="+13025551234", recording_name=name, recording_status=status))
+    rows, total = store.search(recordings_only=True)
+    assert total == 2
+    assert {row.call_id for row in rows} == {"failed", "ok"}
+
+
+def test_late_ring_leg_events_cannot_transfer_the_voicemail_caller_twice(tmp_path):
+    service, asterisk, store, _, _, _, keys, call = _ring_flow_service(
+        tmp_path, extra_nodes=lambda keys: [
+            {"type": "voicemail", "mailbox": keys["102"], "configured": True},
+        ],
+    )
+    real_continue = asterisk.continue_in_dialplan
+
+    def continue_once(channel, context, mailbox):
+        if asterisk.continued:
+            # ARI rejects continue once the channel has left Stasis for VoiceMail.
+            raise RuntimeError("409 Channel not in a Stasis application")
+        real_continue(channel, context, mailbox)
+
+    asterisk.continue_in_dialplan = continue_once
+    legs = list(dict.fromkeys(_all_legs(call)))
+    for leg in legs:
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    # Late events may refer to the primary leg even after the index is cleared.
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": legs[0]}})
+    assert len(asterisk.continued) == 1
+    assert "chan-inbound-chain" not in asterisk.hung_up
+    assert store.get(call.call_id).ended_at

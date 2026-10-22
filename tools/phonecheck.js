@@ -163,7 +163,7 @@ function shellWorker({ offline = false } = {}) {
   /* The Cache API keys on absolute URLs: a worker that precaches "/phone"
      stores "https://phone.example.com/phone". */
   const absolute = value => new URL(String(value.url || value), 'https://phone.example.com').href;
-  const makeResponse = url => ({ url: absolute(url), clone: () => makeResponse(url) });
+  const makeResponse = url => ({ ok: true, url: absolute(url), clone: () => makeResponse(url) });
   const namedCache = store => ({
     addAll: async urls => urls.forEach(url => store.set(absolute(url), makeResponse(url))),
     put: async (request, response) => store.set(absolute(request), response),
@@ -386,6 +386,22 @@ async function main() {
     await signIn(bareIp, { domain: '203.0.113.10' });
     check('a bare-IP SIP address never becomes the WebSocket address - an IP cannot hold a TLS certificate',
       bareIp.sip.sockets[0] === 'wss://phone.example.com/ws', bareIp.sip.sockets[0]);
+
+    const legacySocket = boot({settings: {
+      username: 'KUDGTE_101', domain: 'sip.engineerip.com', wss: 'wss://sip.engineerip.com/ws'
+    }});
+    check('stored legacy domain-derived socket migrates to the page host',
+      legacySocket.d.getElementById('login-wss').value === 'wss://phone.example.com/ws');
+    const customSocket = boot({settings: {
+      domain: 'sip.engineerip.com', wss: 'wss://edge.example.com:8089/ws'
+    }});
+    check('migration preserves other custom WebSocket servers',
+      customSocket.d.getElementById('login-wss').value === 'wss://edge.example.com:8089/ws');
+    const chosenSocket = boot({settings: {
+      domain: 'sip.engineerip.com', wss: 'wss://sip.engineerip.com/ws', wssOriginVersion: 1
+    }});
+    check('a server explicitly saved after migration is preserved',
+      chosenSocket.d.getElementById('login-wss').value === 'wss://sip.engineerip.com/ws');
 
     const denied = boot();
     await signIn(denied, { password: 'bad-password' });
@@ -999,16 +1015,16 @@ async function main() {
     await worker.activate();
 
     const cached = await worker.fetch('https://phone.example.com/phone');
-    check('the shell is served from the cache',
+    check('the shell is served online',
       cached && cached.url === 'https://phone.example.com/phone', cached && cached.url);
-    check('without going to the network', worker.network.length === 0, worker.network.join(', '));
+    check('by revalidating with the network', worker.network.length === 1, worker.network.join(', '));
 
     const fresh = await worker.fetch('https://phone.example.com/phone.js');
     check('a cached asset is answered too',
       fresh && fresh.url === 'https://phone.example.com/phone.js', fresh && fresh.url);
 
     const stack = await worker.fetch('https://phone.example.com/jssip.min.js');
-    check('the SIP stack comes from the cache as well',
+    check('the SIP stack is served online as well',
       stack && stack.url === 'https://phone.example.com/jssip.min.js', stack && stack.url);
 
     const state = await worker.fetch('https://phone.example.com/admin/api/state');
@@ -1050,6 +1066,15 @@ async function main() {
     const reopened = await offlineWorker.fetch('https://phone.example.com/phone', { mode: 'navigate' });
     check('offline, opening the phone still works from the cache',
       reopened && reopened.url === 'https://phone.example.com/phone', reopened && reopened.url);
+
+    const currentCache = (await worker.caches.keys())[0];
+    const sameRelease = await worker.caches.open(currentCache);
+    await sameRelease.put('https://phone.example.com/phone.js', stale());
+    const refreshed = await worker.fetch('https://phone.example.com/phone.js');
+    check('even a stale asset in the CURRENT cache cannot shadow a deployed fix',
+      refreshed && !refreshed.stale && worker.network.includes('https://phone.example.com/phone.js'));
+    const offlineAsset = await offlineWorker.fetch('https://phone.example.com/phone.js');
+    check('offline assets still use the shell fallback', !!offlineAsset);
 
     const shipped = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
     check('a release can replace the shell by bumping the cache name',

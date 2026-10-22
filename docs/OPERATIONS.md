@@ -258,3 +258,54 @@ Docker output is capped per container and Asterisk file logs are held in tmpfs. 
 ## Recording controls and VPS load
 
 Recording is disabled by default at two levels: the administrator master policy and each extension preference. A bridge is recorded only when both are enabled. Administrators manage the master switch under **Call settings** and extension preferences under **Extensions**. Assigned users can opt their own extension in or out under **Security > My call recording**, but cannot override a disabled master switch. Keep the master switch off when minimizing CPU, disk I/O, and storage is more important than recordings.
+
+## Verify voicemail, the browser socket, and recording finalisation after an upgrade
+
+Rebuild/import the updated `telephony-api` image and recreate **both**
+`telephony-api` and `ari-worker` (they use that image). Keep all named volumes.
+The worker syncs the saved configuration on startup. Saving a Main Number or
+Call Handling flow now also renders/reloads the PBX immediately; a saved-but-not-
+applied warning must be resolved before the flow is considered live.
+
+1. **Browser phone:** close/reopen or reload the phone after the upgrade so the
+   updated service worker activates. Its shell is now network-first, with an
+   offline fallback, rather than indefinitely serving an older `phone.js`.
+   A legacy socket equal to `wss://<SIP-domain>/ws` migrates once to
+   `wss://<page-host>/ws`; the SIP domain itself is unchanged. Other custom socket
+   addresses, and explicit choices saved after migration, are preserved. In the
+   browser's Network / WS tab, confirm `/ws` on the intended HTTPS host returns
+   **101 Switching Protocols**, then confirm SIP registration succeeds. The HTTP
+   diagnostic fetch can be blocked by CORS: its failure alone does not establish
+   a DNS or certificate failure.
+2. **Voicemail:** save an enabled mailbox in the relevant flow. Call the DID,
+   let the desks ring out, listen through the greeting, leave more than two
+   seconds of speech (`minsecs=2`), and hang up. Confirm the message appears and
+   plays in the correct number's mailbox. Repeat with multiple ringing devices:
+   their late teardown events must not cut off the caller's greeting/message.
+   Dial `*97` to check mailbox access and greeting recording separately.
+3. **Recording:** enable the platform and answering extension's recording
+   switches, complete an answered **ARI-managed bridge** call, then check the
+   recording becomes `finalized` and plays/downloads. A saved file whose finish
+   event was missed is reconciled by the worker every 30 seconds. An ARI outage
+   or missing stored response is not taken as proof that audio was lost. Failed
+   attempts stay visible rather than disappearing. Recovery can expose an
+   existing file; it cannot reconstruct audio that was never written.
+
+The direct registered-phone outbound `Dial()` route is unchanged by this fix;
+bridge-recording tests do not prove recording coverage for that separate route.
+When reporting a missing recording, include the call ID (if present), timestamp
+with timezone, direction and whether it was dialled directly in a SIP/browser
+phone or initiated from the console/API. Do not include SIP passwords or tokens.
+
+For a failed live acceptance call, correlate that ID/time with:
+
+```bash
+docker compose logs --since=15m telephony-api ari-worker asterisk
+docker compose exec asterisk asterisk -rx 'voicemail show users for engineerip'
+docker compose exec asterisk asterisk -rx 'dialplan show voicemail-inbound'
+```
+
+A voicemail continuation failure and recording setup failure now log the call
+ID in the worker; an AMI apply failure is logged by the API and shown in the
+flow-save warning. These checks are live acceptance gates, not something unit
+tests alone can certify.

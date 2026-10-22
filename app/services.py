@@ -817,6 +817,7 @@ class TelephonyService:
             try:
                 self.asterisk.continue_in_dialplan(handed, "voicemail-inbound", mailbox)
             except Exception:
+                logger.exception("Voicemail handoff failed for call %s, mailbox %s", call.call_id, mailbox)
                 handed = ""
                 self.asterisk.hangup(channel_id)
             self._finalize(session["call_id"], "ivr_no_selection", keep=handed)
@@ -995,8 +996,10 @@ class TelephonyService:
             if not recording["enabled"]:
                 return
             name = f"call-{updated.call_id}"
-            self.asterisk.start_bridge_recording(bridge_id, name, recording["format"], recording["beep"], recording["max_duration"])
+            # Persist intent first: a fast finish event must already be
+            # correlatable, and a failed start must remain visible in history.
             updated = self.store.update(updated.call_id, recording_name=name, recording_format=recording["format"], recording_status="recording")
+            self.asterisk.start_bridge_recording(bridge_id, name, recording["format"], recording["beep"], recording["max_duration"])
             self.notify_crm("call.recording_started", updated)
             if recording["announcement"] and recording["announcement_media"]:
                 try:
@@ -1004,7 +1007,9 @@ class TelephonyService:
                 except Exception:
                     self.notify_crm("call.recording_announcement_failed", updated)
         except Exception:
-            self.store.update(current.call_id, recording_status="failed")
+            logger.exception("Recording setup failed for call %s", current.call_id)
+            updated = self.store.update(current.call_id, recording_status="failed")
+            self.notify_crm("call.recording_failed", updated)
 
     def _finalize(self, call_id: str, reason: str, keep: str = "") -> None:
         with self._finalize_lock:
@@ -1016,6 +1021,10 @@ class TelephonyService:
             if not call or call.status == "completed":
                 return
             ended = iso_now()
+            # Publish the transition before hangup/stop can emit a finish event.
+            # The SQL guard preserves a finish event that already arrived.
+            if call.recording_name:
+                self.store.mark_recording_finalizing(call_id)
             # The call is over: nothing it owns may keep ringing. Anything
             # still up is an orphan of the same call and answers into a void.
             # `keep` names a channel deliberately handed on - a caller leaving
@@ -1030,11 +1039,10 @@ class TelephonyService:
             recording_status = call.recording_status
             if call.recording_name and recording_status == "recording":
                 self.asterisk.stop_recording(call.recording_name)
-                recording_status = "finalizing"
             if call.bridge_id:
                 self.asterisk.destroy_bridge(call.bridge_id)
             terminal_status = "failed" if call.status == "failed" else ("completed" if call.answered else "failed")
-            updated = self.store.update(call_id, status=terminal_status, ended_at=ended, duration_seconds=duration, recording_status=recording_status)
+            updated = self.store.update(call_id, status=terminal_status, ended_at=ended, duration_seconds=duration)
             if terminal_status == "completed":
                 self.notify_crm("call.completed", updated, {"reason": reason})
             else:
@@ -1179,6 +1187,13 @@ class TelephonyService:
             return
 
         if event_type == "ChannelDestroyed":
+            # All ring legs can disappear before their queued events arrive.
+            # After a handoff the first event has ended our ownership; another
+            # leg must not continue the caller out of VoiceMail a second time
+            # (ARI rejects it, and the transfer-error path would hang them up).
+            if call.ended_at is not None:
+                self._leg_index.pop(str(channel_id), None)
+                return
             # A caller who gives up during the prompt leaves nothing behind.
             self._ivr_sessions_map().pop(str(channel_id), None)
             legs = [leg for leg, _ in self._leg_pairs(call)]
@@ -1223,6 +1238,7 @@ class TelephonyService:
                         try:
                             self.asterisk.continue_in_dialplan(handed, "voicemail-inbound", mailbox)
                         except Exception:
+                            logger.exception("Voicemail handoff failed for call %s, mailbox %s", call.call_id, mailbox)
                             handed = ""
                             self.asterisk.hangup(call.customer_channel_id)
                         self._finalize(call.call_id, "inbound_not_answered", keep=handed)
@@ -1245,8 +1261,33 @@ class TelephonyService:
                 self.asterisk.hangup(other)
             self._finalize(call.call_id, "channel_destroyed")
 
+    def reconcile_recordings(self) -> None:
+        """Recover missed finish events using positive evidence from ARI.
+
+        A missing stored response may mean ARI is down or still flushing; it
+        must not be interpreted as a failed recording or downgrade a live one.
+        """
+        for call in self.store.stale_recordings():
+            if not call.ended_at:
+                continue
+            try:
+                stored = self.asterisk.get_stored_recording(call.recording_name or "")
+            except Exception:
+                continue
+            if stored:
+                updated = self.store.update(
+                    call.call_id, recording_status="finalized",
+                    recording_format=stored.get("format") or call.recording_format,
+                    recording_path=stored.get("filename") or call.recording_path,
+                )
+                self.notify_crm("call.recording_finished", updated, {"reason": "reconciled"})
+
     def recover_incomplete_calls(self) -> None:
         """Reconcile persisted calls with channels that survived an ARI worker restart."""
+        try:
+            self.reconcile_recordings()
+        except Exception:
+            logger.exception("Recording reconciliation during recovery failed")
         try:
             live = {str(channel.get("id")): channel for channel in self.asterisk.list_channels() if channel.get("id")}
         except Exception:

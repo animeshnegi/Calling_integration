@@ -5291,7 +5291,13 @@ def register_admin(app, config, on_telephony_change=None):
             who = "operator" if session.get("admin_role") == "admin" else "customer"
             kind = "call_route" if target_type == "number" else "routing_flow"
             store.add_activity(owner, int(session["admin_user_id"]), "route.saved", kind, route_id, f"Call flow for {label} updated by the {who}")
-            return jsonify({"ok": True, "route_id": route_id, "auto_ivr": added})
+            # The store is only the plan - the PBX runs the rendered mailboxes
+            # and dialplan. Every sibling mutation (extensions, SIP accounts)
+            # applies here, and flows used to skip it: a saved voicemail box
+            # then existed nowhere Asterisk could see it, so VoiceMail() failed
+            # at ring-out while every store-reading test stayed green.
+            warning = apply_change()
+            return jsonify({"ok": True, "route_id": route_id, "auto_ivr": added, "warning": warning})
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
 

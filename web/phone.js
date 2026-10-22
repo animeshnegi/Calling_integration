@@ -13,12 +13,21 @@ const contactsKey="eip-phone-contacts";
 
 function settings(){
   if(handoff)return {...handoff};
-  const publicSettings=JSON.parse(localStorage.getItem(storeKey)||"{}");
+  const saved=localStorage.getItem(storeKey);
+  const publicSettings=JSON.parse(saved||"{}");
+  // Older builds persisted the SIP domain as the default socket host.
+  // Migrate that exact legacy default once; keep other custom endpoints.
+  if (saved && !publicSettings.wssOriginVersion) {
+    const legacy="wss://"+String(publicSettings.domain||"").replace(/^https?:\/\//,"").replace(/\/$/,"")+"/ws";
+    if (publicSettings.wss===legacy) publicSettings.wss=defaultWss();
+    publicSettings.wssOriginVersion=1;
+    localStorage.setItem(storeKey,JSON.stringify(publicSettings));
+  }
   return {...publicSettings,password:sessionStorage.getItem(secretKey)||""};
 }
 function saveSettings(s){
   if(handoff){handoff={...s};return}
-  const publicSettings={extension:s.extension||"",username:s.username||"",domain:s.domain||"",wss:s.wss||"",apiToken:s.apiToken||""};
+  const publicSettings={extension:s.extension||"",username:s.username||"",domain:s.domain||"",wss:s.wss||"",apiToken:s.apiToken||"",wssOriginVersion:1};
   localStorage.setItem(storeKey,JSON.stringify(publicSettings));
   if(s.password)sessionStorage.setItem(secretKey,s.password);
 }
@@ -268,7 +277,7 @@ async function wssDiagnosis(wssUrl){
     if(r.status>=500)return" "+probe.href+" answered HTTP "+r.status+" - the reverse proxy cannot reach Asterisk's WebSocket listener.";
     return" "+probe.href+" answered HTTP "+r.status+" instead of a WebSocket upgrade.";
   }catch{
-    return" "+probe.href+" could not be reached from this page (network, DNS, or the TLS certificate for "+probe.hostname+").";
+    return" The WebSocket connection to "+wssUrl+" failed. The HTTP diagnostic probe was also blocked (possibly CORS on a different host); it cannot determine whether DNS, TLS, the proxy or Asterisk caused the disconnect. The default socket for this page is "+defaultWss()+".";
   }
 }
 

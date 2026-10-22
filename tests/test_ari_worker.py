@@ -292,6 +292,7 @@ class FakeTelephonyService:
         self.events = []
         self.webhook_scans = 0
         self.cleanup_scans = 0
+        self.recording_scans = 0
         self.ivr_ticks = 0
 
     def recover_incomplete_calls(self):
@@ -311,6 +312,9 @@ class FakeTelephonyService:
     def has_ivr_sessions(self):
         return False
 
+    def reconcile_recordings(self):
+        self.recording_scans += 1
+
     def cleanup_recordings(self):
         self.cleanup_scans += 1
 
@@ -321,6 +325,9 @@ class FailingEventHandlerService(FakeTelephonyService):
 
 
 class FailingMaintenanceService(FakeTelephonyService):
+    def reconcile_recordings(self):
+        raise RuntimeError("ARI unavailable")
+
     def process_webhook_deliveries(self):
         raise RuntimeError("database unavailable")
 
@@ -400,6 +407,7 @@ def test_main_wires_ari_loop_and_runs_maintenance_on_schedule(monkeypatch):
     assert service.webhook_scans == 3
     assert notifier.processed == 2
     assert service.cleanup_scans == 1
+    assert service.recording_scans == 2
     assert bundle.sleeps == [30, 30, 30]
 
 
@@ -424,8 +432,10 @@ def test_main_logs_maintenance_failures_and_keeps_scheduling(monkeypatch):
 
     assert bundle.app.logger.exceptions == [
         "Webhook delivery processing failed",
+        "Recording reconciliation failed",
         "Webhook delivery processing failed",
         "Voicemail email processing failed",
+        "Recording reconciliation failed",
         "Webhook delivery processing failed",
         "Voicemail email processing failed",
         "Recording retention cleanup failed",

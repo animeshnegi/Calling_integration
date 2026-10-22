@@ -51,8 +51,15 @@ def main() -> None:
     last_cleanup = 0.0
     last_voicemail_scan = 0.0
     last_webhook_scan = 0.0
+    last_recording_scan = 0.0
     while True:
         now = time.monotonic()
+        if now - last_recording_scan >= 30:
+            try:
+                service.reconcile_recordings()
+            except Exception:
+                app.logger.exception("Recording reconciliation failed")
+            last_recording_scan = now
         if now - last_webhook_scan >= 5:
             try:
                 service.process_webhook_deliveries()

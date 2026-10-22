@@ -1582,7 +1582,7 @@ async function loadRecordings() {
     const from = val('recording-from'), to = val('recording-to');
     // An administrator reading one customer keeps that customer's recordings only.
     const owned = state.is_admin && scopeOwner !== null
-      ? new Set(state.extensions.filter(x => Number(x.owner_user_id) === Number(scopeOwner)).map(x => x.extension)) : null;
+      ? new Set(state.extensions.filter(x => Number(x.owner_user_id) === Number(scopeOwner)).map(x => x.key || x.extension)) : null;
     const calls = data.calls.filter(x =>
       (!owned || owned.has(x.extension)) &&
       (!from || String(x.started_at).slice(0, 10) >= from) &&
@@ -1606,7 +1606,9 @@ async function loadRecordings() {
               ${x.recording_status === 'finalized'
                 ? `<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
                    <a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a>`
-                : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
+                : x.recording_status === 'failed'
+                  ? '<small style="color:var(--danger)">Recording failed. No playable audio is available; check the ARI worker and Asterisk recording logs for this call ID.</small>'
+                  : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
             </div>
           </div>`).join('')}</div>
       </div>`).join('') || empty('No recordings found', 'Try another extension, or complete a recorded call.', '◉'));
@@ -4079,7 +4081,8 @@ wire('save-route', 'click', async () => {
     notify((result.auto_ivr || []).length
       ? `Call flow saved for ${label}; a phone menu was added automatically`
       : `Call flow saved for ${label}`);
-    setSaveFlowState('saved', `Saved for ${label}`);
+    if (result.warning) notify(`Flow saved, but not applied to Asterisk: ${result.warning}`, true);
+    setSaveFlowState('saved', result.warning ? 'Saved — PBX apply failed' : `Saved for ${label}`);
     const id = workspace?.customer?.id, tab = wsTab;
     await loadState();
     if (id) await openCustomer(id, tab, true);
