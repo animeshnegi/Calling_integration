@@ -328,3 +328,87 @@ rings. Test ring-device off → voicemail, and ring-out → forwarding separatel
 When several desks ring, configure a number-level fallback for a deterministic
 shared ending; without one the first selected desk supplies the no-answer action.
 A general number can use a saved journey without provisioning a duplicate desk.
+
+
+## Extension-to-extension audio loss and Asterisk restarts
+
+A CLI returning to the Linux shell plus an increased container `RestartCount`
+requires investigating Asterisk's process exit **before** diagnosing RTP/NAT.
+`Running=true ExitCode=0` after Docker has restarted the container does not
+identify the preceding exit. Nor does a `native_rtp`/`simple_bridge` technology
+switch prove a SIP transfer or a crash; a bridge technology change is normal.
+
+Immediately after reproducing 101 → 105, run on the VM:
+
+```bash
+bash scripts/diagnose-extension-audio.sh > extension-audio.log 2>&1
+```
+
+This is a finite, read-only snapshot: container state plus historical Docker
+`die`/`oom`/restart events, image portability metadata, VM CPU flags, channel/media
+statistics, codec/bridge modules, and bounded existing logs. It does **not** enable
+SIP/RTP logging, reload or restart anything, change a codec, or place a call. Review
+and redact IPs, phone numbers and previously enabled SIP traces before sharing the
+log. Never share `.env`, complete Docker environments or raw core dumps.
+
+Docker keeps a bounded event history. Capture it promptly and record the exact UTC
+call time; a missing event is not proof that no crash occurred. An in-place Asterisk
+restart also need not create a Docker `die` event. Interpret recorded exit values:
+
+- **132 / SIGILL:** inspect `BUILD_NATIVE` and CPU capabilities. The image is built
+  on a workstation then exported to the VM. Upstream Asterisk enables
+  `BUILD_NATIVE` by default, adding `-march=native` to compilation, including
+  bundled pjproject. A codec/media function can execute instructions present on
+  the builder but missing on the VM. Successful G.711 carrier calls do not prove
+  all G.722/internal media paths are safe.
+- **139 / SIGSEGV or 134 / SIGABRT:** obtain a native backtrace against the exact
+  image/binaries before assigning a module/root cause. A portability fix does not
+  prove these faults repaired. Core dumps may contain SIP and provider secrets;
+  collect/store them privately. Frame pointers are retained in new images.
+- **137 / SIGKILL:** correlate Docker `oom` events and the host kernel log; do not
+  label every SIGKILL as an OOM. The running container's OOM flag may no longer
+  describe the prior event.
+- **0:** inspect configuration-sync/re-exec/deployment logs around the event; an
+  orderly exit is not evidence of a native crash.
+
+### Portable image correction
+
+`asterisk/Dockerfile` now explicitly disables `BUILD_NATIVE` before the parallel
+build, retains `KEEP_FRAME_POINTERS`, and fails the build if the native flag remains.
+The resulting image records `/usr/share/asterisk/build-portability.txt`. Merely
+pulling source, changing the dialplan, restarting an old container or importing the
+old image cannot fix machine instructions compiled into existing binaries.
+
+Rebuild/export a **new tag** on the build machine using the documented build/export
+script; do not reuse an old tar archive. Import it using `import-start-images.sh`
+in a maintenance window: replacing the Asterisk container interrupts active calls.
+Confirm the image actually running on the VM:
+
+```bash
+docker exec engineerip-asterisk cat /usr/share/asterisk/build-portability.txt
+docker exec engineerip-asterisk asterisk -rx 'core show settings'
+```
+
+The metadata must report `BUILD_NATIVE=disabled`, and Asterisk's build options
+must not include `BUILD_NATIVE`. The compile policy changes no SIP usernames,
+trunks, caller ID, codec order, outbound dial strings or RTP/media settings. Do
+not force G.711 globally or disable bridging just to hide an unclassified crash.
+
+### Required live acceptance (not covered by the Python suite)
+
+1. Record Asterisk's current image ID, uptime and Docker `RestartCount`.
+2. With two phones on the same numbered line, call 101 → 105, then 105 → 101.
+   Verify both directions of speech for at least 60 seconds, and repeat calls.
+3. Repeat with the devices' normal G.722/G.711 negotiations and, if used, a browser
+   and a plain SIP device. Preserve the separate RTP/DTLS identities. Capture
+   `pjsip show channelstats` while connected; a connected call with zero RTP still
+   needs media-address/NAT investigation if the process stayed alive.
+4. Confirm uptime continues, restart count does not increase, no new fatal event
+   occurs, both sides hear audio, and hangup clears both channels.
+5. Make one existing external-call smoke test without altering its working
+   credentials, provider codecs or routing.
+
+No Docker/Asterisk/SIP phones are available in the coding sandbox, so build-policy
+and dialplan tests cannot certify those live media/crash checks. The user's live
+exit event/backtrace and this acceptance run are required before declaring the
+reported incident resolved.

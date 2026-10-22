@@ -8,6 +8,9 @@ ARG ASTERISK_VERSION=22.11.0
 ARG ASTERISK_MAKE_JOBS=4
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Upstream BUILD_NATIVE defaults to yes (-march=native). Exported images must
+# also run on a different VM CPU: disable it before compiling Asterisk, codec
+# modules and bundled pjproject. Keep frame pointers for usable native traces.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     --mount=type=cache,target=/tmp/asterisk-download,sharing=locked \
@@ -29,8 +32,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && tar -xzf "asterisk-${ASTERISK_VERSION}.tar.gz" -C /tmp \
     && cd "/tmp/asterisk-${ASTERISK_VERSION}" \
     && ./configure --with-jansson-bundled --with-pjproject-bundled \
+    && make menuselect.makeopts \
+    && menuselect/menuselect --disable BUILD_NATIVE --enable KEEP_FRAME_POINTERS menuselect.makeopts \
+    && if grep -Eq '(^|[[:space:]])BUILD_NATIVE([[:space:]]|$)' menuselect.makeopts; then \
+         echo "ERROR: BUILD_NATIVE is still enabled; refusing a CPU-specific export image." >&2; \
+         exit 1; \
+       fi \
     && make -j"${ASTERISK_MAKE_JOBS}" \
     && make install && ldconfig \
+    && mkdir -p /usr/share/asterisk \
+    && printf 'ASTERISK_VERSION=%s\nBUILD_NATIVE=disabled\nKEEP_FRAME_POINTERS=enabled\n' "$ASTERISK_VERSION" \
+         > /usr/share/asterisk/build-portability.txt \
     && if [ ! -f /usr/lib/asterisk/modules/res_srtp.so ]; then \
          echo "ERROR: res_srtp.so was not built. WebRTC endpoints negotiate DTLS-SRTP" >&2; \
          echo "       and every browser call would fail at media setup. Was libsrtp2-dev" >&2; \
