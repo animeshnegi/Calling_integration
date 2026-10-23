@@ -111,3 +111,18 @@ def test_the_routing_canvas_puts_the_journey_on_the_main_number():
     assert 'id="extension-flow-tab"' in html
     assert "Department or extension" in html          # the number journey has its own stages
     assert "Extension Call Handling" in html    # a distinct no-answer editor
+
+
+def test_image_refuses_to_ship_without_both_sip_websocket_modules():
+    dockerfile = (ROOT / "asterisk/Dockerfile").read_text()
+    assert "for module in res_http_websocket res_pjsip_transport_websocket" in dockerfile
+    assert 'if [ ! -f "/usr/lib/asterisk/modules/${module}.so" ]' in dockerfile
+    assert "Refusing this image" in dockerfile
+
+
+def test_docs_distinguish_panel_container_network_from_host_loopback():
+    docs = (ROOT / "docs/DEPLOYMENT.md").read_text()
+    assert "install-softphone-proxy.py" in docs
+    assert "--connect-network" in docs
+    assert "host network mode" in docs
+    assert "not replacement/recreation" in docs

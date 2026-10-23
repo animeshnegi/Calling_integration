@@ -330,6 +330,30 @@ shared ending; without one the first selected desk supplies the no-answer action
 A general number can use a saved journey without provisioning a duplicate desk.
 
 
+## 1Panel/OpenResty softphone `/ws` installation
+
+For a repeated `/ws` 404 with 1Panel/container-managed HTTPS, use the
+container-aware installer rather than copying the **host** nginx upstream into a
+bridged proxy. Run on the VM, first without `--apply` to see the selected vhost,
+network and upstream:
+
+```bash
+sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com
+sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com \
+  --apply --connect-network
+```
+
+Add `--proxy-container NAME` when auto-discovery finds more than one proxy. Review
+DEPLOYMENT.md's 1Panel section before applying. In bridge mode, persist the shared
+external network in the panel's proxy Compose settings so a future recreation
+keeps connectivity. Host-networked OpenResty needs no extra network. A `PASS`
+means the real public SIP WebSocket upgrade succeeded, not SIP registration/audio.
+If the direct Asterisk preflight fails, no config/network is changed. If nginx
+rejects the patch, the installer restores the original vhost. Valid routes with
+failed public verification are explicitly `NOT VERIFIED`, not silently rolled
+back or called fixed. This operation does not restart Asterisk or alter outbound
+calling.
+
 ## Extension-to-extension audio loss and Asterisk restarts
 
 A CLI returning to the Linux shell plus an increased container `RestartCount`

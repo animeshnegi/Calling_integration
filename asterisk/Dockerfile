@@ -49,6 +49,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          echo "       installed before ./configure? Refusing to ship this image." >&2; \
          exit 1; \
        fi \
+    && for module in res_http_websocket res_pjsip_transport_websocket; do \
+         if [ ! -f "/usr/lib/asterisk/modules/${module}.so" ]; then \
+           echo "ERROR: ${module}.so was not built; /ws cannot serve SIP WebSockets. Refusing this image." >&2; \
+           exit 1; \
+         fi; \
+       done \
     && cd / \
     && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" \
     && apt-get purge -y --auto-remove build-essential curl libedit-dev libjansson-dev libncurses5-dev libnewt-dev libogg-dev libopus-dev libsamplerate0-dev libsndfile1-dev libsrtp2-dev libspeex-dev libspeexdsp-dev libsqlite3-dev libssl-dev libtool libvorbis-dev libxml2-dev pkg-config uuid-dev xmlstarlet \

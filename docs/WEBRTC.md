@@ -142,7 +142,11 @@ change:
   not the SIP domain. Install/include `deploy/nginx/softphone-websocket.conf` in
   that host's active HTTPS vhost (see DEPLOYMENT.md), then run
   `python3 scripts/check-softphone-websocket.py wss://YOUR_WEB_HOST/ws`.
-  The Flask app cannot serve `/ws` or install routes into host nginx.
+  The Flask app cannot serve `/ws` or install routes into host nginx. For a
+  1Panel/OpenResty container, use the container-aware installer in DEPLOYMENT.md:
+  `sudo python3 scripts/install-softphone-proxy.py --domain YOUR_WEB_HOST`
+  (dry run first). A bridged proxy must use a shared Docker network, not its own
+  loopback address for Asterisk.
 * A restart of the Asterisk container once, on a deployment that predates the
   WSS transport: transports are rendered into
   `dynamic/pjsip.transports.conf` and a `pjsip reload` does not add a new

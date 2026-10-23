@@ -296,6 +296,81 @@ SIP and RTP on `sip.example.com` are never proxied - the plain DNS record plus
 open firewall ports 5060/udp and the RTP range are all a desk phone or a
 desktop softphone needs.
 
+### 1Panel / Docker nginx / OpenResty: install the active route
+
+The host-nginx example below does not apply unchanged to a **bridged proxy
+container**. Its `127.0.0.1` is the proxy container itself. Pointing that upstream
+at `127.0.0.1:8088` cannot reach a loopback-published Asterisk port on the Docker
+host. A proxy in **host network mode** can use that loopback port.
+
+From the updated repository **on the Docker VM**, first preview:
+
+```bash
+sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com
+```
+
+Then apply the reviewed plan:
+
+```bash
+sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com \
+  --apply --connect-network
+```
+
+Use your web hostname. If multiple nginx/OpenResty containers are running, add
+`--proxy-container NAME` (find the intended proxy in `docker ps`). This is for
+nginx/OpenResty in Docker, not an external managed gateway or nginx on another VM.
+
+The installer:
+
+1. Finds the proxy binary/startup config and exact active HTTPS `server_name`
+   through `nginx -T`. It never prints that raw dump or Docker environments.
+2. Resolves the vhost to its **persistent mounted file on the VM**, refusing an
+   unmounted/read-only/ambiguous vhost or an unmanaged exact `/ws` location.
+3. Requires a real SIP WebSocket upgrade **directly from Asterisk** before any
+   modification. If Asterisk fails, it stops without changing files/networks.
+4. Uses host loopback for host networking. With bridging it uses Docker DNS
+   `engineerip-asterisk:8088`, reuses a shared network or, only with explicit
+   `--connect-network`, attaches the proxy to the existing private network.
+   No additional HTTP/ARI port is published to the Internet.
+5. Adds only the exact `/ws` location in that HTTPS vhost. It leaves certificates,
+   other sites and the existing Flask/API route intact. Before edits it saves a
+   private `*.engineerip-*.bak` backup. It preserves file-bind-mount inodes.
+6. Runs `nginx -t` and reloads **only the proxy**. Rejection restores the original
+   file and rolls back a newly added network attachment. It never restarts
+   Asterisk, changes SIP credentials or places calls.
+7. Checks `wss://HOST/ws` with trusted TLS and the real SIP subprotocol. It reports
+   **PASS only for a valid HTTP 101 handshake**. If the installed route is valid
+   but the public path still fails (e.g. an outer CDN/proxy), it keeps the valid
+   route/backup, reports `NOT VERIFIED`, and exits nonzero rather than claiming
+   the problem fixed.
+
+**Persist Docker networking in 1Panel.** A live `docker network connect` survives
+container restarts, not replacement/recreation. For a bridged proxy, add the shared
+network as an **external network in its 1Panel-managed Compose configuration**, and
+keep its existing network attachments. Adapt the actual service name; for example:
+
+```yaml
+services:
+  openresty:  # use the existing proxy service name
+    networks:
+      # Keep this service's existing networks as well.
+      - engineerip-telephony-internal
+networks:
+  engineerip-telephony-internal:
+    external: true
+    name: engineerip-telephony-internal
+```
+
+Do not add `networks` to a service that already uses `network_mode: host`; it does
+not need the additional network. The installer does not rewrite a panel's Compose
+file or remove existing networks. 1Panel may regenerate site configuration after
+panel edits: re-run the dry-run/check after such edits. Running the installer
+again is idempotent for its own route.
+
+The installer requires root, Python 3 and access to the local Docker daemon, but no
+SIP/provider password. Review and apply it on the VM; committing it to Git alone
+cannot alter the live proxy.
+
 ### Apply and verify the softphone route (host nginx)
 
 The application does **not** serve `/ws`; Asterisk does. Rebuilding or importing
