@@ -151,3 +151,77 @@ def test_missing_container_fails_before_any_exec_or_log_dump(tmp_path):
     result = subprocess.run(["bash", str(ROOT / "scripts/diagnose-extension-audio.sh")], env=env, capture_output=True, text=True, timeout=5)
     assert result.returncode == 1 and "Cannot inspect" in result.stderr
     assert all(json.loads(line)[0] == "inspect" for line in log.read_text().splitlines())
+
+
+@pytest.mark.parametrize("browser_101,browser_105", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("caller,callee", [("101", "105"), ("105", "101")])
+def test_customer_line_calls_use_exact_scoped_identity_and_compatible_media(
+    tmp_path, browser_101, browser_105, caller, callee,
+):
+    """Re-check modern customer provisioning, both directions and mixed devices.
+
+    The original regression covered legacy platform extensions without a DID.
+    This checks the actual number-scoped customer path; it still does NOT send
+    RTP, execute native bridge code or establish that a live PBX cannot crash.
+    """
+    from app.admin import endpoint_name
+    from test_services import line_setup, make_customer
+
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    owner = make_customer(store, "audio-recheck", "Audio Recheck")
+    number = "+13025559001"
+    keys = line_setup(store, number, owner, ("101", "105"))
+    # Another line has the same digits; it must not receive this internal call.
+    other_keys = line_setup(store, "+13025559002", owner, ("101", "105"))
+    sync = TelephonyConfigSync(store, None, str(tmp_path / "pjsip.dynamic.conf"))
+    context_name = sync.number_context(number)
+
+    def context_of(text):
+        return text.split(f"[{context_name}]\n", 1)[1].split("\n[", 1)[0]
+
+    def outbound_blocks(text):
+        context = context_of(text)
+        return [context.split(f"exten => {pattern},1,", 1)[1].split("\nexten =>", 1)[0]
+                for pattern in ("_+X.", "_XXXX.")]
+
+    original_dialplan = sync.render_dialplan()
+    original_pjsip = sync.render_pjsip()
+    browsers = {"101": browser_101, "105": browser_105}
+    for digits, enabled in browsers.items():
+        store.save_extension({"extension": keys[digits], "webrtc_enabled": enabled}, owner_user_id=owner)
+    pjsip = sync.render_pjsip()
+    dialplan = sync.render_dialplan()
+    context = context_of(dialplan)
+
+    def body(text, identity):
+        return text.split(f"[{identity}]\ntype=endpoint\n", 1)[1].split("\n\n", 1)[0]
+
+    for digits in (caller, callee):
+        row = store.extension_row(keys[digits])
+        canonical = endpoint_name(keys[digits])
+        plain = body(pjsip, row["sip_username"])
+        assert body(pjsip, canonical).split("context=", 1)[1] == plain.split("context=", 1)[1]
+        assert f"context={context_name}" in plain
+        assert "webrtc=yes" not in plain and "media_encryption=dtls" not in plain
+        assert "direct_media=no" in plain and "rtp_symmetric=yes" in plain
+        assert "allow=g722,ulaw,alaw" in plain
+        targets = [f"PJSIP/{canonical}"]
+        browser_id = browser_username(row["sip_username"])
+        if browsers[digits]:
+            web = body(pjsip, browser_id)
+            assert "webrtc=yes" in web and "transport=transport-wss" in web
+            assert f"aors={browser_id}" in web
+            assert "direct_media=no" in web and "rtp_symmetric=yes" in web
+            assert "allow=g722,ulaw,alaw" in web
+            targets.insert(0, f"PJSIP/{browser_id}")
+        else:
+            assert f"[{browser_id}]\ntype=endpoint" not in pjsip
+        route = context.split(f"exten => {digits},1,", 1)[1].split("\nexten =>", 1)[0]
+        assert f"Dial({'&'.join(targets)},30)" in route
+        assert f"PJSIP/{endpoint_name(other_keys[digits])}" not in route
+        assert "Stasis(" not in route and "System(" not in route
+    # Device-mode switches cannot change the working carrier path or identities.
+    assert outbound_blocks(dialplan) == outbound_blocks(original_dialplan)
+    provider_sections = [name for name in sync._section_names(original_pjsip) if name.startswith("provider-")]
+    for name in provider_sections:
+        assert original_pjsip.split(f"[{name}]\n", 1)[1].split("\n\n", 1)[0] == pjsip.split(f"[{name}]\n", 1)[1].split("\n\n", 1)[0]
