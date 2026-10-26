@@ -19,6 +19,14 @@ COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser web ./web
 COPY --chown=appuser:appuser wsgi.py ./wsgi.py
 
+# Image-only/Windows deployments do not copy repository scripts to the VM.
+# Carry the minimal host-side proxy repair kit in the API image so docker cp
+# can extract it after docker load. It is NOT run inside the API container and
+# the container receives no Docker socket or host-proxy privileges.
+COPY --chown=appuser:appuser scripts/install-softphone-proxy.py scripts/check-softphone-websocket.py ./deploy-kit/scripts/
+COPY --chown=appuser:appuser deploy/nginx/softphone-websocket.conf ./deploy-kit/deploy/nginx/
+COPY --chown=appuser:appuser deploy/SOFTPHONE_TOOLS.md ./deploy-kit/deploy/
+
 USER appuser
 
 EXPOSE 5000

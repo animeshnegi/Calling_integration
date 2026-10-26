@@ -298,6 +298,12 @@ desktop softphone needs.
 
 ### 1Panel / Docker nginx / OpenResty: install the active route
 
+**Windows-built, image-only deployment?** Docker import does not copy scripts to
+`/opt/Calling_integration`. Use the small tools archive or extract `/app/deploy-kit`
+from a newly built/imported API image first; see
+[`deploy/SOFTPHONE_TOOLS.md`](../deploy/SOFTPHONE_TOOLS.md). The current repair needs
+no server-side build, Git pull, image replacement or Asterisk restart.
+
 The host-nginx example below does not apply unchanged to a **bridged proxy
 container**. Its `127.0.0.1` is the proxy container itself. Pointing that upstream
 at `127.0.0.1:8088` cannot reach a loopback-published Asterisk port on the Docker

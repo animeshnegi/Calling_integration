@@ -10,5 +10,7 @@ venv/
 *.log
 *.tar
 *.tar.gz
+*.tar.sha256
+*.tar.gz.sha256
 asterisk/keys/*
 !asterisk/keys/.gitkeep

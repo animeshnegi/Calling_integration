@@ -2,6 +2,30 @@
 
 This guide is for building the CPU-intensive Asterisk image on a personal computer and running the completed images on a smaller Google Compute Engine VM.
 
+## Image-only / Windows users: why a host installer can be missing
+
+`docker save` exports **images only**. `docker load` does not update
+`/opt/Calling_integration/scripts` on the VM, even if the running container has the
+latest application. A missing `install-softphone-proxy.py` on the host is not a
+reason to build on the low-spec server or to restart a working PBX.
+
+For the current missing-installer problem, copy/extract the small host-tools
+archive as described in [`deploy/SOFTPHONE_TOOLS.md`](../deploy/SOFTPHONE_TOOLS.md).
+It contains only the installer, its standard-library checker, the nginx snippet
+and instructions. It does not overwrite `.env`, Compose, databases or images.
+Run the dry-run, then the reviewed apply step on the VM. No server Git checkout
+update is required for this archive path.
+
+New API images additionally embed `/app/deploy-kit`, so any Windows Docker
+Desktop build → save `.tar` → transfer → load workflow can carry the installer.
+You can copy that directory out of a **stopped temporary container** using the
+exact imported image tag; see the same guide. The old images built before this
+Dockerfile correction do not have that directory: use the standalone tools
+archive rather than repeatedly trying to copy a nonexistent path.
+
+The kit is not auto-executed by the API; the application has no Docker socket or
+host-proxy privileges. Loading/starting images alone cannot configure 1Panel.
+
 ## 1. Requirements
 
 Personal computer:
@@ -50,6 +74,14 @@ This builds tagged `linux/amd64` images and creates:
 
 - `engineerip-telephony-v1.tar.gz`
 - `engineerip-telephony-v1.tar.gz.sha256`
+- `engineerip-softphone-tools-v1.tar.gz` (**copy this too**)
+- `engineerip-softphone-tools-v1.tar.gz.sha256`
+
+The Bash exporter copies the host kit from the locally built API image using a
+stopped temporary container. It does not start the application. If building and
+saving images manually in Windows PowerShell, you can keep that workflow: the new
+API Dockerfile embeds the same kit. Alternatively package the small tools without
+building any image: `py -3 scripts/package-softphone-tools.py`.
 
 For an ARM64 VM:
 
@@ -59,7 +91,12 @@ PLATFORM=linux/arm64 ./scripts/build-export-images.sh v1
 
 ## 4. Copy to Google VM
 
-Copy the repository (without `.git` if desired), image archive, checksum, and the VM's separately prepared `.env`. Example:
+For an existing image-only deployment, keep its `.env`/Compose configuration and
+copy the image archive/checksum plus the small host-tools archive/checksum. Extract
+the tools separately as described above. No Git pull or image build is needed on
+the VM. For an initial deployment, also supply `docker-compose.yml` and prepare the
+VM's private `.env` separately. Copying the full source tree is optional. Example
+for operators who do choose to copy the source:
 
 ```bash
 gcloud compute scp --recurse . VM_NAME:~/Calling_integration --zone=ZONE
@@ -77,7 +114,12 @@ chmod +x scripts/*.sh
 ./scripts/import-start-images.sh engineerip-telephony-v1.tar.gz v1
 ```
 
-The script verifies the checksum, loads both images, creates `crm-network` if necessary, and runs `docker compose up -d --no-build`. `--no-build` is important on a low-resource VM.
+The script verifies the checksum, loads both images, creates `crm-network` if necessary, and runs `docker compose up -d --no-build`. It accepts both Windows `.tar`
+and compressed `.tar.gz` image exports. `--no-build` is important on a low-resource
+VM. Import/start is a planned release operation and may recreate Asterisk, dropping
+active calls; use a maintenance window. **Do not import/restart containers just to
+install the missing proxy helper**: the small tools archive repair needs neither.
+The import helper does not silently edit nginx or overwrite host configuration.
 
 Verify:
 
