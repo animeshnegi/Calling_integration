@@ -197,3 +197,61 @@ about it, and what it cannot:
 The browser captures the microphone with its own echo cancellation, noise
 suppression and automatic gain, which is what keeps a laptop or handset call
 usable without a headset.
+
+## Silent calls, two-minute drop-outs, and call-screen responsiveness
+
+A browser call that rings but has no audio is usually one of three separate
+faults: the remote WebRTC track was never attached to an `<audio>` element, the
+browser blocked autoplay, or ICE advertised an unreachable media address. The
+softphone now fixes the first two in code and reports the third instead of
+leaving the call screen silent:
+
+* `web/phone.js` binds the remote track handler both to `session.connection` and
+  to the `peerconnection` event. JsSIP creates the peer connection and emits
+  that event **synchronously inside `ua.call()`**, before `attachSession()` can
+  subscribe; subscribing only to the event left outbound calls with no remote
+  audio element. The handler accepts `event.streams[0]`, a bare `event.track`
+  (no `a=msid` stream), and tracks already present in `pc.getReceivers()`. It
+  uses `addEventListener("track", …)` where available and never overwrites an
+  existing handler.
+* The `<audio autoplay playsinline>` element is primed inside the Call and
+  Answer clicks. If the browser still rejects `play()`, an in-call
+  **Tap to enable call audio** button appears; any later tap retries playback.
+  `remoteAudio.muted` is never used as a fallback, so the far end cannot be
+  accidentally silenced. A denied `getUserMedia()` ends the call with
+  “Microphone unavailable” instead of leaving a dead connected screen.
+* SIP **session timers are enabled** with `UPDATE` refresh, registration expiry
+  is 300 seconds, and a REGISTER keepalive runs every 30 seconds. The last one
+  is important behind proxies/CDNs that close an idle WebSocket after roughly
+  100–120 seconds: without signalling traffic, a phone that worked at first can
+  no longer make or receive calls until the page is reloaded. WebSocket
+  recovery is bounded to 2–8 seconds, with a watchdog on `online` and tab
+  `visibilitychange` for browsers that suspended timers.
+* The connection badge now has a distinct **Reconnecting…** state instead of
+  showing Offline with no explanation. The in-call status follows ICE state
+  (`Connecting audio…`, `Connected`, `Network interrupted…`, `Media connection
+  failed`). An in-call DTMF keypad and physical-keyboard DTMF support IVR
+  navigation without leaving the call screen.
+* `phone.html` requests versioned `/phone.css?v=N` and `/phone.js?v=N`, and
+  `sw.js` precaches exactly those URLs under `eip-phone-vN`. A browser that
+  cached the previous `public, max-age=3600` script under the unversioned URL
+  cannot answer the new page with stale call code. Bump both the HTML version
+  and the service worker `VERSION` together on future shell changes.
+
+These are browser fixes; they do not change outbound call routing. A live
+deployment still needs the checks that only the VM can prove:
+
+```bash
+python3 scripts/check-softphone-websocket.py ws://127.0.0.1:8088/ws
+python3 scripts/check-softphone-websocket.py wss://YOUR_WEB_HOST/ws
+docker compose exec asterisk asterisk -rx 'pjsip show contacts'
+docker compose exec asterisk asterisk -rx 'module show like res_srtp'
+```
+
+The admin **Service address** must resolve to the VM's public numeric IP; do
+not point it at a Cloudflare-proxied hostname. UDP 10000–10100 must reach the
+Asterisk container. If STUN-only ICE still produces silence on a restrictive
+office network, configure a TURN server in the platform's ICE settings so the
+browser has a relay candidate. The call-screen quality badge reports the
+negotiated codec and unstable packet loss/jitter; it cannot replace a live RTP
+capture when the network path itself is broken.

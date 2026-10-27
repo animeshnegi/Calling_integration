@@ -20,6 +20,15 @@ const { JSDOM, VirtualConsole } = require('jsdom');
 
 const WEB = path.join(__dirname, '..', 'web');
 const LOGO = 'https://engineerip.com/static/img/logo.png';
+const assetVersion = () => {
+  const code = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
+  const match = code.match(/const VERSION = "(\d+)"/);
+  return match ? match[1] : '';
+};
+const VERSION = assetVersion();
+const VERSIONED_CSS = `/phone.css?v=${VERSION}`;
+const VERSIONED_JS = `/phone.js?v=${VERSION}`;
+const SHELL_URLS = ['/phone', VERSIONED_CSS, VERSIONED_JS, '/jssip.min.js', '/manifest.json'];
 
 let passed = 0;
 const failures = [];
@@ -65,23 +74,44 @@ function makeFakeSip() {
   function makeSession({ direction = 'outgoing', caller = '' } = {}) {
     /* JsSIP exposes the RTCPeerConnection as session.connection, and the page
        reads its stats to report call quality. */
-    const peer = { ontrack: null, _stats: null, async getStats() { return this._stats || []; } };
+    const listeners = {};
+    const peer = {
+      ontrack: null, _stats: null, _receivers: [], iceConnectionState: 'new', listeners,
+      addEventListener(name, callback) { (listeners[name] = listeners[name] || []).push(callback); },
+      dispatch(name, event) { (listeners[name] || []).slice().forEach(callback => callback(event)); },
+      track(event) {
+        this.dispatch('track', event);
+        if (this.ontrack && !(event && event.__eipHandled)) this.ontrack(event);
+        return event;
+      },
+      getReceivers() { return this._receivers; },
+      async getStats() { return this._stats || []; },
+    };
     const session = {
       direction,
       connection: peer,
       remote_identity: { uri: { user: caller, toString: () => `sip:${caller}@sip.example.com` } },
-      _terminated: false, _ended: false, _answered: null, _muted: null, _held: false,
+      _terminated: false, _ended: false, _answered: null, _muted: null, _held: false, _dtmf: [],
+      _connectionSent: false,
       terminate() { this._terminated = true; this._ended = true; this.emit('ended'); },
       isEnded() { return this._ended; },
-      answer(options) { this._answered = options; this.emit('confirmed'); },
+      /* Real JsSIP creates the peer connection synchronously inside answer(). */
+      answer(options) { this._answered = options; this.sendConnection(); this.emit('confirmed'); },
       mute(options) { this._muted = options; },
       hold() { this._held = true; this.emit('hold'); },
       unhold() { this._held = false; this.emit('unhold'); },
+      sendDTMF(tone) { this._dtmf.push(String(tone)); },
       /* The other end of the call, driven by the test. */
       ring() { this.emit('progress'); },
       connect() { this.emit('confirmed'); },
       fail(cause) { this._ended = true; this.emit('failed', { cause }); },
-      sendConnection() { this.emit('peerconnection', { peerconnection: peer }); return peer; },
+      sendConnection() {
+        if (!this._connectionSent) {
+          this._connectionSent = true;
+          this.emit('peerconnection', { peerconnection: peer });
+        }
+        return peer;
+      },
       /* What the browser would report for a negotiated codec and its network. */
       negotiates(codec, { received = 1000, lost = 0, jitter = 0 } = {}) {
         peer._stats = [
@@ -106,26 +136,38 @@ function makeFakeSip() {
       this.calls = [];
       this.started = false;
       this.stopped = false;
+      this._connected = false;
+      this._registered = false;
+      this.registers = 0;
       instances.push(this);
     }
 
     start() {
       this.started = true;
+      this.stopped = false;
       setTimeout(() => {
         if (this.stopped) return;
         if (String(this.config.password).startsWith('bad')) {
           this.emit('registrationFailed', { cause: 'Rejected' });
           return;
         }
+        this._connected = true;
+        this._registered = true;
         this.emit('connected');
         this.emit('registered');
       }, 0);
     }
 
-    stop() { this.stopped = true; this.emit('disconnected'); }
+    stop() { this.stopped = true; this._connected = false; this._registered = false; this.emit('disconnected'); }
+    isConnected() { return this._connected; }
+    isRegistered() { return this._registered; }
+    register() { this.registers += 1; this._registered = true; this.emit('registered'); }
 
     call(target, options) {
       const session = makeSession({ direction: 'outgoing' });
+      /* This is the regression: the real stack emits "peerconnection"
+         synchronously inside ua.call(), before phone.js can attachSession. */
+      session.sendConnection();
       this.calls.push({ target, options, session });
       calls.push({ target, options, session });
       return session;
@@ -138,7 +180,7 @@ function makeFakeSip() {
       return session;
     }
 
-    drop() { this.emit('disconnected'); }
+    drop() { this._connected = false; this._registered = false; this.emit('disconnected'); }
   }
 
   api.WebSocketInterface = WebSocketInterface;
@@ -247,6 +289,7 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
       if (opener) Object.defineProperty(window, 'opener', { value: opener, configurable: true });
       /* jsdom seams: media, clipboard, prompts and a Date the test can move. */
       window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+      window.HTMLMediaElement.prototype.pause = () => {};
       Object.defineProperty(window.HTMLMediaElement.prototype, 'srcObject', {
         configurable: true,
         get() { return this._srcObject || null; },
@@ -291,6 +334,13 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
 
 const shown = (d, id) => !d.getElementById(id).classList.contains('hidden');
 const session = env => env.sip.calls[env.sip.calls.length - 1];
+async function startTestCall(env, number = '1555') {
+  await signIn(env);
+  typeDigits(env.d, number);
+  env.d.getElementById('call-btn').click();
+  await settle(20);
+  return session(env);
+}
 
 function typeDigits(d, digits) {
   for (const digit of digits) d.querySelector(`.keypad button[data-key="${digit}"]`).click();
@@ -335,6 +385,14 @@ async function main() {
     check('the in-call status line carries the class its stylesheet styles',
       env.d.getElementById('active-status').classList.contains('active-status'),
       env.d.getElementById('active-status').className);
+    check('the page requests versioned CSS/JS so a stale cached build cannot answer a new page',
+      shippedPage.includes(`href="/phone.css?v=${VERSION}"`)
+      && shippedPage.includes(`src="/phone.js?v=${VERSION}"`), VERSION);
+    const swSource = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
+    check('the service worker precaches the same versioned assets',
+      swSource.includes(`const VERSION = "${VERSION}"`)
+      && swSource.includes('`/phone.js?v=${VERSION}`')
+      && swSource.includes('`/phone.css?v=${VERSION}`'), VERSION);
     check('no runtime errors while the page boots', env.errors.length === 0, env.errors[0]);
     check('a first-time visitor sees the sign-in screen, not a broken phone',
       shown(env.d, 'login-screen') && !shown(env.d, 'phone-app'));
@@ -358,6 +416,14 @@ async function main() {
     check("the WebSocket rides this page's own host, where HTTPS already works",
       good.sip.sockets[0] === 'wss://phone.example.com/ws', good.sip.sockets[0]);
     check('the registration is started', ua.started === true);
+    check('long-call SIP session timers stay enabled and refresh with UPDATE',
+      ua.config.session_timers === true && ua.config.session_timers_refresh_method === 'UPDATE',
+      JSON.stringify({ timers: ua.config.session_timers, method: ua.config.session_timers_refresh_method }));
+    check('registration and WebSocket recovery are bounded, not left at stale defaults',
+      ua.config.register_expires === 300
+      && ua.config.connection_recovery_min_interval === 2
+      && ua.config.connection_recovery_max_interval === 8,
+      JSON.stringify(ua.config));
     check('a registered phone shows the dialer', shown(good.d, 'phone-app') && !shown(good.d, 'login-screen'));
     check('the connection badge says the phone is ready',
       /Ready/.test(good.d.getElementById('connection-state').textContent)
@@ -418,10 +484,18 @@ async function main() {
 
     const lost = boot();
     await signIn(lost);
-    lost.sip.instances[0].drop();
-    check('a dropped WebSocket marks the phone offline',
-      !lost.d.getElementById('connection-state').classList.contains('online'),
-      lost.d.getElementById('connection-state').className);
+    const lostUa = lost.sip.instances[0];
+    lostUa.drop();
+    check('a dropped WebSocket marks the phone as reconnecting, not silently ready',
+      !lost.d.getElementById('connection-state').classList.contains('online')
+      && /Reconnecting/.test(lost.d.getElementById('connection-state').textContent)
+      && lost.d.getElementById('connection-state').classList.contains('connecting'),
+      lost.d.getElementById('connection-state').textContent + ' / ' + lost.d.getElementById('connection-state').className);
+    lost.w.eval('ensureSipConnection()');
+    await settle(20);
+    check('the visibility/online watchdog restarts the dropped signalling connection',
+      lostUa.isConnected() && lostUa.isRegistered(),
+      JSON.stringify({ connected: lostUa.isConnected(), registered: lostUa.isRegistered() }));
   }
 
   /* ------------------------------------------------- keypad & paste */
@@ -612,6 +686,85 @@ async function main() {
       failing.d.getElementById('active-status').textContent);
     const failed = JSON.parse(failing.w.localStorage.getItem('eip-phone-recents'));
     check('and is recorded as failed', failed[0].status === 'failed', JSON.stringify(failed));
+  }
+
+  /* -------------------------------------------------- media reliability */
+  section('Media, registration and in-call responsiveness');
+  {
+    const early = boot();
+    const placed = await startTestCall(early, '1555');
+    const peer = placed.session.connection;
+    check('an outgoing peerconnection created inside ua.call() is still bound',
+      peer.__eipAudioBound === true && typeof peer.ontrack === 'function'
+      && (peer.listeners.track || []).length > 0,
+      JSON.stringify({ bound: peer.__eipAudioBound, listeners: Object.keys(peer.listeners) }));
+    const track = { kind: 'audio', id: 'remote-track-1' };
+    peer.track({ track });  // No a=msid stream: Asterisk may deliver only a track.
+    const attached = early.d.getElementById('remote-audio').srcObject;
+    check('a remote track without an msid stream is still attached and playable',
+      attached && typeof attached.getTracks === 'function' && attached.getTracks().includes(track),
+      JSON.stringify(attached && attached.getTracks && attached.getTracks().map(t => t.id)));
+    check('the remote audio element is never muted by the media fix',
+      early.d.getElementById('remote-audio').muted === false);
+    early.dom.window.close();
+
+    const blocked = boot();
+    const blockedCall = await startTestCall(blocked, '1666');
+    const blockedPeer = blockedCall.session.connection;
+    blocked.d.getElementById('remote-audio').play = () => Promise.reject(new Error('autoplay blocked'));
+    blockedPeer.track({ track: { kind: 'audio', id: 'blocked-track' } });
+    await settle(20);
+    check('a blocked autoplay promise offers a one-tap audio unlock',
+      shown(blocked.d, 'enable-audio-btn'),
+      blocked.d.getElementById('enable-audio-btn').className);
+    blocked.d.getElementById('remote-audio').play = () => Promise.resolve();
+    blocked.d.getElementById('enable-audio-btn').click();
+    await settle(20);
+    check('tapping the unlock retries playback and keeps the far end audible',
+      !shown(blocked.d, 'enable-audio-btn')
+      && blocked.d.getElementById('remote-audio').muted === false,
+      blocked.d.getElementById('enable-audio-btn').className);
+    blocked.dom.window.close();
+
+    const keep = boot();
+    await signIn(keep);
+    const keepUa = keep.sip.instances[0];
+    const beforeKeepalive = keepUa.registers;
+    keep.w.eval('sendRegistrationKeepalive()');
+    check('a registration keepalive refreshes the SIP contact before a proxy idle timeout',
+      keepUa.registers === beforeKeepalive + 1,
+      `${beforeKeepalive} -> ${keepUa.registers}`);
+    keep.dom.window.close();
+
+    const dtmf = boot();
+    const dtmfCall = await startTestCall(dtmf, '1770');
+    dtmf.d.getElementById('dtmf-btn').click();
+    check('the in-call keypad opens for IVR navigation',
+      shown(dtmf.d, 'dtmf-panel')
+      && dtmf.d.getElementById('dtmf-btn').getAttribute('aria-expanded') === 'true',
+      dtmf.d.getElementById('dtmf-panel').className);
+    dtmf.d.querySelector('#dtmf-panel [data-dtmf="5"]').click();
+    check('a keypad press sends that DTMF tone on the live session',
+      dtmfCall.session._dtmf.join('') === '5', dtmfCall.session._dtmf.join(''));
+    const key7 = new dtmf.w.Event('keydown', { bubbles: true });
+    Object.defineProperty(key7, 'key', { value: '7' });
+    dtmf.d.dispatchEvent(key7);
+    check('the physical keyboard sends DTMF during a call instead of editing the dialer',
+      dtmfCall.session._dtmf.join('') === '57'
+      && dtmf.d.getElementById('number-input').value === '1770',
+      dtmfCall.session._dtmf.join('') + ' / ' + dtmf.d.getElementById('number-input').value);
+    dtmf.dom.window.close();
+
+    const mic = boot();
+    const micCall = await startTestCall(mic, '1888');
+    micCall.session.emit('getusermediafailed', new Error('denied'));
+    await settle(20);
+    check('a denied microphone ends the call with an actionable message',
+      !shown(mic.d, 'active-call-view')
+      && /Microphone unavailable/.test(mic.d.getElementById('active-status').textContent)
+      && mic.d.getElementById('call-btn').disabled === false,
+      mic.d.getElementById('active-status').textContent);
+    mic.dom.window.close();
   }
 
   /* ---------------------------------------------------- incoming calls */
@@ -1008,8 +1161,7 @@ async function main() {
     const worker = shellWorker();
     await worker.install();
     check('installing precaches the phone shell',
-      ['/phone', '/phone.css', '/phone.js', '/jssip.min.js', '/manifest.json']
-        .every(url => worker.entries.has(`https://phone.example.com${url}`)),
+      SHELL_URLS.every(url => worker.entries.has(`https://phone.example.com${url}`)),
       [...worker.entries.keys()].join(', '));
     check('and reaches for nothing outside this site', worker.network.length === 0, worker.network.join(', '));
     await worker.activate();
@@ -1019,9 +1171,9 @@ async function main() {
       cached && cached.url === 'https://phone.example.com/phone', cached && cached.url);
     check('by revalidating with the network', worker.network.length === 1, worker.network.join(', '));
 
-    const fresh = await worker.fetch('https://phone.example.com/phone.js');
-    check('a cached asset is answered too',
-      fresh && fresh.url === 'https://phone.example.com/phone.js', fresh && fresh.url);
+    const fresh = await worker.fetch(`https://phone.example.com${VERSIONED_JS}`);
+    check('a cached versioned asset is answered too',
+      fresh && fresh.url === `https://phone.example.com${VERSIONED_JS}`, fresh && fresh.url);
 
     const stack = await worker.fetch('https://phone.example.com/jssip.min.js');
     check('the SIP stack is served online as well',
@@ -1039,8 +1191,7 @@ async function main() {
     check('a non-GET request is never answered from the shell', post === undefined);
     check('nothing else was written to the cache',
       [...worker.entries.keys()].sort().join(', ') ===
-        ['/jssip.min.js', '/manifest.json', '/phone', '/phone.css', '/phone.js']
-          .map(url => `https://phone.example.com${url}`).join(', '),
+        [...SHELL_URLS].sort().map(url => `https://phone.example.com${url}`).join(', '),
       [...worker.entries.keys()].join(', '));
 
     /* A release must replace the shell outright: a copy cached by an earlier
@@ -1069,11 +1220,11 @@ async function main() {
 
     const currentCache = (await worker.caches.keys())[0];
     const sameRelease = await worker.caches.open(currentCache);
-    await sameRelease.put('https://phone.example.com/phone.js', stale());
-    const refreshed = await worker.fetch('https://phone.example.com/phone.js');
+    await sameRelease.put(`https://phone.example.com${VERSIONED_JS}`, stale());
+    const refreshed = await worker.fetch(`https://phone.example.com${VERSIONED_JS}`);
     check('even a stale asset in the CURRENT cache cannot shadow a deployed fix',
-      refreshed && !refreshed.stale && worker.network.includes('https://phone.example.com/phone.js'));
-    const offlineAsset = await offlineWorker.fetch('https://phone.example.com/phone.js');
+      refreshed && !refreshed.stale && worker.network.includes(`https://phone.example.com${VERSIONED_JS}`));
+    const offlineAsset = await offlineWorker.fetch(`https://phone.example.com${VERSIONED_JS}`);
     check('offline assets still use the shell fallback', !!offlineAsset);
 
     const shipped = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');

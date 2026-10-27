@@ -569,9 +569,12 @@ pages are linkable.
   outbound call from dialling to hangup (the target, the audio-only offer, the remote
   audio track, the timer, mute/hold/speaker, one recents row), incoming answer/decline, a
   caller who gives up, a second caller while busy, API-backed call history with an
-  escaped payload, contacts, the settings dialog and logout. jsdom has no media engine,
-  dialog or clipboard, so those are stubbed; what the page asks the SIP stack to do is
-  recorded instead, which is the part a browser cannot check for us.
+  escaped payload, contacts, the settings dialog and logout. It also covers the silent-call
+  regressions: a peer connection created synchronously inside `ua.call()`, a bare remote
+  track with no `a=msid` stream, blocked autoplay/unlock, SIP session timers and
+  registration keepalive, reconnect state, in-call DTMF, and microphone denial. jsdom has
+  no media engine, dialog or clipboard, so those are stubbed; what the page asks the SIP
+  stack to do is recorded instead, which is the part a browser cannot check for us.
 * `node tools/uicheck.js` — boots the real console in jsdom against captured fixtures
   and asserts the promises above: refreshes that paint nothing, only customers dial,
   customer-first pickers, the flow builder's administrator mode, the system board, the

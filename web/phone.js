@@ -1,7 +1,14 @@
-const $=id=>document.getElementById(id);
+const doc=document;
+const $=id=>doc.getElementById(id);
 const input=$("number-input"),display=$("dial-display"),hint=$("dial-hint"),state=$("connection-state");
 const installBtn=$("install-btn"),remoteAudio=$("remote-audio"),settingsDialog=$("settings-dialog"),loginScreen=$("login-screen"),phoneApp=$("phone-app");
 let deferredInstall=null,ua=null,currentSession=null,currentCallAnswered=false,currentCallStatus="completed",callStartedAt=null,timer=null,muted=false,held=false;
+let currentSipSettings=null,remoteStream=null,audioPlayPending=false,sipEverRegistered=false;
+let keepaliveTimer=null,reconnectTimer=null,qualityTimer=null;
+/* A REGISTER is both a contact refresh and a WebSocket keepalive. Some reverse
+   proxies/CDNs close an idle WSS around 100-120 seconds; without traffic the
+   phone silently stops receiving calls until the page is reloaded. */
+const KEEPALIVE_MS=30000,RECONNECT_WATCHDOG_MS=9000;
 
 /* A sign-in the admin console handed this window for one extension. It lives in
    memory only: nothing from it is written to storage. */
@@ -58,7 +65,35 @@ const sipTarget=n=>{const d=sipDomain();return /^sip:/i.test(n)?n:"sip:"+cleanNu
 
 function tickClock(){$("sb-time").textContent=new Date().toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}
 tickClock();setInterval(tickClock,15000);
-function setState(text,online=false){state.className="state "+(online?"online":"offline");state.innerHTML="<i></i> "+text}
+function setState(text,mode=false){
+  const cls=mode===true?"online":mode==="connecting"?"connecting":"offline";
+  state.className="state "+cls;state.innerHTML="<i></i> "+text
+}
+function setCallStatus(text){const el=$("active-status");if(el)el.textContent=text}
+function showAudioUnlock(visible,message){
+  const btn=$("enable-audio-btn");if(!btn)return;
+  btn.classList.toggle("hidden",!visible);
+  if(message)btn.textContent=message
+}
+function playRemoteAudio(){
+  audioPlayPending=true;
+  remoteAudio.muted=false;
+  let attempt;
+  try{attempt=remoteAudio.play()}catch{attempt=null}
+  if(attempt&&typeof attempt.then==="function"){
+    attempt.then(()=>{audioPlayPending=false;showAudioUnlock(false)})
+      .catch(()=>showAudioUnlock(true,"🔊 Tap to enable call audio"))
+  }else{audioPlayPending=false;showAudioUnlock(false)}
+}
+function resetRemoteAudio(){
+  try{remoteAudio.pause()}catch{}
+  remoteStream=null;remoteAudio.srcObject=null;remoteAudio.muted=false;
+  audioPlayPending=false;showAudioUnlock(false)
+}
+/* Browsers sometimes need a user gesture before an auto-playing media element
+   will make a sound. The call and answer buttons are gestures; a later tap
+   anywhere can still unlock the remote track if that first attempt was blocked. */
+doc.addEventListener("pointerdown",()=>{if(audioPlayPending)playRemoteAudio()},{capture:true,passive:true});
 function showNumber(){const v=input.value.trim();display.textContent=v||"Enter number";hint.textContent=v?"Ready to call":"Direct paste is supported"}
 function addRecent(number,direction="outgoing",status="completed"){const rows=JSON.parse(localStorage.getItem(recentsKey)||"[]");rows.unshift({number,direction,status,at:Date.now()});localStorage.setItem(recentsKey,JSON.stringify(rows.slice(0,100)))}
 function formatTime(ts){const d=new Date(ts);return d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}
@@ -66,7 +101,7 @@ function renderRecents(rows){
   const box=$("recents-list");box.innerHTML="";
   if(!rows.length){box.innerHTML='<div class="empty-state compact"><div class="empty-icon">◷</div><h3>No recent calls</h3><p>Your calls will appear here.</p></div>';return}
   rows.forEach(r=>{
-    const el=document.createElement("div");el.className="list-item";
+    const el=doc.createElement("div");el.className="list-item";
     el.innerHTML='<div class="avatar">'+(r.direction==="incoming"?"↓":"↑")+'</div><div class="item-main"><strong>'+escapeHtml(r.number||"Unknown")+'</strong><small>'+escapeHtml(r.status||"completed")+'</small></div><div class="item-side"><small>'+formatTime(r.at||Date.now())+'</small><button class="quick-call" title="Call">☎</button></div>';
     el.querySelector(".quick-call").onclick=()=>{input.value=r.number||"";showNumber();startCall()};
     box.appendChild(el)
@@ -82,10 +117,10 @@ async function loadRecents(){
   }
   renderRecents(rows)
 }
-function nav(viewId){document.querySelectorAll(".view").forEach(v=>v.classList.remove("active"));$(viewId).classList.add("active");document.querySelectorAll(".nav-item").forEach(n=>n.classList.toggle("active",n.dataset.view===viewId));if(viewId==="recents-view")loadRecents()}
-document.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>nav(b.dataset.view));
+function nav(viewId){doc.querySelectorAll(".view").forEach(v=>v.classList.remove("active"));$(viewId).classList.add("active");doc.querySelectorAll(".nav-item").forEach(n=>n.classList.toggle("active",n.dataset.view===viewId));if(viewId==="recents-view")loadRecents()}
+doc.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>nav(b.dataset.view));
 
-document.querySelectorAll(".keypad button").forEach(b=>b.onclick=()=>{input.value+=b.dataset.key;showNumber()});
+doc.querySelectorAll(".keypad button").forEach(b=>b.onclick=()=>{input.value+=b.dataset.key;showNumber()});
 $("clear-btn").onclick=()=>{input.value="";showNumber();input.focus()};
 $("backspace-btn").onclick=()=>{input.value=input.value.slice(0,-1);showNumber()};
 $("paste-btn").onclick=async()=>{try{input.value=cleanNumber(await navigator.clipboard.readText());showNumber();input.focus()}catch{input.focus()}};
@@ -94,9 +129,9 @@ input.addEventListener("input",showNumber);
    behave like the on-screen keys, Enter calls and Escape hangs up. Anything
    typed into a field - the search box, the sign-in form, the settings dialog -
    keeps its own behaviour. */
-document.addEventListener("keydown",e=>{
+doc.addEventListener("keydown",e=>{
   if(e.ctrlKey||e.metaKey||e.altKey)return;
-  const target=e.target||document.body;
+  const target=e.target||doc.body;
   const typing=/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName||"");
   const dialogOpen=settingsDialog.hasAttribute("open");
   const phoneVisible=!phoneApp.classList.contains("hidden");
@@ -104,11 +139,14 @@ document.addEventListener("keydown",e=>{
   // Enter dials from anywhere the phone owns - but a focused button or link
   // keeps its native Enter activation instead of being hijacked into a call.
   if(e.key==="Enter"){
+    if(currentSession)return;
     if(!/^(BUTTON|A|SUMMARY)$/.test(target.tagName||"")){e.preventDefault();startCall()}
     return
   }
   if(e.key==="Escape"){if(currentSession){e.preventDefault();endCall("Call ended",true,"completed")}return}
   if(typing)return;
+  // During a call, the keyboard is an IVR keypad rather than a second dialer.
+  if(currentSession&&/^[0-9*#]$/.test(e.key)){e.preventDefault();sendDtmf(e.key);return}
   if(/^[0-9*#]$/.test(e.key)){e.preventDefault();input.value+=e.key;showNumber();return}
   if(e.key==="Backspace"){e.preventDefault();input.value=input.value.slice(0,-1);showNumber()}
 });
@@ -137,7 +175,6 @@ function setLoginBusy(busy){$("login-btn").disabled=busy;$("login-btn").textCont
    is treating it. That is also the honest answer to "is this call HD": the far
    end and the carrier have a say, and the badge names the codec in use. */
 const WIDEBAND=/g722|opus|slin16/i;
-let qualityTimer=null;
 
 function statsRows(report){
   const rows=[];
@@ -188,26 +225,80 @@ function startQualityWatch(session){
   qualityTimer=setInterval(tick,2000)
 }
 
+function ensureRemoteStream(preferred){
+  if(preferred)remoteStream=preferred;
+  else if(!remoteStream){
+    const Stream=window.MediaStream||window.webkitMediaStream;
+    if(Stream)remoteStream=new Stream();
+    else{
+      // jsdom/older engines: a minimal MediaStream-compatible holder.
+      const tracks=[];
+      remoteStream={getTracks:()=>tracks.slice(),addTrack:t=>{if(!tracks.includes(t))tracks.push(t)}};
+    }
+  }
+  remoteAudio.srcObject=remoteStream;
+  return remoteStream
+}
+function addRemoteTrack(ev){
+  const preferred=ev&&ev.streams&&ev.streams[0];
+  const track=ev&&ev.track;
+  if(!preferred&&!track)return;
+  if(!preferred&&track.kind&&track.kind!=="audio")return;
+  const stream=ensureRemoteStream(preferred);
+  if(track&&(!track.kind||track.kind==="audio")&&typeof stream.getTracks==="function"&&typeof stream.addTrack==="function"&&!stream.getTracks().includes(track)){
+    try{stream.addTrack(track)}catch{}
+  }
+  playRemoteAudio()
+}
+function bindPeer(pc){
+  if(!pc||pc.__eipAudioBound)return;
+  pc.__eipAudioBound=true;
+  const handler=ev=>{if(ev)ev.__eipHandled=true;addRemoteTrack(ev)};
+  if(typeof pc.addEventListener==="function"){
+    pc.addEventListener("track",handler);
+    // Keep ontrack for browsers/tests that dispatch through the property, but
+    // never handle one event twice when both dispatchers fire.
+    pc.ontrack=ev=>{if(!ev||!ev.__eipHandled)handler(ev)};
+    pc.addEventListener("iceconnectionstatechange",()=>{
+      if(!currentSession)return;
+      const ice=pc.iceConnectionState;
+      if(ice==="checking")setCallStatus("Connecting audio…");
+      else if(ice==="connected"||ice==="completed")setCallStatus("Connected");
+      else if(ice==="disconnected")setCallStatus("Network interrupted — reconnecting audio…");
+      else if(ice==="failed")setCallStatus("Media connection failed")
+    })
+  }else{
+    const previous=pc.ontrack;
+    pc.ontrack=ev=>{if(typeof previous==="function")previous(ev);if(!ev||!ev.__eipHandled)handler(ev)}
+  }
+  // An outgoing ua.call() creates its peer connection and emits the
+  // "peerconnection" event synchronously, before attachSession() can subscribe.
+  // Bind the already-created connection too, and recover any receiver tracks.
+  if(typeof pc.getReceivers==="function"){
+    try{pc.getReceivers().forEach(receiver=>{if(receiver.track)addRemoteTrack({track:receiver.track,streams:[]})})}catch{}
+  }
+}
 function attachRemoteAudio(session){
-  session.on("peerconnection",e=>{
-    const pc=e.peerconnection||e;
-    pc.ontrack=ev=>{if(ev.streams&&ev.streams[0]){remoteAudio.srcObject=ev.streams[0];remoteAudio.play().catch(()=>{})}}
-  })
+  bindPeer(session&&session.connection);
+  session.on("peerconnection",e=>bindPeer((e&&e.peerconnection)||e))
 }
 function attachSession(session,incoming=false){
   currentSession=session;currentCallAnswered=false;currentCallStatus="completed";
-  muted=false;held=false;remoteAudio.muted=false;
-  ["mute-btn","hold-btn","speaker-btn"].forEach(id=>$(id).classList.remove("active"));
+  muted=false;held=false;resetRemoteAudio();
+  ["mute-btn","hold-btn","speaker-btn","dtmf-btn"].forEach(id=>$(id).classList.remove("active"));
+  $("dtmf-panel").classList.add("hidden");$("dtmf-btn").setAttribute("aria-expanded","false");
   $("active-number").textContent=input.value||"Unknown";
   $("active-call-view").classList.remove("hidden");
   $("incoming-actions").classList.toggle("hidden",!incoming);
   $("hangup-btn").classList.toggle("hidden",incoming);
   $("active-label").textContent=incoming?"Incoming call":"Calling";
+  $("call-btn").disabled=true;
   callStartedAt=incoming?null:Date.now();startTimer();
-  $("active-status").textContent=incoming?"Incoming call":"Connecting…";
-  session.on("progress",()=>{$("active-status").textContent="Ringing…"});
-  session.on("accepted",()=>{currentCallAnswered=true;$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
-  session.on("confirmed",()=>{currentCallAnswered=true;$("active-status").textContent="Connected";callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
+  setCallStatus(incoming?"Incoming call":"Connecting…");
+  session.on("progress",()=>setCallStatus("Ringing…"));
+  session.on("accepted",()=>{currentCallAnswered=true;setCallStatus("Connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
+  session.on("confirmed",()=>{currentCallAnswered=true;setCallStatus("Connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
+  session.on("getusermediafailed",()=>endCall("Microphone unavailable. Allow microphone access and retry.",true,"failed"));
   session.on("ended",()=>endCall("Call ended",false,"completed"));
   session.on("failed",e=>endCall("Call failed"+(e?.cause?": "+e.cause:""),false,"failed"));
   attachRemoteAudio(session)
@@ -224,24 +315,22 @@ function startTimer(){
  * call in recents once, and put the dialer back.
  *
  * A session can also end itself - the far end hangs up, or terminate()
- * reports back through the session's own "ended" event before this function
- * resumes. Whichever path runs first closes the screen, and the other one
- * finds currentSession pointing elsewhere (or at nothing) and stops, so one
- * call can never be filed twice.
+ * reports back through the session's own "ended" event synchronously. Claim
+ * currentSession before terminating, so that nested event cannot overwrite the
+ * reason (for example "Microphone unavailable") with a generic "Call ended".
  */
 function endCall(message="Call ended",terminate=true,status="completed"){
   const session=currentSession;
   if(!session)return;
+  currentSession=null;
   if(terminate){currentCallStatus=status;try{if(!session.isEnded?.())session.terminate()}catch{}}
-  if(currentSession!==session)return;
   const number=input.value.trim();
   const direction=session.direction==="incoming"?"incoming":"outgoing";
-  // The pressing of a button and the session's own "ended" event can both
-  // reach here; whichever ran last decided why the call ended.
   const outcome=status==="completed"?currentCallStatus:status;
   if(number)addRecent(number,direction,outcome==="completed"&&direction==="incoming"&&!currentCallAnswered?"missed":outcome);
-  currentSession=null;clearInterval(timer);callStartedAt=null;stopQualityWatch();
-  $("active-status").textContent=message;$("active-call-view").classList.add("hidden");$("call-timer").textContent="00:00";
+  clearInterval(timer);callStartedAt=null;stopQualityWatch();resetRemoteAudio();
+  $("dtmf-panel").classList.add("hidden");$("dtmf-btn").setAttribute("aria-expanded","false");
+  setCallStatus(message);$("active-call-view").classList.add("hidden");$("call-timer").textContent="00:00";
   $("call-btn").disabled=false;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");loadRecents()
 }
 
@@ -250,7 +339,7 @@ function endCall(message="Call ended",terminate=true,status="completed"){
    cached from before the vendoring - or a fetch that failed while the page was
    loading - can still arrive here with no JsSIP, so try both copies again
    before giving up. */
-function loadScript(src){return new Promise(resolve=>{const el=document.createElement("script");el.src=src;el.onload=()=>resolve(true);el.onerror=()=>resolve(false);document.head.appendChild(el)})}
+function loadScript(src){return new Promise(resolve=>{const el=doc.createElement("script");el.src=src;el.onload=()=>resolve(true);el.onerror=()=>resolve(false);doc.head.appendChild(el)})}
 async function ensureSipLibrary(){
   if(window.JsSIP)return true;
   await loadScript("/jssip.min.js");
@@ -284,6 +373,35 @@ async function wssDiagnosis(wssUrl){
   }
 }
 
+/* Registration and connection resilience ---------------------------------- */
+function stopKeepalive(){clearInterval(keepaliveTimer);keepaliveTimer=null}
+function stopReconnectWatchdog(){clearTimeout(reconnectTimer);reconnectTimer=null}
+function sendRegistrationKeepalive(){
+  if(!ua)return;
+  if(typeof ua.isConnected==="function"&&!ua.isConnected())return;
+  try{if(typeof ua.register==="function")ua.register()}catch{}
+}
+function startKeepalive(){
+  stopKeepalive();
+  keepaliveTimer=setInterval(sendRegistrationKeepalive,KEEPALIVE_MS)
+}
+function ensureSipConnection(){
+  if(!ua)return;
+  try{
+    if(typeof ua.isConnected==="function"&&!ua.isConnected()){
+      // JsSIP auto-recovers with exponential backoff; this is a bounded
+      // watchdog for a browser that suspended timers while the tab slept.
+      ua.start()
+    }else if(typeof ua.isRegistered==="function"&&!ua.isRegistered()){
+      ua.register()
+    }
+  }catch{}
+}
+function scheduleReconnect(delay=RECONNECT_WATCHDOG_MS){
+  stopReconnectWatchdog();
+  reconnectTimer=setTimeout(()=>{reconnectTimer=null;ensureSipConnection()},delay)
+}
+
 async function connectSip(s){
   if(!(await ensureSipLibrary())){
     /* "Not loaded" alone cannot tell a stale cached page from a server that is
@@ -299,22 +417,43 @@ async function connectSip(s){
   if(!s.username||!s.password||!s.domain||!s.wss)throw new Error("Enter SIP username, password and domain.");
   return new Promise((resolve,reject)=>{
     try{
+      stopKeepalive();stopReconnectWatchdog();sipEverRegistered=false;
       if(ua){try{ua.stop()}catch{}ua=null}
+      currentSipSettings={...s};
       const socket=new JsSIP.WebSocketInterface(s.wss);
-      ua=new JsSIP.UA({sockets:[socket],uri:"sip:"+s.username+"@"+s.domain,password:s.password,session_timers:false});
+      ua=new JsSIP.UA({
+        sockets:[socket],uri:"sip:"+s.username+"@"+s.domain,password:s.password,
+        // Session timers keep long WebRTC calls and NAT bindings refreshed.
+        session_timers:true,session_timers_refresh_method:"UPDATE",
+        register:true,register_expires:300,
+        connection_recovery_min_interval:2,connection_recovery_max_interval:8
+      });
       let settled=false;
       const fail=message=>{if(settled)return;settled=true;setState("Registration failed");reject(new Error(message||"SIP registration failed"))};
-      ua.on("connected",()=>setState("Online",true));
+      ua.on("connected",()=>{
+        setState(sipEverRegistered?"Reconnecting…":"Online",sipEverRegistered?"connecting":true);
+        if(sipEverRegistered)scheduleReconnect(12000)
+      });
       ua.on("disconnected",()=>{
-        setState("Offline");
+        stopKeepalive();setState("Reconnecting…","connecting");
+        if(sipEverRegistered)scheduleReconnect();
         if(settled)return;
         /* A refused proxy path, an unreachable listener and a dead host all
            arrive as this one event before registration - probe the endpoint
            and report the evidence without assuming which hop failed. */
         wssDiagnosis(s.wss).then(hint=>fail("SIP WebSocket disconnected."+hint))
       });
-      ua.on("registered",()=>{setState("Ready",true);showPhone();$("login-status").className="login-status ok";$("login-status").textContent="Authenticated and registered.";if(!settled){settled=true;resolve(true)}});
-      ua.on("registrationFailed",e=>fail(e.cause||"SIP authentication failed."));
+      ua.on("registered",()=>{
+        sipEverRegistered=true;stopReconnectWatchdog();startKeepalive();
+        setState("Ready",true);showPhone();
+        $("login-status").className="login-status ok";$("login-status").textContent="Authenticated and registered.";
+        if(!settled){settled=true;resolve(true)}
+      });
+      ua.on("unregistered",()=>{if(sipEverRegistered&&settled)setState("Reconnecting…","connecting")});
+      ua.on("registrationFailed",e=>{
+        if(settled){setState("Registration failed");setCallStatus("SIP registration failed. Check credentials or tap Reconnect.");return}
+        fail(e.cause||"SIP authentication failed.")
+      });
       ua.on("newRTCSession",e=>{
         const session=e.session;
         if(session.direction==="incoming"){
@@ -324,29 +463,58 @@ async function connectSip(s){
         }
       });
       ua.start()
-    }catch(err){ua=null;reject(err)}
+    }catch(err){stopKeepalive();stopReconnectWatchdog();ua=null;reject(err)}
   })
 }
 
 async function startCall(){
   const number=cleanNumber(input.value);if(!number){input.focus();return}
   if(!ua){showLogin("Sign in to your SIP account first.");return}
+  const disconnected=(typeof ua.isConnected==="function"&&!ua.isConnected())||
+                     (typeof ua.isRegistered==="function"&&!ua.isRegistered());
+  if(disconnected){ensureSipConnection();$("dial-hint").textContent="Reconnecting to SIP — try the call again in a moment.";return}
   if(currentSession)return;
+  playRemoteAudio();  // Unlock the media element inside the user's click.
   try{
     const session=ua.call(sipTarget(number),{mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig(),rtcOfferConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
-    attachSession(session,false);$("call-btn").disabled=true
+    attachSession(session,false)
   }catch(err){$("dial-hint").textContent=err.message}
 }
 $("call-btn").onclick=startCall;
 
 $("answer-btn").onclick=()=>{
   if(!currentSession)return;
-  try{currentSession.answer({mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig()});currentCallAnswered=true;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";callStartedAt=Date.now();startTimer()}catch(e){$("active-status").textContent=e.message}
+  playRemoteAudio();  // The answer gesture is the best chance to unlock audio.
+  setCallStatus("Connecting…");
+  try{
+    currentSession.answer({mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig(),rtcAnswerConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
+    // Some JsSIP builds create the peer connection during answer(); bind it
+    // even if the peerconnection event was emitted before this returned.
+    attachRemoteAudio(currentSession);
+    currentCallAnswered=true;$("incoming-actions").classList.add("hidden");
+    $("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";
+    callStartedAt=Date.now();startTimer()
+  }catch(e){setCallStatus(e.message)}
 };
 $("decline-btn").onclick=()=>endCall("Call declined",true,"declined");
 $("hangup-btn").onclick=()=>endCall("Call ended",true,"completed");
 $("mute-btn").onclick=()=>{if(!currentSession)return;muted=!muted;currentSession.mute({audio:muted});$("mute-btn").classList.toggle("active",muted)};
 $("hold-btn").onclick=()=>{if(!currentSession)return;held=!held;held?currentSession.hold():currentSession.unhold();$("hold-btn").classList.toggle("active",held)};
+/* In-call DTMF: a real softphone must be able to navigate an IVR without
+   leaving the call screen. The same keys work from the physical keyboard. */
+function sendDtmf(tone){
+  if(!currentSession||!/^[0-9*#]$/.test(String(tone)))return;
+  try{if(typeof currentSession.sendDTMF==="function")currentSession.sendDTMF(String(tone))}catch{}
+  const key=doc.querySelector(`#dtmf-panel [data-dtmf="${tone}"]`);
+  if(key){key.classList.add("pressed");setTimeout(()=>key.classList.remove("pressed"),120)}
+}
+$("dtmf-btn").onclick=()=>{
+  const panel=$("dtmf-panel"),open=panel.classList.toggle("hidden")===false;
+  $("dtmf-btn").classList.toggle("active",open);
+  $("dtmf-btn").setAttribute("aria-expanded",open?"true":"false")
+};
+doc.querySelectorAll("#dtmf-panel [data-dtmf]").forEach(key=>key.onclick=()=>sendDtmf(key.dataset.dtmf));
+$("enable-audio-btn").onclick=()=>playRemoteAudio();
 $("speaker-btn").onclick=async()=>{
   const on=!$("speaker-btn").classList.contains("active");
   /* Route the remote audio to another output where the browser can pick one.
@@ -387,7 +555,7 @@ $("login-form").onsubmit=async e=>{
   const s={...settings(),username:$("login-username").value.trim(),password:$("login-password").value,domain,wss:$("login-wss").value.trim()||defaultWss()};
   if(!s.username||!s.password||!s.domain)return;
   saveSettings(s);setLoginBusy(true);$("login-status").className="login-status";$("login-status").textContent="Connecting to SIP server…";
-  try{await connectSip(s)}catch(err){$("login-status").className="login-status error";$("login-status").textContent=err.message||"Authentication failed.";setState("Offline");try{if(ua)ua.stop()}catch{}ua=null}
+  try{await connectSip(s)}catch(err){$("login-status").className="login-status error";$("login-status").textContent=err.message||"Authentication failed.";setState("Offline");stopKeepalive();stopReconnectWatchdog();sipEverRegistered=false;try{if(ua)ua.stop()}catch{}ua=null}
   finally{setLoginBusy(false)}
 };
 
@@ -408,7 +576,10 @@ $("connect-btn").onclick=async()=>{
   try{await connectSip(s);$("settings-status").className="settings-status ok";$("settings-status").textContent="Phone connected."}catch(err){$("settings-status").className="settings-status error";$("settings-status").textContent=err.message}
 };
 $("logout-btn").onclick=()=>{
-  try{if(ua)ua.stop()}catch{}ua=null;handoff=null;iceServers=DEFAULT_ICE_SERVERS;currentSession=null;sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
+  stopKeepalive();stopReconnectWatchdog();sipEverRegistered=false;
+  try{if(ua)ua.stop()}catch{}ua=null;handoff=null;iceServers=DEFAULT_ICE_SERVERS;
+  currentSession=null;resetRemoteAudio();clearInterval(timer);stopQualityWatch();
+  sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
 };
 $("refresh-recents").onclick=loadRecents;
 $("contacts-btn").onclick=()=>nav("contacts-view");
@@ -419,11 +590,17 @@ $("add-contact").onclick=()=>{
 };
 function renderContacts(){
   const rows=JSON.parse(localStorage.getItem(contactsKey)||"[]"),box=$("contacts-list");box.innerHTML="";$("contacts-empty").classList.toggle("hidden",!!rows.length);
-  rows.forEach(r=>{const el=document.createElement("div");el.className="list-item";el.innerHTML='<div class="avatar">'+escapeHtml((r.name||"?")[0].toUpperCase())+'</div><div class="item-main"><strong>'+escapeHtml(r.name)+'</strong><small>'+escapeHtml(r.phone)+'</small></div><button class="quick-call">☎</button>';el.querySelector("button").onclick=()=>{input.value=r.phone;showNumber();nav("dialer-view");startCall()};box.appendChild(el)})
+  rows.forEach(r=>{const el=doc.createElement("div");el.className="list-item";el.innerHTML='<div class="avatar">'+escapeHtml((r.name||"?")[0].toUpperCase())+'</div><div class="item-main"><strong>'+escapeHtml(r.name)+'</strong><small>'+escapeHtml(r.phone)+'</small></div><button class="quick-call">☎</button>';el.querySelector("button").onclick=()=>{input.value=r.phone;showNumber();nav("dialer-view");startCall()};box.appendChild(el)})
 }
 window.addEventListener("beforeinstallprompt",e=>{e.preventDefault();deferredInstall=e;installBtn.classList.remove("hidden")});
 installBtn.onclick=async()=>{if(!deferredInstall)return;deferredInstall.prompt();await deferredInstall.userChoice;deferredInstall=null;installBtn.classList.add("hidden")};
 window.addEventListener("appinstalled",()=>installBtn.classList.add("hidden"));
+/* Mobile and laptop browsers throttle timers in background tabs. Recover the
+   signalling connection as soon as the network or the tab becomes active,
+   instead of waiting for a call that Asterisk can no longer deliver. */
+window.addEventListener("online",()=>{if(ua)ensureSipConnection()});
+window.addEventListener("offline",()=>{stopKeepalive();setState("Offline")});
+doc.addEventListener("visibilitychange",()=>{if(!doc.hidden&&ua)ensureSipConnection()});
 if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js").catch(()=>{});
 
 const fromConsole=new URLSearchParams(location.search).get("connect")==="extension"&&!!window.opener;
@@ -461,6 +638,6 @@ async function startConsoleSession(m){
   handoff={extension:m.extension||"",username:m.sip_username,password:m.sip_password,domain:m.domain,wss:m.wss||defaultWss(),apiToken:""};
   try{if(ua)ua.stop()}catch{}ua=null;
   showConsoleScreen(label,`Signing in as ${label}…`);
-  try{await connectSip(handoff);document.title=`Softphone · ${label}`;$("brand-title").textContent=label}
+  try{await connectSip(handoff);doc.title=`Softphone · ${label}`;$("brand-title").textContent=label}
   catch(err){showLogin(err.message||"Could not sign this extension in.",true)}
 }

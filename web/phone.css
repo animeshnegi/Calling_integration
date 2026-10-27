@@ -17,7 +17,8 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);background:radial-gradient(circle at 10% 0%,#e5ecff 0,transparent 34%),radial-gradient(circle at 100% 15%,#f1e6ff 0,transparent 32%),var(--bg);-webkit-font-smoothing:antialiased}
 button,input{font:inherit}
-button{cursor:pointer}
+button{cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.keypad button,.call-btn,.control-btn,.dtmf-panel button{user-select:none;-webkit-user-select:none}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .keypad button:focus-visible,.call-btn:focus-visible,.nav-item:focus-visible,.tool-btn:focus-visible{outline-offset:3px}
 .hidden{display:none!important}
@@ -46,6 +47,9 @@ button{cursor:pointer}
 .state.online i{background:var(--green)}
 .state.offline{color:#b45309}
 .state.offline i{background:#f59e0b}
+.state.connecting{color:#b45309}
+.state.connecting i{background:#f59e0b;animation:statepulse 1.4s ease-in-out infinite}
+@keyframes statepulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.7)}}
 .top-actions{display:flex;gap:7px}
 .icon-btn,.paste-btn,.clear-btn,.text-btn,.round-btn{border:0;background:transparent;color:var(--muted)}
 .icon-btn{width:40px;height:40px;border-radius:12px;font-size:18px}
@@ -118,10 +122,17 @@ h2{margin:3px 0 0;font-size:27px;letter-spacing:-.04em}
 .call-quality{margin-top:11px;padding:5px 13px;border-radius:999px;background:#4f46e50e;color:var(--muted);font-size:11px;font-weight:750;letter-spacing:.02em}
 .call-quality.good{background:#16a34a14;color:#15803d}
 .call-quality.warn{background:#f59e0b1a;color:#b45309}
-.call-controls{display:flex;gap:12px;margin-top:auto;margin-bottom:22px}
-.control-btn{width:72px;height:60px;border:1px solid var(--line);border-radius:18px;background:#fff;color:var(--text);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:18px}
-.control-btn span{font-size:10px;color:var(--muted)}
+.call-controls{display:flex;gap:8px;margin-top:auto;margin-bottom:12px;flex-wrap:wrap;justify-content:center}
+.control-btn{width:64px;height:58px;border:1px solid var(--line);border-radius:18px;background:#fff;color:var(--text);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:18px;transition:transform .12s,background .12s,border-color .12s}
+.control-btn:hover{background:var(--surface2)}
+.control-btn:active{transform:scale(.94)}
+.control-btn span{font-size:9px;color:var(--muted)}
 .control-btn.active{background:#4f46e512;color:var(--accent);border-color:#4f46e530}
+.audio-unlock{border:0;border-radius:999px;padding:10px 18px;margin-top:14px;background:linear-gradient(135deg,#f59e0b,#f97316);color:#fff;font-size:12px;font-weight:800;box-shadow:0 10px 25px #f59e0b33;animation:statepulse 2s ease-in-out infinite}
+.dtmf-panel{width:min(260px,100%);display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 0 16px}
+.dtmf-panel button{height:42px;border:1px solid var(--line);border-radius:14px;background:#fff;color:var(--text);font-size:18px;font-weight:700;box-shadow:0 4px 14px #34435e0a;transition:transform .1s,background .1s}
+.dtmf-panel button:hover{background:var(--surface2)}
+.dtmf-panel button:active,.dtmf-panel button.pressed{transform:scale(.94);background:#4f46e518;color:var(--accent);border-color:#4f46e530}
 .hangup-btn{width:68px;height:68px;border-radius:50%;border:0;background:var(--red);color:#fff;font-size:24px;transform:rotate(135deg);box-shadow:0 15px 30px #ef444433}
 .active-status{font-size:12px;color:var(--muted);margin-top:13px}
 .incoming-actions{display:flex;gap:10px;margin-top:auto;margin-bottom:18px}

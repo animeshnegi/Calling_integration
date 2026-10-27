@@ -1,6 +1,7 @@
 """The pages a browser is served: which files exist, what they declare, and
 what a bare probe such as /favicon.ico is answered with."""
 from pathlib import Path
+import re
 
 import pytest
 
@@ -137,3 +138,30 @@ def test_the_softphone_button_only_shows_for_a_browser_extension():
     # The window that opens signs in on the browser identity, never the plain
     # one a desk phone or Zoiper uses.
     assert "sip_username: credentials.webrtc_sip_username || credentials.sip_username" in admin_js
+
+
+def test_phone_shell_is_versioned_and_the_service_worker_precaches_that_version():
+    root = Path(__file__).resolve().parents[1] / "web"
+    html = (root / "phone.html").read_text()
+    sw = (root / "sw.js").read_text()
+    match = re.search(r'<meta name="eip-phone-version" content="(\d+)">', html)
+    assert match, "phone.html needs an asset version"
+    version = match.group(1)
+    assert f'/phone.css?v={version}' in html
+    assert f'/phone.js?v={version}' in html
+    assert f'const CACHE = "eip-phone-v{version}";' in sw
+    assert f'const VERSION = "{version}";' in sw
+    assert '`/phone.js?v=${VERSION}`' in sw
+
+
+def test_premium_softphone_media_and_ivr_controls_are_shipped():
+    root = Path(__file__).resolve().parents[1] / "web"
+    html = (root / "phone.html").read_text()
+    js = (root / "phone.js").read_text()
+    for element in ("enable-audio-btn", "dtmf-btn", "dtmf-panel"):
+        assert f'id="{element}"' in html
+    assert "session_timers:true" in js
+    assert "session_timers:false" not in js
+    assert "sendRegistrationKeepalive" in js
+    assert "peerconnection" in js and "getReceivers" in js
+    assert "TURN server" in html
