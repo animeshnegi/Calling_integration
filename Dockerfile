@@ -13,11 +13,15 @@ RUN groupadd --system appuser \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# PocketSphinx includes its offline English model in the wheel. Validate it
+# while building on the workstation, not by downloading models on the VM.
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -c "from pocketsphinx import Decoder; Decoder(loglevel='FATAL')"
 
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser web ./web
 COPY --chown=appuser:appuser wsgi.py ./wsgi.py
+COPY --chown=appuser:appuser deploy/THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
 
 # Image-only/Windows deployments do not copy repository scripts to the VM.
 # Carry the minimal host-side proxy repair kit in the API image so docker cp

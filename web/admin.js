@@ -1500,7 +1500,6 @@ function renderEmailSettings() {
     $('transcription-enabled').checked = !!config.transcription_enabled;
   }
   $('sendgrid-key-status').textContent = config.has_api_key ? 'API key configured — leave blank to keep it' : 'No API key configured';
-  $('transcription-key-status').textContent = config.has_transcription_api_key ? 'OpenAI key configured — leave blank to keep it' : 'No OpenAI key configured';
   const rows = state.email_deliveries || [];
   paint('email-delivery-list', rows.length ? `
     <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Transcript</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
@@ -4474,10 +4473,9 @@ async function saveEmailSettings() {
   const result = await api('/admin/api/email-config', { method: 'POST', body: JSON.stringify({
     enabled: $('email-enabled').checked, api_key: val('sendgrid-key'),
     from_email: val('sendgrid-from'), from_name: val('sendgrid-name'),
-    transcription_enabled: $('transcription-enabled').checked, transcription_api_key: val('transcription-key'),
+    transcription_enabled: $('transcription-enabled').checked,
   }) });
   $('sendgrid-key').value = '';
-  $('transcription-key').value = '';
   emailSettingsDirty = false;
   state.email_config = result.email_config || state.email_config;
   renderEmailSettings();

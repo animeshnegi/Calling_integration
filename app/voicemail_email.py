@@ -11,10 +11,10 @@ from typing import Any
 
 import requests
 
+from . import local_transcription
 from .voicemail import mailbox_name
 
 SENDGRID_URL = "https://api.sendgrid.com/v3/mail/send"
-TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions"
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_MESSAGES_PER_SCAN = 20
 logger = logging.getLogger(__name__)
@@ -111,29 +111,7 @@ class VoicemailEmailNotifier:
     def _transcribe(config, audio: Path, audio_bytes: bytes) -> tuple[str | None, str]:
         if not config.get("transcription_enabled"):
             return None, "disabled"
-        if audio.suffix.lower() != ".wav":
-            return None, "unsupported_audio"
-        if not config.get("transcription_api_key"):
-            return None, "key_unavailable"
-        try:
-            response = requests.post(
-                TRANSCRIPTION_URL,
-                headers={"Authorization": f"Bearer {config['transcription_api_key']}"},
-                # No mailbox/recipient/caller metadata is sent to the provider.
-                files={"file": ("voicemail.wav", audio_bytes, "audio/wav")},
-                data={"model": "whisper-1"}, timeout=(5, 45), allow_redirects=False,
-            )
-            if response.status_code != 200:
-                return None, {401: "invalid_key", 403: "access_denied", 429: "quota_or_rate_limit"}.get(response.status_code, "provider_error")
-            result = response.json()
-            text = result.get("text") if isinstance(result, dict) else None
-            if not isinstance(text, str) or not text.strip():
-                return None, "empty_transcript"
-            return text.strip()[:20000], "transcribed"
-        except requests.Timeout:
-            return None, "timeout"
-        except (requests.RequestException, ValueError):
-            return None, "provider_error"
+        return local_transcription.transcribe(audio_bytes, audio.suffix)
 
     def _snapshot(self, candidate):
         # Mailbox operations rename msgNNNN files. Snapshot metadata AND audio

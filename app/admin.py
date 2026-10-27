@@ -284,7 +284,10 @@ class SettingsStore:
         if self.database.is_mysql:
             self.database.create_all()
             existing_user_columns = self.database.columns("admin_users")
+            legacy_transcription_key = "transcription_api_key_enc" in self.database.columns("email_config")
             with self._connect() as db:
+                if legacy_transcription_key:
+                    db.execute("UPDATE email_config SET transcription_api_key_enc='' WHERE transcription_api_key_enc<>''")
                 try:
                     db.execute("CREATE UNIQUE INDEX idx_extensions_sip_username ON extensions(sip_username)")
                 except Exception:
@@ -376,14 +379,17 @@ class SettingsStore:
             db.execute("BEGIN IMMEDIATE")
             # Additive upgrades for image-only deployments with an existing DB.
             for table, additions in (
-                ("email_config", (("transcription_enabled", "INTEGER NOT NULL DEFAULT 0"),
-                                  ("transcription_api_key_enc", "TEXT NOT NULL DEFAULT ''"))),
+                ("email_config", (("transcription_enabled", "INTEGER NOT NULL DEFAULT 0"),)),
                 ("voicemail_deliveries", (("transcription_status", "TEXT NOT NULL DEFAULT 'disabled'"),)),
             ):
                 existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
                 for column, definition in additions:
                     if column not in existing:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            # Old hosted-transcription credentials are no longer needed. Keep
+            # the legacy column for safe, additive upgrades, but erase its value.
+            if "transcription_api_key_enc" in {r["name"] for r in db.execute("PRAGMA table_info(email_config)").fetchall()}:
+                db.execute("UPDATE email_config SET transcription_api_key_enc='' WHERE transcription_api_key_enc<>''")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(sip_providers)").fetchall()}
             if "allowed_ips" not in columns:
                 db.execute("ALTER TABLE sip_providers ADD COLUMN allowed_ips TEXT NOT NULL DEFAULT ''")
@@ -3921,23 +3927,20 @@ class SettingsStore:
         from cryptography.fernet import InvalidToken
 
         with self._connect() as db:
-            row = db.execute("SELECT * FROM email_config WHERE id=1").fetchone()
+            row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
         result = {"from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False,
-                  "has_api_key": False, "transcription_enabled": False, "has_transcription_api_key": False}
+                  "has_api_key": False, "transcription_enabled": False}
         if row:
             result.update({"from_email": row["from_email"], "from_name": row["from_name"],
                            "enabled": bool(row["enabled"]), "has_api_key": bool(row["sendgrid_api_key_enc"]),
                            "transcription_enabled": bool(row["transcription_enabled"]),
-                           "has_transcription_api_key": bool(row["transcription_api_key_enc"]),
                            "updated_at": row["updated_at"]})
             if include_key:
-                for field, column, provider in (("api_key", "sendgrid_api_key_enc", "SendGrid"),
-                                                 ("transcription_api_key", "transcription_api_key_enc", "OpenAI")):
-                    try:
-                        result[field] = self.decrypt(row[column]) if row[column] else ""
-                    except InvalidToken:
-                        result[field] = ""
-                        result[field + "_error"] = f"Saved {provider} key cannot be decrypted. Restore the original SECRET_KEY or save a replacement API key."
+                try:
+                    result["api_key"] = self.decrypt(row["sendgrid_api_key_enc"]) if row["sendgrid_api_key_enc"] else ""
+                except InvalidToken:
+                    result["api_key"] = ""
+                    result["api_key_error"] = "Saved SendGrid key cannot be decrypted. Restore the original SECRET_KEY or save a replacement API key."
         return result
 
     def save_email_config(self, data):
@@ -3946,7 +3949,7 @@ class SettingsStore:
         # Preserve ciphertext directly: replacing a key must work even when the
         # old key is unreadable (for example after a changed SECRET_KEY).
         with self._connect() as db:
-            row = db.execute("SELECT * FROM email_config WHERE id=1").fetchone()
+            row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
             old = dict(row) if row else {}
 
             def flag(name):
@@ -3970,16 +3973,13 @@ class SettingsStore:
             if "\r" in from_name or "\n" in from_name:
                 raise ValueError("Sender name cannot contain line breaks")
             encrypted = secret("api_key", "sendgrid_api_key_enc")
-            transcription_key = secret("transcription_api_key", "transcription_api_key_enc")
             if enabled and (not encrypted or not from_email):
                 raise ValueError("SendGrid API key and verified from email are required")
-            if transcription_enabled and not transcription_key:
-                raise ValueError("An OpenAI API key is required to enable transcription")
-            db.execute("INSERT INTO email_config(id,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,transcription_api_key_enc) "
-                       "VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,"
+            db.execute("INSERT INTO email_config(id,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled) "
+                       "VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,"
                        "from_email=excluded.from_email,from_name=excluded.from_name,enabled=excluded.enabled,"
-                       "transcription_enabled=excluded.transcription_enabled,transcription_api_key_enc=excluded.transcription_api_key_enc,updated_at=CURRENT_TIMESTAMP",
-                       (encrypted, from_email, from_name, int(enabled), int(transcription_enabled), transcription_key))
+                       "transcription_enabled=excluded.transcription_enabled,updated_at=CURRENT_TIMESTAMP",
+                       (encrypted, from_email, from_name, int(enabled), int(transcription_enabled)))
             # A repaired sender/key should retry exhausted failures, never an
             # already accepted email or a delivery still in flight.
             if encrypted != old.get("sendgrid_api_key_enc", "") or from_email != old.get("from_email", "") or (enabled and not old.get("enabled")):

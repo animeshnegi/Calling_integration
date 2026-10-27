@@ -91,7 +91,6 @@ email_config = Table("email_config", metadata, Column("id", Integer, primary_key
     Column("from_email", String(254), nullable=False, server_default=""), Column("from_name", String(120), nullable=False, server_default="EIP Telephony Voicemail"),
     Column("enabled", Integer, nullable=False, server_default="0"),
     Column("transcription_enabled", Integer, nullable=False, server_default="0"),
-    Column("transcription_api_key_enc", String(2048), nullable=False, server_default=""),
     Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 voicemail_deliveries = Table("voicemail_deliveries", metadata,
     Column("fingerprint", String(128), primary_key=True), Column("mailbox", String(64), nullable=False), Column("recipient", String(254), nullable=False),

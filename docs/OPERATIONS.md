@@ -506,33 +506,42 @@ In **Email Delivery** (platform administrator only):
    fallback. Editing an unrelated extension field retains its recipient;
    explicitly clearing the recipient stops notifications for that mailbox.
 
-### Optional transcript alongside the attachment
+### Optional local transcript alongside the attachment
 
-Enable **Include a voicemail transcript** and save a separate **OpenAI API key**
-only if you want hosted transcription. This is **off by default**. Enabling it
-uploads eligible voicemail audio to `https://api.openai.com/v1/audio/transcriptions`
-using `whisper-1`; OpenAI API access/billing is separate from SendGrid and from
-any ChatGPT subscription. Review provider data handling, your privacy obligations,
-and caller consent before enabling. No local AI model, GPU, or new container is
-required. The setting is platform-wide for eligible email notifications.
+Enable **Include a voicemail transcript** if you want the email to contain
+readable text. There is **no transcription API, OpenAI key, other hosted speech
+service, usage fee, model download, or GPU**. The setting is off by default.
+Recognition runs locally inside the API image using PocketSphinx 5.1.1 and its
+bundled `en-us` model (BSD-style CMU licence, included in the image as
+`THIRD_PARTY_NOTICES.md`). The recognizer starts only for an eligible
+voicemail, in a disposable Python subprocess: mono 16-bit PCM
+WAV at 8 or 16 kHz is supported, with 8 kHz audio resampled in-process. The
+original recording remains attached to the email. SendGrid is still required
+to **email** the message; no audio is sent to a speech-to-text provider.
 
-The notification includes a machine-generated transcript in both plain text and
-escaped HTML, **plus the original audio**. Transcripts may contain errors. Only
-the audio, a generic filename and the model name are sent to OpenAI, not separate
-caller, mailbox or recipient metadata (the recording itself can contain personal
-information). Transcripts are not stored in the application database or logs;
-they do appear in the email sent through SendGrid and held by the recipient.
+The English model is intentionally small and CPU-only. Accuracy is best-effort:
+accents, noisy telephone audio and non-English speech can produce an incorrect
+or empty transcript. Always listen to the original audio for important details.
+Transcripts are escaped in HTML and truncated to 20,000 characters. They are
+not stored in the application database or logs; they do appear in the email
+sent through SendGrid and held by the recipient. Audio bytes pass to the worker
+over stdin, not a temporary file. The worker has a 192 MiB address-space limit,
+60 CPU seconds, a 120-second parent timeout, low priority, one math thread, no
+core dumps and a five-minute/20 MiB WAV limit. A native decoder fault cannot
+take down the ARI event loop.
 
-If transcription fails, is empty, or the format is unsupported, the email still
-sends with its audio and an unavailable-transcript note. **Recent email deliveries**
-shows the transcription result separately: `invalid key`, `access denied`,
-`quota or rate limit`, `timeout`, `provider error`, `key unavailable`, or
-`unsupported audio`. Correct the OpenAI key, permissions/billing or connectivity
-as appropriate. A message already accepted by SendGrid is not sent again just
-to retry its transcript. The email test has no audio and **does not test the
-OpenAI key**; verify transcription using a new non-sensitive test voicemail.
-Transcription can be requested again (and billed again) if the email needs a retry.
-WAV is supported; legacy GSM attachments still email without transcription.
+The notification includes the machine-generated transcript in both plain text
+and escaped HTML, **plus the original audio**. If recognition fails, is empty,
+or the format is unsupported, the email still sends with its audio and an
+unavailable-transcript note. **Recent email deliveries** shows a separate
+result: `transcribed`, `empty transcript`, `engine unavailable`, `resource limit`,
+`timeout`, `worker error`, `audio too long`, or `unsupported audio`. A message
+already accepted by SendGrid is not sent again just to retry its transcript.
+An ordinary failed email retry runs local recognition again (CPU time, but no
+provider charge).
+The test email has no audio and **does not test the recognizer**; verify with a
+new, non-sensitive test voicemail. Legacy GSM attachments still email without
+transcription.
 
 ### Worker, retries and image-only deployment
 
@@ -552,7 +561,7 @@ claim prevents simultaneous workers from sending the same pending message;
 abandoned pending claims become eligible again after ten minutes (within the
 attempt limit). Saving a replacement SendGrid key, changing the sender, or
 re-enabling email resets failed-attempt limits, without re-sending accepted
-emails. Correcting only the OpenAI key does not resend audio already accepted.
+emails. Correcting the local recognizer does not resend audio already accepted.
 
 For the Windows-built, image-only installation, rebuild/export the **API image
 on the workstation**, transfer/load it on the VM, then recreate **both API and
@@ -565,13 +574,17 @@ cd /opt/Calling_integration
 docker compose up -d --no-build --force-recreate telephony-api telephony-ari
 ```
 
-Do not build on the VM. Retain the `.env`,
-`SECRET_KEY`, database and voicemail volumes; back up the database first. SQLite
-and MySQL add the new columns automatically with transcription off by default.
-No Asterisk image, outbound dialplan or proxy configuration change is needed
-for this email update. Run the test email after deployment, then leave a test
-voicemail and verify its recipient, attachment and optional transcript.
+Do not build on the VM. The workstation build installs the recognizer wheel and
+its bundled model into the image; the VM does not download a model. Retain the
+`.env`, `SECRET_KEY`, database and voicemail volumes; back up the database
+first. SQLite and MySQL add the new column automatically with transcription off
+by default; obsolete hosted transcription keys are erased from an existing
+config table. No Asterisk image, outbound dialplan or proxy configuration change
+is needed for this email update. Run the test email after deployment, then
+leave a test voicemail and verify its recipient, attachment and optional
+transcript.
 
-Local regressions use mocked SendGrid/OpenAI HTTP calls; they do not prove live
+Local regressions include a real offline decode of an 8 kHz CMU-licensed speech
+sample and mocked SendGrid HTTP calls. They do not prove live email
 provider authentication, network access or actual inbox delivery. MySQL upgrades
 are checked against generated reconciliation SQL, not a running MySQL server.

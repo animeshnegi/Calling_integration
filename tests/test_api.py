@@ -812,13 +812,15 @@ def test_email_config_rotation_test_and_secret_redaction(tmp_path, monkeypatch):
     client = app_client(tmp_path)
     assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
     headers = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
+    # Legacy cloud-key fields from an older browser are ignored, never re-saved.
     patch = {"enabled": False, "api_key": " SG.initial ", "from_email": "verified@example.com",
              "transcription_enabled": True, "transcription_api_key": "sk.transcription"}
     assert client.post("/admin/api/email-config", json=patch).status_code == 403
     saved = client.post("/admin/api/email-config", json=patch, headers=headers)
     assert saved.status_code == 200
     assert saved.json["email_config"]["has_api_key"]
-    assert saved.json["email_config"]["has_transcription_api_key"]
+    assert saved.json["email_config"]["transcription_enabled"]
+    assert "has_transcription_api_key" not in saved.json["email_config"]
     assert not saved.json["email_config"]["enabled"]
     assert "SG.initial" not in saved.text and "sk.transcription" not in saved.text
     assert client.post("/admin/api/email-config", json={"api_key": "SG.replacement"}, headers=headers).status_code == 200

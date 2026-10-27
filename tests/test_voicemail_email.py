@@ -2,6 +2,7 @@ import base64
 import os
 import sqlite3
 import threading
+from pathlib import Path
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ import pytest
 from app.admin import SettingsStore
 from app.database import metadata, reconcile_statements
 from app.voicemail import VoicemailStore
-from app.voicemail_email import SENDGRID_URL, TRANSCRIPTION_URL, VoicemailEmailNotifier
+from app.voicemail_email import SENDGRID_URL, VoicemailEmailNotifier
 
 
 def test_sendgrid_voicemail_attachment_is_sent_once(tmp_path, monkeypatch):
@@ -83,14 +84,15 @@ def response(status=202, **data):
 
 def test_key_rotation_trim_blank_preservation_and_partial_save(email_system):
     settings, _, _ = email_system
+    # A stale browser may still submit the removed cloud key; it is ignored.
     settings.save_email_config({"api_key": "  SG.replacement\r\n", "transcription_api_key": " sk.transcription  "})
     settings.save_email_config({"api_key": "", "transcription_api_key": "", "from_name": "New sender"})
     cfg = settings.get_email_config(include_key=True)
     assert cfg["api_key"] == "SG.replacement"
-    assert cfg["transcription_api_key"] == "sk.transcription"
+    assert "transcription_api_key" not in cfg
     assert cfg["enabled"] and cfg["from_email"] == "verified@example.com"
     public = settings.get_email_config()
-    assert public["has_transcription_api_key"] and not public["transcription_enabled"]
+    assert "has_transcription_api_key" not in public and not public["transcription_enabled"]
     assert "api_key" not in public and "transcription_api_key" not in public
     with settings._connect() as db:
         row = dict(db.execute("SELECT * FROM email_config").fetchone())
@@ -99,7 +101,7 @@ def test_key_rotation_trim_blank_preservation_and_partial_save(email_system):
 
 
 @pytest.mark.parametrize("patch", [{"api_key": "Bearer SG.foo"}, {"api_key": "SG.foo\nbar"},
-                                   {"transcription_enabled": True}, {"enabled": "false"}, {"from_name": "X\nY"}, []])
+                                   {"transcription_enabled": "true"}, {"enabled": "false"}, {"from_name": "X\nY"}, []])
 def test_invalid_config_is_atomic(email_system, patch):
     settings, _, _ = email_system
     before = settings.get_email_config(include_key=True)
@@ -163,21 +165,18 @@ def test_same_extension_digits_across_tenants_use_exact_mailboxes(tmp_path, monk
 
 def test_transcript_and_audio_in_same_email_escaped_and_not_stored(email_system, monkeypatch):
     settings, store, notifier = email_system
-    settings.save_email_config({"transcription_enabled": True, "transcription_api_key": "sk.transcription"})
+    settings.save_email_config({"transcription_enabled": True})  # No extra key.
     audio = message_file(store)
-    calls = []
-    def post(url, **kw):
-        calls.append((url, kw))
-        return response(200, text="Please call me.\n<script>private transcript</script>") if url == TRANSCRIPTION_URL else response()
-    monkeypatch.setattr("app.voicemail_email.requests.post", post)
+    calls, local = [], []
+    def transcribe(data, suffix):
+        local.append((data, suffix))
+        return "Please call me.\n<script>private transcript</script>", "transcribed"
+    monkeypatch.setattr("app.voicemail_email.local_transcription.transcribe", transcribe)
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or response())
     assert notifier.process() == 1
-    assert [url for url, _ in calls] == [TRANSCRIPTION_URL, SENDGRID_URL]
-    upload = calls[0][1]
-    assert upload["headers"]["Authorization"] == "Bearer sk.transcription"
-    assert upload["data"] == {"model": "whisper-1"}
-    assert upload["files"]["file"] == ("voicemail.wav", audio.read_bytes(), "audio/wav")
-    assert upload["allow_redirects"] is False
-    payload = calls[1][1]["json"]
+    assert [url for url, _ in calls] == [SENDGRID_URL]  # Only email leaves server.
+    assert local == [(audio.read_bytes(), ".wav")]
+    payload = calls[0][1]["json"]
     assert "Please call me." in payload["content"][0]["value"]
     assert "<script>" not in payload["content"][1]["value"]
     assert "&lt;script&gt;private transcript" in payload["content"][1]["value"]
@@ -185,55 +184,67 @@ def test_transcript_and_audio_in_same_email_escaped_and_not_stored(email_system,
     deliveries = settings.list_voicemail_deliveries()
     assert deliveries[0]["transcription_status"] == "transcribed"
     assert "private transcript" not in str(deliveries)
-    assert notifier.process() == 0 and len(calls) == 2
+    assert notifier.process() == 0 and len(calls) == len(local) == 1
 
 
-@pytest.mark.parametrize("failure, expected", [(401, "invalid_key"), (429, "quota_or_rate_limit"),
-                                              (503, "provider_error"), ("empty", "empty_transcript"),
-                                              ("timeout", "timeout"), ("invalid_json", "provider_error")])
-def test_transcription_failure_still_sends_audio(email_system, monkeypatch, failure, expected):
-    import requests
+@pytest.mark.parametrize("status", ["engine_unavailable", "resource_limit", "empty_transcript", "timeout", "worker_error", "audio_too_long"])
+def test_transcription_failure_still_sends_audio(email_system, monkeypatch, status):
     settings, store, notifier = email_system
-    settings.save_email_config({"transcription_enabled": True, "transcription_api_key": "sk.transcription"})
+    settings.save_email_config({"transcription_enabled": True})
     message_file(store)
-    sent = []
-    def post(url, **kw):
-        if url == TRANSCRIPTION_URL:
-            if failure == "timeout":
-                raise requests.Timeout("do not disclose sk.transcription")
-            if failure == "invalid_json":
-                return SimpleNamespace(status_code=200, json=lambda: (_ for _ in ()).throw(ValueError("bad JSON")))
-            return response(200) if failure == "empty" else response(failure)
-        sent.append(kw["json"])
-        return response()
-    monkeypatch.setattr("app.voicemail_email.requests.post", post)
+    calls = []
+    monkeypatch.setattr("app.voicemail_email.local_transcription.transcribe", lambda *args: (None, status))
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or response())
     assert notifier.process() == 1
-    assert len(sent) == 1 and sent[0]["attachments"]
-    assert "Transcription is unavailable" in sent[0]["content"][0]["value"]
-    assert settings.list_voicemail_deliveries()[0]["transcription_status"] == expected
+    assert len(calls) == 1 and calls[0][0] == SENDGRID_URL
+    sent = calls[0][1]["json"]
+    assert sent["attachments"]
+    assert "Transcription is unavailable" in sent["content"][0]["value"]
+    assert settings.list_voicemail_deliveries()[0]["transcription_status"] == status
 
 
 @pytest.mark.parametrize("enabled,suffix,expected", [(False, "wav", "disabled"), (True, "gsm", "unsupported_audio")])
 def test_disabled_or_unsupported_transcription_never_uploads_audio(email_system, monkeypatch, enabled, suffix, expected):
     settings, store, notifier = email_system
-    settings.save_email_config({"transcription_enabled": enabled, "transcription_api_key": "sk.transcription"})
+    settings.save_email_config({"transcription_enabled": enabled})
     message_file(store, suffix=suffix)
     calls = []
+    monkeypatch.setattr("app.local_transcription.subprocess.run", lambda *a, **kw: pytest.fail("No recognizer should be started"))
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(url) or response())
     assert notifier.process() == 1 and calls == [SENDGRID_URL]
     assert settings.list_voicemail_deliveries()[0]["transcription_status"] == expected
 
 
-def test_unreadable_transcription_key_does_not_prevent_audio_email(email_system, monkeypatch):
+def test_old_transcription_credentials_erased_without_changing_sendgrid_or_opt_in(email_system):
+    settings, _, _ = email_system
+    settings.save_email_config({"transcription_enabled": True})
+    with settings._connect() as db:
+        db.execute("ALTER TABLE email_config ADD COLUMN transcription_api_key_enc TEXT NOT NULL DEFAULT ''")
+        db.execute("UPDATE email_config SET transcription_api_key_enc=?", (settings.encrypt("sk.old-cloud-key"),))
+    for _ in range(2):
+        upgraded = SettingsStore(str(settings.path), "s" * 40)
+        cfg = upgraded.get_email_config(include_key=True)
+        assert cfg["api_key"] == "SG.secret" and cfg["transcription_enabled"]
+        assert "transcription_api_key" not in cfg and "has_transcription_api_key" not in cfg
+        with upgraded._connect() as db:
+            assert db.execute("SELECT transcription_api_key_enc FROM email_config").fetchone()[0] == ""
+
+
+def test_real_local_recognition_reaches_email_without_speech_provider(email_system, monkeypatch):
     settings, store, notifier = email_system
-    settings.save_email_config({"transcription_enabled": True, "transcription_api_key": "sk.old"})
-    settings.secret_key = b"new-secret"
-    settings.save_email_config({"api_key": "SG.new"})
-    message_file(store)
+    settings.save_email_config({"transcription_enabled": True})
+    fixture = Path(__file__).parent / "fixtures/local-transcription/goforward-8k.wav"
+    message_file(store, content=fixture.read_bytes())
     calls = []
-    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(url) or response())
-    assert notifier.process() == 1 and calls == [SENDGRID_URL]
-    assert settings.list_voicemail_deliveries()[0]["transcription_status"] == "key_unavailable"
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or response())
+    assert notifier.process() == 1
+    assert len(calls) == 1 and calls[0][0] == SENDGRID_URL
+    email = calls[0][1]["json"]
+    assert "go forward ten meters" in email["content"][0]["value"]
+    assert "<script>" not in email["content"][1]["value"]
+    assert "go forward ten meters" in email["content"][1]["value"]
+    assert base64.b64decode(email["attachments"][0]["content"]) == fixture.read_bytes()
+    assert settings.list_voicemail_deliveries()[0]["transcription_status"] == "transcribed"
 
 
 def test_recipient_is_preserved_when_editing_other_extension_fields(email_system):
@@ -301,12 +312,12 @@ def test_existing_sqlite_email_schema_upgrades_idempotently(tmp_path):
 
 def test_mysql_additive_transcription_upgrade_has_safe_defaults():
     existing = {t.name: {c.name: {"type": c.type} for c in t.columns} for t in metadata.sorted_tables}
-    for table, column in (("email_config", "transcription_enabled"), ("email_config", "transcription_api_key_enc"),
+    for table, column in (("email_config", "transcription_enabled"),
                           ("voicemail_deliveries", "transcription_status")):
         del existing[table][column]
     ddl = "\n".join(reconcile_statements(existing))
     assert "ADD COLUMN transcription_enabled INTEGER NOT NULL DEFAULT '0'" in ddl
-    assert "ADD COLUMN transcription_api_key_enc VARCHAR(2048) NOT NULL DEFAULT ''" in ddl
+    assert "transcription_api_key_enc" not in ddl
     assert "ADD COLUMN transcription_status VARCHAR(20) NOT NULL DEFAULT 'disabled'" in ddl
 
 
