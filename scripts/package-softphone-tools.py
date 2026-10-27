@@ -6,6 +6,7 @@ of rebuilding) the Docker images. Its root layout matches /opt/Calling_integrati
 """
 import argparse
 import hashlib
+import io
 import os
 from pathlib import Path
 import tarfile
@@ -13,6 +14,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
+    "scripts/finish-deployment.py",
     "scripts/install-softphone-proxy.py",
     "scripts/check-softphone-websocket.py",
     "scripts/check-voicemail-transcription.py",
@@ -47,8 +49,12 @@ def package(output, root=ROOT):
                 info.uid = info.gid = 0
                 info.uname = info.gname = ""
                 info.mode = 0o644  # Invoke Python explicitly; no executable-bit dependency.
-                with source.open("rb") as handle:
-                    archive.addfile(info, handle)
+                data = source.read_bytes()
+                # Windows checkouts can use CRLF; Linux shell scripts must not.
+                if source.suffix in {".sh", ".py", ".conf", ".md"}:
+                    data = data.replace(b"\r\n", b"\n")
+                    info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
         os.chmod(temporary, 0o644)
         os.replace(temporary, output)
     finally:

@@ -22,8 +22,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve()
 CANDIDATES = (Path.cwd(), *HERE.parents)
 SAMPLE_PATHS = (
-    "deploy/fixtures/goforward-8k.wav",
-    "deploy-kit/fixtures/goforward-8k.wav",
+    "deploy/fixtures/goforward-8k.wav",                 # Source checkout.
+    "deploy-kit/deploy/fixtures/goforward-8k.wav",     # Actual /app/deploy-kit layout in the image.
+    "deploy-kit/fixtures/goforward-8k.wav",            # Backwards-compatible older kit.
 )
 
 

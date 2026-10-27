@@ -303,8 +303,11 @@ desktop softphone needs.
 from a newly built/imported API image first; see
 [`deploy/SOFTPHONE_TOOLS.md`](../deploy/SOFTPHONE_TOOLS.md). For the exact
 image/file upload and verification sequence, use
-[`deploy/RELEASE_CHECKLIST.md`](../deploy/RELEASE_CHECKLIST.md). The current repair needs
-no server-side build, Git pull, image replacement or Asterisk restart.
+[`deploy/RELEASE_CHECKLIST.md`](../deploy/RELEASE_CHECKLIST.md). After extracting the
+archive, `python3 scripts/finish-deployment.py latest tel.engineerip.com`
+performs the service start, host-tool refresh, route install and checks in one
+command. The current repair needs no server-side build, Git pull, image
+replacement or Asterisk restart.
 
 The host-nginx example below does not apply unchanged to a **bridged proxy
 container**. Its `127.0.0.1` is the proxy container itself. Pointing that upstream

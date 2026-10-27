@@ -8,10 +8,11 @@ This small bundle provides the host-side proxy installer/checker, deployment
 verification scripts, an offline recognizer self-test, nginx snippet, licence
 notice, and guides:
 
+- `scripts/finish-deployment.py` (one-command post-image-load setup and checks)
 - `scripts/install-softphone-proxy.py`
 - `scripts/check-softphone-websocket.py`
 - `scripts/check-voicemail-transcription.py`
-- `scripts/verify-release.sh`
+- `scripts/verify-release.sh` (legacy CRLF-safe verification wrapper)
 - `scripts/diagnose-extension-audio.sh`
 - `deploy/nginx/softphone-websocket.conf`
 - `deploy/RELEASE_CHECKLIST.md` (complete Windows → VM and check-everything guide)
@@ -24,6 +25,23 @@ You do NOT need to rebuild images, build on the VM, or pull Git on the VM to
 install this bundle into an existing deployment. Start with
 `deploy/RELEASE_CHECKLIST.md` for the exact image/file transfer commands and
 post-deployment checks.
+
+## Quick path: one command after `docker image load`
+
+After extracting this archive into `/opt/Calling_integration`, run in a
+maintenance window:
+
+```bash
+cd /opt/Calling_integration
+python3 scripts/finish-deployment.py latest tel.engineerip.com
+```
+
+The script starts/recreates services, refreshes host tools from the loaded
+image, waits for Asterisk, installs/validates the `/ws` route, verifies offline
+transcription, public WebSocket, fresh admin UI and Compose state. It removes
+the temporary `docker create` helper container automatically. No server build,
+Git pull, or manual `tools_container` command is needed. The rest of this file
+is the manual fallback and troubleshooting reference.
 
 ## A. Repair the existing deployment with the small archive
 

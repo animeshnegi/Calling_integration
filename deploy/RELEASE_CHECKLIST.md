@@ -20,6 +20,49 @@ Replace example hostnames/tags if your environment differs.
 
 ---
 
+## 0. Simple path: two commands after uploading the archives
+
+Copy the image `.tar` (+ `.sha256`) and `softphone-proxy-tools.tar.gz`
+(+ `.sha256`) to `/tmp` on the VM. Then run **in a maintenance window**:
+
+```bash
+cd /opt/Calling_integration
+tar -xzf /tmp/softphone-proxy-tools.tar.gz -C .
+python3 scripts/finish-deployment.py \
+  --image-tar /tmp/engineerip-telephony-20261027-local1.tar \
+  20261027-local1 tel.engineerip.com
+```
+
+If you already ran `docker image load`, omit `--image-tar`. For the `latest`
+tag and the standard domain, the second command is simply:
+
+```bash
+python3 scripts/finish-deployment.py
+```
+
+That one script:
+
+1. verifies/loads the image archive and checks its architecture;
+2. starts/recreates all Compose services with `--no-build`—so
+   `engineerip-asterisk` exists before the proxy installer runs;
+3. extracts `/app/deploy-kit`, removes its temporary stopped container, and
+   normalizes Windows CRLF line endings;
+4. waits for Asterisk's direct SIP WebSocket;
+5. dry-runs, applies and validates the exact `/ws` route;
+6. runs the offline transcription self-test with `--network none`;
+7. checks the public `wss` upgrade, `admin.js` no-store header, and Compose
+   state.
+
+Add `--proxy-container NAME` if more than one nginx/OpenResty container exists.
+Use `--skip-proxy` only if the `/ws` route is already managed another way.
+`bash scripts/verify-release.sh` remains a CRLF-safe wrapper around
+`finish-deployment.py --verify-only`; it now defaults to `latest` and
+`tel.engineerip.com`.
+
+Sections 1–5 below explain each file and provide the manual fallback. **Do not
+run their individual start/install/verify commands separately if the
+one-command script succeeded.**
+
 ## 1. What belongs where
 
 | Item | Windows workstation | VM `/opt/Calling_integration` | Docker image | Docker volume |
@@ -92,9 +135,10 @@ saved SendGrid/SIP credentials will become unreadable.
 
 ---
 
-## 3. VM: verify, load image, place host files
+## 3. VM: verify, load image, place host files (manual fallback)
 
-Use the same tag on both machines:
+Skip this section if you used the one-command script in section 0. Use the same
+tag on both machines:
 
 ```bash
 TAG=20261027-local1
@@ -132,7 +176,7 @@ in the next command is enough. Do not print the rest of `.env`.
 
 ---
 
-## 4. Install the softphone `/ws` route (1Panel/OpenResty)
+## 4. Install the softphone `/ws` route (manual fallback)
 
 A repeated `https://tel.engineerip.com/ws` **HTTP 404** means the active HTTPS
 vhost does not forward that exact path to Asterisk. Loading a new Docker image
@@ -173,7 +217,7 @@ two-way call audio.
 
 ---
 
-## 5. Recreate the two application services from the loaded image
+## 5. Recreate application services from the loaded image (manual fallback)
 
 There is no VM build:
 
@@ -194,7 +238,8 @@ maintenance-window decision.
 Run the bundled read-only verification:
 
 ```bash
-bash scripts/verify-release.sh "$TAG" tel.engineerip.com
+python3 scripts/finish-deployment.py --verify-only "$TAG" tel.engineerip.com
+# Legacy equivalent: bash scripts/verify-release.sh
 ```
 
 It checks:
@@ -203,8 +248,9 @@ It checks:
 2. a real 8 kHz WAV is transcribed **with `--network none`**;
 3. public `/ws` returns a valid SIP WebSocket 101;
 4. `admin.js` has `Cache-Control: no-store`;
-5. both API services are running;
-6. recent ARI/voicemail worker logs.
+5. Compose service state.
+
+It is Python-based so a Windows CRLF copy cannot break `set -o pipefail`.
 
 It does **not** authenticate to SendGrid, prove inbox delivery, register a
 phone, or prove internal-call audio. Those checks follow.
@@ -341,7 +387,8 @@ restart. Do not change outbound calling during this investigation.
 
 Send only the exact inline error wording and the relevant sanitized line from:
 
-- `bash scripts/verify-release.sh "$TAG" tel.engineerip.com`;
+- `python3 scripts/finish-deployment.py --verify-only "$TAG" tel.engineerip.com`
+  (or its legacy `bash scripts/verify-release.sh` wrapper);
 - `python3 scripts/check-softphone-websocket.py wss://tel.engineerip.com/ws`;
 - **Recent email deliveries** status/error;
 - SendGrid Email Activity result (`Delivered`, `Blocked`, `Bounce`, `Dropped`);

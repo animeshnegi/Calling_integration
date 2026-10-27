@@ -17,7 +17,10 @@ notice and instructions. It does not overwrite `.env`, Compose, databases or
 images. Run the dry-run, then the reviewed apply step on the VM. No server Git
 checkout update is required for this archive path. Use
 [`deploy/RELEASE_CHECKLIST.md`](../deploy/RELEASE_CHECKLIST.md) for the complete
-Windows → VM image/file transfer procedure and all post-deployment checks.
+Windows → VM image/file transfer procedure and all post-deployment checks. After
+extracting the tools archive, `python3 scripts/finish-deployment.py` performs
+the required service start, host-tool refresh, `/ws` install and verification
+in one idempotent command; the individual commands below are a manual fallback.
 
 New API images additionally embed `/app/deploy-kit`, so any Windows Docker
 Desktop build → save `.tar` → transfer → load workflow can carry the installer.

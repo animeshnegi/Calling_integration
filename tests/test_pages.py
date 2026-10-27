@@ -137,4 +137,3 @@ def test_the_softphone_button_only_shows_for_a_browser_extension():
     # The window that opens signs in on the browser identity, never the plain
     # one a desk phone or Zoiper uses.
     assert "sip_username: credentials.webrtc_sip_username || credentials.sip_username" in admin_js
-

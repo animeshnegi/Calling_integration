@@ -33,9 +33,9 @@ if command -v cygpath >/dev/null; then TOOLS_COPY_DIR="$(cygpath -w "$TOOLS_DIR"
 # Git Bash must not rewrite the Linux path inside the container argument.
 MSYS_NO_PATHCONV=1 docker cp "${TOOLS_CONTAINER}:/app/deploy-kit/." "$TOOLS_COPY_DIR"
 tar -czf "$TOOLS_OUTPUT" -C "$TOOLS_DIR" \
-  scripts/install-softphone-proxy.py scripts/check-softphone-websocket.py \
-  scripts/check-voicemail-transcription.py scripts/verify-release.sh \
-  scripts/diagnose-extension-audio.sh \
+  scripts/finish-deployment.py scripts/install-softphone-proxy.py \
+  scripts/check-softphone-websocket.py scripts/check-voicemail-transcription.py \
+  scripts/verify-release.sh scripts/diagnose-extension-audio.sh \
   deploy/nginx/softphone-websocket.conf deploy/SOFTPHONE_TOOLS.md \
   deploy/RELEASE_CHECKLIST.md deploy/THIRD_PARTY_NOTICES.md \
   deploy/fixtures/README.md deploy/fixtures/goforward-8k.wav
