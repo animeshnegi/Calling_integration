@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Verify the bundled offline voicemail recognizer with a public WAV sample.
+
+Run inside the imported API image (no network needed):
+
+    docker run --rm --network none IMAGE python \
+        /app/deploy-kit/scripts/check-voicemail-transcription.py
+
+It also works from a source checkout by running:
+
+    python3 scripts/check-voicemail-transcription.py
+
+Only the public sample transcript is printed. No SendGrid key, voicemail,
+customer data, or application database is read.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+CANDIDATES = (Path.cwd(), *HERE.parents)
+SAMPLE_PATHS = (
+    "deploy/fixtures/goforward-8k.wav",
+    "deploy-kit/fixtures/goforward-8k.wav",
+)
+
+
+def find_app_root() -> Path | None:
+    return next((base for base in CANDIDATES if (base / "app/local_transcription.py").is_file()), None)
+
+
+def find_sample(root: Path) -> Path | None:
+    return next((path for name in SAMPLE_PATHS if (path := root / name).is_file()), None)
+
+
+def main() -> int:
+    root = find_app_root()
+    if root is None:
+        print(json.dumps({"status": "engine_unavailable", "error": "app/local_transcription.py not found"}))
+        print("FAIL: run this inside the imported API image or updated source checkout.", file=sys.stderr)
+        return 1
+    sample = find_sample(root)
+    if sample is None:
+        print(json.dumps({"status": "engine_unavailable", "error": "bundled speech sample not found"}))
+        print("FAIL: deploy/fixtures/goforward-8k.wav is missing from this image.", file=sys.stderr)
+        return 1
+    sys.path.insert(0, str(root))
+    from app.local_transcription import transcribe
+
+    text, status = transcribe(sample.read_bytes(), ".wav")
+    ok = status == "transcribed" and bool(text) and "go forward" in text.lower()
+    print(json.dumps({"status": status, "transcript": text, "offline": True}))
+    print("PASS: bundled CPU recognizer decoded 8 kHz WAV offline." if ok
+          else f"FAIL: local transcription status is {status}.", file=sys.stderr)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

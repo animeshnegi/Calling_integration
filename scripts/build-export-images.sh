@@ -34,7 +34,11 @@ if command -v cygpath >/dev/null; then TOOLS_COPY_DIR="$(cygpath -w "$TOOLS_DIR"
 MSYS_NO_PATHCONV=1 docker cp "${TOOLS_CONTAINER}:/app/deploy-kit/." "$TOOLS_COPY_DIR"
 tar -czf "$TOOLS_OUTPUT" -C "$TOOLS_DIR" \
   scripts/install-softphone-proxy.py scripts/check-softphone-websocket.py \
-  deploy/nginx/softphone-websocket.conf deploy/SOFTPHONE_TOOLS.md
+  scripts/check-voicemail-transcription.py scripts/verify-release.sh \
+  scripts/diagnose-extension-audio.sh \
+  deploy/nginx/softphone-websocket.conf deploy/SOFTPHONE_TOOLS.md \
+  deploy/RELEASE_CHECKLIST.md deploy/THIRD_PARTY_NOTICES.md \
+  deploy/fixtures/README.md deploy/fixtures/goforward-8k.wav
 (cd "$(dirname "$TOOLS_OUTPUT")" && sha256sum "$(basename "$TOOLS_OUTPUT")") > "$TOOLS_OUTPUT.sha256"
 printf '\nCreated image archive:\n  %s\n  %s.sha256\nHost tools (COPY THIS TOO):\n  %s\n  %s.sha256\n' "$OUTPUT" "$OUTPUT" "$TOOLS_OUTPUT" "$TOOLS_OUTPUT"
 printf '\nOn the VM, use --no-build as before. Extract the tools archive into /opt/Calling_integration, then run the proxy installer there.\nSee deploy/SOFTPHONE_TOOLS.md. Loading the images alone does NOT update host scripts or nginx.\n'

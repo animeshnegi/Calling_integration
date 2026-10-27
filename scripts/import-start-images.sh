@@ -21,4 +21,5 @@ docker compose ps
 
 printf '\nImages started without building. This does not install host scripts or nginx routes.\n'
 printf 'For a missing softphone installer, extract the small host-tools archive or /app/deploy-kit from the imported API image.\n'
-printf 'See deploy/SOFTPHONE_TOOLS.md (included in the host-tools archive).\n'
+printf 'See deploy/SOFTPHONE_TOOLS.md and deploy/RELEASE_CHECKLIST.md (included in the host-tools archive).\n'
+printf 'After extracting host tools: bash scripts/verify-release.sh %s YOUR_WEB_DOMAIN\n' "$TAG"

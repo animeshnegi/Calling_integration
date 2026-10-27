@@ -4,16 +4,26 @@
 `/opt/Calling_integration`. An image import cannot install a script on the host
 or configure a separate 1Panel/OpenResty container automatically.
 
-This small bundle provides exactly four files:
+This small bundle provides the host-side proxy installer/checker, deployment
+verification scripts, an offline recognizer self-test, nginx snippet, licence
+notice, and guides:
 
 - `scripts/install-softphone-proxy.py`
 - `scripts/check-softphone-websocket.py`
+- `scripts/check-voicemail-transcription.py`
+- `scripts/verify-release.sh`
+- `scripts/diagnose-extension-audio.sh`
 - `deploy/nginx/softphone-websocket.conf`
-- this guide
+- `deploy/RELEASE_CHECKLIST.md` (complete Windows → VM and check-everything guide)
+- `deploy/SOFTPHONE_TOOLS.md` (this guide)
+- `deploy/THIRD_PARTY_NOTICES.md`
+- `deploy/fixtures/README.md` and `deploy/fixtures/goforward-8k.wav`
 
 It contains no `.env`, passwords, databases, Compose file or application images.
 You do NOT need to rebuild images, build on the VM, or pull Git on the VM to
-install this bundle into an existing deployment.
+install this bundle into an existing deployment. Start with
+`deploy/RELEASE_CHECKLIST.md` for the exact image/file transfer commands and
+post-deployment checks.
 
 ## A. Repair the existing deployment with the small archive
 
@@ -26,7 +36,7 @@ On the VM:
 ```bash
 cd /opt/Calling_integration
 # Back up any installer/checker/snippet you edited locally before extracting.
-# This archive contains only the four host-tools files listed above.
+# This archive contains only the allowlisted host-tools files listed above.
 tar -xzf /tmp/softphone-proxy-tools.tar.gz -C /opt/Calling_integration
 ls -l scripts/install-softphone-proxy.py
 sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com
@@ -57,7 +67,9 @@ proof of SIP registration or two-way audio.
 
 ## B. Future images also contain this bundle
 
-New API images built with the updated Dockerfile include `/app/deploy-kit`.
+New API images built with the updated Dockerfile include `/app/deploy-kit`:
+the host installer/checkers, release checklist, offline verification script and
+sample, audio incident collector, nginx snippet, and licence notice.
 After importing a NEW image built with that Dockerfile, extract the tools from a
 **stopped temporary container**. Replace `YOUR_TAG` with the tag you loaded:
 
@@ -83,6 +95,8 @@ does not install or enable the proxy route.
 Keep your existing Docker Desktop build → save `.tar` → transfer → load workflow.
 Update the Windows source/Dockerfile before your next local build so the API
 image includes `/app/deploy-kit`. No server-side build is required.
+`deploy/RELEASE_CHECKLIST.md` has copy/paste PowerShell, `scp`, checksum,
+`docker load`, and verification commands for the complete release.
 
 For example, in **PowerShell on Windows** (with Docker Desktop using Linux
 containers), build and save both images locally. Use a fresh tag:

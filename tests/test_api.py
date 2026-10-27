@@ -861,3 +861,24 @@ def test_customer_cannot_read_or_change_email_provider_settings(tmp_path, monkey
     assert client.post("/admin/api/email-config", json={"api_key": "SG.attacker"}, headers=headers).status_code == 403
     assert client.post("/admin/api/email-config/test", json={"email": "customer@example.com"}, headers=headers).status_code == 403
     assert store.get_email_config(include_key=True)["api_key"] == "SG.private"
+
+
+def test_admin_ui_and_state_are_not_cached_across_image_upgrades(tmp_path, monkeypatch):
+    """A stale admin.js must never keep removed API-key fields alive."""
+    from collections import defaultdict, deque
+    from app import admin as admin_module
+    # Login rate limiting is process-global; isolate this focused UI check.
+    monkeypatch.setattr(admin_module, "_LOGIN_BUCKETS", defaultdict(deque))
+    client = app_client(tmp_path)
+    for path in ("/admin/login", "/admin-assets/admin.js", "/admin-assets/admin.css"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Pragma"] == "no-cache"
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    for path in ("/admin", "/admin/api/state"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+    # The landing page's unrelated public assets keep their existing policy.
+    assert client.get("/favicon.ico").headers["Cache-Control"] != "no-store"

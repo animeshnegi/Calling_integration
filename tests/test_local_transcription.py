@@ -13,8 +13,8 @@ import pytest
 
 from app import local_transcription as local
 
-FIXTURE = Path(__file__).parent / "fixtures/local-transcription/goforward-8k.wav"
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURE = ROOT / "deploy/fixtures/goforward-8k.wav"
 
 
 def wav(samples=b"\0\0" * 1600, rate=8000, channels=1, width=2):
@@ -129,6 +129,8 @@ def test_deployment_bundles_offline_model_and_no_cloud_transcription_endpoint():
     dockerfile = (ROOT / "Dockerfile").read_text()
     assert "Decoder(loglevel='FATAL')" in dockerfile
     assert "THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md" in dockerfile
+    assert "check-voicemail-transcription.py" in dockerfile
+    assert "goforward-8k.wav" in dockerfile
     assert "Copyright (c) 1999-2016 Carnegie Mellon University" in (ROOT / "deploy/THIRD_PARTY_NOTICES.md").read_text()
     for filename in ("app/voicemail_email.py", "app/local_transcription.py", "web/admin.html", "web/admin.js"):
         source = (ROOT / filename).read_text()

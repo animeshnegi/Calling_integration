@@ -24,12 +24,14 @@ COPY --chown=appuser:appuser wsgi.py ./wsgi.py
 COPY --chown=appuser:appuser deploy/THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
 
 # Image-only/Windows deployments do not copy repository scripts to the VM.
-# Carry the minimal host-side proxy repair kit in the API image so docker cp
-# can extract it after docker load. It is NOT run inside the API container and
-# the container receives no Docker socket or host-proxy privileges.
-COPY --chown=appuser:appuser scripts/install-softphone-proxy.py scripts/check-softphone-websocket.py ./deploy-kit/scripts/
+# Carry the host-side proxy/repair and offline verification kit in the API
+# image so docker cp can extract it after docker load. It is NOT run inside the
+# API container and the container receives no Docker socket or host-proxy
+# privileges. The offline speech sample/model are baked in; nothing downloads.
+COPY --chown=appuser:appuser scripts/install-softphone-proxy.py scripts/check-softphone-websocket.py scripts/check-voicemail-transcription.py scripts/verify-release.sh scripts/diagnose-extension-audio.sh ./deploy-kit/scripts/
 COPY --chown=appuser:appuser deploy/nginx/softphone-websocket.conf ./deploy-kit/deploy/nginx/
-COPY --chown=appuser:appuser deploy/SOFTPHONE_TOOLS.md ./deploy-kit/deploy/
+COPY --chown=appuser:appuser deploy/SOFTPHONE_TOOLS.md deploy/RELEASE_CHECKLIST.md deploy/THIRD_PARTY_NOTICES.md ./deploy-kit/deploy/
+COPY --chown=appuser:appuser deploy/fixtures/README.md deploy/fixtures/goforward-8k.wav ./deploy-kit/deploy/fixtures/
 
 USER appuser
 

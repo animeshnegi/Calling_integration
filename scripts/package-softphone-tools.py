@@ -15,8 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 FILES = (
     "scripts/install-softphone-proxy.py",
     "scripts/check-softphone-websocket.py",
+    "scripts/check-voicemail-transcription.py",
+    "scripts/verify-release.sh",
+    "scripts/diagnose-extension-audio.sh",
     "deploy/nginx/softphone-websocket.conf",
     "deploy/SOFTPHONE_TOOLS.md",
+    "deploy/RELEASE_CHECKLIST.md",
+    "deploy/THIRD_PARTY_NOTICES.md",
+    "deploy/fixtures/README.md",
+    "deploy/fixtures/goforward-8k.wav",
 )
 
 
@@ -42,6 +49,7 @@ def package(output, root=ROOT):
                 info.mode = 0o644  # Invoke Python explicitly; no executable-bit dependency.
                 with source.open("rb") as handle:
                     archive.addfile(info, handle)
+        os.chmod(temporary, 0o644)
         os.replace(temporary, output)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -59,7 +67,7 @@ def main(argv=None):
         output, checksum = package(args.output)
     except (OSError, ValueError, tarfile.TarError) as exc:
         parser.exit(1, f"Packaging failed: {exc}\n")
-    print(f"Created {output}\nChecksum: {checksum}\nOnly the installer, checker, nginx snippet and instructions are included; no .env, images or Compose file.")
+    print(f"Created {output}\nChecksum: {checksum}\nOnly allowlisted installer, checker, verification, audio, nginx, fixture and guide files are included; no .env, images or Compose file.")
 
 
 if __name__ == "__main__":

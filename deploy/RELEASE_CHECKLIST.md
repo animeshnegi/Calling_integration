@@ -1,0 +1,355 @@
+# One-time Windows → VM release and check-everything checklist
+
+This checklist is for the current deployment shape:
+
+- Windows workstation builds Docker images.
+- Linux VM does **not** build, clone Git, download AI models, or run `docker compose build`.
+- VM checkout: `/opt/Calling_integration`.
+- SSH destination in the examples: `engineerip7@ipseekers`.
+- Public admin/softphone domain: `tel.engineerip.com`.
+- HTTPS proxy: 1Panel / OpenResty in Docker.
+- Existing `.env`, `SECRET_KEY`, database, and voicemail volumes stay on the VM.
+
+`docker image save` moves **images only**. It does not create or update
+`/opt/Calling_integration/scripts/*.py`, `docker-compose.yml`, nginx snippets,
+or 1Panel's vhost. Those host files must be copied separately. This is why
+`python3 scripts/install-softphone-proxy.py` was previously missing on the VM.
+
+Never paste an API key, `.env`, database, or full `nginx -T` dump into chat.
+Replace example hostnames/tags if your environment differs.
+
+---
+
+## 1. What belongs where
+
+| Item | Windows workstation | VM `/opt/Calling_integration` | Docker image | Docker volume |
+|---|---|---|---|---|
+| Application code and admin UI | source checkout used only to build | not required | **yes** | no |
+| PocketSphinx + English model | installed by `docker build` | not installed on host | **yes** | no |
+| `.env` / `SECRET_KEY` | do not copy from VM | **keep existing** | no | no |
+| `docker-compose.yml` | copy only if changed | **one current copy** | no | no |
+| `scripts/install-softphone-proxy.py` | source / tools archive | **copy from archive** | also in `/app/deploy-kit` | no |
+| `scripts/check-softphone-websocket.py`, `diagnose-extension-audio.sh`, `verify-release.sh` | source / tools archive | **copy from archive** | also in `/app/deploy-kit` | no |
+| nginx snippet and release docs | source / tools archive | **copy from archive** | also in `/app/deploy-kit` | no |
+| settings/calls DB and voicemail audio | never transfer | no | no | **keep existing** |
+
+The current host-tools archive contains no `.env`, passwords, Compose file,
+database, or application image. Images and host files are both required.
+
+---
+
+## 2. Windows: build and export
+
+In **PowerShell**, from the updated repository root. Docker Desktop must use
+Linux containers. Use a new tag every release; the example uses
+`20261027-local1`.
+
+```powershell
+$Tag = "20261027-local1"
+$ImageTar = "engineerip-telephony-${Tag}.tar"
+$ToolsTar = "softphone-proxy-tools.tar.gz"
+
+docker build --platform linux/amd64 -t "engineerip/telephony-api:$Tag" .
+docker build --platform linux/amd64 -t "engineerip/asterisk:$Tag" ./asterisk
+docker image save --output $ImageTar "engineerip/telephony-api:$Tag" "engineerip/asterisk:$Tag"
+
+# Linux-compatible sha256sum -c format, not PowerShell's default hash-only output.
+$ImageHash = (Get-FileHash $ImageTar -Algorithm SHA256).Hash.ToLower()
+"$ImageHash  $ImageTar" | Set-Content -Encoding ascii "${ImageTar}.sha256"
+
+# Creates the small host-tools archive and its checksum.
+py -3 scripts/package-softphone-tools.py --output $ToolsTar
+```
+
+If `py` is unavailable, use `python` or `python3`. If OpenSSH `scp` is
+unavailable, use WinSCP to copy the same four resulting files in the next step.
+
+Optional: use `scripts/build-export-images.sh` under Bash/WSL instead; it
+produces both an image archive and a tools sidecar with checksums.
+
+### Upload with `scp`
+
+```powershell
+scp $ImageTar "${ImageTar}.sha256" $ToolsTar "${ToolsTar}.sha256" engineerip7@ipseekers:/tmp/
+```
+
+Or drag those four files into `/tmp` with WinSCP. They are:
+
+- `engineerip-telephony-20261027-local1.tar`
+- `engineerip-telephony-20261027-local1.tar.sha256`
+- `softphone-proxy-tools.tar.gz`
+- `softphone-proxy-tools.tar.gz.sha256`
+
+Only copy `docker-compose.yml` if you actually changed it. Back up and compare
+the VM's existing file first; do not overwrite local panel-specific edits.
+
+```powershell
+scp .\docker-compose.yml engineerip7@ipseekers:/tmp/docker-compose.new.yml
+```
+
+Never upload or overwrite `.env`. Keep the server's existing `SECRET_KEY`, or
+saved SendGrid/SIP credentials will become unreadable.
+
+---
+
+## 3. VM: verify, load image, place host files
+
+Use the same tag on both machines:
+
+```bash
+TAG=20261027-local1
+cd /tmp
+sha256sum -c "engineerip-telephony-$TAG.tar.sha256"
+sha256sum -c softphone-proxy-tools.tar.gz.sha256
+
+cd /opt/Calling_integration
+cp -a docker-compose.yml "docker-compose.yml.bak.$TAG"   # only if replacing Compose
+# Compare before replacing; keep the existing file if the only changes are local.
+# cp /tmp/docker-compose.new.yml docker-compose.yml
+
+docker image load --input "/tmp/engineerip-telephony-$TAG.tar"
+
+# Inspect before extracting. Expected paths start with scripts/ and deploy/.
+tar -tzf /tmp/softphone-proxy-tools.tar.gz
+tar -xzf /tmp/softphone-proxy-tools.tar.gz -C /opt/Calling_integration
+ls -l scripts/install-softphone-proxy.py scripts/verify-release.sh \
+      scripts/check-voicemail-transcription.py deploy/RELEASE_CHECKLIST.md
+```
+
+Use `sudo tar` only if your user cannot write the existing checkout. Do not
+change ownership of `.env`, the database, or voicemail volumes.
+
+If Compose reads `IMAGE_TAG` from `.env`, update just that line so a later
+`docker compose up` keeps using the loaded image:
+
+```bash
+sed -i.bak.$TAG "s/^IMAGE_TAG=.*/IMAGE_TAG=$TAG/" .env
+grep '^IMAGE_TAG=' .env
+```
+
+Skip that edit if your `.env` does not contain `IMAGE_TAG`; passing the variable
+in the next command is enough. Do not print the rest of `.env`.
+
+---
+
+## 4. Install the softphone `/ws` route (1Panel/OpenResty)
+
+A repeated `https://tel.engineerip.com/ws` **HTTP 404** means the active HTTPS
+vhost does not forward that exact path to Asterisk. Loading a new Docker image
+cannot fix it: 1Panel's proxy configuration is a host-side file.
+
+Preview first:
+
+```bash
+cd /opt/Calling_integration
+sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com
+```
+
+Review the selected proxy container, persistent vhost, upstream, and network.
+Then apply:
+
+```bash
+sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com \
+  --apply --connect-network
+```
+
+If more than one nginx/OpenResty proxy is running, add
+`--proxy-container NAME` from `docker ps`. For a bridged proxy, persist the
+attached external network in 1Panel's proxy Compose configuration, preserving
+all existing networks. A host-networked proxy uses host loopback and needs no
+new network.
+
+The installer requires a valid SIP WebSocket upgrade directly from Asterisk
+before touching files. It backs up the vhost, checks `nginx -t`, reloads only
+that proxy, and reports `NOT VERIFIED` if the public check fails. A passing
+check is HTTP **101** with the `sip` subprotocol:
+
+```bash
+python3 scripts/check-softphone-websocket.py wss://tel.engineerip.com/ws
+```
+
+This proves the browser's WebSocket transport, not SIP registration, RTP, or
+two-way call audio.
+
+---
+
+## 5. Recreate the two application services from the loaded image
+
+There is no VM build:
+
+```bash
+cd /opt/Calling_integration
+TAG=20261027-local1
+IMAGE_TAG="$TAG" docker compose up -d --no-build --force-recreate \
+  telephony-api telephony-ari
+docker compose ps telephony-api telephony-ari
+```
+
+Both services use the **same** rebuilt `engineerip/telephony-api` image: the
+API serves the admin UI; `telephony-ari` runs the voicemail email worker and the
+offline recognizer. Recreating these two does not recreate Asterisk and does
+not change outbound calling. Replacing the Asterisk image is a separate
+maintenance-window decision.
+
+Run the bundled read-only verification:
+
+```bash
+bash scripts/verify-release.sh "$TAG" tel.engineerip.com
+```
+
+It checks:
+
+1. the loaded image architecture matches the VM;
+2. a real 8 kHz WAV is transcribed **with `--network none`**;
+3. public `/ws` returns a valid SIP WebSocket 101;
+4. `admin.js` has `Cache-Control: no-store`;
+5. both API services are running;
+6. recent ARI/voicemail worker logs.
+
+It does **not** authenticate to SendGrid, prove inbox delivery, register a
+phone, or prove internal-call audio. Those checks follow.
+
+---
+
+## 6. API key error and email sending
+
+In the browser, **hard-refresh once** (`Ctrl+F5`). A stale `admin.js` could
+still show the old “OpenAI API key” field or try to use a removed input. The
+new image serves admin pages/assets with `no-store`; verify:
+
+```bash
+curl -fsSI https://tel.engineerip.com/admin-assets/admin.js | grep -i '^cache-control:'
+# Expected: Cache-Control: no-store
+```
+
+Sign in as a **platform administrator**. In **Email Delivery**:
+
+1. Paste only the **SendGrid API key** — no `Bearer`, quotes, spaces, or line
+   breaks. Blank keeps the saved key; a new value replaces it.
+2. Enter a **verified SendGrid sender** email.
+3. Enter a test recipient and click **Save & send test email**. This saves the
+   form before testing and works with automatic email temporarily off.
+4. Check the inbox/spam and SendGrid **Email Activity** for bounces,
+   suppressions, or blocks. “Accepted by SendGrid” is not inbox delivery.
+
+There is **no transcription API key**. If the page still asks for an OpenAI
+key, the browser is showing old cached UI or the VM is running an old image.
+
+Read the inline error exactly:
+
+| Error | What to correct |
+|---|---|
+| HTTP 401 | Paste a current SendGrid key with Mail Send permission. |
+| HTTP 403 | Verify the sender, Mail Send permission, account status, and IP restrictions. |
+| HTTP 429 | Rate limit; retry later. |
+| HTTP 5xx | SendGrid-side failure; retry later. |
+| DNS / TLS / timeout | Fix server outbound HTTPS, DNS, or certificate trust. |
+| Saved key cannot be decrypted | Restore the original `SECRET_KEY`, or paste a replacement SendGrid key. |
+| Invalid API key format | Remove `Bearer`, whitespace, or line breaks. |
+
+For automatic voicemail email, also enable **Enable voicemail email**, set a
+notification email on each active extension (or assigned user profile), and
+keep voicemail enabled. Only unread INBOX/urgent messages are scanned; reading
+a message before the roughly 30-second scan can prevent its notification.
+Inspect **Recent email deliveries** and, if needed:
+
+```bash
+cd /opt/Calling_integration
+docker compose logs --tail=100 telephony-ari
+```
+
+Failed deliveries retry after 60 seconds up to five attempts. Replacing the
+SendGrid key, changing the sender, or re-enabling email resets failed attempts
+without re-sending accepted mail.
+
+---
+
+## 7. Voicemail transcription workflow
+
+Transcription is entirely local. PocketSphinx and its English model are inside
+the API image. No OpenAI key, Whisper API, speech-provider upload, usage fee,
+runtime model download, or GPU is used. SendGrid is still required to email
+the resulting text and original audio.
+
+Correct sequence:
+
+1. Enable **Enable voicemail email**.
+2. Enable **Include a voicemail transcript**.
+3. Save; set the extension's notification email and leave voicemail enabled.
+4. Leave a **new, unread, non-sensitive test voicemail**.
+5. Wait at least 10 seconds for the file to settle, then up to about 30–60
+   seconds for the ARI worker's next scan.
+6. Open the email: it should contain escaped plain/HTML transcript text **and
+   the original WAV attachment**.
+7. Check **Recent email deliveries → Transcript**.
+
+The **Save & send test email** button has no recording and deliberately does
+not test transcription. To test the recognizer without a voicemail:
+
+```bash
+cd /opt/Calling_integration
+TAG=20261027-local1
+docker run --rm --network none "engineerip/telephony-api:$TAG" python \
+  /app/deploy-kit/scripts/check-voicemail-transcription.py
+# Expected: "status": "transcribed", "go forward ten meters"
+```
+
+Status meanings:
+
+| Status | Meaning / action |
+|---|---|
+| `transcribed` | Text was generated locally; original audio is still attached. |
+| `empty transcript` | No recognisable speech; audio-only note is included. |
+| `unsupported audio` / `audio too long` | Only mono 16-bit PCM WAV at 8/16 kHz, up to 5 minutes / 20 MiB, is supported. Legacy GSM emails without text. |
+| `engine unavailable` | Loaded image lacks PocketSphinx; rebuild/load the current image. |
+| `resource limit` / `timeout` / `worker error` | A bounded decoder worker failed; the audio email still sends. Check RAM/CPU and logs. |
+| `disabled` | The transcript switch is off. |
+
+Transcripts are machine-generated English, may be inaccurate, and are not
+stored in the database. No language selector or external model is included.
+
+---
+
+## 8. Internal softphone audio is a separate check
+
+The `/ws` installer fixes a 404/registration transport problem. It does **not**
+prove that internal `101 ↔ 105` calls keep two-way audio. The earlier live
+symptom was brief audio, silence, and a CLI shell/restart; external calls were
+working and outbound routing remains unchanged.
+
+After the release, perform one plain 101↔105 call in a maintenance window.
+If audio drops, collect a read-only incident snapshot **immediately** and note
+UTC start/end times:
+
+```bash
+cd /opt/Calling_integration
+bash scripts/diagnose-extension-audio.sh > "/tmp/extension-audio-$(date -u +%Y%m%dT%H%M%SZ).log" 2>&1
+```
+
+Review that file locally; it can include phone numbers/IPs. Look for the Docker
+`die` event's `exitCode`, `RestartCount`, `OOMKilled`, image ID, CPU portability
+marker, `pjsip show channelstats`, bridge/codec modules, and Asterisk logs.
+Exit 132 suggests a builder-only CPU instruction (`BUILD_NATIVE`); 139/134
+requires a native backtrace; 137 needs OOM/kernel correlation; 0 needs
+re-exec/config-sync log correlation. A portable build fixed one concrete
+shipping defect but did **not** prove the cause of the unclassified live
+restart. Do not change outbound calling during this investigation.
+
+---
+
+## 9. If something still fails
+
+Send only the exact inline error wording and the relevant sanitized line from:
+
+- `bash scripts/verify-release.sh "$TAG" tel.engineerip.com`;
+- `python3 scripts/check-softphone-websocket.py wss://tel.engineerip.com/ws`;
+- **Recent email deliveries** status/error;
+- SendGrid Email Activity result (`Delivered`, `Blocked`, `Bounce`, `Dropped`);
+- `/tmp/extension-audio-*.log` for internal audio, with phone numbers/IPs
+  redacted.
+
+Do **not** send the SendGrid key, `.env`, database, raw `nginx -T`, raw core
+dump, or unredacted SIP traces. This repository's automated tests cover the
+application logic and a real offline WAV decode; live provider authentication,
+inbox delivery, 1Panel state, MySQL behavior, and Asterisk media still require
+these checks on your VM.

@@ -4352,6 +4352,17 @@ def register_admin(app, config, on_telephony_change=None):
     app.extensions["settings_store"] = store
     web_dir = str(Path(app.root_path).parent / "web")
 
+    @app.after_request
+    def no_stale_admin_ui_after_image_upgrade(response):
+        # An old cached admin.js can still reference removed API-key fields and
+        # produce misleading save errors after an image-only deployment. Admin
+        # pages, assets and API state must be fetched from the running image.
+        if (request.path.startswith("/admin") or request.path in {"/login", "/console-check"}):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     def apply_change() -> str:
         """Re-render the Asterisk configuration; return why it did not apply.
 
@@ -4419,7 +4430,7 @@ def register_admin(app, config, on_telephony_change=None):
     def admin_asset(filename):
         if filename not in {"admin.css", "admin.js"}:
             return jsonify({"error": "not found"}), 404
-        return send_from_directory(web_dir, filename, max_age=3600)
+        return send_from_directory(web_dir, filename, max_age=0)
 
     @app.get("/")
     def landing_page(): return send_from_directory(web_dir, "index.html")

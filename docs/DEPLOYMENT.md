@@ -301,7 +301,9 @@ desktop softphone needs.
 **Windows-built, image-only deployment?** Docker import does not copy scripts to
 `/opt/Calling_integration`. Use the small tools archive or extract `/app/deploy-kit`
 from a newly built/imported API image first; see
-[`deploy/SOFTPHONE_TOOLS.md`](../deploy/SOFTPHONE_TOOLS.md). The current repair needs
+[`deploy/SOFTPHONE_TOOLS.md`](../deploy/SOFTPHONE_TOOLS.md). For the exact
+image/file upload and verification sequence, use
+[`deploy/RELEASE_CHECKLIST.md`](../deploy/RELEASE_CHECKLIST.md). The current repair needs
 no server-side build, Git pull, image replacement or Asterisk restart.
 
 The host-nginx example below does not apply unchanged to a **bridged proxy

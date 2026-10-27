@@ -11,10 +11,13 @@ reason to build on the low-spec server or to restart a working PBX.
 
 For the current missing-installer problem, copy/extract the small host-tools
 archive as described in [`deploy/SOFTPHONE_TOOLS.md`](../deploy/SOFTPHONE_TOOLS.md).
-It contains only the installer, its standard-library checker, the nginx snippet
-and instructions. It does not overwrite `.env`, Compose, databases or images.
-Run the dry-run, then the reviewed apply step on the VM. No server Git checkout
-update is required for this archive path.
+It contains the installer, WebSocket checker, offline transcription self-test,
+release verification script, audio incident collector, nginx snippet, licence
+notice and instructions. It does not overwrite `.env`, Compose, databases or
+images. Run the dry-run, then the reviewed apply step on the VM. No server Git
+checkout update is required for this archive path. Use
+[`deploy/RELEASE_CHECKLIST.md`](../deploy/RELEASE_CHECKLIST.md) for the complete
+Windows → VM image/file transfer procedure and all post-deployment checks.
 
 New API images additionally embed `/app/deploy-kit`, so any Windows Docker
 Desktop build → save `.tar` → transfer → load workflow can carry the installer.
@@ -489,10 +492,13 @@ In **Email Delivery** (platform administrator only):
    Entering a new key replaces it, even if the old ciphertext is unreadable.
    Keep the deployment's `SECRET_KEY` unchanged across image upgrades: it is
    also used for other encrypted telephony credentials.
-2. Enter a test recipient and select **Save & send test email**. This saves the
-   current form first, so a replacement key is actually used. Tests work with
-   automatic voicemail email switched off. Failed saves do not send a test
-   using stale credentials. Background refreshes preserve unsaved form edits.
+2. After any image replacement, hard-refresh the admin page once (`Ctrl+F5`).
+   Admin pages and assets are served with `Cache-Control: no-store`, so a stale
+   `admin.js` cannot keep removed fields alive. Enter a test recipient and
+   select **Save & send test email**. This saves the current form first, so a
+   replacement key is actually used. Tests work with automatic voicemail email
+   switched off. Failed saves do not send a test using stale credentials.
+   Background refreshes preserve unsaved form edits.
 3. **Accepted by SendGrid is not inbox delivery.** Check spam and SendGrid Email
    Activity for bounces, suppressions, sender authentication, and recipient
    rejection. HTTP 401 means replace/check the key; HTTP 403 means check sender

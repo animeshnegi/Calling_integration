@@ -233,7 +233,7 @@ def test_old_transcription_credentials_erased_without_changing_sendgrid_or_opt_i
 def test_real_local_recognition_reaches_email_without_speech_provider(email_system, monkeypatch):
     settings, store, notifier = email_system
     settings.save_email_config({"transcription_enabled": True})
-    fixture = Path(__file__).parent / "fixtures/local-transcription/goforward-8k.wav"
+    fixture = Path(__file__).resolve().parents[1] / "deploy/fixtures/goforward-8k.wav"
     message_file(store, content=fixture.read_bytes())
     calls = []
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or response())
