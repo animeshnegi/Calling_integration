@@ -478,3 +478,100 @@ No Docker/Asterisk/SIP phones are available in the coding sandbox, so build-poli
 and dialplan tests cannot certify those live media/crash checks. The user's live
 exit event/backtrace and this acceptance run are required before declaring the
 reported incident resolved.
+
+## Email delivery and optional voicemail-to-text
+
+In **Email Delivery** (platform administrator only):
+
+1. Paste a **SendGrid** API key with **Mail Send** permission, without `Bearer`.
+   Set a sender email verified in your SendGrid account. Leading/trailing
+   whitespace is trimmed; blank key fields preserve the encrypted saved key.
+   Entering a new key replaces it, even if the old ciphertext is unreadable.
+   Keep the deployment's `SECRET_KEY` unchanged across image upgrades: it is
+   also used for other encrypted telephony credentials.
+2. Enter a test recipient and select **Save & send test email**. This saves the
+   current form first, so a replacement key is actually used. Tests work with
+   automatic voicemail email switched off. Failed saves do not send a test
+   using stale credentials. Background refreshes preserve unsaved form edits.
+3. **Accepted by SendGrid is not inbox delivery.** Check spam and SendGrid Email
+   Activity for bounces, suppressions, sender authentication, and recipient
+   rejection. HTTP 401 means replace/check the key; HTTP 403 means check sender
+   verification, Mail Send permission, account status and IP restrictions.
+   DNS/TLS/connectivity failures and rate limits are reported separately. Keys
+   and raw provider error bodies are never returned in API responses.
+4. Enable automatic voicemail email, and set the **notification email on each
+   extension** (or the email in a user's profile for its assigned extension).
+   A mailbox must be active and voicemail-enabled. The same `101` on two DIDs
+   is matched using its full scoped mailbox identity, never a digits-only
+   fallback. Editing an unrelated extension field retains its recipient;
+   explicitly clearing the recipient stops notifications for that mailbox.
+
+### Optional transcript alongside the attachment
+
+Enable **Include a voicemail transcript** and save a separate **OpenAI API key**
+only if you want hosted transcription. This is **off by default**. Enabling it
+uploads eligible voicemail audio to `https://api.openai.com/v1/audio/transcriptions`
+using `whisper-1`; OpenAI API access/billing is separate from SendGrid and from
+any ChatGPT subscription. Review provider data handling, your privacy obligations,
+and caller consent before enabling. No local AI model, GPU, or new container is
+required. The setting is platform-wide for eligible email notifications.
+
+The notification includes a machine-generated transcript in both plain text and
+escaped HTML, **plus the original audio**. Transcripts may contain errors. Only
+the audio, a generic filename and the model name are sent to OpenAI, not separate
+caller, mailbox or recipient metadata (the recording itself can contain personal
+information). Transcripts are not stored in the application database or logs;
+they do appear in the email sent through SendGrid and held by the recipient.
+
+If transcription fails, is empty, or the format is unsupported, the email still
+sends with its audio and an unavailable-transcript note. **Recent email deliveries**
+shows the transcription result separately: `invalid key`, `access denied`,
+`quota or rate limit`, `timeout`, `provider error`, `key unavailable`, or
+`unsupported audio`. Correct the OpenAI key, permissions/billing or connectivity
+as appropriate. A message already accepted by SendGrid is not sent again just
+to retry its transcript. The email test has no audio and **does not test the
+OpenAI key**; verify transcription using a new non-sensitive test voicemail.
+Transcription can be requested again (and billed again) if the email needs a retry.
+WAV is supported; legacy GSM attachments still email without transcription.
+
+### Worker, retries and image-only deployment
+
+Email processing runs in a single non-overlapping background task in the ARI
+worker, not in the loop that checks IVR timeouts. It checks INBOX/urgent messages
+on a roughly 30-second schedule, skips audio modified in the last 10 seconds,
+limits attachments to 20 MiB, and processes up to 20 delivery attempts per scan.
+Large backlogs and provider latency can take longer. Previously undelivered
+INBOX/urgent messages can be sent after fixing a recipient or provider setting.
+Accepted delivery history is retained across this upgrade to avoid re-sending
+old audio; distinct later calls with identical audio have separate identities. A network timeout can leave acceptance unknown, so a
+retry can produce a duplicate; inbox delivery/exactly-once delivery is not
+promised by a SendGrid HTTP response.
+
+Failed attempts have a 60-second retry delay and a five-attempt limit. An atomic
+claim prevents simultaneous workers from sending the same pending message;
+abandoned pending claims become eligible again after ten minutes (within the
+attempt limit). Saving a replacement SendGrid key, changing the sender, or
+re-enabling email resets failed-attempt limits, without re-sending accepted
+emails. Correcting only the OpenAI key does not resend audio already accepted.
+
+For the Windows-built, image-only installation, rebuild/export the **API image
+on the workstation**, transfer/load it on the VM, then recreate **both API and
+ARI-worker services** from that same new image using your existing Compose
+configuration and `--no-build`, in a maintenance window. For the repository
+Compose service names, after loading the new image:
+
+```bash
+cd /opt/Calling_integration
+docker compose up -d --no-build --force-recreate telephony-api telephony-ari
+```
+
+Do not build on the VM. Retain the `.env`,
+`SECRET_KEY`, database and voicemail volumes; back up the database first. SQLite
+and MySQL add the new columns automatically with transcription off by default.
+No Asterisk image, outbound dialplan or proxy configuration change is needed
+for this email update. Run the test email after deployment, then leave a test
+voicemail and verify its recipient, attachment and optional transcript.
+
+Local regressions use mocked SendGrid/OpenAI HTTP calls; they do not prove live
+provider authentication, network access or actual inbox delivery. MySQL upgrades
+are checked against generated reconciliation SQL, not a running MySQL server.

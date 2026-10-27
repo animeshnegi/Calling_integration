@@ -805,3 +805,57 @@ def test_admin_webhook_test_reports_the_endpoint_answer(tmp_path, monkeypatch):
     assert response.json == {"ok": False, "status_code": 503, "error": "HTTP 503"}
 
     assert client.post("/admin/api/webhooks/999999/test", headers=csrf).status_code == 404
+
+
+def test_email_config_rotation_test_and_secret_redaction(tmp_path, monkeypatch):
+    """Admin saves replace keys, test uses saved replacement, state is public."""
+    client = app_client(tmp_path)
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    headers = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
+    patch = {"enabled": False, "api_key": " SG.initial ", "from_email": "verified@example.com",
+             "transcription_enabled": True, "transcription_api_key": "sk.transcription"}
+    assert client.post("/admin/api/email-config", json=patch).status_code == 403
+    saved = client.post("/admin/api/email-config", json=patch, headers=headers)
+    assert saved.status_code == 200
+    assert saved.json["email_config"]["has_api_key"]
+    assert saved.json["email_config"]["has_transcription_api_key"]
+    assert not saved.json["email_config"]["enabled"]
+    assert "SG.initial" not in saved.text and "sk.transcription" not in saved.text
+    assert client.post("/admin/api/email-config", json={"api_key": "SG.replacement"}, headers=headers).status_code == 200
+    calls = []
+    class Accepted:
+        status_code = 202
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or Accepted())
+    assert client.post("/admin/api/email-config/test", json={"email": "invalid"}, headers=headers).status_code == 400
+    assert calls == []
+    result = client.post("/admin/api/email-config/test", json={"email": "recipient@example.com"}, headers=headers)
+    assert result.status_code == 200 and result.json["ok"] is True
+    assert len(calls) == 1 and calls[0][0] == "https://api.sendgrid.com/v3/mail/send"
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer SG.replacement"
+    public = client.get("/admin/api/state")
+    assert "SG.replacement" not in public.text and "sk.transcription" not in public.text
+    assert "_key_enc" not in public.text
+    # Provider failures are actionable but never echo reflected secret bodies.
+    class Rejected:
+        status_code = 403
+        text = "sk.transcription SG.replacement"
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda *a, **kw: Rejected())
+    failed = client.post("/admin/api/email-config/test", json={"email": "recipient@example.com"}, headers=headers)
+    assert failed.status_code == 502 and "Mail Send" in failed.json["error"]
+    assert "SG.replacement" not in failed.text
+
+
+def test_customer_cannot_read_or_change_email_provider_settings(tmp_path, monkeypatch):
+    client = app_client(tmp_path)
+    store = client.application.extensions["settings_store"]
+    store.save_email_config({"enabled": True, "api_key": "SG.private", "from_email": "verified@example.com",
+                             "transcription_enabled": True, "transcription_api_key": "sk.private"})
+    store.save_user({"username": "email-customer", "email": "customer@example.com", "password": "long-customer-password",
+                     "role": "user", "active": True})
+    assert client.post("/admin/login", json={"username": "email-customer", "password": "long-customer-password"}).status_code == 200
+    state = client.get("/admin/api/state").json
+    assert state["email_config"] == {} and state["email_deliveries"] == []
+    headers = {"X-CSRF-Token": state["csrf_token"]}
+    assert client.post("/admin/api/email-config", json={"api_key": "SG.attacker"}, headers=headers).status_code == 403
+    assert client.post("/admin/api/email-config/test", json={"email": "customer@example.com"}, headers=headers).status_code == 403
+    assert store.get_email_config(include_key=True)["api_key"] == "SG.private"

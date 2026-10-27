@@ -60,6 +60,7 @@ function countTo(el, target) {
 
 /* --------------------------------------------------------------- 2. State */
 let csrf = '';
+let emailSettingsDirty = false, emailSettingsBusy = false, profileEmailDirty = false;
 let state = {
   extensions: [], phone_numbers: [], providers: [], webhooks: [], webhook_deliveries: [],
   users: [], customers: [], sip_accounts: [], requests: [], activity: [], notifications: [],
@@ -685,7 +686,7 @@ function renderAll() {
     : myExtension?.recording_enabled
       ? 'Calls on this extension are recorded. Switch it off to stop recording this device.'
       : 'Recording is off for this extension. Switch it on to record calls on this device.';
-  $('profile-email').value = state.email || '';
+  if (!profileEmailDirty) $('profile-email').value = state.email || '';
   markStagger();
 }
 
@@ -1492,15 +1493,19 @@ function renderSettings() {
 
 function renderEmailSettings() {
   const config = state.email_config || {};
-  $('email-enabled').checked = !!config.enabled;
-  $('sendgrid-from').value = config.from_email || '';
-  $('sendgrid-name').value = config.from_name || 'EIP Telephony Voicemail';
+  if (!emailSettingsDirty && !emailSettingsBusy) {
+    $('email-enabled').checked = !!config.enabled;
+    $('sendgrid-from').value = config.from_email || '';
+    $('sendgrid-name').value = config.from_name || 'EIP Telephony Voicemail';
+    $('transcription-enabled').checked = !!config.transcription_enabled;
+  }
   $('sendgrid-key-status').textContent = config.has_api_key ? 'API key configured — leave blank to keep it' : 'No API key configured';
+  $('transcription-key-status').textContent = config.has_transcription_api_key ? 'OpenAI key configured — leave blank to keep it' : 'No OpenAI key configured';
   const rows = state.email_deliveries || [];
   paint('email-delivery-list', rows.length ? `
-    <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
+    <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Transcript</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
     <tbody>${rows.map(x => `<tr>
-      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${statusPill(x.status, `mail-${x.id}`)}</td>
+      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${esc(x.status === 'delivered' ? 'Accepted by SendGrid' : x.status)}</td><td>${esc((x.transcription_status || 'disabled').replaceAll('_', ' '))}</td>
       <td>${esc(x.attempts)}</td><td>${esc(fmtDate(x.updated_at))}</td><td>${esc(x.last_error || '—')}</td>
     </tr>`).join('')}</tbody></table>` : empty('No delivery attempts', 'New voicemail email attempts will appear here.', '✎'));
 }
@@ -4457,24 +4462,55 @@ wire('service-address-reset', 'click', async () => {
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
-wire('email-form', 'submit', async event => {
-  event.preventDefault();
+wire('email-form', 'input', () => { emailSettingsDirty = true; });
+wire('email-form', 'change', () => { emailSettingsDirty = true; });
+wire('profile-email', 'input', () => { profileEmailDirty = true; });
+
+function emailFeedback(message, error = false) {
+  $('email-feedback').textContent = message;
+  notify(message, error);
+}
+async function saveEmailSettings() {
+  const result = await api('/admin/api/email-config', { method: 'POST', body: JSON.stringify({
+    enabled: $('email-enabled').checked, api_key: val('sendgrid-key'),
+    from_email: val('sendgrid-from'), from_name: val('sendgrid-name'),
+    transcription_enabled: $('transcription-enabled').checked, transcription_api_key: val('transcription-key'),
+  }) });
+  $('sendgrid-key').value = '';
+  $('transcription-key').value = '';
+  emailSettingsDirty = false;
+  state.email_config = result.email_config || state.email_config;
+  renderEmailSettings();
+}
+async function emailAction(test) {
+  if (emailSettingsBusy) return;
+  if (!$('email-form').reportValidity()) return;
+  if (test && !val('sendgrid-test')) return emailFeedback('Enter a valid test recipient email.', true);
+  emailSettingsBusy = true;
+  // Freeze the draft while saving. Never clear/overwrite edits made in flight.
+  const controls = [...$('email-form').querySelectorAll('input, button')];
+  controls.forEach(control => { control.disabled = true; });
+  $('email-feedback').textContent = test ? 'Saving settings and requesting test email…' : 'Saving email settings…';
   try {
-    await api('/admin/api/email-config', { method: 'POST', body: JSON.stringify({
-      enabled: $('email-enabled').checked, api_key: val('sendgrid-key'),
-      from_email: val('sendgrid-from'), from_name: val('sendgrid-name'),
-    }) });
-    $('sendgrid-key').value = '';
-    notify('SendGrid configuration saved');
-    await loadState();
-  } catch (error) { notify(error.message, true); }
-});
-wire('test-email', 'click', async () => {
-  try {
-    const result = await api('/admin/api/email-config/test', { method: 'POST', body: JSON.stringify({ email: val('sendgrid-test') }) });
-    notify(result.ok ? 'Test email accepted by SendGrid' : 'Test failed');
-  } catch (error) { notify(error.message, true); }
-});
+    await saveEmailSettings();
+    if (test) {
+      await api('/admin/api/email-config/test', { method: 'POST', body: JSON.stringify({ email: val('sendgrid-test') }) });
+      emailFeedback('Test accepted by SendGrid. Check your inbox/spam and SendGrid Email Activity for delivery.');
+    } else {
+      emailFeedback('Email configuration saved. Blank key fields keep the saved keys.');
+    }
+  } catch (error) {
+    emailFeedback(error.message, true);
+  } finally {
+    emailSettingsBusy = false;
+    controls.forEach(control => { control.disabled = false; });
+    // Updating key status must not depend on a changed polling signature.
+    renderEmailSettings();
+  }
+  await loadState();
+}
+wire('email-form', 'submit', event => { event.preventDefault(); emailAction(false); });
+wire('test-email', 'click', () => emailAction(true));
 wire('profile-recording-form', 'submit', async event => {
   event.preventDefault();
   try {
@@ -4487,6 +4523,7 @@ wire('profile-email-form', 'submit', async event => {
   event.preventDefault();
   try {
     await api('/admin/api/profile/email', { method: 'POST', body: JSON.stringify({ email: val('profile-email') }) });
+    profileEmailDirty = false;
     notify('Voicemail email updated');
     await loadState();
   } catch (error) { notify(error.message, true); }

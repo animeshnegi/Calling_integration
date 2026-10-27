@@ -89,10 +89,14 @@ api_idempotency = Table("api_idempotency", metadata,
     Column("call_id", String(128)), Column("created_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 email_config = Table("email_config", metadata, Column("id", Integer, primary_key=True), Column("sendgrid_api_key_enc", Text, nullable=False),
     Column("from_email", String(254), nullable=False, server_default=""), Column("from_name", String(120), nullable=False, server_default="EIP Telephony Voicemail"),
-    Column("enabled", Integer, nullable=False, server_default="0"), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("enabled", Integer, nullable=False, server_default="0"),
+    Column("transcription_enabled", Integer, nullable=False, server_default="0"),
+    Column("transcription_api_key_enc", String(2048), nullable=False, server_default=""),
+    Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 voicemail_deliveries = Table("voicemail_deliveries", metadata,
     Column("fingerprint", String(128), primary_key=True), Column("mailbox", String(64), nullable=False), Column("recipient", String(254), nullable=False),
     Column("status", String(20), nullable=False, server_default="pending"), Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("transcription_status", String(20), nullable=False, server_default="disabled"),
     Column("last_error", Text), Column("delivered_at", DateTime), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 billing_invoices = Table("billing_invoices", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("user_id", BigInteger, nullable=False), Column("number", String(16), nullable=False),

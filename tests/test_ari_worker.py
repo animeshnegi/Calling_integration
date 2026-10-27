@@ -339,12 +339,12 @@ class FakeVoicemailNotifier:
     def __init__(self):
         self.processed = 0
 
-    def process(self):
+    def process_background(self):
         self.processed += 1
 
 
 class FailingVoicemailNotifier:
-    def process(self):
+    def process_background(self):
         raise RuntimeError("sendgrid unavailable")
 
 

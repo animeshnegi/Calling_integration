@@ -372,6 +372,18 @@ class SettingsStore:
                     last_error TEXT, delivered_at TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Serialize SQLite column checks/additions across booting workers.
+            db.execute("BEGIN IMMEDIATE")
+            # Additive upgrades for image-only deployments with an existing DB.
+            for table, additions in (
+                ("email_config", (("transcription_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                                  ("transcription_api_key_enc", "TEXT NOT NULL DEFAULT ''"))),
+                ("voicemail_deliveries", (("transcription_status", "TEXT NOT NULL DEFAULT 'disabled'"),)),
+            ):
+                existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+                for column, definition in additions:
+                    if column not in existing:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(sip_providers)").fetchall()}
             if "allowed_ips" not in columns:
                 db.execute("ALTER TABLE sip_providers ADD COLUMN allowed_ips TEXT NOT NULL DEFAULT ''")
@@ -1392,9 +1404,11 @@ class SettingsStore:
             raise ValueError("Voicemail notification email is invalid")
         with self._connect() as db:
             row = db.execute(
-                "SELECT id,sip_username,sip_password_enc,voicemail_enabled,voicemail_pin_enc,owner_user_id,phone_number_id "
+                "SELECT id,sip_username,sip_password_enc,voicemail_enabled,voicemail_pin_enc,voicemail_email,owner_user_id,phone_number_id "
                 "FROM extensions WHERE id=?", (int(existing["id"]),)
             ).fetchone() if existing is not None else None
+            if row is not None and "voicemail_email" not in data:
+                voicemail_email = row["voicemail_email"]
             created = row is None
             # Who this extension belongs to, and who is being asked to own it. A
             # request that says nothing about the owner keeps the one the row has,
@@ -3904,50 +3918,114 @@ class SettingsStore:
                 )
 
     def get_email_config(self, include_key: bool = False):
+        from cryptography.fernet import InvalidToken
+
         with self._connect() as db:
-            row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,updated_at FROM email_config WHERE id=1").fetchone()
-        result = {"from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False, "has_api_key": False}
+            row = db.execute("SELECT * FROM email_config WHERE id=1").fetchone()
+        result = {"from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False,
+                  "has_api_key": False, "transcription_enabled": False, "has_transcription_api_key": False}
         if row:
-            result.update({"from_email": row["from_email"], "from_name": row["from_name"], "enabled": bool(row["enabled"]), "has_api_key": bool(row["sendgrid_api_key_enc"]), "updated_at": row["updated_at"]})
+            result.update({"from_email": row["from_email"], "from_name": row["from_name"],
+                           "enabled": bool(row["enabled"]), "has_api_key": bool(row["sendgrid_api_key_enc"]),
+                           "transcription_enabled": bool(row["transcription_enabled"]),
+                           "has_transcription_api_key": bool(row["transcription_api_key_enc"]),
+                           "updated_at": row["updated_at"]})
             if include_key:
-                result["api_key"] = self.decrypt(row["sendgrid_api_key_enc"]) if row["sendgrid_api_key_enc"] else ""
+                for field, column, provider in (("api_key", "sendgrid_api_key_enc", "SendGrid"),
+                                                 ("transcription_api_key", "transcription_api_key_enc", "OpenAI")):
+                    try:
+                        result[field] = self.decrypt(row[column]) if row[column] else ""
+                    except InvalidToken:
+                        result[field] = ""
+                        result[field + "_error"] = f"Saved {provider} key cannot be decrypted. Restore the original SECRET_KEY or save a replacement API key."
         return result
 
     def save_email_config(self, data):
-        from_email = str(data.get("from_email", "")).strip().lower()
-        from_name = str(data.get("from_name", "EIP Telephony Voicemail")).strip()[:120]
-        enabled = bool(data.get("enabled"))
-        key = str(data.get("api_key") or "")
-        if from_email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", from_email):
-            raise ValueError("From email is invalid")
-        existing = self.get_email_config(include_key=True)
-        key = key or existing.get("api_key", "")
-        if enabled and (not key or not from_email):
-            raise ValueError("SendGrid API key and verified from email are required")
-        encrypted = self.encrypt(key) if key else ""
+        if not isinstance(data, dict):
+            raise ValueError("Email configuration must be an object")
+        # Preserve ciphertext directly: replacing a key must work even when the
+        # old key is unreadable (for example after a changed SECRET_KEY).
         with self._connect() as db:
-            db.execute("INSERT INTO email_config(id,sendgrid_api_key_enc,from_email,from_name,enabled) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,from_email=excluded.from_email,from_name=excluded.from_name,enabled=excluded.enabled,updated_at=CURRENT_TIMESTAMP",
-                       (encrypted, from_email, from_name, int(enabled)))
+            row = db.execute("SELECT * FROM email_config WHERE id=1").fetchone()
+            old = dict(row) if row else {}
 
-    def claim_voicemail_delivery(self, fingerprint: str, mailbox: str, recipient: str) -> bool:
-        with self._connect() as db:
-            row = db.execute("SELECT status,attempts FROM voicemail_deliveries WHERE fingerprint=?", (fingerprint,)).fetchone()
-            if row and (row["status"] == "delivered" or row["attempts"] >= 5):
-                return False
-            if row:
-                db.execute("UPDATE voicemail_deliveries SET status='pending',attempts=attempts+1,updated_at=CURRENT_TIMESTAMP WHERE fingerprint=?", (fingerprint,))
-            else:
-                db.execute("INSERT INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts) VALUES(?,?,?,'pending',1)", (fingerprint, mailbox, recipient))
-            return True
+            def flag(name):
+                value = data.get(name, bool(old.get(name, False)))
+                if not isinstance(value, (bool, int)) or value not in (0, 1):
+                    raise ValueError(f"{name} must be true or false")
+                return bool(value)
 
-    def finish_voicemail_delivery(self, fingerprint: str, success: bool, error: str | None = None):
+            def secret(field, column):
+                key = str(data.get(field) or "").strip()
+                if len(key) > 512 or re.search(r"\s", key):
+                    raise ValueError("Paste the API key only, without Bearer, spaces or line breaks")
+                return self.encrypt(key) if key else old.get(column, "")
+
+            enabled = flag("enabled")
+            transcription_enabled = flag("transcription_enabled")
+            from_email = str(data.get("from_email", old.get("from_email", ""))).strip().lower()
+            from_name = str(data.get("from_name", old.get("from_name", "EngineerIP Voicemail"))).strip()[:120]
+            if from_email and (len(from_email) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", from_email)):
+                raise ValueError("From email is invalid")
+            if "\r" in from_name or "\n" in from_name:
+                raise ValueError("Sender name cannot contain line breaks")
+            encrypted = secret("api_key", "sendgrid_api_key_enc")
+            transcription_key = secret("transcription_api_key", "transcription_api_key_enc")
+            if enabled and (not encrypted or not from_email):
+                raise ValueError("SendGrid API key and verified from email are required")
+            if transcription_enabled and not transcription_key:
+                raise ValueError("An OpenAI API key is required to enable transcription")
+            db.execute("INSERT INTO email_config(id,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,transcription_api_key_enc) "
+                       "VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,"
+                       "from_email=excluded.from_email,from_name=excluded.from_name,enabled=excluded.enabled,"
+                       "transcription_enabled=excluded.transcription_enabled,transcription_api_key_enc=excluded.transcription_api_key_enc,updated_at=CURRENT_TIMESTAMP",
+                       (encrypted, from_email, from_name, int(enabled), int(transcription_enabled), transcription_key))
+            # A repaired sender/key should retry exhausted failures, never an
+            # already accepted email or a delivery still in flight.
+            if encrypted != old.get("sendgrid_api_key_enc", "") or from_email != old.get("from_email", "") or (enabled and not old.get("enabled")):
+                db.execute("UPDATE voicemail_deliveries SET attempts=0 WHERE status='failed'")
+
+    def claim_voicemail_delivery(self, fingerprint: str, mailbox: str, recipient: str, *, legacy_fingerprint: str | None = None, received_at: str | None = None) -> bool:
         with self._connect() as db:
-            db.execute("UPDATE voicemail_deliveries SET status=?,last_error=?,delivered_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE delivered_at END,updated_at=CURRENT_TIMESTAMP WHERE fingerprint=?",
-                       ("delivered" if success else "failed", error, int(success), fingerprint))
+            # Pre-v2 IDs used only mailbox+audio. Keep their accepted history
+            # without letting that hash suppress a later, distinct call with
+            # identical audio. Convert with the DB's clock/timezone convention.
+            if legacy_fingerprint and received_at:
+                epoch = "UNIX_TIMESTAMP(COALESCE(delivered_at,updated_at))" if self.database.is_mysql else "CAST(strftime('%s',COALESCE(delivered_at,updated_at)) AS INTEGER)"
+                legacy = db.execute(f"SELECT {epoch} AS accepted_at FROM voicemail_deliveries WHERE fingerprint=? AND status='delivered'", (legacy_fingerprint,)).fetchone()
+                if legacy and legacy["accepted_at"] is not None:
+                    try:
+                        received = datetime.fromisoformat(received_at)
+                        if received.tzinfo is None:
+                            received = received.replace(tzinfo=timezone.utc)
+                        if received.timestamp() <= float(legacy["accepted_at"]):
+                            return False
+                    except (ValueError, TypeError):
+                        return False  # Unknown legacy identity: do not re-mail.
+
+            inserted = db.execute("INSERT OR IGNORE INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts) VALUES(?,?,?,'pending',1)",
+                                  (fingerprint, mailbox, recipient))
+            if inserted.rowcount:
+                return True
+            # Atomic lease/retry claim, including multiple notifier instances.
+            # Use the DB clock so a host timezone/clock difference cannot expire
+            # another worker's lease. The lease exceeds normal HTTP timeouts.
+            retry_time = "(CURRENT_TIMESTAMP - INTERVAL 60 SECOND)" if self.database.is_mysql else "datetime('now','-60 seconds')"
+            stale_time = "(CURRENT_TIMESTAMP - INTERVAL 10 MINUTE)" if self.database.is_mysql else "datetime('now','-10 minutes')"
+            claimed = db.execute(
+                "UPDATE voicemail_deliveries SET status='pending',recipient=?,attempts=attempts+1,updated_at=CURRENT_TIMESTAMP "
+                f"WHERE fingerprint=? AND attempts<5 AND ((status='failed' AND updated_at<={retry_time}) "
+                f"OR (status='pending' AND updated_at<={stale_time}))", (recipient, fingerprint))
+            return bool(claimed.rowcount)
+
+    def finish_voicemail_delivery(self, fingerprint: str, success: bool, error: str | None = None, transcription_status: str = "disabled"):
+        with self._connect() as db:
+            db.execute("UPDATE voicemail_deliveries SET status=?,last_error=?,transcription_status=?,delivered_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE delivered_at END,updated_at=CURRENT_TIMESTAMP WHERE fingerprint=?",
+                       ("delivered" if success else "failed", error, transcription_status, int(success), fingerprint))
 
     def list_voicemail_deliveries(self, limit: int = 50):
         with self._connect() as db:
-            rows = db.execute("SELECT fingerprint,mailbox,recipient,status,attempts,last_error,delivered_at,updated_at FROM voicemail_deliveries ORDER BY updated_at DESC LIMIT ?", (min(100, max(1, limit)),)).fetchall()
+            rows = db.execute("SELECT fingerprint,mailbox,recipient,status,attempts,last_error,transcription_status,delivered_at,updated_at FROM voicemail_deliveries ORDER BY updated_at DESC LIMIT ?", (min(100, max(1, limit)),)).fetchall()
         return [dict(row) for row in rows]
 
     def recording_platform_enabled(self) -> bool:
@@ -5543,14 +5621,17 @@ def register_admin(app, config, on_telephony_change=None):
     def admin_email_config():
         try:
             store.save_email_config(request.get_json(silent=True) or {})
-            return jsonify({"ok": True})
+            return jsonify({"ok": True, "email_config": store.get_email_config()})
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
     @app.post("/admin/api/email-config/test")
     @admin_required
     def admin_email_test():
-        email = str((request.get_json(silent=True) or {}).get("email", "")).strip()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Email test must be an object"}), 400
+        email = str(data.get("email", "")).strip()
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             return jsonify({"error": "Valid test email required"}), 400
         success, error = current_app.extensions["voicemail_notifier"].send_test(email)

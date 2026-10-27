@@ -439,11 +439,17 @@
               <label class="field">Sender name<input id="sendgrid-name" maxlength="120" placeholder="EIP Telephony Voicemail"></label>
               <label class="field">Test recipient<input id="sendgrid-test" type="email" placeholder="admin@example.com"></label>
             </div>
-            <div class="btn-row"><button class="btn primary" type="submit">Save email configuration</button><button class="btn ghost" type="button" id="test-email">Send test email</button></div>
+            <label class="switch"><span class="switch-copy"><b>Include a voicemail transcript</b><small>Optional cloud transcription with OpenAI whisper-1. Disabled by default.</small></span><input id="transcription-enabled" type="checkbox"><i class="track"></i></label>
+            <p class="muted">When enabled, voicemail audio is uploaded to OpenAI for transcription and may incur usage charges on your OpenAI API account. Enable only with appropriate consent. The original audio stays attached; if transcription fails, the audio email is still sent. No local model or GPU is needed.</p>
+            <label class="field">OpenAI API key for transcription<input id="transcription-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><small id="transcription-key-status">No key configured</small></label>
+            <p class="muted">Paste API keys only, without “Bearer”. Blank keeps the saved key; entering a new key replaces it. Use a SendGrid verified sender and a key with Mail Send permission. Set the notification recipient on each extension (or in the assigned user's profile).</p>
+            <div class="btn-row"><button class="btn primary" type="submit" id="save-email">Save email configuration</button><button class="btn ghost" type="button" id="test-email">Save &amp; send test email</button></div>
+            <p class="muted">The test saves the settings above first and works even when automatic emails are disabled. It tests email only, not transcription. SendGrid acceptance is not confirmation of inbox delivery; check spam and SendGrid Email Activity.</p>
+            <p id="email-feedback" role="status" aria-live="polite"></p>
           </div>
         </form>
         <article class="panel" style="margin-top:16px">
-          <div class="panel-head"><div><h2>Recent email deliveries</h2><p>Latest SendGrid attempts and errors</p></div></div>
+          <div class="panel-head"><div><h2>Recent email deliveries</h2><p>SendGrid acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.</p></div></div>
           <div class="panel-body flush"><div id="email-delivery-list" class="table-wrap"></div></div>
         </article>
       </section>

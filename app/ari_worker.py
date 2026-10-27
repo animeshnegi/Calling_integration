@@ -68,7 +68,7 @@ def main() -> None:
             last_webhook_scan = now
         if now - last_voicemail_scan >= 30:
             try:
-                app.extensions["voicemail_notifier"].process()
+                app.extensions["voicemail_notifier"].process_background()
             except Exception:
                 app.logger.exception("Voicemail email processing failed")
             last_voicemail_scan = now
