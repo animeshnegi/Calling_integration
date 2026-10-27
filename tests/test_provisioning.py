@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from dialplan_helpers import dynamic_dial
+
 from app import create_app
 from app import admin as admin_module
 from app.config import Config
@@ -1753,11 +1755,11 @@ def test_a_lines_device_is_dialled_by_its_endpoint_name(tmp_path):
     dialplan = sync.render_dialplan()
     # Every extension of a line is dialled by its own globally unique name; the
     # digits alone name nothing, which is what keeps the two 101s apart.
-    assert "Dial(PJSIP/101-13025550001,30)" in dialplan
-    assert "Dial(PJSIP/101-13025550002,30)" in dialplan
+    assert dynamic_dial("101-13025550001") in dialplan
+    assert dynamic_dial("101-13025550002") in dialplan
     # Only the carrier trunk is dialled as user@trunk; every internal device is
     # named, so no key with its `@` ever reaches PJSIP as a section name.
-    targets = [target for target in re.findall(r"Dial\(PJSIP/([^,)]+)", dialplan) if not target.startswith("${")]
+    targets = re.findall(r"PJSIP_DIAL_CONTACTS\(([^)]+)\)", dialplan)
     assert targets and not any("@" in target for target in targets), targets
     pjsip = sync.render_pjsip()
     assert "\n[101-13025550001]\n" in pjsip and "\n[101-13025550002]\n" in pjsip

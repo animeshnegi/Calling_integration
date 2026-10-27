@@ -749,10 +749,24 @@ class TelephonyConfigSync:
                 web_endpoints[str(row["key"])] = browser_username(username)
 
         def ring_targets(key: str) -> list[str]:
-            """Every endpoint one extension's devices live on."""
-            plain = f"PJSIP/{extension_endpoint(key)}"
+            """Endpoint names whose *registered contacts* can answer a call.
+
+            Returning `PJSIP/<endpoint>` here used to make Asterisk dial the
+            endpoint's AOR list as a URI when no device was registered:
+            `ast_sip_session_create_outgoing()` falls back to `endpoint->aors`,
+            which can be `section,username`. PJSIP then logs "invalid URI
+            'section,username'" for that parallel leg. The dialplan must ask
+            PJSIP_DIAL_CONTACTS() for reachable contacts instead.
+            """
+            plain = extension_endpoint(key)
             web = web_endpoints.get(str(key))
-            return [f"PJSIP/{web}", plain] if web else [plain]
+            return [web, plain] if web else [plain]
+
+        def ring_dial_argument(key: str) -> str:
+            # One Dial, with each endpoint's reachable contacts expanded by
+            # PJSIP_DIAL_CONTACTS(). Empty expansions (unregistered devices)
+            # are ignored by Asterisk's '&' splitter in app_dial.c.
+            return "&".join(f"${{PJSIP_DIAL_CONTACTS({name})}}" for name in ring_targets(key))
 
         def ring_extension(key: str, spoken: str = "") -> list[str]:
             """What it takes to ring one extension, wherever it was reached from.
@@ -779,9 +793,10 @@ class TelephonyConfigSync:
             # Asterisk separates parallel channels inside one Dial() with
             # `&` - a comma separates the application's arguments instead, so
             # `Dial(PJSIP/a,PJSIP/b,30)` would ring only `PJSIP/a` with a
-            # garbage timeout. Targets are joined with `&`; the timeout follows
-            # after the comma.
-            return [f" same => n,Dial({'&'.join(ring_targets(key))},30)", *tail, " same => n,Hangup()"]
+            # garbage timeout. PJSIP_DIAL_CONTACTS() expands each endpoint to
+            # its reachable contact URIs (joined with `&`), or an empty string
+            # for an unregistered device. The timeout follows after the comma.
+            return [f" same => n,Dial({ring_dial_argument(key)},30)", *tail, " same => n,Hangup()"]
 
         def extension_route(dialed: str, key: str) -> list[str]:
             """One dialable three-digit number in this context, ringing one device."""
@@ -974,7 +989,7 @@ class TelephonyConfigSync:
         lines.extend([
             "exten => s,1,NoOp(Inbound provider call ${CALLERID(all)})",
             *(
-                [f" same => n,Dial({'&'.join(ring_targets(default_key))},30)"]
+                [f" same => n,Dial({ring_dial_argument(default_key)},30)"]
                 if default_key else
                 [" same => n,Playback(ss-noservice)"]
             ),

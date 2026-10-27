@@ -243,7 +243,7 @@ For each extension:
 5. Dial `104` from a phone on a line that has one: confirm that line's 104 rings.
    Dial `104` from a line that has none: confirm NOT IN SERVICE.
 6. Dial another number of the same account in full: confirm its own device rings
-   and `asterisk -rvvv` shows `Dial(PJSIP/101-<digits>)`, not a carrier leg.
+   and `asterisk -rvvv` shows `Dial(${PJSIP_DIAL_CONTACTS(101-<digits>)},30)`, not a carrier leg.
 7. Repeat for every number and device.
 
 If the customer sees the trunk username instead of the DID, contact the carrier

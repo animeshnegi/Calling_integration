@@ -11,6 +11,7 @@ import pytest
 
 from app.admin import SettingsStore, browser_username
 from app.telephony_config import TelephonyConfigSync
+from dialplan_helpers import dynamic_dial
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,10 +79,10 @@ def test_101_to_105_is_one_parallel_dial_with_anchored_media_and_no_config_resta
     for row in store.list_extensions():
         digits = row["digits"]
         route = context.split(f"exten => {digits},1,", 1)[1].split("\nexten =>", 1)[0]
-        targets = [f"PJSIP/{digits}"]
+        targets = [digits]
         if webrtc:
-            targets.insert(0, f"PJSIP/{browser_username(row['sip_username'])}")
-        assert f"Dial({'&'.join(targets)},30)" in route
+            targets.insert(0, browser_username(row['sip_username']))
+        assert dynamic_dial(*targets) in route
         assert route.count("Dial(") == 1
         assert "Stasis(" not in route  # Native extension calls do not run ARI transfer/config sync.
         assert "restart" not in route.lower() and "System(" not in route
@@ -205,7 +206,7 @@ def test_customer_line_calls_use_exact_scoped_identity_and_compatible_media(
         assert "webrtc=yes" not in plain and "media_encryption=dtls" not in plain
         assert "direct_media=no" in plain and "rtp_symmetric=yes" in plain
         assert "allow=g722,ulaw,alaw" in plain
-        targets = [f"PJSIP/{canonical}"]
+        targets = [canonical]
         browser_id = browser_username(row["sip_username"])
         if browsers[digits]:
             web = body(pjsip, browser_id)
@@ -213,12 +214,12 @@ def test_customer_line_calls_use_exact_scoped_identity_and_compatible_media(
             assert f"aors={browser_id}" in web
             assert "direct_media=no" in web and "rtp_symmetric=yes" in web
             assert "allow=g722,ulaw,alaw" in web
-            targets.insert(0, f"PJSIP/{browser_id}")
+            targets.insert(0, browser_id)
         else:
             assert f"[{browser_id}]\ntype=endpoint" not in pjsip
         route = context.split(f"exten => {digits},1,", 1)[1].split("\nexten =>", 1)[0]
-        assert f"Dial({'&'.join(targets)},30)" in route
-        assert f"PJSIP/{endpoint_name(other_keys[digits])}" not in route
+        assert dynamic_dial(*targets) in route
+        assert endpoint_name(other_keys[digits]) not in route
         assert "Stasis(" not in route and "System(" not in route
     # Device-mode switches cannot change the working carrier path or identities.
     assert outbound_blocks(dialplan) == outbound_blocks(original_dialplan)

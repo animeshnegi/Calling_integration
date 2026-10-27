@@ -198,6 +198,45 @@ The browser captures the microphone with its own echo cancellation, noise
 suppression and automatic gain, which is what keeps a laptop or handset call
 usable without a headset.
 
+## Why an unregistered parallel leg logged `invalid URI 'section,username'`
+
+A live log may show a WebRTC endpoint ringing normally while the plain parallel
+leg fails like this:
+
+```text
+Dial("PJSIP/ENGINEERIP_102_...-webrtc&PJSIP/102-...,30")
+ERROR: Endpoint '102-...': Could not create dialog to invalid URI
+       '102-...,ENGINEERIP_102_...'.  Is endpoint registered and reachable?
+Called PJSIP/ENGINEERIP_102_...-webrtc
+No one is available to answer at this time
+```
+
+The comma-separated text is the endpoint's **AOR list**, not a SIP URI. In
+Asterisk 22, `ast_sip_session_create_outgoing()` asks
+`ast_sip_location_retrieve_contact_and_aor_from_list_filtered()` for a reachable
+contact; when none is registered it falls back to `endpoint->aors` as the
+outgoing URI. A direct `Dial(PJSIP/section)` therefore hands PJSIP a bare AOR
+list when the desk phone is offline. See the pinned upstream sources:
+[`res/res_pjsip_session.c`](https://github.com/asterisk/asterisk/blob/22.11.0/res/res_pjsip_session.c),
+[`res/res_pjsip/location.c`](https://github.com/asterisk/asterisk/blob/22.11.0/res/res_pjsip/location.c)
+and [`channels/pjsip/dialplan_functions.c`](https://github.com/asterisk/asterisk/blob/22.11.0/channels/pjsip/dialplan_functions.c).
+
+The dialplan now uses Asterisk's `PJSIP_DIAL_CONTACTS()` function for every
+extension endpoint:
+
+```text
+Dial(${PJSIP_DIAL_CONTACTS(<browser-endpoint>)}&${PJSIP_DIAL_CONTACTS(<plain-endpoint>)},30)
+```
+
+That function expands only **reachable contact URIs**. An unregistered device
+expands to an empty string; `app_dial.c` ignores empty `&` positions, so the
+other device still rings in the same one parallel Dial. If no device is
+registered at all, Dial sets `CHANUNAVAIL` and the existing voicemail/no-service
+step runs without an invalid URI. This also preserves the browser/plain media
+separation: each contact is dialled through its own endpoint, so a browser still
+gets DTLS-SRTP and a desk phone still gets plain RTP. Outbound trunk Dial lines
+are unchanged.
+
 ## Silent calls, two-minute drop-outs, and call-screen responsiveness
 
 A browser call that rings but has no audio is usually one of three separate

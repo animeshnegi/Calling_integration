@@ -9,6 +9,7 @@ import sqlite3
 
 from app.admin import SettingsStore
 from app.telephony_config import TelephonyConfigSync
+from dialplan_helpers import dynamic_dial
 from app.voicemail import VoicemailStore
 
 
@@ -231,6 +232,6 @@ def test_an_existing_install_migrates_without_losing_a_device(tmp_path):
     dialplan = sync.render_dialplan()
     context = dialplan.split(f"\n[{TelephonyConfigSync.number_context('+13025550098')}]\n")[1].split("\n\n")[0]
     own_101 = context.split("exten => 101,1")[1].split("exten => ")[0]
-    assert "Dial(PJSIP/101-13025550098,30)" in own_101
+    assert dynamic_dial("101-13025550098") in own_101
     assert "VoiceMail(101-13025550098@engineerip,u)" in own_101
     assert "101-13025550001" not in own_101        # the other line's 101, two desks apart

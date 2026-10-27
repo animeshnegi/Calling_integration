@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.admin import SettingsStore
 from app.telephony_config import TelephonyConfigSync
+from dialplan_helpers import dynamic_dial
 
 
 class DummyAMI:
@@ -242,22 +243,22 @@ def test_the_two_101s_present_their_own_number_and_keep_their_own_mailbox(tmp_pa
     context_b = dialplan.split(f"\n[{TelephonyConfigSync.number_context(line_b)}]\n")[1].split("\n\n")[0]
     own_a = context_a.split("exten => 101,1")[1].split("exten => ")[0]
     own_b = context_b.split("exten => 101,1")[1].split("exten => ")[0]
-    assert "Dial(PJSIP/101-13025550098,30)" in own_a
+    assert dynamic_dial("101-13025550098") in own_a
     assert "VoiceMail(101-13025550098@engineerip,u)" in own_a
-    assert "Dial(PJSIP/101-13025550067,30)" in own_b
+    assert dynamic_dial("101-13025550067") in own_b
     assert "VoiceMail(101-13025550067@engineerip,u)" in own_b
     assert "VoiceMailMain(@engineerip)" in context_a and "VoiceMailMain(@engineerip)" in context_b
 
     # The other line's full number still routes internally - the same customer
     # owns it - straight to that number's own 101 and its own box, not the trunk.
     local_b = context_a.split("exten => +13025550067,1")[1].split("exten => ")[0]
-    assert "Dial(PJSIP/101-13025550067,30)" in local_b
+    assert dynamic_dial("101-13025550067") in local_b
     assert "OUTBOUND_TRUNK" not in local_b
 
     # 104 exists on the first line only: the second line's context has no such
     # extension and plays NOT IN SERVICE instead of borrowing it.
     assert "exten => 104,1" in context_a
-    assert "Dial(PJSIP/104-13025550098,30)" in context_a
+    assert dynamic_dial("104-13025550098") in context_a
     assert "exten => 104,1" not in context_b
     # The first line's 104 is reached from the second only by full number - and
     # only because both lines are one customer's; bare 104 stays NOT IN SERVICE.
@@ -749,9 +750,9 @@ def test_webticked_extension_rings_browser_and_plain_endpoints_separately(tmp_pa
     # Asterisk separates parallel channels with `&` inside the first argument -
     # a comma separates Dial()'s own arguments, so `Dial(a,b,30)` would ring
     # only `a` with a garbage timeout and never reach the phone at all.
-    assert f"Dial(PJSIP/{web_username}-webrtc&PJSIP/101,30)" in block
+    assert dynamic_dial(f"{web_username}-webrtc", "101") in block
     assert f"PJSIP/{web_username}-webrtc,PJSIP/" not in block
-    assert block.count("Dial(PJSIP/") == 1
+    assert block.count("Dial(${PJSIP_DIAL_CONTACTS(") == 1
     # No GotoIf fallback dance: each endpoint rings only its own contacts, so
     # an unavailable browser can never stand between the caller and the phone.
     assert "GotoIf" not in block
@@ -761,8 +762,8 @@ def test_webticked_extension_rings_browser_and_plain_endpoints_separately(tmp_pa
     store.save_extension({"extension": "102", "sip_password": "secret", "active": True})
     desk = sync.render_dialplan().split("exten => 102,1,")[1].split("\nexten")[0]
     assert "same => n(plain)," not in desk
-    assert desk.count("Dial(PJSIP/") == 1
-    assert "Dial(PJSIP/102,30)" in desk
+    assert desk.count("Dial(${PJSIP_DIAL_CONTACTS(") == 1
+    assert dynamic_dial("102") in desk
 
 
 def test_apply_restarts_asterisk_when_an_endpoint_disappears(tmp_path: Path):
@@ -861,10 +862,10 @@ def test_every_number_has_its_own_extension_set(tmp_path: Path):
 
     # This line's own set, dialled on this line's own devices.
     assert f"exten => 101,1,NoOp(EngineerIP extension 101 on {line_a})" in context_a
-    assert f"Dial(PJSIP/101-13025550098,30)" in context_a
+    assert dynamic_dial("101-13025550098") in context_a
     assert "exten => 104,1" in context_a
     assert "exten => 105,1" not in context_a        # 105 is the other line's desk
-    assert "Dial(PJSIP/105-13025550067,30)" in context_b
+    assert dynamic_dial("105-13025550067") in context_b
     # The same digits on the other number are a different device - and a number
     # that has no 104 plays NOT IN SERVICE rather than borrowing one.
     assert "exten => 104,1" not in context_b
@@ -876,7 +877,7 @@ def test_every_number_has_its_own_extension_set(tmp_path: Path):
     # inbound destination on the platform, and its other desks are refused.
     assert "exten => +13025550011,1" in context_a and "exten => _+13025550011*X.,1" in context_a
     assert "exten => +13025550011*101" not in context_a
-    assert f"Dial(PJSIP/101-13025550011,30)" in north_context
+    assert dynamic_dial("101-13025550011") in north_context
     # Northwind reaches meridian's line by its full number, never its desks.
     assert "exten => +13025550098,1" in north_context
     assert "+13025550098*104" not in north_context and "+13025550098*101,1" not in north_context
@@ -1017,7 +1018,7 @@ def test_a_customer_dials_its_own_numbers_internally(tmp_path: Path):
     # 105 dials the customer's other number and lands on that number's 117 ...
     route = context_a.split("exten => 13025550067,1,")[1].split("\nexten")[0]
     assert "local number 13025550067 rings extension 117" in route
-    assert "Dial(PJSIP/117-13025550067,30)" in route
+    assert dynamic_dial("117-13025550067") in route
     # ... and the carrier trunk is nowhere in that call.
     assert "OUTBOUND_TRUNK" not in route
     # The + form is what a phone with a country-code dial plan sends.
@@ -1025,12 +1026,12 @@ def test_a_customer_dials_its_own_numbers_internally(tmp_path: Path):
     # Its own number is dialable the same way - and it is its own 105, not the
     # other line's 117.
     assert "local number 13025550098 rings extension 105" in context_b
-    assert "Dial(PJSIP/105-13025550098,30)" in context_b
+    assert dynamic_dial("105-13025550098") in context_b
 
     # Another customer's number is dialled by its full number and rings its own
     # inbound destination on the platform - it never leaves through the trunk.
     assert "exten => 13025550011,1,NoOp(EngineerIP local number 13025550011 rings extension 201)" in context_a
-    assert "Dial(PJSIP/201-13025550011,30)" in context_a
+    assert dynamic_dial("201-13025550011") in context_a
     # ...but that customer's other desks are NOT IN SERVICE from here.
     assert "exten => _13025550011*X.,1" in context_a
     assert "exten => 13025550011*201" not in context_a
@@ -1102,7 +1103,7 @@ def test_dialling_an_extension_nobody_is_signed_in_as_says_so(tmp_path: Path):
     dialplan = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_dialplan()
 
     reachable = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
-    assert "Dial(PJSIP/101,30)" in reachable
+    assert dynamic_dial("101") in reachable
     assert 'ExecIf($["${DIALSTATUS}" = "CHANUNAVAIL"]?Playback(ss-noservice))' in reachable
     assert "VoiceMail(101@engineerip,u)" not in reachable
 
@@ -1135,9 +1136,9 @@ def test_an_extension_that_answers_in_the_browser_is_dialled_on_both_endpoints(t
 
     dialplan = sync.render_dialplan()
     browser = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
-    assert f"Dial(PJSIP/{web_username}-webrtc&PJSIP/101,30)" in browser
+    assert dynamic_dial(f"{web_username}-webrtc", "101") in browser
     desk = dialplan.split("exten => 102,1,")[1].split("\nexten")[0]
-    assert "Dial(PJSIP/102,30)" in desk
+    assert dynamic_dial("102") in desk
     assert f"PJSIP/{desk_username}" not in desk
 
     # The WebRTC settings really are on the endpoint that is dialled for the
@@ -1194,11 +1195,11 @@ def test_a_full_number_of_any_platform_line_is_dialled_inside_the_platform(tmp_p
     # Meridian's own second line: its inbound destination, and its 105 by full number.
     assert "exten => +13025550067,1,NoOp(EngineerIP local number +13025550067 rings extension 101)" in context_a
     assert "exten => +13025550067*105,1" in context_a
-    assert "Dial(PJSIP/105-13025550067,30)" in context_a
+    assert dynamic_dial("105-13025550067") in context_a
 
     # Northwind's line: rings its inbound destination, never its other extensions.
     assert "exten => +13025550011,1,NoOp(EngineerIP local number +13025550011 rings extension 101)" in context_a
-    assert "Dial(PJSIP/101-13025550011,30)" in context_a
+    assert dynamic_dial("101-13025550011") in context_a
     assert "exten => _+13025550011*X.,1" in context_a
     assert "exten => +13025550011*101" not in context_a
     assert "exten => +13025550011*101,1" in north_context          # northwind dials its own 101 by number
@@ -1293,3 +1294,24 @@ def test_the_call_handling_tab_carries_the_mailbox_settings(tmp_path: Path):
     dialplan = sync.render_dialplan()
     assert "exten => *97,1,NoOp(EngineerIP voicemail login)" in dialplan
     assert "VoiceMailMain(@engineerip)" in dialplan          # greetings are recorded here
+
+
+def test_extension_dial_uses_reachable_contacts_not_the_aor_list_as_a_uri(tmp_path):
+    """Regression for the live `invalid URI '102-...,USERNAME'` error.
+
+    Asterisk's PJSIP session creation falls back to `endpoint->aors` as a URI
+    when no contact is reachable. That list can contain a comma, so a plain
+    `Dial(PJSIP/section)` logs an invalid URI. Dialing reachable contacts via
+    PJSIP_DIAL_CONTACTS() keeps one parallel Dial and skips unregistered legs.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "102", "sip_password": "secret", "webrtc_enabled": True, "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    dialplan = sync.render_dialplan()
+    assert "PJSIP_DIAL_CONTACTS(" in dialplan
+    assert "Dial(PJSIP/102" not in dialplan
+    assert "Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)" in dialplan  # outbound unchanged
+    for line in dialplan.splitlines():
+        if "Dial(" in line and "PJSIP_DIAL_CONTACTS" in line:
+            first = line.split("Dial(",1)[1].split(",30)",1)[0]
+            assert "," not in first, line
