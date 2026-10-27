@@ -34,8 +34,10 @@ def test_release_verification_scripts_are_valid_and_allow_no_server_build():
         assert subprocess.run(["bash", "-n", str(ROOT / name)], capture_output=True, text=True).returncode == 0
     finish = (ROOT / "scripts/finish-deployment.py").read_text()
     assert "--force-recreate" in finish and "--no-build" in finish
-    assert "--network none" in finish and "check-voicemail-transcription.py" in finish
+    assert "\"--network\", \"none\"" in finish and "check-voicemail-transcription.py" in finish
     assert "--apply" in finish and "--connect-network" in finish and "no-store" in finish
+    assert "--sample" in finish and "refresh-tools-from-image" in finish
+    assert "if args.refresh_tools_from_image:" in finish
     assert "docker compose build" not in finish
     wrapper = (ROOT / "scripts/verify-release.sh").read_text()
     assert "--verify-only" in wrapper and "set -o pipefail" not in wrapper
@@ -49,6 +51,7 @@ def test_release_checklist_covers_images_files_keys_transcription_and_softphone(
         "docker image save --output", "scp ", "sha256sum -c", "docker image load --input",
         "tar -xzf /tmp/softphone-proxy-tools.tar.gz", "Never upload or overwrite `.env`",
         "python3 scripts/finish-deployment.py", "--image-tar",
+        "--sample /tmp/goforward-8k.wav", "bind-mounting",
         "IMAGE_TAG=\"$TAG\" docker compose up -d --no-build --force-recreate",
         "telephony-api telephony-ari", "bash scripts/verify-release.sh",
         "Save & send test email", "HTTP 401", "HTTP 403", "Recent email deliveries",
@@ -97,6 +100,13 @@ def test_offline_self_check_works_from_the_image_deploy_kit_layout(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert '"status": "transcribed"' in result.stdout
+    explicit = subprocess.run(
+        [sys.executable, str(tmp_path / "deploy-kit/scripts/check-voicemail-transcription.py"),
+         "--sample", str(tmp_path / "deploy-kit/deploy/fixtures/goforward-8k.wav")],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert explicit.returncode == 0, explicit.stderr
+    assert '"status": "transcribed"' in explicit.stdout
 
 
 def test_legacy_verify_wrapper_runs_even_with_windows_crlf(tmp_path):
@@ -160,3 +170,28 @@ def test_finish_deployment_removes_helper_container_after_failed_copy(monkeypatc
     with pytest.raises(RuntimeError, match="/app/deploy-kit"):
         module.extract_deploy_kit("engineerip/telephony-api:latest")
     assert ["docker", "rm", "helper-container-id"] in calls
+
+
+def test_finish_deployment_requires_host_tools_archive(tmp_path, monkeypatch):
+    module = load_script("finish-deployment.py", "finish_deployment_requires_test")
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    with pytest.raises(RuntimeError, match="Extract softphone-proxy-tools.tar.gz"):
+        module.require_host_tools()
+
+
+def test_finish_deployment_offline_check_uses_corrected_host_script(monkeypatch):
+    module = load_script("finish-deployment.py", "finish_deployment_offline_test")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append([str(part) for part in argv])
+        return SimpleNamespace(returncode=0, stdout='{"status": "transcribed"}\n', stderr="")
+
+    monkeypatch.setattr(module, "run", fake_run)
+    module.offline_transcription("engineerip/telephony-api:latest")
+    command = calls[0]
+    assert "--network" in command and "none" in command
+    assert any(part.endswith("check-voicemail-transcription.py:/tmp/check-voicemail-transcription.py:ro")
+               for part in command)
+    assert any(part.endswith("goforward-8k.wav:/tmp/goforward-8k.wav:ro") for part in command)
+    assert command[-2:] == ["--sample", "/tmp/goforward-8k.wav"]

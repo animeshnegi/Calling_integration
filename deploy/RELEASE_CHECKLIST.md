@@ -40,16 +40,22 @@ tag and the standard domain, the second command is simply:
 python3 scripts/finish-deployment.py
 ```
 
+An already loaded image can be verified with the new small tools archive; no
+full image rebuild is needed just to fix these host-side steps. If verification
+reports `engine_unavailable` or a missing `no-store` header, rebuild the API
+image from the current source on Windows.
+
 That one script:
 
 1. verifies/loads the image archive and checks its architecture;
 2. starts/recreates all Compose services with `--no-build`—so
    `engineerip-asterisk` exists before the proxy installer runs;
-3. extracts `/app/deploy-kit`, removes its temporary stopped container, and
-   normalizes Windows CRLF line endings;
+3. uses the corrected host tools from the extracted archive and normalizes
+   Windows CRLF line endings—no `tools_container`/`docker cp` step;
 4. waits for Asterisk's direct SIP WebSocket;
 5. dry-runs, applies and validates the exact `/ws` route;
-6. runs the offline transcription self-test with `--network none`;
+6. runs the offline transcription self-test with `--network none`, bind-mounting
+   the corrected host script/sample into the loaded image;
 7. checks the public `wss` upgrade, `admin.js` no-store header, and Compose
    state.
 
@@ -335,10 +341,16 @@ not test transcription. To test the recognizer without a voicemail:
 ```bash
 cd /opt/Calling_integration
 TAG=20261027-local1
-docker run --rm --network none "engineerip/telephony-api:$TAG" python \
-  /app/deploy-kit/scripts/check-voicemail-transcription.py
+docker run --rm --network none -w /app \
+  -v "$PWD/scripts/check-voicemail-transcription.py:/tmp/check.py:ro" \
+  -v "$PWD/deploy/fixtures/goforward-8k.wav:/tmp/goforward-8k.wav:ro" \
+  "engineerip/telephony-api:$TAG" python /tmp/check.py \
+  --sample /tmp/goforward-8k.wav
 # Expected: "status": "transcribed", "go forward ten meters"
 ```
+
+Bind-mounting the corrected host script and sample also verifies an older
+loaded image whose `/app/deploy-kit` still has the former wrong fixture path.
 
 Status meanings:
 

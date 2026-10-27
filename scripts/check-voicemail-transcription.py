@@ -10,11 +10,14 @@ It also works from a source checkout by running:
 
     python3 scripts/check-voicemail-transcription.py
 
-Only the public sample transcript is printed. No SendGrid key, voicemail,
-customer data, or application database is read.
+A deployment script can bind-mount the corrected host script and sample into
+an older image and pass `--sample /tmp/goforward-8k.wav`. Only the public
+sample transcript is printed. No SendGrid key, voicemail, customer data, or
+application database is read.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -36,16 +39,19 @@ def find_sample(root: Path) -> Path | None:
     return next((path for name in SAMPLE_PATHS if (path := root / name).is_file()), None)
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sample", help="explicit WAV path, e.g. a host file bind-mounted into an older image")
+    args = parser.parse_args(argv)
     root = find_app_root()
     if root is None:
         print(json.dumps({"status": "engine_unavailable", "error": "app/local_transcription.py not found"}))
         print("FAIL: run this inside the imported API image or updated source checkout.", file=sys.stderr)
         return 1
-    sample = find_sample(root)
-    if sample is None:
+    sample = Path(args.sample) if args.sample else find_sample(root)
+    if sample is None or not sample.is_file():
         print(json.dumps({"status": "engine_unavailable", "error": "bundled speech sample not found"}))
-        print("FAIL: deploy/fixtures/goforward-8k.wav is missing from this image.", file=sys.stderr)
+        print("FAIL: speech sample is missing; extract the tools archive or pass --sample PATH.", file=sys.stderr)
         return 1
     sys.path.insert(0, str(root))
     from app.local_transcription import transcribe

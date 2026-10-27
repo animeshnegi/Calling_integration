@@ -36,12 +36,13 @@ cd /opt/Calling_integration
 python3 scripts/finish-deployment.py latest tel.engineerip.com
 ```
 
-The script starts/recreates services, refreshes host tools from the loaded
-image, waits for Asterisk, installs/validates the `/ws` route, verifies offline
-transcription, public WebSocket, fresh admin UI and Compose state. It removes
-the temporary `docker create` helper container automatically. No server build,
-Git pull, or manual `tools_container` command is needed. The rest of this file
-is the manual fallback and troubleshooting reference.
+The script starts/recreates services, uses the corrected host tools from this
+archive, waits for Asterisk, installs/validates the `/ws` route, verifies
+offline transcription, public WebSocket, fresh admin UI and Compose state. It
+does **not** need a `tools_container`, `docker cp`, server build, or Git pull.
+The offline check bind-mounts the corrected host script/sample into the loaded
+image, so an older image with a stale `/app/deploy-kit` still verifies. The rest
+of this file is the manual fallback and troubleshooting reference.
 
 ## A. Repair the existing deployment with the small archive
 

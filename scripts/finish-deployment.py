@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """One command after copying a built image to the VM.
 
-Full deployment (maintenance window: recreates the Compose services):
+After extracting softphone-proxy-tools.tar.gz into /opt/Calling_integration,
+full deployment (maintenance window: recreates the Compose services):
 
     python3 scripts/finish-deployment.py latest tel.engineerip.com
 
-Checks only, without starting containers or changing nginx:
+No `tools_container`/`docker cp` step is required. The script uses the host
+tools archive; only `--refresh-tools-from-image` copies /app/deploy-kit from
+the loaded image. Checks only, without starting containers or changing nginx:
 
     python3 scripts/finish-deployment.py --verify-only
 
@@ -57,6 +60,22 @@ def normalise_text_files():
                 data = path.read_bytes()
                 if b"\r\n" in data:
                     path.write_bytes(data.replace(b"\r\n", b"\n"))
+
+
+def require_host_tools():
+    required = (
+        "scripts/install-softphone-proxy.py",
+        "scripts/check-softphone-websocket.py",
+        "scripts/check-voicemail-transcription.py",
+        "deploy/fixtures/goforward-8k.wav",
+        "deploy/RELEASE_CHECKLIST.md",
+    )
+    missing = [name for name in required if not (ROOT / name).is_file()]
+    if missing:
+        raise RuntimeError(
+            "Missing host tools: " + ", ".join(missing) +
+            f". Extract softphone-proxy-tools.tar.gz into {ROOT} first; docker load alone does not copy host files."
+        )
 
 
 def load_image(archive):
@@ -150,9 +169,21 @@ def check_architecture(image):
 
 
 def offline_transcription(image):
-    # --network none proves no speech API or runtime model download is needed.
-    result = run(["docker", "run", "--rm", "--network", "none", image, "python",
-                  "/app/deploy-kit/scripts/check-voicemail-transcription.py"], capture=True)
+    # Use the CORRECTED script/sample from the host-tools archive. An already
+    # loaded older image can still contain a self-test with the wrong sample
+    # path; bind-mounting avoids requiring a full image rebuild just to verify.
+    checker = ROOT / "scripts/check-voicemail-transcription.py"
+    sample = ROOT / "deploy/fixtures/goforward-8k.wav"
+    for path in (checker, sample):
+        if not path.is_file():
+            raise RuntimeError(f"Missing {path.relative_to(ROOT)}. Extract softphone-proxy-tools.tar.gz into {ROOT} first.")
+    result = run([
+        "docker", "run", "--rm", "--network", "none", "-w", "/app",
+        "-v", f"{checker}:/tmp/check-voicemail-transcription.py:ro",
+        "-v", f"{sample}:/tmp/goforward-8k.wav:ro",
+        image, "python", "/tmp/check-voicemail-transcription.py",
+        "--sample", "/tmp/goforward-8k.wav",
+    ], capture=True)
     print(result.stdout.strip())
     if result.stderr.strip():
         print(result.stderr.strip(), file=sys.stderr)
@@ -190,21 +221,26 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tag", nargs="?", default=DEFAULT_TAG, help=f"loaded image tag (default: {DEFAULT_TAG})")
     parser.add_argument("domain", nargs="?", default=DEFAULT_DOMAIN, help=f"public HTTPS host (default: {DEFAULT_DOMAIN})")
-    parser.add_argument("--verify-only", action="store_true", help="run checks only; no start, extraction, or nginx changes")
+    parser.add_argument("--verify-only", action="store_true", help="run checks only; no service start or nginx changes")
     parser.add_argument("--skip-proxy", action="store_true", help="start and verify but do not modify the 1Panel/nginx route")
     parser.add_argument("--proxy-container", help="exact nginx/OpenResty container name when auto-detection is ambiguous")
     parser.add_argument("--image-tar", help="optional image .tar/.tar.gz to docker load before finishing")
+    parser.add_argument("--refresh-tools-from-image", action="store_true",
+                        help="optional: overwrite host tools with /app/deploy-kit from the loaded image")
     args = parser.parse_args(argv)
     image = f"engineerip/telephony-api:{args.tag}"
     try:
         normalise_text_files()
+        require_host_tools()
         if args.image_tar:
             load_image(args.image_tar)
         if not args.verify_only:
             print("Use this in a maintenance window: services are recreated.\n")
             start_services(args.tag)
-            extract_deploy_kit(image)
-            normalise_text_files()
+            if args.refresh_tools_from_image:
+                extract_deploy_kit(image)
+                normalise_text_files()
+                require_host_tools()
             wait_for_direct_websocket()
             install_proxy(args.domain, args.proxy_container, args.skip_proxy)
         verify(args.tag, args.domain, image)
