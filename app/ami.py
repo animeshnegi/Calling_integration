@@ -110,6 +110,11 @@ class AsteriskAMI:
     def reload_voicemail(self) -> dict[str, str]:
         return self.action("Reload", Module="app_voicemail.so")
 
+    def reload_rtp(self) -> dict[str, str]:
+        # Re-read rtp.conf / its ICE candidate include for new WebRTC calls.
+        # This is a reload, not a module unload or an Asterisk restart.
+        return self.action("Reload", Module="res_rtp_asterisk.so")
+
     def restart(self, verify_timeout: float = 20.0) -> None:
         """Restart Asterisk and verify it comes back.
 

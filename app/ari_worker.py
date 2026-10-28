@@ -52,8 +52,15 @@ def main() -> None:
     last_voicemail_scan = 0.0
     last_webhook_scan = 0.0
     last_recording_scan = 0.0
+    last_config_retry = 0.0
     while True:
         now = time.monotonic()
+        if now - last_config_retry >= 30:
+            try:
+                app.extensions["telephony_config_sync"].retry_pending()
+            except Exception:
+                app.logger.exception("Pending Asterisk RTP/configuration retry failed")
+            last_config_retry = now
         if now - last_recording_scan >= 30:
             try:
                 service.reconcile_recordings()

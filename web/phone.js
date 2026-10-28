@@ -4,7 +4,11 @@ const input=$("number-input"),display=$("dial-display"),hint=$("dial-hint"),stat
 const installBtn=$("install-btn"),remoteAudio=$("remote-audio"),settingsDialog=$("settings-dialog"),loginScreen=$("login-screen"),phoneApp=$("phone-app");
 let deferredInstall=null,ua=null,currentSession=null,currentCallAnswered=false,currentCallStatus="completed",callStartedAt=null,timer=null,muted=false,held=false;
 let currentSipSettings=null,remoteStream=null,audioPlayPending=false,sipEverRegistered=false;
-let keepaliveTimer=null,reconnectTimer=null,qualityTimer=null;
+let keepaliveTimer=null,reconnectTimer=null,qualityTimer=null,preparationTimer=null,currentIceCleanup=null;
+/* JsSIP waits for ICE gathering to finish before sending an INVITE or a 200
+   answer. Some unreachable STUN/TURN servers never finish before the PBX's
+   ring timeout. Once candidates exist, bound that wait without inventing any. */
+const ICE_GATHER_LIMIT_MS=8000,CALL_SETUP_LIMIT_MS=20000;
 /* A REGISTER is both a contact refresh and a WebSocket keepalive. Some reverse
    proxies/CDNs close an idle WSS around 100-120 seconds; without traffic the
    phone silently stops receiving calls until the page is reloaded. */
@@ -95,7 +99,8 @@ function resetRemoteAudio(){
    will make a sound. The call and answer buttons are gestures; a later tap
    anywhere can still unlock the remote track if that first attempt was blocked. */
 doc.addEventListener("pointerdown",()=>{if(audioPlayPending)playRemoteAudio()},{capture:true,passive:true});
-function showNumber(){const v=input.value.trim();display.textContent=v||"Enter number";hint.textContent=v?"Ready to call":"Direct paste is supported"}
+function showNumber(){const v=input.value.trim();display.textContent=v||"Enter number";hint.classList.remove("error");hint.textContent=v?"Ready to call":"Direct paste is supported"}
+function showDialError(message){nav("dialer-view");hint.classList.add("error");hint.textContent=message}
 function addRecent(number,direction="outgoing",status="completed"){const rows=JSON.parse(localStorage.getItem(recentsKey)||"[]");rows.unshift({number,direction,status,at:Date.now()});localStorage.setItem(recentsKey,JSON.stringify(rows.slice(0,100)))}
 function formatTime(ts){const d=new Date(ts);return d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})}
 function renderRecents(rows){
@@ -254,19 +259,19 @@ function addRemoteTrack(ev){
 function bindPeer(pc){
   if(!pc||pc.__eipAudioBound)return;
   pc.__eipAudioBound=true;
-  const handler=ev=>{if(ev)ev.__eipHandled=true;addRemoteTrack(ev)};
+  const handler=ev=>{if(!currentSession||currentSession.connection!==pc)return;if(ev)ev.__eipHandled=true;addRemoteTrack(ev)};
   if(typeof pc.addEventListener==="function"){
     pc.addEventListener("track",handler);
     // Keep ontrack for browsers/tests that dispatch through the property, but
     // never handle one event twice when both dispatchers fire.
     pc.ontrack=ev=>{if(!ev||!ev.__eipHandled)handler(ev)};
     pc.addEventListener("iceconnectionstatechange",()=>{
-      if(!currentSession)return;
+      if(!currentSession||currentSession.connection!==pc)return;
       const ice=pc.iceConnectionState;
-      if(ice==="checking")setCallStatus("Connecting audio…");
-      else if(ice==="connected"||ice==="completed")setCallStatus("Connected");
+      if(ice==="checking")setCallStatus(currentCallAnswered?"Connecting audio…":"Preparing call and network connection…");
+      else if((ice==="connected"||ice==="completed")&&currentCallAnswered)setCallStatus("Connected");
       else if(ice==="disconnected")setCallStatus("Network interrupted — reconnecting audio…");
-      else if(ice==="failed")setCallStatus("Media connection failed")
+      else if(ice==="failed")setCallStatus("Media connection failed. Check ICE/TURN and the server's RTP UDP ports.")
     })
   }else{
     const previous=pc.ontrack;
@@ -281,7 +286,16 @@ function bindPeer(pc){
 }
 function attachRemoteAudio(session){
   bindPeer(session&&session.connection);
-  session.on("peerconnection",e=>bindPeer((e&&e.peerconnection)||e))
+  session.on("peerconnection",e=>{if(currentSession===session)bindPeer((e&&e.peerconnection)||e)})
+}
+function clearPreparationTimer(){if(preparationTimer){clearTimeout(preparationTimer);preparationTimer=null;}}
+function startPreparationTimer(session){
+  clearPreparationTimer();
+  preparationTimer=setTimeout(()=>{
+    preparationTimer=null;
+    if(currentSession!==session||currentCallAnswered)return;
+    endCall("Call setup timed out. Allow microphone access and check the ICE/STUN/TURN connection, then try again.",true,"failed");
+  },CALL_SETUP_LIMIT_MS)
 }
 function attachSession(session,incoming=false){
   currentSession=session;currentCallAnswered=false;currentCallStatus="completed";
@@ -294,15 +308,54 @@ function attachSession(session,incoming=false){
   $("hangup-btn").classList.toggle("hidden",incoming);
   $("active-label").textContent=incoming?"Incoming call":"Calling";
   $("call-btn").disabled=true;
-  callStartedAt=incoming?null:Date.now();startTimer();
-  setCallStatus(incoming?"Incoming call":"Connecting…");setCallPhase(incoming?"incoming":"dialing");
-  session.on("progress",()=>{setCallStatus("Ringing…");setCallPhase("ringing")});
-  session.on("accepted",()=>{currentCallAnswered=true;setCallStatus("Connected");setCallPhase("connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
-  session.on("confirmed",()=>{currentCallAnswered=true;setCallStatus("Connected");setCallPhase("connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
-  session.on("getusermediafailed",()=>endCall("Microphone unavailable. Allow microphone access and retry.",true,"failed"));
-  session.on("ended",()=>endCall("Call ended",false,"completed"));
-  session.on("failed",e=>endCall("Call failed"+(e?.cause?": "+e.cause:""),false,"failed"));
-  attachRemoteAudio(session)
+  callStartedAt=null;startTimer();
+  setCallStatus(incoming?"Incoming call":"Preparing call… Allow microphone access if prompted.");setCallPhase(incoming?"incoming":"dialing");
+  const active=()=>currentSession===session;
+  // JsSIP normally waits for ICE gathering to finish before emitting the
+  // outgoing INVITE or the incoming 200 OK. Give STUN/TURN a chance, but once
+  // at least one candidate exists, do not wait beyond the PBX's ring timeout.
+  let candidateTimer=null,releaseCandidate=null;
+  const clearCandidateTimer=()=>{if(candidateTimer!==null)clearTimeout(candidateTimer);candidateTimer=null;releaseCandidate=null};
+  currentIceCleanup=clearCandidateTimer;
+  session.on("icecandidate",event=>{
+    if(!active()||!event||typeof event.ready!=="function")return;
+    releaseCandidate=event.ready;
+    if(candidateTimer===null)candidateTimer=setTimeout(()=>{
+      const ready=releaseCandidate;candidateTimer=null;releaseCandidate=null;
+      if(active()&&ready)ready()
+    },ICE_GATHER_LIMIT_MS)
+  });
+  session.on("sdp",event=>{if(event?.originator==="local")clearCandidateTimer()});
+  session.on("sending",()=>{if(active())clearPreparationTimer()});
+  session.on("progress",()=>{if(active()){setCallStatus("Ringing…");setCallPhase("ringing")}});
+  const accepted=()=>{
+    if(!active())return;
+    clearPreparationTimer();currentCallAnswered=true;$("active-label").textContent="Call";
+    const ice=session.connection?.iceConnectionState;
+    setCallStatus(ice==="connected"||ice==="completed"?"Connected":"Connecting audio…");
+    setCallPhase("connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)
+  };
+  session.on("accepted",accepted);session.on("confirmed",accepted);
+  session.on("getusermediafailed",()=>{if(active())endCall("Microphone unavailable. Allow microphone access and retry.",true,"failed")});
+  // JsSIP can emit failed before getusermediafailed, and an incoming SDP
+  // creation error may otherwise leave the screen stuck after it replies 500.
+  ["peerconnection:createofferfailed","peerconnection:createanswerfailed","peerconnection:setlocaldescriptionfailed"].forEach(name=>
+    session.on(name,()=>{if(active()&&!currentCallAnswered)endCall("Could not prepare call audio. Check microphone and browser audio permissions.",true,"failed")})
+  );
+  const mediaFailure="Media connection failed. Check ICE/TURN and the server's RTP UDP ports.";
+  session.on("ended",e=>{
+    clearCandidateTimer();if(!active())return;
+    if(/RTP Timeout/i.test(String(e?.cause||"")))endCall(mediaFailure,false,"failed");
+    else endCall("Call ended",false,"completed")
+  });
+  session.on("failed",e=>{
+    clearCandidateTimer();if(!active())return;
+    const cause=String(e?.cause||"");
+    const message=/user denied media access/i.test(cause)?"Microphone unavailable. Allow microphone access and retry.":/RTP Timeout/i.test(cause)?mediaFailure:"Call failed"+(cause?": "+cause:"");
+    endCall(message,false,"failed")
+  });
+  attachRemoteAudio(session);
+  if(!incoming)startPreparationTimer(session)
 }
 function startTimer(){
   clearInterval(timer);timer=setInterval(()=>{
@@ -324,6 +377,7 @@ function endCall(message="Call ended",terminate=true,status="completed"){
   const session=currentSession;
   if(!session)return;
   currentSession=null;
+  clearPreparationTimer();if(currentIceCleanup)currentIceCleanup();currentIceCleanup=null;
   if(terminate){currentCallStatus=status;try{if(!session.isEnded?.())session.terminate()}catch{}}
   const number=input.value.trim();
   const direction=session.direction==="incoming"?"incoming":"outgoing";
@@ -332,6 +386,7 @@ function endCall(message="Call ended",terminate=true,status="completed"){
   clearInterval(timer);callStartedAt=null;stopQualityWatch();resetRemoteAudio();setCallPhase("ended");
   $("dtmf-panel").classList.add("hidden");$("dtmf-btn").setAttribute("aria-expanded","false");
   setCallStatus(message);$("active-call-view").classList.add("hidden");$("call-timer").textContent="00:00";
+  if(status==="failed")showDialError(message); // Keep the reason visible after the call view closes.
   $("call-btn").disabled=false;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");loadRecents()
 }
 
@@ -475,27 +530,26 @@ async function startCall(){
                      (typeof ua.isRegistered==="function"&&!ua.isRegistered());
   if(disconnected){ensureSipConnection();$("dial-hint").textContent="Reconnecting to SIP — try the call again in a moment.";return}
   if(currentSession)return;
-  playRemoteAudio();  // Unlock the media element inside the user's click.
+  showNumber();playRemoteAudio();  // Unlock the media element inside the user's click.
   try{
     const session=ua.call(sipTarget(number),{mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig(),rtcOfferConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
     attachSession(session,false)
-  }catch(err){$("dial-hint").textContent=err.message}
+  }catch(err){showDialError("Could not start call: "+(err?.message||err))}
 }
 $("call-btn").onclick=startCall;
 
 $("answer-btn").onclick=()=>{
-  if(!currentSession)return;
+  const session=currentSession;if(!session)return;
   playRemoteAudio();  // The answer gesture is the best chance to unlock audio.
-  setCallStatus("Connecting…");setCallPhase("answering");
+  setCallStatus("Preparing answer… Allow microphone access if prompted.");setCallPhase("answering");
+  $("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Answering";
+  startPreparationTimer(session);
   try{
-    currentSession.answer({mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig(),rtcAnswerConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
+    session.answer({mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig(),rtcAnswerConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
     // Some JsSIP builds create the peer connection during answer(); bind it
     // even if the peerconnection event was emitted before this returned.
-    attachRemoteAudio(currentSession);
-    currentCallAnswered=true;$("incoming-actions").classList.add("hidden");
-    $("hangup-btn").classList.remove("hidden");$("active-label").textContent="Call";
-    callStartedAt=Date.now();startTimer()
-  }catch(e){setCallStatus(e.message)}
+    if(currentSession===session)attachRemoteAudio(session)
+  }catch(e){if(currentSession===session)endCall("Could not answer: "+(e?.message||e),true,"failed")}
 };
 $("decline-btn").onclick=()=>endCall("Call declined",true,"declined");
 $("hangup-btn").onclick=()=>endCall("Call ended",true,"completed");
@@ -579,7 +633,7 @@ $("connect-btn").onclick=async()=>{
 $("logout-btn").onclick=()=>{
   stopKeepalive();stopReconnectWatchdog();sipEverRegistered=false;
   try{if(ua)ua.stop()}catch{}ua=null;handoff=null;iceServers=DEFAULT_ICE_SERVERS;
-  currentSession=null;resetRemoteAudio();clearInterval(timer);stopQualityWatch();
+  currentSession=null;clearPreparationTimer();if(currentIceCleanup)currentIceCleanup();currentIceCleanup=null;resetRemoteAudio();clearInterval(timer);stopQualityWatch();
   sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
 };
 $("refresh-recents").onclick=loadRecents;

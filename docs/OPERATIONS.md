@@ -2,6 +2,10 @@
 
 This guide is for building the CPU-intensive Asterisk image on a personal computer and running the completed images on a smaller Google Compute Engine VM.
 
+For the browser call-setup/ICE candidate release, build **both** images and use
+[`WEBRTC-RELEASE.md`](WEBRTC-RELEASE.md); this update is image-only but does
+require recreating Asterisk during a maintenance window.
+
 ## Image-only / Windows users: why a host installer can be missing
 
 `docker save` exports **images only**. `docker load` does not update

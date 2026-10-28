@@ -95,15 +95,16 @@ function makeFakeSip() {
       _connectionSent: false,
       terminate() { this._terminated = true; this._ended = true; this.emit('ended'); },
       isEnded() { return this._ended; },
-      /* Real JsSIP creates the peer connection synchronously inside answer(). */
-      answer(options) { this._answered = options; this.sendConnection(); this.emit('confirmed'); },
+      /* JsSIP creates the peer synchronously, but acceptance follows ICE
+         gathering and the SIP response; answer() itself does not confirm. */
+      answer(options) { this._answered = options; this.sendConnection(); },
       mute(options) { this._muted = options; },
       hold() { this._held = true; this.emit('hold'); },
       unhold() { this._held = false; this.emit('unhold'); },
       sendDTMF(tone) { this._dtmf.push(String(tone)); },
       /* The other end of the call, driven by the test. */
       ring() { this.emit('progress'); },
-      connect() { this.emit('confirmed'); },
+      connect() { peer.iceConnectionState = 'connected'; this.emit('confirmed'); },
       fail(cause) { this._ended = true; this.emit('failed', { cause }); },
       sendConnection() {
         if (!this._connectionSent) {
@@ -334,6 +335,26 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
 
 const shown = (d, id) => !d.getElementById(id).classList.contains('hidden');
 const session = env => env.sip.calls[env.sip.calls.length - 1];
+/* Capture only the call-setup timers, so tests can exercise both limits
+   instantly without changing registration, UI, or JsSIP timing. */
+function captureSetupTimers(env) {
+  const originalSet = env.w.setTimeout.bind(env.w), originalClear = env.w.clearTimeout.bind(env.w);
+  const pending = new Map();
+  let next = 1000000;
+  env.w.setTimeout = (fn, delay, ...args) => {
+    if (delay !== 8000 && delay !== 20000) return originalSet(fn, delay, ...args);
+    const id = next++; pending.set(id, { fn, delay, args }); return id;
+  };
+  env.w.clearTimeout = id => { if (pending.has(id)) pending.delete(id); else originalClear(id); };
+  return {
+    count: delay => [...pending.values()].filter(item => item.delay === delay).length,
+    run: delay => {
+      const entry = [...pending].find(([, item]) => item.delay === delay);
+      if (!entry) return false;
+      pending.delete(entry[0]); entry[1].fn(...entry[1].args); return true;
+    },
+  };
+}
 async function startTestCall(env, number = '1555') {
   await signIn(env);
   typeDigits(env.d, number);
@@ -569,7 +590,8 @@ async function main() {
     check('the premium call screen keeps End Call in a fixed footer',
       shown(d, 'hangup-btn') && !!d.getElementById('hangup-btn').closest('.call-footer')
       && d.getElementById('active-call-view').dataset.phase === 'dialing');
-    check('the status starts at connecting', /Connecting/.test(d.getElementById('active-status').textContent));
+    check('the status starts by preparing the call, not claiming a SIP answer',
+      /Preparing call/.test(d.getElementById('active-status').textContent));
 
     placed.session.ring();
     check('ringing is reported while the far end rings', /Ringing/.test(d.getElementById('active-status').textContent));
@@ -765,14 +787,95 @@ async function main() {
 
     const mic = boot();
     const micCall = await startTestCall(mic, '1888');
+    // Real JsSIP emits failed first, followed by getusermediafailed.
+    micCall.session.fail('User Denied Media Access');
     micCall.session.emit('getusermediafailed', new Error('denied'));
     await settle(20);
-    check('a denied microphone ends the call with an actionable message',
+    check('a denied microphone remains visible after the call screen closes',
       !shown(mic.d, 'active-call-view')
-      && /Microphone unavailable/.test(mic.d.getElementById('active-status').textContent)
+      && /Microphone unavailable/.test(mic.d.getElementById('dial-hint').textContent)
       && mic.d.getElementById('call-btn').disabled === false,
-      mic.d.getElementById('active-status').textContent);
+      mic.d.getElementById('dial-hint').textContent);
     mic.dom.window.close();
+  }
+
+  /* ------------------------------------------ bounded ICE and real ordering */
+  section('ICE gathering and SIP setup');
+  {
+    const env = boot();
+    await signIn(env);
+    const timers = captureSetupTimers(env);
+    typeDigits(env.d, '102'); env.d.getElementById('call-btn').click(); await settle(20);
+    const call = session(env).session;
+    let hostReady = 0, relayReady = 0;
+    call.emit('icecandidate', { candidate: { candidate: 'typ host' }, ready: () => { hostReady++; } });
+    call.emit('icecandidate', { candidate: { candidate: 'typ relay' }, ready: () => { relayReady++; } });
+    check('a first host candidate is not released immediately, leaving time for TURN',
+      hostReady === 0 && relayReady === 0 && timers.count(8000) === 1);
+    timers.run(8000);
+    check('the bounded gather releases the latest candidates if gathering stalls',
+      hostReady === 0 && relayReady === 1 && timers.count(8000) === 0);
+    call.emit('sending');
+    check('sending the INVITE cancels the no-signalling watchdog', timers.count(20000) === 0);
+    call.terminate(); env.dom.window.close();
+
+    const complete = boot(); await signIn(complete);
+    const completedTimers = captureSetupTimers(complete);
+    typeDigits(complete.d, '103'); complete.d.getElementById('call-btn').click(); await settle(20);
+    const completedCall = session(complete).session;
+    let released = 0;
+    completedCall.emit('icecandidate', { ready: () => { released++; } });
+    completedCall.emit('sdp', { originator: 'local' });
+    check('normal gathering completion cancels the early-release timer',
+      completedTimers.count(8000) === 0 && released === 0);
+    completedCall.emit('icecandidate', { ready: () => { released++; } });
+    completedCall.terminate();
+    check('ending a call cancels both candidate and setup timers',
+      completedTimers.count(8000) === 0 && completedTimers.count(20000) === 0);
+    complete.dom.window.close();
+
+    const stuck = boot(); await signIn(stuck);
+    const stuckTimers = captureSetupTimers(stuck);
+    typeDigits(stuck.d, '104'); stuck.d.getElementById('call-btn').click(); await settle(20);
+    const stuckCall = session(stuck).session;
+    stuckTimers.run(20000); await settle(20);
+    check('no candidate and no INVITE eventually fails visibly instead of hanging',
+      stuckCall._terminated && !shown(stuck.d, 'active-call-view')
+      && /setup timed out/i.test(stuck.d.getElementById('dial-hint').textContent));
+    // Late events from an old session must not close a new call.
+    stuck.d.getElementById('call-btn').click(); await settle(20);
+    const nextCall = session(stuck).session;
+    stuckCall.emit('failed', { cause: 'late failure' });
+    check('a stale session cannot overwrite or terminate the next call',
+      shown(stuck.d, 'active-call-view') && !nextCall._terminated);
+    nextCall.terminate(); stuck.dom.window.close();
+
+    const media = boot();
+    const mediaCall = (await startTestCall(media, '105')).session;
+    mediaCall.connection.iceConnectionState = 'checking';
+    mediaCall.emit('accepted');
+    check('after SIP acceptance the phone distinguishes audio still connecting',
+      /Connecting audio/.test(media.d.getElementById('active-status').textContent));
+    mediaCall.emit('peerconnection:createofferfailed', new Error('renegotiation failed'));
+    check('a later renegotiation error does not forcibly hang up an accepted call',
+      shown(media.d, 'active-call-view') && !mediaCall._terminated);
+    mediaCall.emit('ended', { cause: 'RTP Timeout' });
+    check('an ICE failure terminated by JsSIP remains visible on the dialer',
+      /Media connection failed/.test(media.d.getElementById('dial-hint').textContent)
+      && media.d.getElementById('dial-hint').classList.contains('error'));
+    media.dom.window.close();
+
+    const incoming = boot(); await signIn(incoming);
+    const ringing = incoming.sip.instances[0].receive({ caller: '101' });
+    incoming.d.getElementById('answer-btn').click();
+    ringing.connection.iceConnectionState = 'checking';
+    ringing.connection.dispatch('iceconnectionstatechange');
+    check('ICE checking before the SIP answer is not described as connected audio',
+      /Preparing/.test(incoming.d.getElementById('active-status').textContent));
+    ringing.terminate();
+    check('a caller who hangs up while the answer is still preparing is missed',
+      JSON.parse(incoming.w.localStorage.getItem('eip-phone-recents'))[0].status === 'missed');
+    incoming.dom.window.close();
   }
 
   /* ---------------------------------------------------- incoming calls */
@@ -798,9 +901,15 @@ async function main() {
     check('and the same STUN configuration the outgoing calls use',
       incoming._answered && Array.isArray(incoming._answered.pcConfig.iceServers)
       && incoming._answered.pcConfig.iceServers.length > 0);
-    check('the in-call controls replace the answer buttons',
+    check('answering waits for actual SIP acceptance and does not start the timer',
       !shown(d, 'incoming-actions') && shown(d, 'hangup-btn')
-      && d.getElementById('active-label').textContent === 'Call');
+      && d.getElementById('active-label').textContent === 'Answering'
+      && /Preparing answer/.test(d.getElementById('active-status').textContent)
+      && d.getElementById('call-timer').textContent === '00:00');
+    incoming.connect();
+    check('only SIP acceptance marks the call connected',
+      d.getElementById('active-label').textContent === 'Call'
+      && /Connected/.test(d.getElementById('active-status').textContent));
     await hangUp(env);
     check('the answered call is recorded as an incoming call',
       JSON.parse(env.w.localStorage.getItem('eip-phone-recents'))[0].direction === 'incoming');

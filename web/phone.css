@@ -72,7 +72,8 @@ button{cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:tran
 #dialer-view.active{display:flex;flex-direction:column;overflow-y:auto}
 .selected-contact{flex:0 0 auto;text-align:center;padding:clamp(4px,1.6vh,14px) 0 clamp(4px,1.2vh,10px)}
 .dial-display{font-size:clamp(22px,3.6vh,28px);font-weight:750;letter-spacing:-.025em;min-height:34px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 8px}
-.dial-hint{font-size:12px;color:var(--muted);margin-top:2px}
+.dial-hint{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.35}
+.dial-hint.error{color:#b42318;font-weight:700}
 
 /* the keypad: its rows take the height the window leaves over */
 .keypad{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:minmax(44px,min(74px,11vh));align-content:center;gap:min(12px,1.7vh) min(16px,4vw);width:100%;max-width:310px;margin:0 auto}
@@ -157,7 +158,7 @@ h2{margin:3px 0 0;font-size:27px;letter-spacing:-.04em}
 .hangup-btn:hover{filter:brightness(1.05)}
 .hangup-btn:active{transform:scale(.93)}
 .hangup-icon{width:30px;height:30px;fill:currentColor;transform:rotate(135deg)}
-.active-status{min-height:18px;max-width:320px;text-align:center;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.active-status{min-height:18px;max-width:320px;text-align:center;font-size:12px;line-height:1.3;color:var(--muted);overflow-wrap:anywhere}
 .incoming-actions{display:flex;gap:10px;width:100%;max-width:320px;margin-bottom:2px}
 .answer-btn,.decline-btn{flex:1;min-width:0;border:0;border-radius:16px;height:48px;padding:0 16px;font-weight:850;box-shadow:0 10px 26px #34435e14}
 .answer-btn{background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff}

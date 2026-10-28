@@ -74,11 +74,17 @@ if [ "$RTP_START" -ge "$RTP_END" ]; then
     echo "ASTERISK_RTP_START must be lower than ASTERISK_RTP_END" >&2
     exit 1
 fi
+# PJSIP's external_media_address changes SDP c= only. Asterisk's RTP engine
+# otherwise advertises the Docker-only address as its WebRTC ICE candidate.
+# Generate the local/public candidate map in the shared dynamic volume before
+# loading RTP, including after a container recreation changes its bridge IP.
+/configure-ice.sh "$DYNAMIC_DIR"
 cat > "$ASTERISK_CONFIG_DIR/rtp.conf" <<EOF
 [general]
 rtpstart=$RTP_START
 rtpend=$RTP_END
 icesupport=yes
+#include dynamic/rtp.ice.conf
 EOF
 mkdir -p /var/spool/asterisk/voicemail
 chown -R asterisk:telephony /var/spool/asterisk/voicemail

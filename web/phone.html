@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f6fa">
   <meta name="description" content="EngineerIP Phone — secure SIP calling, recents, contacts and messages.">
-  <meta name="eip-phone-version" content="10">
+  <meta name="eip-phone-version" content="11">
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" type="image/png" href="https://engineerip.com/static/img/logo.png">
   <link rel="apple-touch-icon" href="https://engineerip.com/static/img/logo.png">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
-  <link rel="stylesheet" href="/phone.css?v=10">
+  <link rel="stylesheet" href="/phone.css?v=11">
   <title>EngineerIP Phone</title>
 </head>
 <body>
@@ -89,7 +89,7 @@
       <section id="dialer-view" class="view active">
         <div class="selected-contact">
           <div id="dial-display" class="dial-display">Enter number</div>
-          <div id="dial-hint" class="dial-hint">Direct paste is supported</div>
+          <div id="dial-hint" class="dial-hint" role="status" aria-live="polite">Direct paste is supported</div>
         </div>
         <div class="keypad" aria-label="Dial pad">
           <button data-key="1"><b>1</b></button><button data-key="2"><b>2</b><small>ABC</small></button><button data-key="3"><b>3</b><small>DEF</small></button>
@@ -190,6 +190,6 @@
        fetched, fall back to the pinned upstream build before phone.js runs. -->
   <script src="/jssip.min.js"></script>
   <script>if(!window.JsSIP)document.write('<script src="https://cdn.jsdelivr.net/gh/versatica/JsSIP@3.10.1/dist/jssip.min.js"><\/script>');</script>
-  <script src="/phone.js?v=10"></script>
+  <script src="/phone.js?v=11"></script>
 </body>
 </html>

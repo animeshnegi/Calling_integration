@@ -58,16 +58,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && cd / \
     && rm -rf "/tmp/asterisk-${ASTERISK_VERSION}" \
     && apt-get purge -y --auto-remove build-essential curl libedit-dev libjansson-dev libncurses5-dev libnewt-dev libogg-dev libopus-dev libsamplerate0-dev libsndfile1-dev libsrtp2-dev libspeex-dev libspeexdsp-dev libsqlite3-dev libssl-dev libtool libvorbis-dev libxml2-dev pkg-config uuid-dev xmlstarlet \
-    && apt-get install -y --no-install-recommends libxml2 libsqlite3-0 libedit2 libcurl4 libsrtp2-1 libspeex1 libspeexdsp1 libogg0 libvorbis0a libvorbisenc2 libvorbisfile3
+    && apt-get install -y --no-install-recommends libxml2 libsqlite3-0 libedit2 libcurl4 libsrtp2-1 libspeex1 libspeexdsp1 libogg0 libvorbis0a libvorbisenc2 libvorbisfile3 util-linux diffutils hostname mawk \
+    && command -v flock && command -v getent && command -v hostname && command -v cmp && command -v awk
 
 COPY config/ /etc/asterisk/
 # Recordings the operator supplies (see sounds/custom/README.md). The directory
 # may hold nothing but that note, in which case the stock prompts are used.
 COPY sounds/ /var/lib/asterisk/sounds/
-COPY entrypoint.sh /entrypoint.sh
-# Windows Git checkouts can convert shell scripts to CRLF. Normalize it in the image.
-RUN sed -i 's/\r$//' /entrypoint.sh \
-    && chmod 750 /entrypoint.sh \
+COPY entrypoint.sh configure-ice.sh /
+# Windows Git checkouts can convert shell scripts to CRLF. Normalize them in the image.
+RUN sed -i 's/\r$//' /entrypoint.sh /configure-ice.sh \
+    && chmod 750 /entrypoint.sh /configure-ice.sh \
     && groupadd --system asterisk \
     && groupadd --gid 2000 telephony \
     && useradd --system --gid asterisk --groups telephony --home-dir /var/lib/asterisk --no-create-home asterisk \

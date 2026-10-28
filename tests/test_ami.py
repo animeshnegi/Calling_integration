@@ -133,6 +133,16 @@ def test_a_cli_command_is_read_as_follows_not_as_a_refusal(monkeypatch):
     assert "not permitted" in str(refused.value)
 
 
+def test_rtp_candidate_reload_uses_the_real_ami_module_action(monkeypatch):
+    _, sockets = scripted(monkeypatch, [[SUCCESS_LOGIN, SUCCESS_OUTPUT]])
+    ami().reload_rtp()
+    assert b"Action: Reload\r\n" in sockets[0].sent
+    assert b"Module: res_rtp_asterisk.so\r\n" in sockets[0].sent
+    scripted(monkeypatch, [[SUCCESS_LOGIN, ERROR_COMMAND]])
+    with pytest.raises(AMIError):
+        ami().reload_rtp()
+
+
 def test_a_failure_before_the_restart_command_raises(monkeypatch):
     """Not reaching AMI, or not authenticating, means NO restart happened."""
     monkeypatch.setattr("time.sleep", lambda _s: None)

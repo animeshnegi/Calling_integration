@@ -153,10 +153,10 @@ def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypa
     store.set_settings({"service_host": "sip.example.com"})
     text = sync.render_transports()
     assert "[transport-udp]" in text and "[transport-tcp]" in text
-    # Media address on all three transports: the browser's ICE candidates come
-    # from the WSS transport. It is the resolved IP - SDP and ICE cannot use a
-    # hostname. Signalling stays on the hostname and off the WSS transport -
-    # that leg already came in through the reverse proxy.
+    # The SDP connection address is numeric on all three transports. RTP's
+    # ICE candidates require a separate rtp.conf mapping, tested elsewhere.
+    # Signalling stays on the hostname and off the WSS transport - that leg
+    # already came in through the reverse proxy.
     assert text.count("external_media_address=203.0.113.10") == 3
     assert text.count("external_signaling_address=sip.example.com") == 2
     assert "external_signaling_address=198.51.100.99" not in text
@@ -511,9 +511,8 @@ def test_internal_calls_negotiate_hd_voice_first(tmp_path: Path):
 
 
 def test_browser_media_advertises_the_public_address(tmp_path: Path, monkeypatch):
-    """A WebRTC call's ICE candidates come from the WSS transport, so it needs
-    the admin panel's service address just like the UDP/TCP transports - a
-    browser cannot send audio to the container's private address."""
+    """The WSS transport needs the numeric media address for SDP c=, just
+    like UDP/TCP. ICE candidate mapping is separately tested in RTP config."""
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
     store.set_settings({"service_host": "sip.engineerip.com"})
@@ -521,9 +520,8 @@ def test_browser_media_advertises_the_public_address(tmp_path: Path, monkeypatch
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
 
     wss = sync.render_transports().split("[transport-wss]")[1]
-    # The resolved IP, not the hostname: SDP c= and ICE candidates cannot use
-    # a name, and a name leaves the browser sending audio to the container's
-    # private address - a call that connects and stays completely silent.
+    # The SDP c= address must be numeric; the same validated IP is used by
+    # the independently generated ICE host-candidate mapping.
     assert "external_media_address=203.0.113.20" in wss
     assert "external_media_address=sip.engineerip.com" not in wss
     assert "local_net=10.0.0.0/8" in wss
@@ -567,6 +565,10 @@ def test_media_address_refuses_addresses_the_internet_cannot_reach(monkeypatch):
         ("192.168.1.10", "public IP"),
         ("10.0.0.5", "public IP"),
         ("127.0.0.1", "public IP"),
+        ("224.0.0.1", "multicast"),
+        ("240.0.0.1", "reserved"),
+        ("192.0.0.2", "public IP"),
+        ("192.88.99.1", "public IP"),
         ("104.16.100.100", "Cloudflare"),
         ("172.64.1.1", "Cloudflare"),
         ("2606:4700:4700::1111", "Cloudflare"),

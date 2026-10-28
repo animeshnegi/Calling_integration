@@ -237,9 +237,75 @@ separation: each contact is dialled through its own endpoint, so a browser still
 gets DTLS-SRTP and a desk phone still gets plain RTP. Outbound trunk Dial lines
 are unchanged.
 
+## Browser dial/answer: SIP setup and Docker ICE
+
+A registration and a ringing browser do **not** prove the call was answered or
+that media works. In the reported trace the desk-phone leg rang the browser for
+30 seconds and went to voicemail: Asterisk did not log an answer/bridge. The
+trace does not prove why the answer was missing, or whether an outbound browser
+INVITE was sent. Keep signalling and RTP failures separate when investigating.
+
+JsSIP 3.10.1 waits for local ICE gathering before sending an initial INVITE or
+an incoming 200 OK. The phone now waits up to eight seconds **after its first
+candidate** for STUN/TURN, then asks JsSIP to proceed with the candidates it
+has. Normal completion proceeds immediately. If there are no candidates (or
+microphone permission remains pending), the phone reports a setup timeout
+instead of spinning forever. Answer is marked and timed only on SIP acceptance;
+ICE checking before then is displayed as preparation, not connected audio.
+Microphone denial remains visible after the call screen closes. A very slow
+TURN server can still miss the eight-second window; do not treat this limit as
+proof a relay candidate was gathered.
+
+Asterisk 22's PJSIP `external_media_address` rewrites the SDP `c=` address; it
+**does not rewrite ICE host candidates**. For the supplied Compose topology
+(one Docker bridge, IPv4 public address, and identical external/internal RTP
+ports), the Asterisk entrypoint records its actual container IPv4 address and
+creates `/etc/asterisk/dynamic/rtp.ice.conf`. The API sync maps it to the
+validated numeric Service address using `[ice_host_candidates]`. Both images
+are required. The mapping is rebuilt at Asterisk container startup (so a new
+bridge IP is not hardcoded), refreshed on settings changes, and the RTP module
+is reloaded without unloading it or restarting existing calls. API and worker
+writes share a lock; pending reloads are retried. The last validated public IP
+is kept in the shared dynamic volume for the next Asterisk boot. An unresolved,
+private, special or Cloudflare-proxied Service address is rejected by the sync
+and the last valid configuration is kept. TEST-NET documentation addresses are
+accepted for examples/tests only and cannot carry real calls.
+
+This automatic host mapping is for **static one-to-one NAT with unchanged RTP
+ports**, as in the supplied Compose file. It is not a general solution for
+port-remapping NAT, multi-homed or IPv6-only deployments; these need a separately
+validated ICE/network configuration. A TURN server may still be necessary for
+restrictive browser networks. UDP 10000–10100 (or the configured RTP range)
+must really reach Asterisk; loading images or seeing a public SDP address does
+not prove the firewall path.
+
+After deploying both images, inspect the generated mapping without printing
+credentials:
+
+```bash
+docker exec engineerip-asterisk sh -c 'cat /etc/asterisk/dynamic/rtp.ice.conf'
+docker exec engineerip-asterisk asterisk -rx 'rtp show settings'
+docker compose logs --tail=80 telephony-ari asterisk
+```
+
+The include should map the **actual** Docker IPv4 to the VM's numeric public
+media IP. A missing mapping, a boot warning, or a pending RTP reload needs
+attention; a correct file alone does not prove the RTP engine loaded it or that
+packets can traverse the network. With SIP logging enabled briefly, inspect the
+actual `a=candidate` lines of a test call locally and disable logging afterward;
+SIP logs can contain telephone numbers and credentials. Finally call in both
+directions from the real devices and confirm two-way audio.
+
+Local regression includes two real headless Chromium peers, the vendored JsSIP,
+SIP/WebSocket signalling, actual bidirectional encrypted RTP packet counters
+and decoded non-silent audio energy, deliberately stalled gathering,
+denial/SDP-failure paths, and Asterisk config
+lifecycle/AMI tests. The signalling relay is a test double, not Asterisk, and
+none of these checks proves the deployed VM, carrier or Internet NAT path.
+
 ## Silent calls, two-minute drop-outs, and call-screen responsiveness
 
-A browser call that rings but has no audio is usually one of three separate
+A browser call that rings but has no audio can have several separate
 faults: the remote WebRTC track was never attached to an `<audio>` element, the
 browser blocked autoplay, or ICE advertised an unreachable media address. The
 softphone now fixes the first two in code and reports the third instead of
@@ -340,5 +406,5 @@ a fixed header; mute/speaker/hold/keypad and DTMF live in a scrollable body;
 the DTMF keypad can no longer push End Call below the window. The screen has
 distinct dialling, ringing, connected and ended phase styling, larger touch
 targets, `touch-action: manipulation`, reduced-motion support, and short-window
-rules. Versioned `/phone.css?v=10` / `/phone.js?v=10` and service-worker cache
-`eip-phone-v10` ensure the new layout replaces a cached old call screen.
+rules. Versioned `/phone.css?v=11` / `/phone.js?v=11` and service-worker cache
+`eip-phone-v11` ensure the new phone code replaces a cached old call screen.
