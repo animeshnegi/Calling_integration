@@ -70,6 +70,7 @@ function setState(text,mode=false){
   state.className="state "+cls;state.innerHTML="<i></i> "+text
 }
 function setCallStatus(text){const el=$("active-status");if(el)el.textContent=text}
+function setCallPhase(phase){const el=$("active-call-view");if(el)el.dataset.phase=phase}
 function showAudioUnlock(visible,message){
   const btn=$("enable-audio-btn");if(!btn)return;
   btn.classList.toggle("hidden",!visible);
@@ -294,10 +295,10 @@ function attachSession(session,incoming=false){
   $("active-label").textContent=incoming?"Incoming call":"Calling";
   $("call-btn").disabled=true;
   callStartedAt=incoming?null:Date.now();startTimer();
-  setCallStatus(incoming?"Incoming call":"Connecting…");
-  session.on("progress",()=>setCallStatus("Ringing…"));
-  session.on("accepted",()=>{currentCallAnswered=true;setCallStatus("Connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
-  session.on("confirmed",()=>{currentCallAnswered=true;setCallStatus("Connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
+  setCallStatus(incoming?"Incoming call":"Connecting…");setCallPhase(incoming?"incoming":"dialing");
+  session.on("progress",()=>{setCallStatus("Ringing…");setCallPhase("ringing")});
+  session.on("accepted",()=>{currentCallAnswered=true;setCallStatus("Connected");setCallPhase("connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
+  session.on("confirmed",()=>{currentCallAnswered=true;setCallStatus("Connected");setCallPhase("connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)});
   session.on("getusermediafailed",()=>endCall("Microphone unavailable. Allow microphone access and retry.",true,"failed"));
   session.on("ended",()=>endCall("Call ended",false,"completed"));
   session.on("failed",e=>endCall("Call failed"+(e?.cause?": "+e.cause:""),false,"failed"));
@@ -328,7 +329,7 @@ function endCall(message="Call ended",terminate=true,status="completed"){
   const direction=session.direction==="incoming"?"incoming":"outgoing";
   const outcome=status==="completed"?currentCallStatus:status;
   if(number)addRecent(number,direction,outcome==="completed"&&direction==="incoming"&&!currentCallAnswered?"missed":outcome);
-  clearInterval(timer);callStartedAt=null;stopQualityWatch();resetRemoteAudio();
+  clearInterval(timer);callStartedAt=null;stopQualityWatch();resetRemoteAudio();setCallPhase("ended");
   $("dtmf-panel").classList.add("hidden");$("dtmf-btn").setAttribute("aria-expanded","false");
   setCallStatus(message);$("active-call-view").classList.add("hidden");$("call-timer").textContent="00:00";
   $("call-btn").disabled=false;$("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");loadRecents()
@@ -485,7 +486,7 @@ $("call-btn").onclick=startCall;
 $("answer-btn").onclick=()=>{
   if(!currentSession)return;
   playRemoteAudio();  // The answer gesture is the best chance to unlock audio.
-  setCallStatus("Connecting…");
+  setCallStatus("Connecting…");setCallPhase("answering");
   try{
     currentSession.answer({mediaConstraints:MIC_CONSTRAINTS,pcConfig:iceConfig(),rtcAnswerConstraints:{offerToReceiveAudio:true,offerToReceiveVideo:false}});
     // Some JsSIP builds create the peer connection during answer(); bind it

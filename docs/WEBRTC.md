@@ -294,3 +294,51 @@ office network, configure a TURN server in the platform's ICE settings so the
 browser has a relay candidate. The call-screen quality badge reports the
 negotiated codec and unstable packet loss/jitter; it cannot replace a live RTP
 capture when the network path itself is broken.
+
+## Calls back to a Zoiper / desk phone, and `.env`
+
+A log that starts with `PJSIP/AUMPNO_101` on UDP and dials extension `102` is
+**Zoiper → browser**, not browser → Zoiper. In that direction the log may show
+only the `102-webrtc` contact, which is correct when `102` is a browser-only
+extension: `PJSIP_DIAL_CONTACTS()` skips the unregistered plain leg. The failing
+direction needs its own log, plus:
+
+```bash
+docker compose exec asterisk asterisk -rx 'pjsip show contacts'
+docker compose exec asterisk asterisk -rx 'pjsip show aors'
+docker compose exec asterisk asterisk -rx 'pjsip show endpoint 101-13022661626'
+```
+
+The plain device's contact must be **Reachable**. Dynamic AORs for plain SIP
+devices now carry `qualify_frequency=30`, `qualify_timeout=3`,
+`authenticate_qualify=no` and `remove_unavailable=yes`. Asterisk sends an
+unauthenticated OPTIONS every 30 seconds, which keeps the phone's NAT/UDP
+mapping alive and marks a phone that stopped answering as unreachable. This is
+the common reason a Zoiper can place calls (its INVITE refreshes NAT) but does
+not ring when the browser calls back (the stored contact has gone stale). The
+browser's WSS AOR keeps its REGISTER keepalive instead of UDP OPTIONS.
+
+Do **not** paste `.env` into a ticket. Check only non-secret values locally:
+
+```bash
+grep -E '^(ASTERISK_EXTERNAL_ADDRESS|IMAGE_TAG|ASTERISK_RTP_START|ASTERISK_RTP_END)=' .env
+```
+
+The admin panel's **Service address** (`service_host`) is authoritative; it
+must resolve to the VM's public numeric IP, not a Cloudflare-proxied hostname.
+Keep `SECRET_KEY` unchanged across image upgrades. UDP 10000–10100 must reach
+the Asterisk container, and the phone must re-register before its contact
+expires. If `pjsip show contacts` shows the Zoiper contact as `Unreachable`,
+fix registration/NAT/firewall before debugging browser audio.
+
+## Premium in-call screen
+
+The active call screen is now a full-height glass shell instead of one long
+scrolling column. The caller, timer, codec badge and audio-unlock prompt live in
+a fixed header; mute/speaker/hold/keypad and DTMF live in a scrollable body;
+**End Call, Answer/Decline and the live status live in a fixed footer**. Opening
+the DTMF keypad can no longer push End Call below the window. The screen has
+distinct dialling, ringing, connected and ended phase styling, larger touch
+targets, `touch-action: manipulation`, reduced-motion support, and short-window
+rules. Versioned `/phone.css?v=10` / `/phone.js?v=10` and service-worker cache
+`eip-phone-v10` ensure the new layout replaces a cached old call screen.

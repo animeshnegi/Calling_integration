@@ -1315,3 +1315,21 @@ def test_extension_dial_uses_reachable_contacts_not_the_aor_list_as_a_uri(tmp_pa
         if "Dial(" in line and "PJSIP_DIAL_CONTACTS" in line:
             first = line.split("Dial(",1)[1].split(",30)",1)[0]
             assert "," not in first, line
+
+
+def test_plain_contacts_are_qualified_for_calls_back_to_zoiper(tmp_path):
+    """A Zoiper behind NAT must stay reachable after the UDP mapping idles."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_password": "secret", "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    pjsip = sync.render_pjsip()
+    assert "qualify_frequency=30" in pjsip
+    assert "qualify_timeout=3" in pjsip
+    assert "authenticate_qualify=no" in pjsip
+    assert "remove_unavailable=yes" in pjsip
+    # The browser AOR is kept alive by REGISTER/WSS, not UDP OPTIONS.
+    username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+    alias_aor = pjsip.split(f"[{username}]\ntype=aor\n")[1].split("\n\n")[0]
+    assert "qualify_frequency=30" in alias_aor
+    dialplan = sync.render_dialplan()
+    assert dynamic_dial("101") in dialplan

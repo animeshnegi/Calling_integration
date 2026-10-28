@@ -572,7 +572,8 @@ pages are linkable.
   escaped payload, contacts, the settings dialog and logout. It also covers the silent-call
   regressions: a peer connection created synchronously inside `ua.call()`, a bare remote
   track with no `a=msid` stream, blocked autoplay/unlock, SIP session timers and
-  registration keepalive, reconnect state, in-call DTMF, and microphone denial. jsdom has
+  registration keepalive, reconnect state, in-call DTMF, microphone denial, call phases,
+  and a fixed End Call footer that stays visible while the DTMF keypad is open. jsdom has
   no media engine, dialog or clipboard, so those are stubbed; what the page asks the SIP
   stack to do is recorded instead, which is the part a browser cannot check for us.
 * `node tools/uicheck.js` — boots the real console in jsdom against captured fixtures

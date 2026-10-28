@@ -165,3 +165,17 @@ def test_premium_softphone_media_and_ivr_controls_are_shipped():
     assert "sendRegistrationKeepalive" in js
     assert "peerconnection" in js and "getReceivers" in js
     assert "TURN server" in html
+
+
+def test_premium_call_screen_keeps_end_call_visible_with_dtmf_open():
+    root = Path(__file__).resolve().parents[1] / "web"
+    html = (root / "phone.html").read_text()
+    css = (root / "phone.css").read_text()
+    assert 'class="call-shell"' in html and 'class="call-footer"' in html
+    assert 'id="hangup-btn"' in html and 'aria-label="End call"' in html
+    assert html.index('class="call-footer"') < html.index('id="hangup-btn"')
+    assert html.index('id="hangup-btn"') < html.index('id="active-status"')
+    assert 'data-phase="idle"' in html
+    assert ".call-body{" in css and "overflow-y:auto" in css
+    assert ".call-footer{" in css and "flex:0 0 auto" in css and "z-index:1" in css
+    assert ".hangup-icon{" in css and "transform:rotate(135deg)" in css

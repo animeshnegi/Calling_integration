@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f6fa">
   <meta name="description" content="EngineerIP Phone — secure SIP calling, recents, contacts and messages.">
-  <meta name="eip-phone-version" content="9">
+  <meta name="eip-phone-version" content="10">
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" type="image/png" href="https://engineerip.com/static/img/logo.png">
   <link rel="apple-touch-icon" href="https://engineerip.com/static/img/logo.png">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
-  <link rel="stylesheet" href="/phone.css?v=9">
+  <link rel="stylesheet" href="/phone.css?v=10">
   <title>EngineerIP Phone</title>
 </head>
 <body>
@@ -121,19 +121,47 @@
         <div class="empty-state compact" id="contacts-empty"><div class="empty-icon">♙</div><h3>No contacts yet</h3><p>Add a contact or dial a number directly.</p></div>
       </section>
 
-      <section id="active-call-view" class="active-call hidden">
-        <div class="active-avatar">E</div><div class="active-label" id="active-label">Calling</div><h2 id="active-number">—</h2><div id="call-timer">00:00</div>
-        <div id="call-quality" class="call-quality hidden" role="status" aria-live="polite"></div>
-        <button id="enable-audio-btn" class="audio-unlock hidden" type="button">🔊 Tap to enable call audio</button>
-        <div class="call-controls"><button id="mute-btn" class="control-btn">🎙<span>Mute</span></button><button id="speaker-btn" class="control-btn">🔊<span>Speaker</span></button><button id="hold-btn" class="control-btn">⏸<span>Hold</span></button><button id="dtmf-btn" class="control-btn" aria-expanded="false">⌨<span>Keypad</span></button></div>
-        <div id="dtmf-panel" class="dtmf-panel hidden" aria-label="In-call keypad">
-          <button data-dtmf="1">1</button><button data-dtmf="2">2</button><button data-dtmf="3">3</button>
-          <button data-dtmf="4">4</button><button data-dtmf="5">5</button><button data-dtmf="6">6</button>
-          <button data-dtmf="7">7</button><button data-dtmf="8">8</button><button data-dtmf="9">9</button>
-          <button data-dtmf="*">*</button><button data-dtmf="0">0</button><button data-dtmf="#">#</button>
+      <section id="active-call-view" class="active-call hidden" data-phase="idle">
+        <div class="call-shell">
+          <div class="call-ambient" aria-hidden="true"></div>
+          <header class="call-head">
+            <div class="call-secure"><span></span> EngineerIP secure browser call</div>
+            <div class="call-avatar-wrap"><div class="active-avatar" id="call-avatar">E</div></div>
+            <div id="active-label" class="active-label">Calling</div>
+            <h2 id="active-number">—</h2>
+            <div class="call-meta">
+              <span id="call-timer" class="call-timer">00:00</span>
+              <span id="call-quality" class="call-quality hidden" role="status" aria-live="polite"></span>
+            </div>
+            <button id="enable-audio-btn" class="audio-unlock hidden" type="button">🔊 Tap to enable call audio</button>
+          </header>
+
+          <div class="call-body">
+            <div class="call-controls" aria-label="Call controls">
+              <button id="mute-btn" class="control-btn" type="button"><span class="control-icon">🎙</span><span class="control-label">Mute</span></button>
+              <button id="speaker-btn" class="control-btn" type="button"><span class="control-icon">🔊</span><span class="control-label">Speaker</span></button>
+              <button id="hold-btn" class="control-btn" type="button"><span class="control-icon">⏸</span><span class="control-label">Hold</span></button>
+              <button id="dtmf-btn" class="control-btn" type="button" aria-expanded="false"><span class="control-icon">⌨</span><span class="control-label">Keypad</span></button>
+            </div>
+            <div id="dtmf-panel" class="dtmf-panel hidden" aria-label="In-call keypad">
+              <button data-dtmf="1" type="button">1</button><button data-dtmf="2" type="button">2</button><button data-dtmf="3" type="button">3</button>
+              <button data-dtmf="4" type="button">4</button><button data-dtmf="5" type="button">5</button><button data-dtmf="6" type="button">6</button>
+              <button data-dtmf="7" type="button">7</button><button data-dtmf="8" type="button">8</button><button data-dtmf="9" type="button">9</button>
+              <button data-dtmf="*" type="button">*</button><button data-dtmf="0" type="button">0</button><button data-dtmf="#" type="button">#</button>
+            </div>
+          </div>
+
+          <footer class="call-footer">
+            <div id="incoming-actions" class="incoming-actions hidden">
+              <button id="answer-btn" class="answer-btn" type="button">☎ Answer</button>
+              <button id="decline-btn" class="decline-btn" type="button">Decline</button>
+            </div>
+            <button id="hangup-btn" class="hangup-btn" type="button" aria-label="End call" title="End call">
+              <svg class="hangup-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.96.96 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 0 0-2.66-1.85.996.996 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
+            </button>
+            <div id="active-status" class="active-status" role="status" aria-live="polite">Connecting…</div>
+          </footer>
         </div>
-        <div id="incoming-actions" class="incoming-actions hidden"><button id="answer-btn" class="answer-btn">☎ Answer</button><button id="decline-btn" class="decline-btn">Decline</button></div>
-        <button id="hangup-btn" class="hangup-btn">●</button><div id="active-status" class="active-status" role="status" aria-live="polite">Connecting…</div>
       </section>
 
       <nav class="bottom-nav" aria-label="Phone navigation">
@@ -162,6 +190,6 @@
        fetched, fall back to the pinned upstream build before phone.js runs. -->
   <script src="/jssip.min.js"></script>
   <script>if(!window.JsSIP)document.write('<script src="https://cdn.jsdelivr.net/gh/versatica/JsSIP@3.10.1/dist/jssip.min.js"><\/script>');</script>
-  <script src="/phone.js?v=9"></script>
+  <script src="/phone.js?v=10"></script>
 </body>
 </html>

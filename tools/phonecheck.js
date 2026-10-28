@@ -566,10 +566,15 @@ async function main() {
       !d.getElementById('active-call-view').classList.contains('hidden')
       && d.getElementById('active-number').textContent === '15555123456');
     check('the call button is disabled while a call is up', d.getElementById('call-btn').disabled === true);
+    check('the premium call screen keeps End Call in a fixed footer',
+      shown(d, 'hangup-btn') && !!d.getElementById('hangup-btn').closest('.call-footer')
+      && d.getElementById('active-call-view').dataset.phase === 'dialing');
     check('the status starts at connecting', /Connecting/.test(d.getElementById('active-status').textContent));
 
     placed.session.ring();
     check('ringing is reported while the far end rings', /Ringing/.test(d.getElementById('active-status').textContent));
+    check('the call phase drives the ringing animation state',
+      d.getElementById('active-call-view').dataset.phase === 'ringing');
 
     const peer = placed.session.sendConnection();
     const stream = { id: 'remote-stream' };
@@ -743,6 +748,9 @@ async function main() {
       shown(dtmf.d, 'dtmf-panel')
       && dtmf.d.getElementById('dtmf-btn').getAttribute('aria-expanded') === 'true',
       dtmf.d.getElementById('dtmf-panel').className);
+    check('End Call stays visible while the DTMF keypad is open',
+      shown(dtmf.d, 'hangup-btn')
+      && !!dtmf.d.getElementById('hangup-btn').closest('.call-footer'));
     dtmf.d.querySelector('#dtmf-panel [data-dtmf="5"]').click();
     check('a keypad press sends that DTMF tone on the live session',
       dtmfCall.session._dtmf.join('') === '5', dtmfCall.session._dtmf.join(''));
@@ -967,7 +975,11 @@ async function main() {
     const view = (css.match(/\.view\{[^}]*\}/) || [''])[0];
     check('the dialer view scrolls instead of clipping the keypad on a short window',
       /overflow-y:auto/.test(view), view);
-    check('the in-call screen scrolls too', /\.active-call\{[^}]*overflow-y:auto/.test(css));
+    const callBody = (css.match(/\.call-body\{[^}]*\}/) || [''])[0];
+    const callFooter = (css.match(/\.call-footer\{[^}]*\}/) || [''])[0];
+    check('the in-call body scrolls while the end-call footer stays fixed',
+      /overflow-y:auto/.test(callBody) && /flex:0 0 auto/.test(callFooter)
+      && /z-index:1/.test(callFooter), callBody + ' / ' + callFooter);
     check('short windows get their own layout instead of a scrollbar',
       /@media\(max-height:\d+px\)/.test(css));
     check('keyboard users get a visible focus ring', /:focus-visible\{[^}]*outline:2px solid/.test(css));

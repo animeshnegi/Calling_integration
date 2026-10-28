@@ -185,6 +185,20 @@ class TelephonyConfigSync:
     # to "local", which keeps this order when the far end offers its own.
     INTERNAL_CODECS = "g722,ulaw,alaw"
 
+    # Plain UDP phones (Zoiper, desk phones) can lose their NAT mapping after a
+    # minute or two of idleness. A short unauthenticated OPTIONS qualify keeps
+    # the contact reachable, and lets PJSIP_DIAL_CONTACTS() skip a phone that is
+    # genuinely offline instead of dialing a stale AOR name as a SIP URI.
+    PLAIN_AOR_OPTIONS = (
+        "max_contacts=5",
+        "remove_existing=yes",
+        "qualify_frequency=30",
+        "qualify_timeout=3",
+        "authenticate_qualify=no",
+        "remove_unavailable=yes",
+    )
+    BROWSER_AOR_OPTIONS = ("max_contacts=5", "remove_existing=yes")
+
     def external_address(self) -> str:
         """Single source of truth for the public SIP/RTP address: the admin
         panel's Service address (service_host). ASTERISK_EXTERNAL_ADDRESS in
@@ -428,7 +442,7 @@ class TelephonyConfigSync:
                 # or softphone must keep registering with the credential on its
                 # sheet.
                 aors.append(username)
-                alias_aor = [f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", ""]
+                alias_aor = [f"[{username}]", "type=aor", *self.PLAIN_AOR_OPTIONS, ""]
             # The endpoint the dial plan rings for a desk phone or softphone:
             # plain RTP on the phone's own transport. A browser cannot use this
             # media at all - and, just as importantly, a Zoiper cannot use
@@ -466,7 +480,7 @@ class TelephonyConfigSync:
                     f"allow={self.INTERNAL_CODECS}",
                 ]
                 browser_endpoint = [
-                    f"[{browser_name}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                    f"[{browser_name}]", "type=aor", *self.BROWSER_AOR_OPTIONS, "",
                     f"[auth-{section}-webrtc]", "type=auth", "auth_type=userpass",
                     f"username={browser_name}", f"password={password}", *auth_digest, "",
                     f"[{browser_name}]", "type=endpoint", f"aors={browser_name}", f"auth=auth-{section}-webrtc",
@@ -490,7 +504,7 @@ class TelephonyConfigSync:
                 ]
             lines.extend([
                 f"; Extension {extension}",
-                f"[{section}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                f"[{section}]", "type=aor", *self.PLAIN_AOR_OPTIONS, "",
                 *alias_aor,
                 f"[auth-{section}]", "type=auth", "auth_type=userpass",
                 f"username={username}", f"password={password}", *auth_digest, "",
@@ -549,8 +563,8 @@ class TelephonyConfigSync:
             ]
             lines.extend([
                 f"; Customer device {username}",
-                f"[{endpoint}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
-                f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                f"[{endpoint}]", "type=aor", *self.PLAIN_AOR_OPTIONS, "",
+                f"[{username}]", "type=aor", *self.PLAIN_AOR_OPTIONS, "",
                 f"[auth-{endpoint}]", "type=auth", "auth_type=userpass", f"username={username}", f"password={password}", *auth_digest, "",
                 f"[{endpoint}]", "type=endpoint", f"aors={endpoint},{username}", f"auth=auth-{endpoint}",
                 *device_body, "",
