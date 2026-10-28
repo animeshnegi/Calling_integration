@@ -489,12 +489,12 @@ reported incident resolved.
 
 In **Email Delivery** (platform administrator only):
 
-1. Select **Elastic Email** or **SendGrid**. Elastic Email requires an API key
-   with **Send HTTP** permission; SendGrid requires **Mail Send** permission.
-   Paste the key without `Bearer` and enter a sender verified with that provider.
-   Blank preserves a saved key for the same provider; switching providers
-   requires re-entering the selected provider's key. Existing SendGrid settings
-   remain on SendGrid. Keep `SECRET_KEY` unchanged across image upgrades.
+1. **Elastic Email is the only sender.** A previously saved Elastic Email key is
+   reused automatically even if the old form labelled it SendGrid. Otherwise,
+   enter an Elastic Email key with **Send HTTP** permission, without `Bearer`,
+   and use a sender verified with Elastic Email. Blank keeps the saved key.
+   Recognisable SendGrid keys (`SG.`) are blocked, not sent to Elastic Email;
+   replace one with an Elastic key. Keep `SECRET_KEY` unchanged across upgrades.
 2. After any image replacement, hard-refresh the admin page once (`Ctrl+F5`).
    Enter a test recipient and select **Save & send test email**. This saves the
    current form first and works with automatic email switched off. A failed
@@ -584,7 +584,7 @@ docker compose up -d --no-build --no-deps --force-recreate telephony-api telepho
 Do not build on the VM. The workstation build installs the recognizer wheel and
 its bundled model into the image; the VM does not download a model. Retain the
 `.env`, `SECRET_KEY`, database and voicemail volumes; back up the database
-first. SQLite and MySQL add the provider column automatically, preserving existing SendGrid configurations; transcription remains off
+first. SQLite and MySQL automatically migrate the email sender to Elastic Email, retaining the saved key; transcription remains off
 by default; obsolete hosted transcription keys are erased from an existing
 config table. No Asterisk image, outbound dialplan or proxy configuration change
 is needed for this email update. Run the test email after deployment, then

@@ -813,7 +813,7 @@ def test_email_config_rotation_test_and_secret_redaction(tmp_path, monkeypatch):
     assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
     headers = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
     # Legacy cloud-key fields from an older browser are ignored, never re-saved.
-    patch = {"enabled": False, "api_key": " SG.initial ", "from_email": "verified@example.com",
+    patch = {"enabled": False, "api_key": " ELASTIC.initial ", "from_email": "verified@example.com",
              "transcription_enabled": True, "transcription_api_key": "sk.transcription"}
     assert client.post("/admin/api/email-config", json=patch).status_code == 403
     saved = client.post("/admin/api/email-config", json=patch, headers=headers)
@@ -822,29 +822,37 @@ def test_email_config_rotation_test_and_secret_redaction(tmp_path, monkeypatch):
     assert saved.json["email_config"]["transcription_enabled"]
     assert "has_transcription_api_key" not in saved.json["email_config"]
     assert not saved.json["email_config"]["enabled"]
-    assert "SG.initial" not in saved.text and "sk.transcription" not in saved.text
-    assert client.post("/admin/api/email-config", json={"api_key": "SG.replacement"}, headers=headers).status_code == 200
+    assert "ELASTIC.initial" not in saved.text and "sk.transcription" not in saved.text
+    # A cached old console cannot switch the transport or erase a saved key.
+    stale = client.post("/admin/api/email-config", json={"provider": "sendgrid", "api_key": ""}, headers=headers)
+    assert stale.status_code == 200 and stale.json["email_config"]["provider"] == "elasticemail"
+    assert client.application.extensions["settings_store"].get_email_config(include_key=True)["api_key"] == "ELASTIC.initial"
+    assert client.post("/admin/api/email-config", json={"api_key": "ELASTIC.replacement"}, headers=headers).status_code == 200
     calls = []
     class Accepted:
-        status_code = 202
+        status_code = 200
+        def json(self):
+            return {"success": True}
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or Accepted())
     assert client.post("/admin/api/email-config/test", json={"email": "invalid"}, headers=headers).status_code == 400
     assert calls == []
     result = client.post("/admin/api/email-config/test", json={"email": "recipient@example.com"}, headers=headers)
     assert result.status_code == 200 and result.json["ok"] is True
-    assert len(calls) == 1 and calls[0][0] == "https://api.sendgrid.com/v3/mail/send"
-    assert calls[0][1]["headers"]["Authorization"] == "Bearer SG.replacement"
+    assert len(calls) == 1 and calls[0][0] == "https://api.elasticemail.com/v2/email/send"
+    assert calls[0][1]["data"]["apikey"] == "ELASTIC.replacement" and "headers" not in calls[0][1]
     public = client.get("/admin/api/state")
-    assert "SG.replacement" not in public.text and "sk.transcription" not in public.text
+    assert "ELASTIC.replacement" not in public.text and "sk.transcription" not in public.text
     assert "_key_enc" not in public.text
     # Provider failures are actionable but never echo reflected secret bodies.
     class Rejected:
         status_code = 403
-        text = "sk.transcription SG.replacement"
+        text = "sk.transcription ELASTIC.replacement"
+        def json(self):
+            return {"success": False, "error": "Permission denied ELASTIC.replacement"}
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda *a, **kw: Rejected())
     failed = client.post("/admin/api/email-config/test", json={"email": "recipient@example.com"}, headers=headers)
-    assert failed.status_code == 502 and "Mail Send" in failed.json["error"]
-    assert "SG.replacement" not in failed.text
+    assert failed.status_code == 502 and "Send HTTP" in failed.json["error"]
+    assert "ELASTIC.replacement" not in failed.text
 
 
 def test_elastic_email_api_saves_and_reports_safe_structured_test_results(tmp_path, monkeypatch):
@@ -893,7 +901,7 @@ def test_elastic_email_api_saves_and_reports_safe_structured_test_results(tmp_pa
 def test_customer_cannot_read_or_change_email_provider_settings(tmp_path, monkeypatch):
     client = app_client(tmp_path)
     store = client.application.extensions["settings_store"]
-    store.save_email_config({"enabled": True, "api_key": "SG.private", "from_email": "verified@example.com",
+    store.save_email_config({"enabled": True, "api_key": "ELASTIC.private", "from_email": "verified@example.com",
                              "transcription_enabled": True, "transcription_api_key": "sk.private"})
     store.save_user({"username": "email-customer", "email": "customer@example.com", "password": "long-customer-password",
                      "role": "user", "active": True})
@@ -901,9 +909,9 @@ def test_customer_cannot_read_or_change_email_provider_settings(tmp_path, monkey
     state = client.get("/admin/api/state").json
     assert state["email_config"] == {} and state["email_deliveries"] == []
     headers = {"X-CSRF-Token": state["csrf_token"]}
-    assert client.post("/admin/api/email-config", json={"api_key": "SG.attacker"}, headers=headers).status_code == 403
+    assert client.post("/admin/api/email-config", json={"api_key": "ELASTIC.attacker"}, headers=headers).status_code == 403
     assert client.post("/admin/api/email-config/test", json={"email": "customer@example.com"}, headers=headers).status_code == 403
-    assert store.get_email_config(include_key=True)["api_key"] == "SG.private"
+    assert store.get_email_config(include_key=True)["api_key"] == "ELASTIC.private"
 
 
 def test_admin_ui_and_state_are_not_cached_across_image_upgrades(tmp_path, monkeypatch):
@@ -925,3 +933,13 @@ def test_admin_ui_and_state_are_not_cached_across_image_upgrades(tmp_path, monke
         assert response.headers["Cache-Control"] == "no-store"
     # The landing page's unrelated public assets keep their existing policy.
     assert client.get("/favicon.ico").headers["Cache-Control"] != "no-store"
+
+
+def test_login_rate_limit_remains_enforced_within_each_test(tmp_path):
+    from app import admin as admin_module
+
+    client = app_client(tmp_path)
+    attempts = {"username": "unknown-user", "password": "wrong"}
+    for _ in range(admin_module._LOGIN_LIMIT):
+        assert client.post("/login", json=attempts).status_code == 401
+    assert client.post("/login", json=attempts).status_code == 429

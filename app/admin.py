@@ -308,6 +308,7 @@ class SettingsStore:
                 if not db.execute("SELECT 1 FROM settings WHERE `key`='recording_policy_v2_initialized'").fetchone():
                     db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','true') ON DUPLICATE KEY UPDATE value='true',updated_at=CURRENT_TIMESTAMP")
                     db.execute("INSERT IGNORE INTO settings(`key`,value) VALUES('recording_policy_v2_initialized','true')")
+                self._migrate_email_to_elastic(db)
             return
         with self._connect() as db:
             db.executescript("""
@@ -380,13 +381,14 @@ class SettingsStore:
             # Additive upgrades for image-only deployments with an existing DB.
             for table, additions in (
                 ("email_config", (("transcription_enabled", "INTEGER NOT NULL DEFAULT 0"),
-                                  ("provider", "TEXT NOT NULL DEFAULT 'sendgrid'"))),
+                                  ("provider", "TEXT NOT NULL DEFAULT 'elasticemail'"))),
                 ("voicemail_deliveries", (("transcription_status", "TEXT NOT NULL DEFAULT 'disabled'"),)),
             ):
                 existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
                 for column, definition in additions:
                     if column not in existing:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            self._migrate_email_to_elastic(db)
             # Old hosted-transcription credentials are no longer needed. Keep
             # the legacy column for safe, additive upgrades, but erase its value.
             if "transcription_api_key_enc" in {r["name"] for r in db.execute("PRAGMA table_info(email_config)").fetchall()}:
@@ -3924,16 +3926,34 @@ class SettingsStore:
                     (email, wanted["id"]),
                 )
 
+    @staticmethod
+    def _migrate_email_to_elastic(db):
+        """Upgrade old settings automatically, including keys saved in the old form.
+
+        The key ciphertext, sender and opt-in remain untouched. The one-time
+        marker retries definite SendGrid client rejections such as HTTP 401.
+        Accepted mail and ambiguous network failures are left alone; an old
+        client can never switch the running sender back to SendGrid.
+        """
+        first = db.execute("INSERT OR IGNORE INTO settings(`key`,value) VALUES('elastic_email_only_v1','true')")
+        db.execute("UPDATE email_config SET provider='elasticemail' WHERE provider<>'elasticemail' OR provider IS NULL")
+        if first.rowcount:
+            # HTTP 4xx responses were rejected before acceptance. Do not reset
+            # timeouts or other ambiguous failures: they may have been accepted.
+            db.execute("UPDATE voicemail_deliveries SET attempts=0,last_error=NULL "
+                       "WHERE status='failed' AND last_error LIKE ?", ("SendGrid HTTP 4%",))
+
     def get_email_config(self, include_key: bool = False):
         from cryptography.fernet import InvalidToken
 
         with self._connect() as db:
-            row = db.execute("SELECT provider,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
-        # Existing installations and clients that omit provider remain on SendGrid.
-        result = {"provider": "sendgrid", "from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False,
+            row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
+        # There is only one email sender. The name of the encrypted column is
+        # historical; an Elastic key saved in the old UI remains usable.
+        result = {"provider": "elasticemail", "from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False,
                   "has_api_key": False, "transcription_enabled": False}
         if row:
-            result.update({"provider": row["provider"], "from_email": row["from_email"], "from_name": row["from_name"],
+            result.update({"from_email": row["from_email"], "from_name": row["from_name"],
                            "enabled": bool(row["enabled"]), "has_api_key": bool(row["sendgrid_api_key_enc"]),
                            "transcription_enabled": bool(row["transcription_enabled"]),
                            "updated_at": row["updated_at"]})
@@ -3942,22 +3962,20 @@ class SettingsStore:
                     result["api_key"] = self.decrypt(row["sendgrid_api_key_enc"]) if row["sendgrid_api_key_enc"] else ""
                 except InvalidToken:
                     result["api_key"] = ""
-                    result["api_key_error"] = "Saved email API key cannot be decrypted. Restore the original SECRET_KEY or save a replacement API key."
+                    result["api_key_error"] = "Saved email API key cannot be decrypted. Restore the original SECRET_KEY or save a replacement Elastic Email key."
         return result
 
     def save_email_config(self, data):
         if not isinstance(data, dict):
             raise ValueError("Email configuration must be an object")
-        # The historically named sendgrid_api_key_enc column stores the one
-        # selected provider's encrypted key; no database copy or re-key is needed.
-        # Preserve ciphertext directly so an unreadable old key can be replaced.
+        # Preserve ciphertext without decrypting: blank retains the existing key,
+        # while replacing a key still works after SECRET_KEY has changed.
         with self._connect() as db:
             row = db.execute("SELECT provider,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
             old = dict(row) if row else {}
-            labels = {"sendgrid": "SendGrid", "elasticemail": "Elastic Email"}
-            provider = data.get("provider", old.get("provider", "sendgrid"))
-            if not isinstance(provider, str) or provider not in labels:
-                raise ValueError("Choose SendGrid or Elastic Email as the email provider")
+            # Older cached pages can still submit provider=sendgrid; ignore it.
+            # No request is allowed to select or send through another provider.
+            provider = "elasticemail"
 
             def flag(name):
                 value = data.get(name, bool(old.get(name, False)))
@@ -3976,22 +3994,19 @@ class SettingsStore:
             key = str(data.get("api_key") or "").strip()
             if len(key) > 512 or re.search(r"\s", key):
                 raise ValueError("Paste the API key only, without Bearer, spaces or line breaks")
-            # Never accidentally send one vendor's stored credential to the
-            # other. Re-enter the intended key when changing provider, including
-            # an Elastic key previously saved under the old SendGrid-only UI.
-            if provider != old.get("provider", "sendgrid") and old.get("sendgrid_api_key_enc") and not key:
-                raise ValueError(f"Enter the {labels[provider]} API key when switching providers")
+            # A recognizable SendGrid credential must never be forwarded to a
+            # different service. An Elastic key saved under the old UI is kept.
+            if key.upper().startswith("SG."):
+                raise ValueError("This looks like a SendGrid key. Enter an Elastic Email API key instead")
             encrypted = self.encrypt(key) if key else old.get("sendgrid_api_key_enc", "")
             if enabled and (not encrypted or not from_email):
-                raise ValueError(f"{labels[provider]} API key and verified from email are required")
+                raise ValueError("Elastic Email API key and verified from email are required")
             db.execute("INSERT INTO email_config(id,provider,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled) "
                        "VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,"
                        "from_email=excluded.from_email,from_name=excluded.from_name,enabled=excluded.enabled,"
                        "transcription_enabled=excluded.transcription_enabled,updated_at=CURRENT_TIMESTAMP",
                        (provider, encrypted, from_email, from_name, int(enabled), int(transcription_enabled)))
-            # A repaired provider/sender/key should retry exhausted failures,
-            # never an already accepted email or a delivery still in flight.
-            if (provider != old.get("provider", "sendgrid") or encrypted != old.get("sendgrid_api_key_enc", "")
+            if (old.get("provider", "elasticemail") != provider or encrypted != old.get("sendgrid_api_key_enc", "")
                     or from_email != old.get("from_email", "") or (enabled and not old.get("enabled"))):
                 db.execute("UPDATE voicemail_deliveries SET attempts=0 WHERE status='failed'")
 

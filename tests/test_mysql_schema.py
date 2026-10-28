@@ -61,6 +61,10 @@ class RecordingConnection:
         self.sink.append(str(sql))
 
         class Result:
+            # Real SQLite/PyMySQL cursors expose affected-row counts for the
+            # one-time email migration's INSERT OR IGNORE.
+            rowcount = 1
+
             def fetchone(self):
                 return None
 

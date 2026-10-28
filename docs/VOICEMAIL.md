@@ -52,7 +52,7 @@ merged into the wrong box; the folder is left where it is, untouched.
 3. Enable **Voicemail** and enter a 4–10 digit numeric PIN. Leaving the PIN blank on a later edit keeps the existing encrypted PIN.
 4. Save. The service atomically renders `voicemail.dynamic.conf`, updates the dialplan, and reloads PJSIP, voicemail, and dialplan modules through private AMI.
 
-PINs are encrypted in `settings.db` and are never returned by the API or admin state. New messages can also be sent as email attachments through Elastic Email or SendGrid; see [`EMAIL_AND_USERS.md`](EMAIL_AND_USERS.md).
+PINs are encrypted in `settings.db` and are never returned by the API or admin state. New messages can also be sent as email attachments through Elastic Email; see [`EMAIL_AND_USERS.md`](EMAIL_AND_USERS.md).
 
 ## Call behavior
 

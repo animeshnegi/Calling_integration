@@ -88,8 +88,8 @@ api_idempotency = Table("api_idempotency", metadata,
     Column("client", String(100), primary_key=True), Column("request_key", String(128), primary_key=True),
     Column("call_id", String(128)), Column("created_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 email_config = Table("email_config", metadata, Column("id", Integer, primary_key=True), Column("sendgrid_api_key_enc", Text, nullable=False),
-    # This legacy column stores the selected provider's encrypted key.
-    Column("provider", String(20), nullable=False, server_default="sendgrid"),
+    # The legacy key column now stores the Elastic Email API key.
+    Column("provider", String(20), nullable=False, server_default="elasticemail"),
     Column("from_email", String(254), nullable=False, server_default=""), Column("from_name", String(120), nullable=False, server_default="EIP Telephony Voicemail"),
     Column("enabled", Integer, nullable=False, server_default="0"),
     Column("transcription_enabled", Integer, nullable=False, server_default="0"),

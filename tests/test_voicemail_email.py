@@ -1,4 +1,3 @@
-import base64
 import os
 import sqlite3
 import threading
@@ -12,17 +11,17 @@ import pytest
 from app.admin import SettingsStore
 from app.database import metadata, reconcile_statements
 from app.voicemail import VoicemailStore
-from app.voicemail_email import SENDGRID_URL, VoicemailEmailNotifier
+from app.voicemail_email import ELASTIC_EMAIL_URL, VoicemailEmailNotifier
 
 
-def test_sendgrid_voicemail_attachment_is_sent_once(tmp_path, monkeypatch):
+def test_elastic_voicemail_attachment_is_sent_once(tmp_path, monkeypatch):
     settings = SettingsStore(str(tmp_path / "settings.db"), "s" * 40)
     settings.save_extension({
         "extension": "101", "sip_username": "101", "sip_password": "sip-secret",
         "voicemail_enabled": True, "voicemail_pin": "1234", "voicemail_email": "agent@example.com",
     })
     settings.save_email_config({
-        "enabled": True, "api_key": "SG.test-secret", "from_email": "verified@example.com", "from_name": "Calls",
+        "enabled": True, "api_key": "ELASTIC.test-secret", "from_email": "verified@example.com", "from_name": "Calls",
     })
     directory = tmp_path / "voicemail" / "engineerip" / "101" / "INBOX"
     directory.mkdir(parents=True)
@@ -33,7 +32,9 @@ def test_sendgrid_voicemail_attachment_is_sent_once(tmp_path, monkeypatch):
     sent = []
 
     class Response:
-        status_code = 202
+        status_code = 200
+        def json(self):
+            return {"success": True}
 
     def fake_post(url, **kwargs):
         sent.append((url, kwargs))
@@ -44,15 +45,17 @@ def test_sendgrid_voicemail_attachment_is_sent_once(tmp_path, monkeypatch):
     assert notifier.process() == 1
     assert notifier.process() == 0
     assert len(sent) == 1
-    payload = sent[0][1]["json"]
-    assert payload["personalizations"][0]["to"][0]["email"] == "agent@example.com"
-    assert payload["attachments"][0]["filename"].endswith(".wav")
-    assert sent[0][1]["headers"]["Authorization"] == "Bearer SG.test-secret"
+    assert sent[0][0] == ELASTIC_EMAIL_URL
+    assert sent[0][1]["data"]["to"] == "agent@example.com"
+    assert sent[0][1]["data"]["apikey"] == "ELASTIC.test-secret"
+    assert sent[0][1]["files"][0][1][0].endswith(".wav")
+    assert sent[0][1]["files"][0][1][1] == audio.read_bytes()
+    assert "headers" not in sent[0][1]
 
 
-def test_sendgrid_key_is_not_exposed(tmp_path):
+def test_elastic_key_is_not_exposed(tmp_path):
     settings = SettingsStore(str(tmp_path / "settings.db"), "s" * 40)
-    settings.save_email_config({"enabled": True, "api_key": "SG.secret", "from_email": "verified@example.com"})
+    settings.save_email_config({"enabled": True, "api_key": "ELASTIC.secret", "from_email": "verified@example.com"})
     public = settings.get_email_config()
     assert public["has_api_key"] is True
     assert "api_key" not in public
@@ -61,7 +64,7 @@ def test_sendgrid_key_is_not_exposed(tmp_path):
 @pytest.fixture
 def email_system(tmp_path):
     settings = SettingsStore(str(tmp_path / "settings.db"), "s" * 40)
-    settings.save_email_config({"enabled": True, "api_key": "SG.secret", "from_email": "verified@example.com"})
+    settings.save_email_config({"enabled": True, "api_key": "ELASTIC.secret", "from_email": "verified@example.com"})
     settings.save_extension({"extension": "101", "sip_password": "sip-secret", "voicemail_enabled": True,
                              "voicemail_pin": "1234", "voicemail_email": "agent@example.com"})
     store = VoicemailStore(str(tmp_path / "voicemail"))
@@ -78,17 +81,19 @@ def message_file(store, mailbox="101", folder="INBOX", index=0, suffix="wav", co
     return audio
 
 
-def response(status=202, **data):
+def response(status=200, **data):
+    if status == 200 and not data:
+        data = {"success": True}
     return SimpleNamespace(status_code=status, json=lambda: data)
 
 
 def test_key_rotation_trim_blank_preservation_and_partial_save(email_system):
     settings, _, _ = email_system
     # A stale browser may still submit the removed cloud key; it is ignored.
-    settings.save_email_config({"api_key": "  SG.replacement\r\n", "transcription_api_key": " sk.transcription  "})
+    settings.save_email_config({"api_key": "  ELASTIC.replacement\r\n", "transcription_api_key": " sk.transcription  "})
     settings.save_email_config({"api_key": "", "transcription_api_key": "", "from_name": "New sender"})
     cfg = settings.get_email_config(include_key=True)
-    assert cfg["api_key"] == "SG.replacement"
+    assert cfg["api_key"] == "ELASTIC.replacement"
     assert "transcription_api_key" not in cfg
     assert cfg["enabled"] and cfg["from_email"] == "verified@example.com"
     public = settings.get_email_config()
@@ -96,11 +101,11 @@ def test_key_rotation_trim_blank_preservation_and_partial_save(email_system):
     assert "api_key" not in public and "transcription_api_key" not in public
     with settings._connect() as db:
         row = dict(db.execute("SELECT * FROM email_config").fetchone())
-    assert "SG.replacement" not in str(row) and "sk.transcription" not in str(row)
+    assert "ELASTIC.replacement" not in str(row) and "sk.transcription" not in str(row)
     assert "secret" not in str(settings.get_settings())
 
 
-@pytest.mark.parametrize("patch", [{"api_key": "Bearer SG.foo"}, {"api_key": "SG.foo\nbar"},
+@pytest.mark.parametrize("patch", [{"api_key": "Bearer ELASTIC.foo"}, {"api_key": "ELASTIC.foo\nbar"},
                                    {"transcription_enabled": "true"}, {"enabled": "false"}, {"from_name": "X\nY"}, []])
 def test_invalid_config_is_atomic(email_system, patch):
     settings, _, _ = email_system
@@ -115,8 +120,8 @@ def test_unreadable_old_key_can_be_replaced(email_system):
     settings.secret_key = b"changed-secret"
     ok, error = notifier.send_test("test@example.com")
     assert not ok and "SECRET_KEY" in error
-    settings.save_email_config({"api_key": "SG.new-key"})
-    assert settings.get_email_config(include_key=True)["api_key"] == "SG.new-key"
+    settings.save_email_config({"api_key": "ELASTIC.new-key"})
+    assert settings.get_email_config(include_key=True)["api_key"] == "ELASTIC.new-key"
 
 
 def test_test_email_works_without_enabling_automatic_notifications(email_system, monkeypatch):
@@ -126,23 +131,23 @@ def test_test_email_works_without_enabling_automatic_notifications(email_system,
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or response())
     assert notifier.send_test("test@example.com") == (True, None)
     assert not settings.get_email_config()["enabled"]
-    assert calls[0][0] == SENDGRID_URL and "attachments" not in calls[0][1]["json"]
-    assert "does not test transcription" in calls[0][1]["json"]["content"][0]["value"]
+    assert calls[0][0] == ELASTIC_EMAIL_URL and "files" not in calls[0][1]
+    assert "does not test transcription" in calls[0][1]["data"]["bodyText"]
 
 
-@pytest.mark.parametrize("status, hint", [(400, "sender"), (401, "replacement"), (403, "Mail Send"),
-                                         (429, "rate limit"), (503, "unavailable"), (302, "Unexpected")])
-def test_sendgrid_errors_are_actionable_and_never_echo_provider_body(email_system, monkeypatch, status, hint):
+@pytest.mark.parametrize("status, hint", [(400, "Send HTTP"), (401, "Send HTTP"), (403, "Send HTTP"),
+                                         (429, "Rate limit"), (503, "unavailable"), (302, "Send HTTP")])
+def test_elastic_errors_are_actionable_and_never_echo_provider_body(email_system, monkeypatch, status, hint):
     _, _, notifier = email_system
-    monkeypatch.setattr("app.voicemail_email.requests.post", lambda *a, **kw: response(status, errors="SG.secret sk.private <script>"))
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda *a, **kw: response(status, success=False, error="invalid API key ELASTIC.secret sk.private <script>"))
     ok, error = notifier.send_test("test@example.com")
     assert not ok and hint in error
-    assert "SG.secret" not in error and "<script>" not in error
+    assert "ELASTIC.secret" not in error and "<script>" not in error
 
 
 def test_same_extension_digits_across_tenants_use_exact_mailboxes(tmp_path, monkeypatch):
     settings = SettingsStore(str(tmp_path / "settings.db"), "s" * 40)
-    settings.save_email_config({"enabled": True, "api_key": "SG.secret", "from_email": "verified@example.com"})
+    settings.save_email_config({"enabled": True, "api_key": "ELASTIC.secret", "from_email": "verified@example.com"})
     settings.save_provider({"name": "p", "server": "sip.example.com", "username": "u", "password": "password", "allowed_ips": "198.51.100.10/32"})
     store = VoicemailStore(str(tmp_path / "voicemail"))
     for index, number in enumerate(("+13025550041", "+13025550042")):
@@ -154,11 +159,11 @@ def test_same_extension_digits_across_tenants_use_exact_mailboxes(tmp_path, monk
     # An ambiguous legacy box must not be guessed into either tenant.
     message_file(store, "101")
     calls = []
-    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(kw["json"]) or response())
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(kw) or response())
     notifier = VoicemailEmailNotifier(store, settings)
     assert notifier.process() == 2
     assert notifier.process() == 0
-    recipients = {p["personalizations"][0]["to"][0]["email"]: p["attachments"][0]["filename"] for p in calls}
+    recipients = {p["data"]["to"]: p["files"][0][1][0] for p in calls}
     assert "101-13025550041" in recipients["tenant0@example.com"]
     assert "101-13025550042" in recipients["tenant1@example.com"]
 
@@ -174,13 +179,13 @@ def test_transcript_and_audio_in_same_email_escaped_and_not_stored(email_system,
     monkeypatch.setattr("app.voicemail_email.local_transcription.transcribe", transcribe)
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or response())
     assert notifier.process() == 1
-    assert [url for url, _ in calls] == [SENDGRID_URL]  # Only email leaves server.
+    assert [url for url, _ in calls] == [ELASTIC_EMAIL_URL]  # Only email leaves server.
     assert local == [(audio.read_bytes(), ".wav")]
-    payload = calls[0][1]["json"]
-    assert "Please call me." in payload["content"][0]["value"]
-    assert "<script>" not in payload["content"][1]["value"]
-    assert "&lt;script&gt;private transcript" in payload["content"][1]["value"]
-    assert base64.b64decode(payload["attachments"][0]["content"]) == audio.read_bytes()
+    payload = calls[0][1]["data"]
+    assert "Please call me." in payload["bodyText"]
+    assert "<script>" not in payload["bodyHtml"]
+    assert "&lt;script&gt;private transcript" in payload["bodyHtml"]
+    assert calls[0][1]["files"][0][1][1] == audio.read_bytes()
     deliveries = settings.list_voicemail_deliveries()
     assert deliveries[0]["transcription_status"] == "transcribed"
     assert "private transcript" not in str(deliveries)
@@ -196,10 +201,10 @@ def test_transcription_failure_still_sends_audio(email_system, monkeypatch, stat
     monkeypatch.setattr("app.voicemail_email.local_transcription.transcribe", lambda *args: (None, status))
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or response())
     assert notifier.process() == 1
-    assert len(calls) == 1 and calls[0][0] == SENDGRID_URL
-    sent = calls[0][1]["json"]
-    assert sent["attachments"]
-    assert "Transcription is unavailable" in sent["content"][0]["value"]
+    assert len(calls) == 1 and calls[0][0] == ELASTIC_EMAIL_URL
+    sent = calls[0][1]
+    assert sent["files"]
+    assert "Transcription is unavailable" in sent["data"]["bodyText"]
     assert settings.list_voicemail_deliveries()[0]["transcription_status"] == status
 
 
@@ -211,11 +216,11 @@ def test_disabled_or_unsupported_transcription_never_uploads_audio(email_system,
     calls = []
     monkeypatch.setattr("app.local_transcription.subprocess.run", lambda *a, **kw: pytest.fail("No recognizer should be started"))
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(url) or response())
-    assert notifier.process() == 1 and calls == [SENDGRID_URL]
+    assert notifier.process() == 1 and calls == [ELASTIC_EMAIL_URL]
     assert settings.list_voicemail_deliveries()[0]["transcription_status"] == expected
 
 
-def test_old_transcription_credentials_erased_without_changing_sendgrid_or_opt_in(email_system):
+def test_old_transcription_credentials_erased_without_changing_elastic_or_opt_in(email_system):
     settings, _, _ = email_system
     settings.save_email_config({"transcription_enabled": True})
     with settings._connect() as db:
@@ -224,7 +229,7 @@ def test_old_transcription_credentials_erased_without_changing_sendgrid_or_opt_i
     for _ in range(2):
         upgraded = SettingsStore(str(settings.path), "s" * 40)
         cfg = upgraded.get_email_config(include_key=True)
-        assert cfg["api_key"] == "SG.secret" and cfg["transcription_enabled"]
+        assert cfg["api_key"] == "ELASTIC.secret" and cfg["transcription_enabled"]
         assert "transcription_api_key" not in cfg and "has_transcription_api_key" not in cfg
         with upgraded._connect() as db:
             assert db.execute("SELECT transcription_api_key_enc FROM email_config").fetchone()[0] == ""
@@ -238,12 +243,12 @@ def test_real_local_recognition_reaches_email_without_speech_provider(email_syst
     calls = []
     monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or response())
     assert notifier.process() == 1
-    assert len(calls) == 1 and calls[0][0] == SENDGRID_URL
-    email = calls[0][1]["json"]
-    assert "go forward ten meters" in email["content"][0]["value"]
-    assert "<script>" not in email["content"][1]["value"]
-    assert "go forward ten meters" in email["content"][1]["value"]
-    assert base64.b64decode(email["attachments"][0]["content"]) == fixture.read_bytes()
+    assert len(calls) == 1 and calls[0][0] == ELASTIC_EMAIL_URL
+    email = calls[0][1]["data"]
+    assert "go forward ten meters" in email["bodyText"]
+    assert "<script>" not in email["bodyHtml"]
+    assert "go forward ten meters" in email["bodyHtml"]
+    assert calls[0][1]["files"][0][1][1] == fixture.read_bytes()
     assert settings.list_voicemail_deliveries()[0]["transcription_status"] == "transcribed"
 
 
@@ -261,17 +266,17 @@ def test_claim_is_atomic_has_backoff_and_key_repair_retries_failures(email_syste
         claimed = list(pool.map(lambda _: settings.claim_voicemail_delivery("fp", "101", "a@example.com"), range(4)))
     assert sum(claimed) == 1
     assert not settings.claim_voicemail_delivery("fp", "101", "a@example.com")
-    settings.finish_voicemail_delivery("fp", False, "SendGrid HTTP 401")
+    settings.finish_voicemail_delivery("fp", False, "Elastic Email HTTP 401")
     assert not settings.claim_voicemail_delivery("fp", "101", "a@example.com")
     with settings._connect() as db:
         db.execute("UPDATE voicemail_deliveries SET attempts=5,updated_at=datetime('now','-2 minutes') WHERE fingerprint='fp'")
     assert not settings.claim_voicemail_delivery("fp", "101", "a@example.com")
     settings.save_email_config({"api_key": ""})  # Keeping a key is not a repair.
     assert settings.list_voicemail_deliveries()[0]["attempts"] == 5
-    settings.save_email_config({"api_key": "SG.repaired"})
+    settings.save_email_config({"api_key": "ELASTIC.repaired"})
     assert settings.claim_voicemail_delivery("fp", "101", "new@example.com")
     settings.finish_voicemail_delivery("fp", True)
-    settings.save_email_config({"api_key": "SG.another"})
+    settings.save_email_config({"api_key": "ELASTIC.another"})
     assert not settings.claim_voicemail_delivery("fp", "101", "new@example.com")
     assert settings.list_voicemail_deliveries()[0]["recipient"] == "new@example.com"
 
@@ -327,7 +332,7 @@ def test_distinct_calls_with_identical_audio_both_notify_and_renumber_does_not_d
     second = message_file(store, index=1)
     second.with_suffix('.txt').write_text("[message]\ncallerid=Customer\norigtime=1700000001\nduration=15\n")
     calls = []
-    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(kw["json"]) or response())
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(kw["data"]) or response())
     assert notifier.process() == 2 and len(calls) == 2
     # A read moves msg0000 to Old and renumbers the other msg to msg0000.
     store.mark_read("101", "inbox", "msg0000")
@@ -342,7 +347,7 @@ def test_legacy_accepted_audio_not_resent_but_later_identical_call_is_eligible(e
     assert settings.claim_voicemail_delivery(old_id, "101", "agent@example.com")
     settings.finish_voicemail_delivery(old_id, True)
     calls = []
-    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(kw["json"]) or response())
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append(kw["data"]) or response())
     assert notifier.process() == 0 and not calls
     # A later call with the same audio is not the historical accepted message.
     audio.with_suffix('.txt').write_text(f"[message]\ncallerid=Customer\norigtime={int(time.time()) + 1}\nduration=15\n")
@@ -351,15 +356,15 @@ def test_legacy_accepted_audio_not_resent_but_later_identical_call_is_eligible(e
 
 
 @pytest.mark.parametrize("exc", ["timeout", "connection"])
-def test_sendgrid_network_errors_are_sanitized(email_system, monkeypatch, exc):
+def test_elastic_network_errors_are_sanitized(email_system, monkeypatch, exc):
     import requests
     settings, _, notifier = email_system
     def fail(*args, **kwargs):
         kind = requests.Timeout if exc == "timeout" else requests.ConnectionError
-        raise kind("SG.secret do not expose this")
+        raise kind("ELASTIC.secret do not expose this")
     monkeypatch.setattr("app.voicemail_email.requests.post", fail)
     ok, error = notifier.send_test("test@example.com")
-    assert not ok and "SG.secret" not in error
+    assert not ok and "ELASTIC.secret" not in error
     assert "timed out" in error if exc == "timeout" else "Cannot reach" in error
 
 

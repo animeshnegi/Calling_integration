@@ -1491,24 +1491,15 @@ function renderSettings() {
   markStagger();
 }
 
-function emailProviderLabel(provider) {
-  return provider === 'elasticemail' ? 'Elastic Email' : 'SendGrid';
-}
 function updateEmailKeyStatus() {
   const config = state.email_config || {};
-  const selected = $('email-provider').value;
-  const switching = config.has_api_key && selected !== (config.provider || 'sendgrid');
-  $('email-key-status').textContent = switching
-    ? `Enter the ${emailProviderLabel(selected)} key when switching providers`
-    : config.has_api_key ? 'API key configured — leave blank to keep it' : 'No key configured';
-  $('email-key').placeholder = switching || !config.has_api_key
-    ? `Enter ${emailProviderLabel(selected)} API key` : 'Leave blank to keep existing';
+  $('email-key-status').textContent = config.has_api_key ? 'API key configured — leave blank to keep it' : 'No API key configured';
+  $('email-key').placeholder = config.has_api_key ? 'Leave blank to keep existing' : 'Enter Elastic Email API key';
 }
 function renderEmailSettings() {
   const config = state.email_config || {};
   if (!emailSettingsDirty && !emailSettingsBusy) {
     $('email-enabled').checked = !!config.enabled;
-    $('email-provider').value = config.provider || 'sendgrid';
     $('email-from').value = config.from_email || '';
     $('email-name').value = config.from_name || 'EIP Telephony Voicemail';
     $('transcription-enabled').checked = !!config.transcription_enabled;
@@ -4477,7 +4468,6 @@ wire('service-address-reset', 'click', async () => {
 });
 wire('email-form', 'input', () => { emailSettingsDirty = true; });
 wire('email-form', 'change', () => { emailSettingsDirty = true; });
-wire('email-provider', 'change', updateEmailKeyStatus);
 wire('profile-email', 'input', () => { profileEmailDirty = true; });
 
 function emailFeedback(message, error = false) {
@@ -4486,7 +4476,7 @@ function emailFeedback(message, error = false) {
 }
 async function saveEmailSettings() {
   const result = await api('/admin/api/email-config', { method: 'POST', body: JSON.stringify({
-    enabled: $('email-enabled').checked, provider: val('email-provider'), api_key: val('email-key'),
+    enabled: $('email-enabled').checked, api_key: val('email-key'),
     from_email: val('email-from'), from_name: val('email-name'),
     transcription_enabled: $('transcription-enabled').checked,
   }) });
@@ -4509,10 +4499,9 @@ async function emailAction(test) {
     if (test) {
       const result = await api('/admin/api/email-config/test', { method: 'POST', body: JSON.stringify({ email: val('email-test'), result_only: true }) });
       if (result.ok !== true) throw Error(result.error || 'Email test failed. Check your email provider settings.');
-      const provider = emailProviderLabel(state.email_config?.provider);
-      emailFeedback(`Test accepted by ${provider}. Check your inbox/spam and provider activity for delivery.`);
+      emailFeedback('Test accepted by Elastic Email. Check your inbox/spam and Elastic Email activity for delivery.');
     } else {
-      emailFeedback('Email configuration saved. A blank key keeps the saved key for this provider.');
+      emailFeedback('Email configuration saved. A blank key keeps the saved Elastic Email key.');
     }
   } catch (error) {
     emailFeedback(error.message, true);

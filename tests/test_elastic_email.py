@@ -1,4 +1,4 @@
-"""Elastic Email v2 contract, provider switching and image-only DB upgrades."""
+"""Elastic Email-only v2 contract, automatic legacy migration and image-only DB upgrades."""
 import base64
 import hashlib
 import io
@@ -158,47 +158,97 @@ def test_elastic_network_failures_are_safe(elastic_system, monkeypatch, error, e
     assert "ELASTIC-secret" not in message
 
 
-def test_legacy_key_upgrade_and_provider_switch_are_safe(tmp_path):
+@pytest.mark.parametrize("legacy_provider", [None, "sendgrid", "elasticemail"])
+def test_old_saved_elastic_key_automatically_sends_via_elastic(tmp_path, monkeypatch, legacy_provider):
+    """Old provider flags and old browsers cannot route a saved Elastic key to SendGrid."""
     path = tmp_path / "old.db"
     secret = "s" * 40
     encryption_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
-    # This might be a SendGrid key or an Elastic key entered in the old UI; the
-    # schema cannot infer which. Do not send it to another provider automatically.
     ciphertext = Fernet(encryption_key).encrypt(b"ELASTIC-legacy-key").decode()
     with sqlite3.connect(path) as db:
-        db.execute("""CREATE TABLE email_config(id INTEGER PRIMARY KEY,sendgrid_api_key_enc TEXT NOT NULL,
+        provider_col = ", provider TEXT NOT NULL DEFAULT 'sendgrid'" if legacy_provider is not None else ""
+        db.execute(f"""CREATE TABLE email_config(id INTEGER PRIMARY KEY,sendgrid_api_key_enc TEXT NOT NULL,
                      from_email TEXT NOT NULL,from_name TEXT NOT NULL,enabled INTEGER NOT NULL,
-                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP{provider_col})""")
         db.execute("INSERT INTO email_config(id,sendgrid_api_key_enc,from_email,from_name,enabled) VALUES(1,?,?,?,1)",
                    (ciphertext, "verified@example.com", "Old sender"))
-    for _ in range(2):
-        settings = SettingsStore(str(path), secret)
-        existing = settings.get_email_config(include_key=True)
-        assert existing["provider"] == "sendgrid"
-        assert existing["api_key"] == "ELASTIC-legacy-key" and existing["enabled"]
-    before = settings.get_email_config(include_key=True)
-    with pytest.raises(ValueError, match="Enter the Elastic Email API key"):
-        settings.save_email_config({"provider": "elasticemail", "api_key": ""})
-    assert settings.get_email_config(include_key=True) == before
-    settings.save_email_config({"provider": "elasticemail", "api_key": "ELASTIC-legacy-key"})
-    settings.save_email_config({"api_key": "", "from_name": "New sender"})
-    current = settings.get_email_config(include_key=True)
-    assert current["provider"] == "elasticemail" and current["api_key"] == "ELASTIC-legacy-key"
-    assert current["enabled"] and current["from_email"] == "verified@example.com"
+        if legacy_provider is not None:
+            db.execute("UPDATE email_config SET provider=?", (legacy_provider,))
+        db.execute("""CREATE TABLE voicemail_deliveries(fingerprint TEXT PRIMARY KEY, mailbox TEXT NOT NULL,
+                   recipient TEXT NOT NULL,status TEXT NOT NULL,attempts INTEGER NOT NULL,
+                   last_error TEXT,delivered_at TEXT,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        db.execute("INSERT INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts,last_error) VALUES('failed','101','agent@example.com','failed',5,'SendGrid HTTP 401')")
+        db.execute("INSERT INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts) VALUES('done','101','agent@example.com','delivered',1)")
+        db.execute("INSERT INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts,last_error) VALUES('uncertain','101','agent@example.com','failed',5,'SendGrid request timed out; acceptance is unknown')")
+        db.execute("INSERT INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts,last_error) VALUES('other','101','agent@example.com','failed',5,'Elastic Email HTTP 401')")
+    settings = SettingsStore(str(path), secret)
+    existing = settings.get_email_config(include_key=True)
+    assert existing["provider"] == "elasticemail"
+    assert existing["api_key"] == "ELASTIC-legacy-key" and existing["enabled"]
+    with settings._connect() as db:
+        row = db.execute("SELECT provider,sendgrid_api_key_enc FROM email_config").fetchone()
+        assert row["provider"] == "elasticemail" and row["sendgrid_api_key_enc"] == ciphertext
+        attempts = {r["fingerprint"]: (r["status"], r["attempts"], r["last_error"]) for r in db.execute("SELECT fingerprint,status,attempts,last_error FROM voicemail_deliveries").fetchall()}
+    assert attempts == {"failed": ("failed", 0, None), "done": ("delivered", 1, None),
+                        "uncertain": ("failed", 5, "SendGrid request timed out; acceptance is unknown"),
+                        "other": ("failed", 5, "Elastic Email HTTP 401")}
+    calls = []
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or fake_response(200, {"success": True}))
+    notifier = VoicemailEmailNotifier(VoicemailStore(str(tmp_path / "voicemail")), settings)
+    assert notifier.send_test("test@example.com") == (True, None)
+    assert calls[0][0] == ELASTIC_EMAIL_URL and calls[0][1]["data"]["apikey"] == "ELASTIC-legacy-key"
+    # A still-open old page posting SendGrid with a blank key must not switch
+    # providers, drop the key, or require a new key to be pasted.
+    settings.save_email_config({"provider": "sendgrid", "api_key": "", "from_name": "New sender"})
+    assert settings.get_email_config(include_key=True)["api_key"] == "ELASTIC-legacy-key"
+    assert settings.get_email_config()["provider"] == "elasticemail"
+    assert notifier.send_test("test@example.com") == (True, None)
+    # Automatic voicemail sends use the same migrated key and endpoint.
+    settings.save_extension({"extension": "101", "sip_password": "sip-secret", "voicemail_enabled": True,
+                             "voicemail_pin": "1234", "voicemail_email": "agent@example.com"})
+    directory = tmp_path / "voicemail" / "engineerip" / "101" / "INBOX"
+    directory.mkdir(parents=True)
+    (directory / "msg0000.txt").write_text("[message]\ncallerid=Customer\norigtime=1700000000\nduration=4\n")
+    audio = directory / "msg0000.wav"
+    audio.write_bytes(b"RIFF-legacy")
+    os.utime(audio, (time.time() - 20, time.time() - 20))
+    assert notifier.process() == 1 and notifier.process() == 0
+    assert calls[-1][1]["files"][0][1][1] == b"RIFF-legacy"
+    assert all(call[0] == ELASTIC_EMAIL_URL for call in calls)
     assert "api_key" not in settings.get_email_config()
     with settings._connect() as db:
         assert "ELASTIC-legacy-key" not in str(dict(db.execute("SELECT * FROM email_config").fetchone()))
-    for bad in ("", "unknown", "https://evil.example", None):
-        with pytest.raises(ValueError, match="Choose SendGrid or Elastic Email"):
-            settings.save_email_config({"provider": bad, "api_key": "another-key"})
-        assert settings.get_email_config(include_key=True) == current
+        db.execute("UPDATE voicemail_deliveries SET attempts=5 WHERE fingerprint='failed'")
+    # Restarting both workers must not keep resetting already retried failures.
+    again = SettingsStore(str(path), secret)
+    assert next(row for row in again.list_voicemail_deliveries() if row["fingerprint"] == "failed")["attempts"] == 5
+
+
+def test_recognisable_sendgrid_key_is_not_forwarded_to_elastic(tmp_path, monkeypatch):
+    settings = SettingsStore(str(tmp_path / "settings.db"), "s" * 40)
+    settings.save_email_config({"api_key": "ELASTIC-secret", "from_email": "verified@example.com"})
+    # A real old SendGrid key must not be sent to a different company.
+    with settings._connect() as db:
+        db.execute("UPDATE email_config SET provider='sendgrid',sendgrid_api_key_enc=?", (settings.encrypt("SG.old-secret"),))
+    settings = SettingsStore(str(settings.path), "s" * 40)
+    notifier = VoicemailEmailNotifier(VoicemailStore(str(tmp_path / "voicemail")), settings)
+    calls = []
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda *args, **kw: calls.append(args) or fake_response(200, {"success": True}))
+    ok, error = notifier.send_test("test@example.com")
+    assert not ok and "Elastic Email API key" in error and "SG.old-secret" not in error
+    assert calls == []
+    with pytest.raises(ValueError, match="Enter an Elastic Email API key"):
+        settings.save_email_config({"api_key": "SG.other-secret"})
+    settings.save_email_config({"api_key": "ELASTIC-replacement"})
+    assert notifier.send_test("test@example.com") == (True, None)
+    assert calls == [(ELASTIC_EMAIL_URL,)]
 
 
 def test_mysql_upgrade_adds_provider_without_changing_legacy_key():
     existing = {t.name: {c.name: {"type": c.type} for c in t.columns} for t in metadata.sorted_tables}
     del existing["email_config"]["provider"]
     ddl = "\n".join(reconcile_statements(existing))
-    assert "ADD COLUMN provider VARCHAR(20) NOT NULL DEFAULT 'sendgrid'" in ddl
+    assert "ADD COLUMN provider VARCHAR(20) NOT NULL DEFAULT 'elasticemail'" in ddl
     assert "sendgrid_api_key_enc" not in ddl
 
 
@@ -226,3 +276,125 @@ def test_failed_voicemail_is_retried_after_provider_repair_without_double_sendin
     assert len(sent) == 2 and sent[1][1]["data"]["apikey"] == "ELASTIC-repaired"
     assert sent[1][1]["files"] == [("file", ("voicemail-101-msg0000.gsm", b"gsm-audio-test", "audio/gsm"))]
     assert settings.list_voicemail_deliveries()[0]["status"] == "delivered"
+
+
+@pytest.mark.parametrize("provider", [None, "sendgrid", "elasticemail", "https://unexpected.example"])
+def test_legacy_or_invalid_provider_flag_never_changes_the_sender(monkeypatch, provider):
+    """The transport cannot regress to SendGrid, even for a stale DB/browser."""
+    config = {"api_key": "ELASTIC-saved", "from_email": "verified@example.com", "provider": provider}
+    message = {"mailbox": "test", "message": "test", "duration_seconds": 0}
+    payload = VoicemailEmailNotifier._payload(config, "to@example.com", message, None)
+    calls = []
+    monkeypatch.setattr("app.voicemail_email.requests.post",
+                        lambda url, **kw: calls.append((url, kw)) or fake_response(200, {"success": True}))
+    assert VoicemailEmailNotifier._send(config, payload) == (True, None)
+    assert len(calls) == 1 and calls[0][0] == ELASTIC_EMAIL_URL
+    assert calls[0][1]["data"]["apikey"] == "ELASTIC-saved"
+    assert calls[0][1]["allow_redirects"] is False
+
+
+def test_mysql_migration_queries_are_parameterized_and_only_reset_once():
+    # Exercise the actual SQLite-to-PyMySQL adapter and %-formatting without a
+    # running MySQL server. A literal LIKE '%' in the SQL would crash PyMySQL.
+    from app.database import MySQLConnection
+
+    class Raw:
+        def __init__(self):
+            self.calls = []
+            self.marked = False
+        def cursor(self):
+            raw = self
+            class Cursor:
+                rowcount = 0
+                lastrowid = 0
+                def execute(self, sql, params):
+                    formatted = sql % tuple(repr(param) for param in params)
+                    raw.calls.append((sql, params, formatted))
+                    if sql.startswith("INSERT IGNORE"):
+                        self.rowcount = 0 if raw.marked else 1
+                        raw.marked = True
+            return Cursor()
+
+    raw = Raw()
+    db = MySQLConnection(raw)
+    SettingsStore._migrate_email_to_elastic(db)
+    SettingsStore._migrate_email_to_elastic(db)
+    resets = [call for call in raw.calls if "UPDATE voicemail_deliveries" in call[0]]
+    assert len(resets) == 1
+    assert "LIKE %s" in resets[0][0] and resets[0][1] == ("SendGrid HTTP 4%",)
+    assert "WHERE status='failed'" in resets[0][0]
+    assert len([call for call in raw.calls if "UPDATE email_config" in call[0]]) == 2
+
+
+def test_concurrent_sqlite_startup_migrates_and_resets_failed_only_once(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "concurrent.db"
+    secret = "s" * 40
+    initial = SettingsStore(str(path), secret)
+    encrypted = initial.encrypt("ELASTIC-legacy-key")
+    with initial._connect() as db:
+        db.execute("DELETE FROM settings WHERE `key`='elastic_email_only_v1'")
+        db.execute("DROP TABLE email_config")
+        db.execute("""CREATE TABLE email_config(id INTEGER PRIMARY KEY,sendgrid_api_key_enc TEXT NOT NULL,
+                   from_email TEXT NOT NULL,from_name TEXT NOT NULL,enabled INTEGER NOT NULL,
+                   updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        db.execute("INSERT INTO email_config(id,sendgrid_api_key_enc,from_email,from_name,enabled) VALUES(1,?,?,?,1)",
+                   (encrypted, "verified@example.com", "Sender"))
+        for fingerprint, status, attempts, error in (("failed", "failed", 5, "SendGrid HTTP 401"),
+                                                      ("sent", "delivered", 1, None), ("pending", "pending", 2, None)):
+            db.execute("INSERT INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts,last_error) VALUES(?,?,?,?,?,?)",
+                       (fingerprint, "101", "agent@example.com", status, attempts, error))
+        db.execute("CREATE TABLE retry_migration_audit(fingerprint TEXT)")
+        db.execute("""CREATE TRIGGER track_migration_reset AFTER UPDATE OF attempts ON voicemail_deliveries
+                      BEGIN INSERT INTO retry_migration_audit VALUES(new.fingerprint); END""")
+
+    barrier = threading.Barrier(6)
+    def start_worker(_):
+        barrier.wait(timeout=10)
+        return SettingsStore(str(path), secret).get_email_config(include_key=True)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(start_worker, range(6)))
+    assert all(config["provider"] == "elasticemail" and config["api_key"] == "ELASTIC-legacy-key" for config in results)
+    with initial._connect() as db:
+        assert [row["fingerprint"] for row in db.execute("SELECT * FROM retry_migration_audit").fetchall()] == ["failed"]
+        attempts = {row["fingerprint"]: (row["status"], row["attempts"]) for row in db.execute("SELECT fingerprint,status,attempts FROM voicemail_deliveries")}
+        assert attempts == {"failed": ("failed", 0), "sent": ("delivered", 1), "pending": ("pending", 2)}
+        assert db.execute("SELECT sendgrid_api_key_enc FROM email_config").fetchone()[0] == encrypted
+
+
+def test_migration_retries_a_definite_401_but_not_accepted_or_unknown_messages(elastic_system, monkeypatch):
+    settings, store, notifier = elastic_system
+    directory = store.root / store.context / "101" / "INBOX"
+    directory.mkdir(parents=True)
+    for index in range(3):
+        stem = f"msg{index:04d}"
+        (directory / f"{stem}.txt").write_text(f"[message]\ncallerid=Customer\norigtime={1700000000 + index}\nduration=4\n")
+        audio = directory / f"{stem}.wav"
+        audio.write_bytes(f"RIFF-message-{index}".encode())
+        os.utime(audio, (time.time() - 20, time.time() - 20))
+    rows = {row["message"]: row for row in store.list_messages("101", "inbox")}
+    identities = {stem: notifier._fingerprint(row, (directory / f"{stem}.wav").read_bytes())
+                  for stem, row in rows.items()}
+    with settings._connect() as db:
+        db.execute("DELETE FROM settings WHERE `key`='elastic_email_only_v1'")
+        db.execute("UPDATE email_config SET provider='sendgrid'")
+        for stem, status, attempts, error in (("msg0000", "failed", 5, "SendGrid HTTP 401: Unauthorized"),
+                                              ("msg0001", "delivered", 1, None),
+                                              ("msg0002", "failed", 5, "SendGrid request timed out; acceptance is unknown")):
+            db.execute("""INSERT INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts,last_error,updated_at)
+                          VALUES(?,?,?,?,?,?,datetime('now','-2 minutes'))""",
+                       (identities[stem], "101", "agent@example.com", status, attempts, error))
+    upgraded = SettingsStore(str(settings.path), "s" * 40)
+    sender = VoicemailEmailNotifier(store, upgraded)
+    calls = []
+    monkeypatch.setattr("app.voicemail_email.requests.post",
+                        lambda url, **kw: calls.append((url, kw)) or fake_response(200, {"success": True}))
+    assert sender.process() == 1 and sender.process() == 0
+    assert len(calls) == 1 and calls[0][0] == ELASTIC_EMAIL_URL
+    assert calls[0][1]["data"]["apikey"] == "ELASTIC-secret"
+    assert calls[0][1]["files"][0][1][1] == b"RIFF-message-0"
+    after = {row["fingerprint"]: row for row in upgraded.list_voicemail_deliveries()}
+    assert after[identities["msg0000"]]["status"] == "delivered"
+    assert after[identities["msg0001"]]["status"] == "delivered" and after[identities["msg0001"]]["attempts"] == 1
+    assert after[identities["msg0002"]]["status"] == "failed" and after[identities["msg0002"]]["attempts"] == 5

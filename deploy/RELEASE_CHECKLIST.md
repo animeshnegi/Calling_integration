@@ -275,16 +275,18 @@ docker compose up -d --no-build --no-deps --force-recreate telephony-api telepho
 ```
 
 Use the same image tag as your existing Compose setup. Keep `.env`, `SECRET_KEY`,
-MySQL/SQLite data and voicemail volumes. The provider column is added on startup;
-existing SendGrid settings stay on SendGrid.
+MySQL/SQLite data and voicemail volumes. Startup automatically switches the
+email sender to Elastic Email and keeps a previously saved Elastic Email key;
+no provider switch or key re-entry is required. Previous SendGrid HTTP 4xx
+rejections are made eligible for retry again by a one-time reset; accepted or
+ambiguous timeout records are not reset by the migration. Recognisable SendGrid (`SG.`)
+keys are blocked until replaced with an Elastic Email key.
 
-Hard-refresh the admin page (`Ctrl+F5`), open **Email Delivery**, select
-**Elastic Email**, enter its API key with **Send HTTP** permission and a sender
-verified in that account, and click **Save & send test email**. Re-enter the
-Elastic key when switching from the old SendGrid-only form: a saved credential is
-never silently forwarded to a different provider. Blank preserves a key for the
-same provider. Turn on voicemail email and set the extension's notification
-address for automatic delivery.
+Hard-refresh the admin page (`Ctrl+F5`), open **Email Delivery** and click
+**Save & send test email** with a test recipient. Elastic Email needs Send HTTP
+permission and a verified sender. Turn on voicemail email and set the extension's
+notification address for automatic delivery. If a new test still reports
+`SendGrid HTTP 401`, the old API image or browser page is still in use.
 
 The provider test uses the same Elastic Email v2 POST form fields as the working
 example; voicemail audio is sent as a multipart attachment. Even HTTP 200 can
@@ -297,7 +299,7 @@ HTTP 403, check the sender/domain verification, permissions and account/IP
 restrictions. For failed voicemail sends, inspect **Recent email deliveries**.
 
 Failed deliveries retry after 60 seconds up to five attempts. Changing the
-provider, key or sender, or re-enabling email resets failed attempts without
+key or sender, or re-enabling email resets failed attempts without
 re-sending accepted mail. The voicemail inbox retains the original audio.
 
 ---

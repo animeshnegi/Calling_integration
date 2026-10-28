@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import html
 import logging
@@ -14,7 +13,6 @@ import requests
 from . import local_transcription
 from .voicemail import mailbox_name
 
-SENDGRID_URL = "https://api.sendgrid.com/v3/mail/send"
 ELASTIC_EMAIL_URL = "https://api.elasticemail.com/v2/email/send"
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_MESSAGES_PER_SCAN = 20
@@ -82,39 +80,6 @@ class VoicemailEmailNotifier:
         return body
 
     @staticmethod
-    def _sendgrid(config: dict[str, Any], message: dict[str, Any]) -> tuple[bool, str | None]:
-        payload: dict[str, Any] = {
-            "personalizations": [{"to": [{"email": message["to"]}]}],
-            "from": {"email": message["from_email"], "name": message["from_name"]},
-            "subject": message["subject"],
-            "content": [{"type": "text/plain", "value": message["text"]},
-                        {"type": "text/html", "value": message["html"]}],
-        }
-        attachment = message.get("attachment")
-        if attachment:
-            payload["attachments"] = [{
-                "content": base64.b64encode(attachment["content"]).decode("ascii"),
-                "type": attachment["type"], "filename": attachment["filename"], "disposition": "attachment",
-            }]
-        response = requests.post(
-            SENDGRID_URL, json=payload,
-            headers={"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"},
-            timeout=(5, 15), allow_redirects=False,
-        )
-        if response.status_code == 202:
-            return True, None
-        # Never echo provider bodies; they may contain credentials or private data.
-        hints = {
-            400: "Check the sender and recipient email addresses and sender name.",
-            401: "The API key is invalid or revoked. Save a replacement SendGrid key.",
-            403: "Verify the sender in SendGrid, Mail Send permission, account status and IP restrictions.",
-            413: "The attachment is too large.",
-            429: "SendGrid rate limit reached. Retry later.",
-        }
-        hint = hints.get(response.status_code, "SendGrid is unavailable; retry later." if response.status_code >= 500 else "Unexpected SendGrid response; check the account configuration.")
-        return False, f"SendGrid HTTP {response.status_code}: {hint}"
-
-    @staticmethod
     def _elastic_error(status: int, detail: Any) -> str:
         # Use untrusted provider text only to select fixed hints, never display it.
         text = detail[:4000].lower() if isinstance(detail, str) else ""
@@ -168,19 +133,17 @@ class VoicemailEmailNotifier:
 
     @staticmethod
     def _send(config: dict[str, Any], payload: dict[str, Any]) -> tuple[bool, str | None]:
-        provider = config.get("provider", "sendgrid")
-        labels = {"sendgrid": "SendGrid", "elasticemail": "Elastic Email"}
-        if provider not in labels:
-            return False, "Choose a valid email provider before sending."
-        name = labels[provider]
+        # Legacy rows and stale browsers may still say provider=sendgrid. The
+        # only permitted sender is Elastic Email, independent of that field.
+        # Avoid forwarding a recognisable SendGrid key to another provider.
+        if str(config.get("api_key") or "").upper().startswith("SG."):
+            return False, "The saved key appears to be a SendGrid key. Save an Elastic Email API key instead."
         try:
-            if provider == "elasticemail":
-                return VoicemailEmailNotifier._elastic(config, payload)
-            return VoicemailEmailNotifier._sendgrid(config, payload)
+            return VoicemailEmailNotifier._elastic(config, payload)
         except requests.Timeout:
-            return False, f"{name} request timed out. Check server connectivity and account activity before retrying; acceptance is unknown."
+            return False, "Elastic Email request timed out. Check server connectivity and account activity before retrying; acceptance is unknown."
         except requests.RequestException:
-            return False, f"Cannot reach {name}. Check server DNS, HTTPS connectivity and TLS certificates."
+            return False, "Cannot reach Elastic Email. Check server DNS, HTTPS connectivity and TLS certificates."
 
     @staticmethod
     def _transcribe(config, audio: Path, audio_bytes: bytes) -> tuple[str | None, str]:
@@ -252,11 +215,10 @@ class VoicemailEmailNotifier:
     def send_test(self, recipient: str) -> tuple[bool, str | None]:
         config = self.settings_store.get_email_config(include_key=True)
         # Test credentials without enabling automatic voicemail notifications.
-        provider = {"sendgrid": "SendGrid", "elasticemail": "Elastic Email"}.get(config.get("provider", "sendgrid"), "email provider")
         if not config.get("api_key"):
-            return False, config.get("api_key_error") or f"Save a {provider} API key before sending a test."
+            return False, config.get("api_key_error") or "Save an Elastic Email API key before sending a test."
         if not config.get("from_email"):
-            return False, f"Save a verified {provider} sender email before sending a test."
+            return False, "Save a verified Elastic Email sender email before sending a test."
         message = {"mailbox": "test", "caller_id": "EngineerIP test", "received_at": "now", "duration_seconds": 0, "message": "test"}
         payload = self._payload(config, recipient, message, None)
         payload["subject"] = "EngineerIP email delivery test"
