@@ -847,6 +847,49 @@ def test_email_config_rotation_test_and_secret_redaction(tmp_path, monkeypatch):
     assert "SG.replacement" not in failed.text
 
 
+def test_elastic_email_api_saves_and_reports_safe_structured_test_results(tmp_path, monkeypatch):
+    from collections import defaultdict, deque
+    from app import admin as admin_module
+    # The login limiter is process-global; do not consume other tests' quota.
+    monkeypatch.setattr(admin_module, "_LOGIN_BUCKETS", defaultdict(deque))
+    client = app_client(tmp_path)
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    headers = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
+    saved = client.post("/admin/api/email-config", headers=headers, json={
+        "provider": "elasticemail", "api_key": "ELASTIC-secret", "from_email": "verified@example.com",
+        "enabled": False,
+    })
+    assert saved.status_code == 200 and saved.json["email_config"]["provider"] == "elasticemail"
+    assert saved.json["email_config"]["has_api_key"] and "ELASTIC-secret" not in saved.text
+    calls = []
+    class Rejected:
+        status_code = 200
+        def json(self):
+            return {"success": False, "error": "Invalid API key ELASTIC-secret test@example.com <script>"}
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or Rejected())
+    # Legacy clients retain the old 502 behavior.
+    old = client.post("/admin/api/email-config/test", headers=headers, json={"email": "test@example.com"})
+    assert old.status_code == 502 and old.json["ok"] is False
+    # The new console opts into a completed test result, so nginx cannot replace
+    # the detailed JSON failure with its generic 502 HTML page.
+    result = client.post("/admin/api/email-config/test", headers=headers,
+                         json={"email": "test@example.com", "result_only": True})
+    assert result.status_code == 200 and result.json["ok"] is False
+    assert "Elastic Email" in result.json["error"] and "Send HTTP" in result.json["error"]
+    assert "ELASTIC-secret" not in result.text and "test@example.com" not in result.text and "<script>" not in result.text
+    assert len(calls) == 2 and all(url == "https://api.elasticemail.com/v2/email/send" for url, _ in calls)
+    assert calls[0][1]["data"]["apikey"] == "ELASTIC-secret" and "headers" not in calls[0][1]
+    class Accepted:
+        status_code = 200
+        def json(self):
+            return {"success": True, "data": {"messageid": "test"}}
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda *a, **kw: Accepted())
+    passed = client.post("/admin/api/email-config/test", headers=headers,
+                         json={"email": "test@example.com", "result_only": True})
+    assert passed.status_code == 200 and passed.json == {"ok": True, "error": None}
+    assert "ELASTIC-secret" not in client.get("/admin/api/state").text
+
+
 def test_customer_cannot_read_or_change_email_provider_settings(tmp_path, monkeypatch):
     client = app_client(tmp_path)
     store = client.application.extensions["settings_store"]

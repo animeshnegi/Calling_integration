@@ -428,27 +428,28 @@
       <!-- ============================================================= EMAIL -->
       <section class="page" id="page-email">
         <form class="panel" id="email-form">
-          <div class="panel-head"><div><h2>SendGrid voicemail delivery</h2><p>The API key is encrypted and can only be configured by an administrator</p></div></div>
+          <div class="panel-head"><div><h2>Voicemail email delivery</h2><p>The API key is encrypted and can only be configured by an administrator</p></div></div>
           <div class="panel-body">
             <label class="switch"><span class="switch-copy"><b>Enable voicemail email</b><small>Send each new voicemail as an email attachment.</small></span><input id="email-enabled" type="checkbox"><i class="track"></i></label>
             <div class="field-row" style="margin-top:16px">
-              <label class="field">SendGrid API key<input id="sendgrid-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><small id="sendgrid-key-status">No key configured</small></label>
-              <label class="field">Verified sender email<input id="sendgrid-from" type="email" placeholder="voicemail@example.com"></label>
+              <label class="field">Email provider<select id="email-provider"><option value="sendgrid">SendGrid</option><option value="elasticemail">Elastic Email</option></select></label>
+              <label class="field">Verified sender email<input id="email-from" type="email" placeholder="voicemail@example.com"></label>
             </div>
             <div class="field-row">
-              <label class="field">Sender name<input id="sendgrid-name" maxlength="120" placeholder="EIP Telephony Voicemail"></label>
-              <label class="field">Test recipient<input id="sendgrid-test" type="email" placeholder="admin@example.com"></label>
+              <label class="field">API key<input id="email-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing" aria-describedby="email-key-status"><small id="email-key-status">No key configured</small></label>
+              <label class="field">Sender name<input id="email-name" maxlength="120" placeholder="EIP Telephony Voicemail"></label>
             </div>
+            <div class="field-row"><label class="field">Test recipient<input id="email-test" type="email" placeholder="admin@example.com"></label></div>
             <label class="switch"><span class="switch-copy"><b>Include a voicemail transcript</b><small>Local, offline speech recognition. No transcription API key or usage fee. Disabled by default.</small></span><input id="transcription-enabled" type="checkbox"><i class="track"></i></label>
-            <p class="muted">Audio is converted to text on this server using the bundled PocketSphinx English model. No audio is uploaded to a transcription provider and no model download or GPU is needed. Recognition uses CPU and is best-effort: accents, noise and non-English speech can reduce accuracy. The original audio stays attached and is emailed with any transcript through SendGrid. If local recognition fails or reaches its resource limit, the audio email is still sent.</p>
-            <p class="muted">Paste API keys only, without “Bearer”. Blank keeps the saved key; entering a new key replaces it. Use a SendGrid verified sender and a key with Mail Send permission. Set the notification recipient on each extension (or in the assigned user's profile).</p>
+            <p class="muted">Audio is converted to text on this server using the bundled PocketSphinx English model. No audio is uploaded to a transcription provider and no model download or GPU is needed. Recognition is best-effort: accents, noise and non-English speech can reduce accuracy. The original audio remains attached. If recognition fails, the audio email is still sent.</p>
+            <p class="muted">Paste only the API key, without “Bearer”. A blank key keeps the existing key for the same provider; enter a key when switching providers. Elastic Email requires Send HTTP permission; SendGrid requires Mail Send permission. Use a sender verified with the selected provider and set a notification recipient on each extension.</p>
             <div class="btn-row"><button class="btn primary" type="submit" id="save-email">Save email configuration</button><button class="btn ghost" type="button" id="test-email">Save &amp; send test email</button></div>
-            <p class="muted">The test saves the settings above first and works even when automatic emails are disabled. It tests email only, not transcription. SendGrid acceptance is not confirmation of inbox delivery; check spam and SendGrid Email Activity.</p>
+            <p class="muted">The test saves these settings first and works even when automatic emails are disabled. It tests email only, not transcription. Provider acceptance is not confirmation of inbox delivery; check spam and the provider's activity log.</p>
             <p id="email-feedback" role="status" aria-live="polite"></p>
           </div>
         </form>
         <article class="panel" style="margin-top:16px">
-          <div class="panel-head"><div><h2>Recent email deliveries</h2><p>SendGrid acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.</p></div></div>
+          <div class="panel-head"><div><h2>Recent email deliveries</h2><p>Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.</p></div></div>
           <div class="panel-body flush"><div id="email-delivery-list" class="table-wrap"></div></div>
         </article>
       </section>

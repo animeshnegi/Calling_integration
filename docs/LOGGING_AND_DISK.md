@@ -129,7 +129,7 @@ Alert before the disk is full. At minimum monitor:
 - `asterisk_recordings` volume;
 - `asterisk_voicemail` volume;
 - Docker container writable size;
-- webhook/SendGrid repeated failures;
+- webhook/email provider repeated failures;
 - unusually high SIP authentication/security events.
 
 A practical warning threshold is 75–80% disk utilization, with a critical alert at 90%.

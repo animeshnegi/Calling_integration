@@ -21,8 +21,8 @@ This project handles SIP credentials, phone numbers and a paid outbound calling 
 - Security response headers are applied.
 - Call recording is globally off by default and new extensions default to opted out. Recording starts only when both the administrator's master switch and the extension preference are enabled. Users can disable their own extension but cannot override a globally disabled policy.
 - Recording and voicemail audio is served only after bearer-token or admin-session authorization. Recording ARI access and the dedicated voicemail volume remain private.
-- Voicemail PINs and the SendGrid API key are encrypted at rest and omitted from responses. PINs are restricted to 4–10 digits and rendered only into the private Asterisk configuration volume.
-- Admin-panel RBAC scopes extension users to their assigned extension's calls, recordings and voicemail. System configuration, user administration, and SendGrid require the Administrator role.
+- Voicemail PINs and the email provider API key are encrypted at rest and omitted from responses. PINs are restricted to 4–10 digits and rendered only into the private Asterisk configuration volume.
+- Admin-panel RBAC scopes extension users to their assigned extension's calls, recordings and voicemail. System configuration, user administration, and email delivery require the Administrator role.
 - The last active administrator cannot be removed, and users cannot disable, demote, or delete their own administrator account.
 - Voicemail email delivery is deduplicated with a persistent audio fingerprint and caps attachments at 20 MiB.
 - Voicemail file operations validate mailbox/folder/message identifiers, reject symlinks and traversal, and preserve Asterisk message numbering.

@@ -137,7 +137,7 @@ scp .\docker-compose.yml engineerip7@ipseekers:/tmp/docker-compose.new.yml
 ```
 
 Never upload or overwrite `.env`. Keep the server's existing `SECRET_KEY`, or
-saved SendGrid/SIP credentials will become unreadable.
+saved email/SIP credentials will become unreadable.
 
 ---
 
@@ -258,61 +258,47 @@ It checks:
 
 It is Python-based so a Windows CRLF copy cannot break `set -o pipefail`.
 
-It does **not** authenticate to SendGrid, prove inbox delivery, register a
+It does **not** authenticate to an email provider, prove inbox delivery, register a
 phone, or prove internal-call audio. Those checks follow.
 
 ---
 
-## 6. API key error and email sending
+## 6. Email sending
 
-In the browser, **hard-refresh once** (`Ctrl+F5`). A stale `admin.js` could
-still show the old “OpenAI API key” field or try to use a removed input. The
-new image serves admin pages/assets with `no-store`; verify:
-
-```bash
-curl -fsSI https://tel.engineerip.com/admin-assets/admin.js | grep -i '^cache-control:'
-# Expected: Cache-Control: no-store
-```
-
-Sign in as a **platform administrator**. In **Email Delivery**:
-
-1. Paste only the **SendGrid API key** — no `Bearer`, quotes, spaces, or line
-   breaks. Blank keeps the saved key; a new value replaces it.
-2. Enter a **verified SendGrid sender** email.
-3. Enter a test recipient and click **Save & send test email**. This saves the
-   form before testing and works with automatic email temporarily off.
-4. Check the inbox/spam and SendGrid **Email Activity** for bounces,
-   suppressions, or blocks. “Accepted by SendGrid” is not inbox delivery.
-
-There is **no transcription API key**. If the page still asks for an OpenAI
-key, the browser is showing old cached UI or the VM is running an old image.
-
-Read the inline error exactly:
-
-| Error | What to correct |
-|---|---|
-| HTTP 401 | Paste a current SendGrid key with Mail Send permission. |
-| HTTP 403 | Verify the sender, Mail Send permission, account status, and IP restrictions. |
-| HTTP 429 | Rate limit; retry later. |
-| HTTP 5xx | SendGrid-side failure; retry later. |
-| DNS / TLS / timeout | Fix server outbound HTTPS, DNS, or certificate trust. |
-| Saved key cannot be decrypted | Restore the original `SECRET_KEY`, or paste a replacement SendGrid key. |
-| Invalid API key format | Remove `Bearer`, whitespace, or line breaks. |
-
-For automatic voicemail email, also enable **Enable voicemail email**, set a
-notification email on each active extension (or assigned user profile), and
-keep voicemail enabled. Only unread INBOX/urgent messages are scanned; reading
-a message before the roughly 30-second scan can prevent its notification.
-Inspect **Recent email deliveries** and, if needed:
+After the new API image is loaded, recreate **both** the API and ARI worker;
+for this email-only update no Asterisk image, host-tools archive, proxy change or
+server build is required:
 
 ```bash
 cd /opt/Calling_integration
-docker compose logs --tail=100 telephony-ari
+docker compose up -d --no-build --no-deps --force-recreate telephony-api telephony-ari
 ```
 
-Failed deliveries retry after 60 seconds up to five attempts. Replacing the
-SendGrid key, changing the sender, or re-enabling email resets failed attempts
-without re-sending accepted mail.
+Use the same image tag as your existing Compose setup. Keep `.env`, `SECRET_KEY`,
+MySQL/SQLite data and voicemail volumes. The provider column is added on startup;
+existing SendGrid settings stay on SendGrid.
+
+Hard-refresh the admin page (`Ctrl+F5`), open **Email Delivery**, select
+**Elastic Email**, enter its API key with **Send HTTP** permission and a sender
+verified in that account, and click **Save & send test email**. Re-enter the
+Elastic key when switching from the old SendGrid-only form: a saved credential is
+never silently forwarded to a different provider. Blank preserves a key for the
+same provider. Turn on voicemail email and set the extension's notification
+address for automatic delivery.
+
+The provider test uses the same Elastic Email v2 POST form fields as the working
+example; voicemail audio is sent as a multipart attachment. Even HTTP 200 can
+contain `success: false`, which is reported as a failure with a safe hint. A
+provider-accepted test is not proof of inbox delivery; check provider activity
+and spam. The test does not test transcription. There is **no transcription API key**.
+
+For HTTP 401, check the selected provider's API key and send permission. For
+HTTP 403, check the sender/domain verification, permissions and account/IP
+restrictions. For failed voicemail sends, inspect **Recent email deliveries**.
+
+Failed deliveries retry after 60 seconds up to five attempts. Changing the
+provider, key or sender, or re-enabling email resets failed attempts without
+re-sending accepted mail. The voicemail inbox retains the original audio.
 
 ---
 
@@ -320,7 +306,7 @@ without re-sending accepted mail.
 
 Transcription is entirely local. PocketSphinx and its English model are inside
 the API image. No OpenAI key, Whisper API, speech-provider upload, usage fee,
-runtime model download, or GPU is used. SendGrid is still required to email
+runtime model download, or GPU is used. An email provider is still required to send
 the resulting text and original audio.
 
 Correct sequence:
@@ -403,11 +389,11 @@ Send only the exact inline error wording and the relevant sanitized line from:
   (or its legacy `bash scripts/verify-release.sh` wrapper);
 - `python3 scripts/check-softphone-websocket.py wss://tel.engineerip.com/ws`;
 - **Recent email deliveries** status/error;
-- SendGrid Email Activity result (`Delivered`, `Blocked`, `Bounce`, `Dropped`);
+- Email provider activity result (`Delivered`, `Blocked`, `Bounce`, `Dropped`);
 - `/tmp/extension-audio-*.log` for internal audio, with phone numbers/IPs
   redacted.
 
-Do **not** send the SendGrid key, `.env`, database, raw `nginx -T`, raw core
+Do **not** send the email API key, `.env`, database, raw `nginx -T`, raw core
 dump, or unredacted SIP traces. This repository's automated tests cover the
 application logic and a real offline WAV decode; live provider authentication,
 inbox delivery, 1Panel state, MySQL behavior, and Asterisk media still require

@@ -224,7 +224,7 @@ The responsive console uses a sidebar with dedicated Dashboard, Extensions, Phon
 - searchable, paginated call history across all extensions;
 - recordings grouped and filtered by extension, with authenticated in-browser playback;
 - extension voicemail enablement/PINs plus mailbox-grouped playback, read, urgent, and delete management;
-- SendGrid voicemail attachments configured only by the main administrator;
+- voicemail email attachments configured only by the main administrator;
 - additional admin-panel users with extension-scoped calls, recordings and voicemail;
 - per-customer default outbound and inbound fallback extension, set by the customer on their Numbers page;
 - per-extension recording: each device opts in on its own switch, with no global policy;
@@ -489,25 +489,23 @@ reported incident resolved.
 
 In **Email Delivery** (platform administrator only):
 
-1. Paste a **SendGrid** API key with **Mail Send** permission, without `Bearer`.
-   Set a sender email verified in your SendGrid account. Leading/trailing
-   whitespace is trimmed; blank key fields preserve the encrypted saved key.
-   Entering a new key replaces it, even if the old ciphertext is unreadable.
-   Keep the deployment's `SECRET_KEY` unchanged across image upgrades: it is
-   also used for other encrypted telephony credentials.
+1. Select **Elastic Email** or **SendGrid**. Elastic Email requires an API key
+   with **Send HTTP** permission; SendGrid requires **Mail Send** permission.
+   Paste the key without `Bearer` and enter a sender verified with that provider.
+   Blank preserves a saved key for the same provider; switching providers
+   requires re-entering the selected provider's key. Existing SendGrid settings
+   remain on SendGrid. Keep `SECRET_KEY` unchanged across image upgrades.
 2. After any image replacement, hard-refresh the admin page once (`Ctrl+F5`).
-   Admin pages and assets are served with `Cache-Control: no-store`, so a stale
-   `admin.js` cannot keep removed fields alive. Enter a test recipient and
-   select **Save & send test email**. This saves the current form first, so a
-   replacement key is actually used. Tests work with automatic voicemail email
-   switched off. Failed saves do not send a test using stale credentials.
-   Background refreshes preserve unsaved form edits.
-3. **Accepted by SendGrid is not inbox delivery.** Check spam and SendGrid Email
-   Activity for bounces, suppressions, sender authentication, and recipient
-   rejection. HTTP 401 means replace/check the key; HTTP 403 means check sender
-   verification, Mail Send permission, account status and IP restrictions.
-   DNS/TLS/connectivity failures and rate limits are reported separately. Keys
-   and raw provider error bodies are never returned in API responses.
+   Enter a test recipient and select **Save & send test email**. This saves the
+   current form first and works with automatic email switched off. A failed
+   save does not send a test using stale credentials; background refreshes
+   preserve unsaved form edits.
+3. Provider acceptance is not inbox delivery. Check spam and the provider's
+   activity log for bounces, suppressions, sender authentication, and recipient
+   rejection. Inline errors distinguish provider rejection, rate limiting and
+   DNS/TLS/connectivity failures. Keys and raw provider bodies are never returned.
+   Elastic Email uses v2 form fields, including multipart audio attachments, and
+   a `success: false` response is a failure even when HTTP is 200.
 4. Enable automatic voicemail email, and set the **notification email on each
    extension** (or the email in a user's profile for its assigned extension).
    A mailbox must be active and voicemail-enabled. The same `101` on two DIDs
@@ -525,7 +523,7 @@ bundled `en-us` model (BSD-style CMU licence, included in the image as
 `THIRD_PARTY_NOTICES.md`). The recognizer starts only for an eligible
 voicemail, in a disposable Python subprocess: mono 16-bit PCM
 WAV at 8 or 16 kHz is supported, with 8 kHz audio resampled in-process. The
-original recording remains attached to the email. SendGrid is still required
+original recording remains attached to the email. An email provider is still required
 to **email** the message; no audio is sent to a speech-to-text provider.
 
 The English model is intentionally small and CPU-only. Accuracy is best-effort:
@@ -533,7 +531,7 @@ accents, noisy telephone audio and non-English speech can produce an incorrect
 or empty transcript. Always listen to the original audio for important details.
 Transcripts are escaped in HTML and truncated to 20,000 characters. They are
 not stored in the application database or logs; they do appear in the email
-sent through SendGrid and held by the recipient. Audio bytes pass to the worker
+sent through the selected email provider and held by the recipient. Audio bytes pass to the worker
 over stdin, not a temporary file. The worker has a 192 MiB address-space limit,
 60 CPU seconds, a 120-second parent timeout, low priority, one math thread, no
 core dumps and a five-minute/20 MiB WAV limit. A native decoder fault cannot
@@ -545,7 +543,7 @@ or the format is unsupported, the email still sends with its audio and an
 unavailable-transcript note. **Recent email deliveries** shows a separate
 result: `transcribed`, `empty transcript`, `engine unavailable`, `resource limit`,
 `timeout`, `worker error`, `audio too long`, or `unsupported audio`. A message
-already accepted by SendGrid is not sent again just to retry its transcript.
+already accepted by the email provider is not sent again just to retry its transcript.
 An ordinary failed email retry runs local recognition again (CPU time, but no
 provider charge).
 The test email has no audio and **does not test the recognizer**; verify with a
@@ -563,12 +561,12 @@ INBOX/urgent messages can be sent after fixing a recipient or provider setting.
 Accepted delivery history is retained across this upgrade to avoid re-sending
 old audio; distinct later calls with identical audio have separate identities. A network timeout can leave acceptance unknown, so a
 retry can produce a duplicate; inbox delivery/exactly-once delivery is not
-promised by a SendGrid HTTP response.
+promised by a provider HTTP response.
 
 Failed attempts have a 60-second retry delay and a five-attempt limit. An atomic
 claim prevents simultaneous workers from sending the same pending message;
 abandoned pending claims become eligible again after ten minutes (within the
-attempt limit). Saving a replacement SendGrid key, changing the sender, or
+attempt limit). Saving a replacement provider key, changing the provider or sender, or
 re-enabling email resets failed-attempt limits, without re-sending accepted
 emails. Correcting the local recognizer does not resend audio already accepted.
 
@@ -580,13 +578,13 @@ Compose service names, after loading the new image:
 
 ```bash
 cd /opt/Calling_integration
-docker compose up -d --no-build --force-recreate telephony-api telephony-ari
+docker compose up -d --no-build --no-deps --force-recreate telephony-api telephony-ari
 ```
 
 Do not build on the VM. The workstation build installs the recognizer wheel and
 its bundled model into the image; the VM does not download a model. Retain the
 `.env`, `SECRET_KEY`, database and voicemail volumes; back up the database
-first. SQLite and MySQL add the new column automatically with transcription off
+first. SQLite and MySQL add the provider column automatically, preserving existing SendGrid configurations; transcription remains off
 by default; obsolete hosted transcription keys are erased from an existing
 config table. No Asterisk image, outbound dialplan or proxy configuration change
 is needed for this email update. Run the test email after deployment, then
@@ -594,6 +592,6 @@ leave a test voicemail and verify its recipient, attachment and optional
 transcript.
 
 Local regressions include a real offline decode of an 8 kHz CMU-licensed speech
-sample and mocked SendGrid HTTP calls. They do not prove live email
+sample, mocked provider responses and a local Elastic Email form/attachment contract test. They do not prove live email
 provider authentication, network access or actual inbox delivery. MySQL upgrades
 are checked against generated reconciliation SQL, not a running MySQL server.

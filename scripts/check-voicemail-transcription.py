@@ -12,7 +12,7 @@ It also works from a source checkout by running:
 
 A deployment script can bind-mount the corrected host script and sample into
 an older image and pass `--sample /tmp/goforward-8k.wav`. Only the public
-sample transcript is printed. No SendGrid key, voicemail, customer data, or
+sample transcript is printed. No email provider key, voicemail, customer data, or
 application database is read.
 """
 from __future__ import annotations

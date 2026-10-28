@@ -89,7 +89,7 @@ const pageMeta = {
   requests: ['Requests', 'Approve customer provisioning requests'],
   activity: ['Activity', 'Important platform and customer actions'],
   providers: ['Carrier Providers', 'Platform carrier connections — administrator only'],
-  email: ['Email Delivery', 'SendGrid voicemail attachments'],
+  email: ['Email Delivery', 'Voicemail attachments and transcripts'],
   settings: ['Platform Settings', 'Global routing and recording policy'],
 };
 /* Pages a customer account must never open. Administrator-only resources are
@@ -1491,20 +1491,34 @@ function renderSettings() {
   markStagger();
 }
 
+function emailProviderLabel(provider) {
+  return provider === 'elasticemail' ? 'Elastic Email' : 'SendGrid';
+}
+function updateEmailKeyStatus() {
+  const config = state.email_config || {};
+  const selected = $('email-provider').value;
+  const switching = config.has_api_key && selected !== (config.provider || 'sendgrid');
+  $('email-key-status').textContent = switching
+    ? `Enter the ${emailProviderLabel(selected)} key when switching providers`
+    : config.has_api_key ? 'API key configured — leave blank to keep it' : 'No key configured';
+  $('email-key').placeholder = switching || !config.has_api_key
+    ? `Enter ${emailProviderLabel(selected)} API key` : 'Leave blank to keep existing';
+}
 function renderEmailSettings() {
   const config = state.email_config || {};
   if (!emailSettingsDirty && !emailSettingsBusy) {
     $('email-enabled').checked = !!config.enabled;
-    $('sendgrid-from').value = config.from_email || '';
-    $('sendgrid-name').value = config.from_name || 'EIP Telephony Voicemail';
+    $('email-provider').value = config.provider || 'sendgrid';
+    $('email-from').value = config.from_email || '';
+    $('email-name').value = config.from_name || 'EIP Telephony Voicemail';
     $('transcription-enabled').checked = !!config.transcription_enabled;
   }
-  $('sendgrid-key-status').textContent = config.has_api_key ? 'API key configured — leave blank to keep it' : 'No API key configured';
+  updateEmailKeyStatus();
   const rows = state.email_deliveries || [];
   paint('email-delivery-list', rows.length ? `
     <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Transcript</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
     <tbody>${rows.map(x => `<tr>
-      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${esc(x.status === 'delivered' ? 'Accepted by SendGrid' : x.status)}</td><td>${esc((x.transcription_status || 'disabled').replaceAll('_', ' '))}</td>
+      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${esc(x.status === 'delivered' ? 'Accepted by email provider' : x.status)}</td><td>${esc((x.transcription_status || 'disabled').replaceAll('_', ' '))}</td>
       <td>${esc(x.attempts)}</td><td>${esc(fmtDate(x.updated_at))}</td><td>${esc(x.last_error || '—')}</td>
     </tr>`).join('')}</tbody></table>` : empty('No delivery attempts', 'New voicemail email attempts will appear here.', '✎'));
 }
@@ -2834,7 +2848,7 @@ const templates = {
         <label class="check"><input name="voicemail_enabled" type="checkbox" ${existing?.voicemail_enabled ? 'checked' : ''}> Enable voicemail</label>
         <label class="field">Voicemail PIN<input name="voicemail_pin" type="password" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="${existing ? 'Leave blank to keep existing' : '4 to 10 digits'}"></label>
       </div>
-      <label class="field">Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(existing?.voicemail_email || '')}"><small>New messages are sent here when SendGrid is enabled.</small></label>
+      <label class="field">Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(existing?.voicemail_email || '')}"><small>New messages are sent here when voicemail email is enabled.</small></label>
       <label class="check"><input name="webrtc_enabled" type="checkbox" ${existing?.webrtc_enabled ? 'checked' : ''}> Answers in the browser (WebRTC)<small>Browser softphones sign in on their own WebRTC identity beside this extension's phones, so a desk phone or Zoiper keeps working here too - each device rings on the media it speaks. The Softphone button appears only while this is on.</small></label>`,
     };
   },
@@ -4463,6 +4477,7 @@ wire('service-address-reset', 'click', async () => {
 });
 wire('email-form', 'input', () => { emailSettingsDirty = true; });
 wire('email-form', 'change', () => { emailSettingsDirty = true; });
+wire('email-provider', 'change', updateEmailKeyStatus);
 wire('profile-email', 'input', () => { profileEmailDirty = true; });
 
 function emailFeedback(message, error = false) {
@@ -4471,11 +4486,11 @@ function emailFeedback(message, error = false) {
 }
 async function saveEmailSettings() {
   const result = await api('/admin/api/email-config', { method: 'POST', body: JSON.stringify({
-    enabled: $('email-enabled').checked, api_key: val('sendgrid-key'),
-    from_email: val('sendgrid-from'), from_name: val('sendgrid-name'),
+    enabled: $('email-enabled').checked, provider: val('email-provider'), api_key: val('email-key'),
+    from_email: val('email-from'), from_name: val('email-name'),
     transcription_enabled: $('transcription-enabled').checked,
   }) });
-  $('sendgrid-key').value = '';
+  $('email-key').value = '';
   emailSettingsDirty = false;
   state.email_config = result.email_config || state.email_config;
   renderEmailSettings();
@@ -4483,19 +4498,21 @@ async function saveEmailSettings() {
 async function emailAction(test) {
   if (emailSettingsBusy) return;
   if (!$('email-form').reportValidity()) return;
-  if (test && !val('sendgrid-test')) return emailFeedback('Enter a valid test recipient email.', true);
+  if (test && !val('email-test')) return emailFeedback('Enter a valid test recipient email.', true);
   emailSettingsBusy = true;
   // Freeze the draft while saving. Never clear/overwrite edits made in flight.
-  const controls = [...$('email-form').querySelectorAll('input, button')];
+  const controls = [...$('email-form').querySelectorAll('input, select, button')];
   controls.forEach(control => { control.disabled = true; });
   $('email-feedback').textContent = test ? 'Saving settings and requesting test email…' : 'Saving email settings…';
   try {
     await saveEmailSettings();
     if (test) {
-      await api('/admin/api/email-config/test', { method: 'POST', body: JSON.stringify({ email: val('sendgrid-test') }) });
-      emailFeedback('Test accepted by SendGrid. Check your inbox/spam and SendGrid Email Activity for delivery.');
+      const result = await api('/admin/api/email-config/test', { method: 'POST', body: JSON.stringify({ email: val('email-test'), result_only: true }) });
+      if (result.ok !== true) throw Error(result.error || 'Email test failed. Check your email provider settings.');
+      const provider = emailProviderLabel(state.email_config?.provider);
+      emailFeedback(`Test accepted by ${provider}. Check your inbox/spam and provider activity for delivery.`);
     } else {
-      emailFeedback('Email configuration saved. Blank key fields keep the saved keys.');
+      emailFeedback('Email configuration saved. A blank key keeps the saved key for this provider.');
     }
   } catch (error) {
     emailFeedback(error.message, true);

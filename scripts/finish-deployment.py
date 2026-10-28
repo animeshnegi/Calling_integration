@@ -245,7 +245,7 @@ def main(argv=None):
             install_proxy(args.domain, args.proxy_container, args.skip_proxy)
         verify(args.tag, args.domain, image)
         print("\nPASS: deployment is ready. Hard-refresh the admin page once.")
-        print("Still check SendGrid test email, a new voicemail transcript, and one 101↔105 call separately.")
+        print("Still check the email provider test, a new voicemail transcript, and one 101↔105 call separately.")
         return 0
     except (RuntimeError, OSError, urllib.error.URLError) as exc:
         print(f"\nFAIL: {exc}", file=sys.stderr)

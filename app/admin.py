@@ -379,7 +379,8 @@ class SettingsStore:
             db.execute("BEGIN IMMEDIATE")
             # Additive upgrades for image-only deployments with an existing DB.
             for table, additions in (
-                ("email_config", (("transcription_enabled", "INTEGER NOT NULL DEFAULT 0"),)),
+                ("email_config", (("transcription_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                                  ("provider", "TEXT NOT NULL DEFAULT 'sendgrid'"))),
                 ("voicemail_deliveries", (("transcription_status", "TEXT NOT NULL DEFAULT 'disabled'"),)),
             ):
                 existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -3927,11 +3928,12 @@ class SettingsStore:
         from cryptography.fernet import InvalidToken
 
         with self._connect() as db:
-            row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
-        result = {"from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False,
+            row = db.execute("SELECT provider,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
+        # Existing installations and clients that omit provider remain on SendGrid.
+        result = {"provider": "sendgrid", "from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False,
                   "has_api_key": False, "transcription_enabled": False}
         if row:
-            result.update({"from_email": row["from_email"], "from_name": row["from_name"],
+            result.update({"provider": row["provider"], "from_email": row["from_email"], "from_name": row["from_name"],
                            "enabled": bool(row["enabled"]), "has_api_key": bool(row["sendgrid_api_key_enc"]),
                            "transcription_enabled": bool(row["transcription_enabled"]),
                            "updated_at": row["updated_at"]})
@@ -3940,29 +3942,28 @@ class SettingsStore:
                     result["api_key"] = self.decrypt(row["sendgrid_api_key_enc"]) if row["sendgrid_api_key_enc"] else ""
                 except InvalidToken:
                     result["api_key"] = ""
-                    result["api_key_error"] = "Saved SendGrid key cannot be decrypted. Restore the original SECRET_KEY or save a replacement API key."
+                    result["api_key_error"] = "Saved email API key cannot be decrypted. Restore the original SECRET_KEY or save a replacement API key."
         return result
 
     def save_email_config(self, data):
         if not isinstance(data, dict):
             raise ValueError("Email configuration must be an object")
-        # Preserve ciphertext directly: replacing a key must work even when the
-        # old key is unreadable (for example after a changed SECRET_KEY).
+        # The historically named sendgrid_api_key_enc column stores the one
+        # selected provider's encrypted key; no database copy or re-key is needed.
+        # Preserve ciphertext directly so an unreadable old key can be replaced.
         with self._connect() as db:
-            row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
+            row = db.execute("SELECT provider,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
             old = dict(row) if row else {}
+            labels = {"sendgrid": "SendGrid", "elasticemail": "Elastic Email"}
+            provider = data.get("provider", old.get("provider", "sendgrid"))
+            if not isinstance(provider, str) or provider not in labels:
+                raise ValueError("Choose SendGrid or Elastic Email as the email provider")
 
             def flag(name):
                 value = data.get(name, bool(old.get(name, False)))
                 if not isinstance(value, (bool, int)) or value not in (0, 1):
                     raise ValueError(f"{name} must be true or false")
                 return bool(value)
-
-            def secret(field, column):
-                key = str(data.get(field) or "").strip()
-                if len(key) > 512 or re.search(r"\s", key):
-                    raise ValueError("Paste the API key only, without Bearer, spaces or line breaks")
-                return self.encrypt(key) if key else old.get(column, "")
 
             enabled = flag("enabled")
             transcription_enabled = flag("transcription_enabled")
@@ -3972,17 +3973,26 @@ class SettingsStore:
                 raise ValueError("From email is invalid")
             if "\r" in from_name or "\n" in from_name:
                 raise ValueError("Sender name cannot contain line breaks")
-            encrypted = secret("api_key", "sendgrid_api_key_enc")
+            key = str(data.get("api_key") or "").strip()
+            if len(key) > 512 or re.search(r"\s", key):
+                raise ValueError("Paste the API key only, without Bearer, spaces or line breaks")
+            # Never accidentally send one vendor's stored credential to the
+            # other. Re-enter the intended key when changing provider, including
+            # an Elastic key previously saved under the old SendGrid-only UI.
+            if provider != old.get("provider", "sendgrid") and old.get("sendgrid_api_key_enc") and not key:
+                raise ValueError(f"Enter the {labels[provider]} API key when switching providers")
+            encrypted = self.encrypt(key) if key else old.get("sendgrid_api_key_enc", "")
             if enabled and (not encrypted or not from_email):
-                raise ValueError("SendGrid API key and verified from email are required")
-            db.execute("INSERT INTO email_config(id,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled) "
-                       "VALUES(1,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,"
+                raise ValueError(f"{labels[provider]} API key and verified from email are required")
+            db.execute("INSERT INTO email_config(id,provider,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled) "
+                       "VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,"
                        "from_email=excluded.from_email,from_name=excluded.from_name,enabled=excluded.enabled,"
                        "transcription_enabled=excluded.transcription_enabled,updated_at=CURRENT_TIMESTAMP",
-                       (encrypted, from_email, from_name, int(enabled), int(transcription_enabled)))
-            # A repaired sender/key should retry exhausted failures, never an
-            # already accepted email or a delivery still in flight.
-            if encrypted != old.get("sendgrid_api_key_enc", "") or from_email != old.get("from_email", "") or (enabled and not old.get("enabled")):
+                       (provider, encrypted, from_email, from_name, int(enabled), int(transcription_enabled)))
+            # A repaired provider/sender/key should retry exhausted failures,
+            # never an already accepted email or a delivery still in flight.
+            if (provider != old.get("provider", "sendgrid") or encrypted != old.get("sendgrid_api_key_enc", "")
+                    or from_email != old.get("from_email", "") or (enabled and not old.get("enabled"))):
                 db.execute("UPDATE voicemail_deliveries SET attempts=0 WHERE status='failed'")
 
     def claim_voicemail_delivery(self, fingerprint: str, mailbox: str, recipient: str, *, legacy_fingerprint: str | None = None, received_at: str | None = None) -> bool:
@@ -5646,7 +5656,11 @@ def register_admin(app, config, on_telephony_change=None):
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             return jsonify({"error": "Valid test email required"}), 400
         success, error = current_app.extensions["voicemail_notifier"].send_test(email)
-        return jsonify({"ok": success, "error": error}), (200 if success else 502)
+        # The console asks for a completed test result rather than an upstream
+        # 502: some reverse proxies replace 5xx JSON with a generic HTML page.
+        # Keep the original 502 contract for older clients that do not opt in.
+        status = 200 if success or data.get("result_only") is True else 502
+        return jsonify({"ok": success, "error": error}), status
 
     @app.post("/admin/api/profile/recording")
     @login_required
