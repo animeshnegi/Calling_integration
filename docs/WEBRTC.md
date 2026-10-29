@@ -56,6 +56,23 @@ It also needs the platform's **service host** set in Settings, because the phone
 
 ## Answering in the browser
 
+A browser endpoint renders `from_domain` from the configured SIP Service
+address. When Asterisk sends a call to that endpoint, it uses a valid SIP host
+for the dialog's initial From and Contact instead of falling back to a Docker
+container ID such as `123abc456def`. JsSIP 3.10.1 rejects that numeric-leading,
+**single-label** host in either header before sending 100/180 or showing an
+incoming call. This setting applies only to browser endpoints; plain SIP and
+carrier From domains are unchanged. The configuration worker reloads PJSIP
+when the endpoint is updated. Check the live endpoint and a fresh call after
+release; the file alone is not proof that a running Asterisk loaded it.
+
+The browser plays a local ringtone while the incoming call is pending and stops
+it on answer, decline, cancellation or logout. A browser may block sound until
+there has been a user gesture: tap the bell in the phone header to enable call
+sounds, or use the prompt on an incoming call. Ringtone playback uses the
+browser's output device and does not affect RTP audio. Keep the phone open;
+browser/OS background and autoplay policies may still limit notifications.
+
 The two endpoints hold two media modes, and the endpoint a call is placed
 towards is what decides the media it is set up with - so a browser and a
 hardware phone never share one identity, one endpoint or one contact space:
@@ -256,8 +273,11 @@ Microphone denial remains visible after the call screen closes. A very slow
 TURN server can still miss the eight-second window; do not treat this limit as
 proof a relay candidate was gathered.
 
-Asterisk 22's PJSIP `external_media_address` rewrites the SDP `c=` address; it
-**does not rewrite ICE host candidates**. For the supplied Compose topology
+Asterisk 22's PJSIP `external_media_address` can rewrite the SDP `c=` address
+when its NAT rules treat the signalling destination as external; a local reverse
+proxy may leave `c=` private. It **does not rewrite ICE host candidates**. A
+private `c=` by itself does not prove failure when ICE selects a reachable
+candidate. For the supplied Compose topology
 (one Docker bridge, IPv4 public address, and identical external/internal RTP
 ports), the Asterisk entrypoint records its actual container IPv4 address and
 creates `/etc/asterisk/dynamic/rtp.ice.conf`. The API sync maps it to the
@@ -343,7 +363,11 @@ leaving the call screen silent:
   cannot answer the new page with stale call code. Bump both the HTML version
   and the service worker `VERSION` together on future shell changes.
 
-These are browser fixes; they do not change outbound call routing. A live
+These are browser fixes; they do not change outbound call routing. The optional
+`tools/phone-asteriskcheck.js` regression starts a disposable local Asterisk,
+real browser sessions and a plain SIP client using generated test credentials;
+its prerequisites and invocation are at the top of that script. It tests real
+loopback signalling and audio, not the production VM or network. A live
 deployment still needs the checks that only the VM can prove:
 
 ```bash
@@ -406,5 +430,5 @@ a fixed header; mute/speaker/hold/keypad and DTMF live in a scrollable body;
 the DTMF keypad can no longer push End Call below the window. The screen has
 distinct dialling, ringing, connected and ended phase styling, larger touch
 targets, `touch-action: manipulation`, reduced-motion support, and short-window
-rules. Versioned `/phone.css?v=11` / `/phone.js?v=11` and service-worker cache
-`eip-phone-v11` ensure the new phone code replaces a cached old call screen.
+rules. Versioned `/phone.css?v=12` / `/phone.js?v=12` and service-worker cache
+`eip-phone-v12` ensure the new phone code replaces a cached old call screen.

@@ -2,6 +2,8 @@ import re
 import socket
 from pathlib import Path
 
+import pytest
+
 from app.admin import SettingsStore
 from app.telephony_config import TelephonyConfigSync
 from dialplan_helpers import dynamic_dial
@@ -111,6 +113,83 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     # And the global identifier order must allow auth_username to run at all.
     bootstrap = (Path(__file__).resolve().parents[1] / "asterisk" / "entrypoint.sh").read_text()
     assert "endpoint_identifier_order=ip,username,auth_username,anonymous" in bootstrap
+
+
+@pytest.mark.parametrize(
+    ("service", "media", "expected"),
+    [
+        ("sip.example.com", "203.0.113.10", "sip.example.com"),
+        ("123test.example.com", "203.0.113.10", "123test.example.com"),
+        ("203.0.113.10", "", "203.0.113.10"),
+        ("2001:db8::12", "", "[2001:db8::12]"),
+        ("123abc456def", "203.0.113.10", "203.0.113.10"),
+        ("invalid host", "203.0.113.10", "203.0.113.10"),
+        ("bad\nfrom_domain=evil.example", "", "asterisk"),
+        ("", "", "asterisk"),
+        ("example.123", "", "asterisk"),
+    ],
+)
+def test_browser_from_domain_is_a_valid_sip_host(service, media, expected):
+    """A numeric-leading single-label Docker hostname is not a SIP host."""
+    assert TelephonyConfigSync._browser_sip_domain(service, media) == expected
+
+
+def test_browser_sip_domain_does_not_change_plain_or_carrier_endpoints(tmp_path: Path):
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.set_settings({"service_host": "sip.example.com"})
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret", "webrtc_enabled": True})
+    store.save_provider({
+        "name": "Carrier", "server": "carrier.example.com", "port": 5060,
+        "username": "carrier-user", "password": "secret", "transport": "udp",
+        "codecs": "ulaw,alaw", "allowed_ips": "198.51.100.10/32",
+    })
+    username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+    text = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_pjsip()
+    browser = text.split(f"[{username}-webrtc]\ntype=endpoint", 1)[1].split("\n\n", 1)[0]
+    plain = text.split(f"[{username}]\ntype=endpoint", 1)[1].split("\n\n", 1)[0]
+    provider = text.split("from_domain=carrier.example.com", 1)
+    assert "from_domain=sip.example.com\n" in browser
+    assert "from_domain=" not in plain
+    assert len(provider) == 2  # Existing carrier domain remains unchanged.
+    assert text.count("from_domain=sip.example.com") == 1
+
+
+def test_numeric_leading_service_name_uses_resolved_media_ip_for_browser_domain(tmp_path: Path, monkeypatch):
+    fake_dns(monkeypatch, {"123abc456def": "203.0.113.10"})
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.set_settings({"service_host": "123abc456def"})
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret", "webrtc_enabled": True})
+    path = tmp_path / "pjsip.dynamic.conf"
+    TelephonyConfigSync(store, DummyAMI(), str(path)).apply()
+    assert "from_domain=203.0.113.10\n" in path.read_text()
+    assert "from_domain=123abc456def" not in path.read_text()
+
+
+def test_browser_sip_domain_update_reloads_without_restarting_asterisk(tmp_path: Path, monkeypatch):
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
+
+    class RecordingAMI(DummyAMI):
+        def __init__(self): self.calls = []
+        def restart(self): self.calls.append("restart")
+        def reload_pjsip(self): self.calls.append("pjsip")
+        def reload_voicemail(self): self.calls.append("voicemail")
+        def reload_dialplan(self): self.calls.append("dialplan")
+
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.set_settings({"service_host": "sip.example.com"})
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret", "webrtc_enabled": True})
+    ami = RecordingAMI()
+    path = tmp_path / "pjsip.dynamic.conf"
+    sync = TelephonyConfigSync(store, ami, str(path))
+    sync.apply()
+    assert ami.calls == ["restart"]
+    # Simulate the prior image's file, with the same endpoint sections and
+    # transports but without the browser-specific domain.
+    path.write_text(path.read_text().replace("from_domain=sip.example.com\n", ""))
+    ami.calls.clear()
+    sync.apply()
+    assert "from_domain=sip.example.com\n" in path.read_text()
+    assert ami.calls == ["pjsip", "voicemail", "dialplan"]
 
 
 def test_admin_chooses_the_sip_digest_algorithm(tmp_path: Path):

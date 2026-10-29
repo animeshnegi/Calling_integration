@@ -5,6 +5,7 @@ const installBtn=$("install-btn"),remoteAudio=$("remote-audio"),settingsDialog=$
 let deferredInstall=null,ua=null,currentSession=null,currentCallAnswered=false,currentCallStatus="completed",callStartedAt=null,timer=null,muted=false,held=false;
 let currentSipSettings=null,remoteStream=null,audioPlayPending=false,sipEverRegistered=false;
 let keepaliveTimer=null,reconnectTimer=null,qualityTimer=null,preparationTimer=null,currentIceCleanup=null;
+let ringerContext=null,ringerSource=null,ringerSession=null;
 /* JsSIP waits for ICE gathering to finish before sending an INVITE or a 200
    answer. Some unreachable STUN/TURN servers never finish before the PBX's
    ring timeout. Once candidates exist, bound that wait without inventing any. */
@@ -80,6 +81,72 @@ function showAudioUnlock(visible,message){
   btn.classList.toggle("hidden",!visible);
   if(message)btn.textContent=message
 }
+/* The remote audio element cannot ring before a call is answered. Generate a
+   short local tone instead, with no microphone, extra asset or RTP changes.
+   Browsers can require a gesture before audio is allowed; keep a visible bell
+   on the dialer and an actionable prompt on the incoming-call screen. */
+function updateRingerUi(){
+  const ready=!!ringerContext&&ringerContext.state==="running"&&(!ringerSession||!!ringerSource);
+  const bell=$("enable-ringer-btn"),prompt=$("enable-ringing-btn");
+  if(bell)bell.classList.toggle("hidden",ready);
+  if(prompt)prompt.classList.toggle("hidden",!ringerSession||ready);
+}
+function ringerPrompt(text){const prompt=$("enable-ringing-btn");if(prompt)prompt.textContent=text}
+function getRingerContext(){
+  if(ringerContext&&ringerContext.state!=="closed")return ringerContext;
+  if(ringerSource){try{ringerSource.stop()}catch{};try{ringerSource.disconnect()}catch{};ringerSource=null}
+  ringerContext=null;
+  const Context=window.AudioContext||window.webkitAudioContext;
+  if(!Context)return null;
+  try{
+    ringerContext=new Context();
+    ringerContext.onstatechange=updateRingerUi;
+    return ringerContext
+  }catch{return null}
+}
+function unlockRinger(){
+  const context=getRingerContext();
+  if(!context){
+    ringerPrompt("Incoming sound unavailable in this browser");
+    updateRingerUi();return
+  }
+  ringerPrompt("🔔 Tap to enable ringing");
+  if(ringerSession&&!ringerSource)startRingtone(ringerSession);
+  if(context.state==="running"){updateRingerUi();return}
+  try{
+    const resumed=context.resume();
+    if(resumed&&typeof resumed.then==="function")resumed.then(updateRingerUi).catch(updateRingerUi);
+  }catch{}
+  updateRingerUi()
+}
+function stopRingtone(){
+  ringerSession=null;
+  const source=ringerSource;ringerSource=null;
+  if(source){try{source.stop()}catch{};try{source.disconnect()}catch{}}
+  updateRingerUi()
+}
+function startRingtone(session){
+  stopRingtone();ringerSession=session;
+  try{
+    const context=getRingerContext();
+    if(!context){ringerPrompt("Incoming sound unavailable in this browser");updateRingerUi();return}
+    // 1.5 seconds of gentle dual-tone ringing followed by 2.5 seconds quiet.
+    // A looping buffer is independent of background-tab timer throttling.
+    const rate=context.sampleRate,buffer=context.createBuffer(1,rate*4,rate),samples=buffer.getChannelData(0);
+    for(let i=0;i<rate*1.5;i++){
+      const t=i/rate,envelope=Math.min(1,t/0.02,(1.5-t)/0.02);
+      samples[i]=0.10*envelope*(Math.sin(2*Math.PI*440*t)+Math.sin(2*Math.PI*480*t))
+    }
+    const source=context.createBufferSource();source.buffer=buffer;source.loop=true;source.connect(context.destination);
+    ringerSource=source;source.start();updateRingerUi()
+  }catch{
+    // Ringing is an enhancement, never a reason to drop a SIP INVITE.
+    stopRingtone();ringerSession=session;
+    ringerPrompt("Incoming sound unavailable in this browser");updateRingerUi()
+  }
+}
+if($("enable-ringer-btn"))$("enable-ringer-btn").onclick=unlockRinger;
+if($("enable-ringing-btn"))$("enable-ringing-btn").onclick=unlockRinger;
 function playRemoteAudio(){
   audioPlayPending=true;
   remoteAudio.muted=false;
@@ -98,7 +165,8 @@ function resetRemoteAudio(){
 /* Browsers sometimes need a user gesture before an auto-playing media element
    will make a sound. The call and answer buttons are gestures; a later tap
    anywhere can still unlock the remote track if that first attempt was blocked. */
-doc.addEventListener("pointerdown",()=>{if(audioPlayPending)playRemoteAudio()},{capture:true,passive:true});
+doc.addEventListener("pointerdown",()=>{if(audioPlayPending)playRemoteAudio();unlockRinger()},{capture:true,passive:true});
+doc.addEventListener("keydown",()=>unlockRinger(),{capture:true});
 function showNumber(){const v=input.value.trim();display.textContent=v||"Enter number";hint.classList.remove("error");hint.textContent=v?"Ready to call":"Direct paste is supported"}
 function showDialError(message){nav("dialer-view");hint.classList.add("error");hint.textContent=message}
 function addRecent(number,direction="outgoing",status="completed"){const rows=JSON.parse(localStorage.getItem(recentsKey)||"[]");rows.unshift({number,direction,status,at:Date.now()});localStorage.setItem(recentsKey,JSON.stringify(rows.slice(0,100)))}
@@ -330,7 +398,7 @@ function attachSession(session,incoming=false){
   session.on("progress",()=>{if(active()){setCallStatus("Ringing…");setCallPhase("ringing")}});
   const accepted=()=>{
     if(!active())return;
-    clearPreparationTimer();currentCallAnswered=true;$("active-label").textContent="Call";
+    clearPreparationTimer();stopRingtone();currentCallAnswered=true;$("active-label").textContent="Call";
     const ice=session.connection?.iceConnectionState;
     setCallStatus(ice==="connected"||ice==="completed"?"Connected":"Connecting audio…");
     setCallPhase("connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)
@@ -355,7 +423,11 @@ function attachSession(session,incoming=false){
     endCall(message,false,"failed")
   });
   attachRemoteAudio(session);
-  if(!incoming)startPreparationTimer(session)
+  if(incoming){
+    // Return to JsSIP immediately so it can send 180 even if audio setup is
+    // slow. The caller may cancel or the user may answer before this runs.
+    setTimeout(()=>{if(active()&&!$("incoming-actions").classList.contains("hidden"))startRingtone(session)},0)
+  }else startPreparationTimer(session)
 }
 function startTimer(){
   clearInterval(timer);timer=setInterval(()=>{
@@ -376,7 +448,7 @@ function startTimer(){
 function endCall(message="Call ended",terminate=true,status="completed"){
   const session=currentSession;
   if(!session)return;
-  currentSession=null;
+  currentSession=null;stopRingtone();
   clearPreparationTimer();if(currentIceCleanup)currentIceCleanup();currentIceCleanup=null;
   if(terminate){currentCallStatus=status;try{if(!session.isEnded?.())session.terminate()}catch{}}
   const number=input.value.trim();
@@ -540,6 +612,7 @@ $("call-btn").onclick=startCall;
 
 $("answer-btn").onclick=()=>{
   const session=currentSession;if(!session)return;
+  stopRingtone();
   playRemoteAudio();  // The answer gesture is the best chance to unlock audio.
   setCallStatus("Preparing answer… Allow microphone access if prompted.");setCallPhase("answering");
   $("incoming-actions").classList.add("hidden");$("hangup-btn").classList.remove("hidden");$("active-label").textContent="Answering";
@@ -633,7 +706,7 @@ $("connect-btn").onclick=async()=>{
 $("logout-btn").onclick=()=>{
   stopKeepalive();stopReconnectWatchdog();sipEverRegistered=false;
   try{if(ua)ua.stop()}catch{}ua=null;handoff=null;iceServers=DEFAULT_ICE_SERVERS;
-  currentSession=null;clearPreparationTimer();if(currentIceCleanup)currentIceCleanup();currentIceCleanup=null;resetRemoteAudio();clearInterval(timer);stopQualityWatch();
+  currentSession=null;stopRingtone();clearPreparationTimer();if(currentIceCleanup)currentIceCleanup();currentIceCleanup=null;resetRemoteAudio();clearInterval(timer);stopQualityWatch();
   sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
 };
 $("refresh-recents").onclick=loadRecents;

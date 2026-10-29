@@ -5,6 +5,9 @@
  * Chrome:
  *   npm install --no-save puppeteer-core ws
  *   CHROMIUM=/path/to/chromium node tools/phone-realcheck.js
+ * For the bundled headless build used in this regression, install
+ * @sparticuz/chromium@131.0.1 (newer sandbox builds may expose different ICE
+ * interfaces). The checks still require actual RTP and non-silent audio.
  *
  * Two real Chrome pages use the shipped phone.js and vendored JsSIP. A tiny
  * loopback SIP-over-WebSocket relay below handles REGISTER and forwards SIP
@@ -17,12 +20,14 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const assert = require('assert/strict');
 const puppeteer = require('puppeteer-core');
 const { WebSocketServer, WebSocket } = require('ws');
 
 const root = path.join(__dirname, '..', 'web');
-const records = [], contacts = new Map(), dialogs = new Map();
+const records = [], contacts = new Map(), dialogs = new Map(), challenges = new Set();
+let privateConnectionLine = false, rewrittenConnectionLines = 0, challengeNextInvite = false;
 const header = (message, name) => {
   const match = message.match(new RegExp('^' + name + ':\\s*(.*)$', 'im'));
   return match ? match[1].trim() : '';
@@ -49,6 +54,27 @@ function replyOk(socket, message) {
   ].join('\r\n');
   socket.send(response);
 }
+function challengeInvite(socket, message) {
+  const response = [
+    'SIP/2.0 401 Unauthorized', 'Via: ' + header(message, 'Via'),
+    'From: ' + header(message, 'From'), 'To: ' + header(message, 'To') + ';tag=challenge',
+    'Call-ID: ' + header(message, 'Call-ID'), 'CSeq: ' + header(message, 'CSeq'),
+    'WWW-Authenticate: Digest realm="asterisk",nonce="test-nonce",algorithm=MD5,qop="auth"',
+    'Content-Length: 0', '', '',
+  ].join('\r\n');
+  socket.send(response);
+}
+function validInviteDigest(message, username) {
+  const fields = {};
+  for (const match of header(message, 'Authorization').matchAll(/(\w+)=(?:"([^"]*)"|([^,\s]+))/g)) {
+    fields[match[1].toLowerCase()] = match[2] === undefined ? match[3] : match[2];
+  }
+  const md5 = text => crypto.createHash('md5').update(text).digest('hex');
+  if (fields.username !== username || fields.realm !== 'asterisk' || fields.nonce !== 'test-nonce'
+      || fields.qop !== 'auth' || !fields.nc || !fields.cnonce || !fields.uri) return false;
+  const ha1 = md5(`${username}:asterisk:test-password`), ha2 = md5(`INVITE:${fields.uri}`);
+  return fields.response === md5(`${ha1}:${fields.nonce}:${fields.nc}:${fields.cnonce}:${fields.qop}:${ha2}`);
+}
 function onSip(socket, bytes) {
   const message = bytes.toString();
   if (!message.trim()) return;
@@ -61,7 +87,18 @@ function onSip(socket, bytes) {
   if (method === 'REGISTER') {
     const username = (header(message, 'From').match(/sip:([^@;>]+)@/i) || [])[1];
     if (!username) throw new Error('Cannot identify REGISTER sender');
-    socket.user = username; contacts.set(username, socket); replyOk(socket, message); return;
+    socket.user = username;
+    socket.contactUser = (header(message, 'Contact').match(/sip:([^@;>]+)@/i) || [])[1];
+    contacts.set(username, socket); replyOk(socket, message); return;
+  }
+  if (method === 'INVITE' && challengeNextInvite && !header(message, 'Authorization')) {
+    challengeNextInvite = false; challenges.add(callId); challengeInvite(socket, message); return;
+  }
+  // The ACK to an authentication challenge is transaction-specific; it is
+  // not the ACK to the eventual successful dialog.
+  if (method === 'ACK' && challenges.has(callId) && !dialogs.has(callId)) return;
+  if (method === 'INVITE' && challenges.has(callId)) {
+    if (!validInviteDigest(message, socket.user)) throw new Error('Invalid browser INVITE digest');
   }
   if (method === 'INVITE' && !dialogs.has(callId)) {
     const target = (first.match(/^INVITE sip:([^@;>]+)@/i) || [])[1];
@@ -72,7 +109,68 @@ function onSip(socket, bytes) {
   const pair = dialogs.get(callId);
   if (!pair) throw new Error('No test dialog for: ' + first);
   const peer = pair[0] === socket ? pair[1] : pair[0];
-  if (peer.readyState === WebSocket.OPEN) peer.send(message);
+  if (peer.readyState === WebSocket.OPEN) {
+    let forwarded = message;
+    if (privateConnectionLine) {
+      const split = forwarded.indexOf('\r\n\r\n');
+      if (split >= 0 && /Content-Type:\s*application\/sdp/i.test(forwarded.slice(0, split))) {
+        let head = forwarded.slice(0, split), body = forwarded.slice(split + 4);
+        body = body.replace(/c=IN IP4 [^\r\n]+/g, () => { rewrittenConnectionLines++; return 'c=IN IP4 172.21.0.2'; });
+        head = head.replace(/Content-Length:\s*\d+/i, 'Content-Length: ' + Buffer.byteLength(body));
+        forwarded = head + '\r\n\r\n' + body;
+      }
+    }
+    peer.send(forwarded);
+  }
+}
+
+// Sanitized version of the production Asterisk 22 WebSocket INVITE. The
+// request target is the random contact username from the real REGISTER; the
+// caller, addresses, ICE credentials and fingerprint below are only fixtures.
+function asteriskInvite(target, fromHost, contactHost, id) {
+  const sdp = [
+    'v=0', 'o=- 123456 123456 IN IP4 172.21.0.2', 's=Asterisk',
+    'c=IN IP4 172.21.0.2', 't=0 0', 'a=msid-semantic:WMS *',
+    'a=group:BUNDLE audio-0', 'm=audio 10046 UDP/TLS/RTP/SAVPF 9 0 8 101',
+    'a=connection:new', 'a=setup:actpass',
+    'a=fingerprint:SHA-256 ' + Array(32).fill('AA').join(':'),
+    'a=ice-ufrag:0123456789abcdef0123456789abcdef',
+    'a=ice-pwd:0123456789abcdef0123456789abcdef',
+    'a=candidate:H123 1 UDP 2130706431 198.51.100.42 10046 typ host',
+    'a=rtpmap:9 G722/8000', 'a=rtpmap:0 PCMU/8000', 'a=rtpmap:8 PCMA/8000',
+    'a=rtpmap:101 telephone-event/8000', 'a=fmtp:101 0-16', 'a=ptime:20',
+    'a=maxptime:140', 'a=sendrecv', 'a=rtcp-mux',
+    'a=ssrc:161924846 cname:test-cname',
+    'a=msid:00000000-0000-4000-8000-000000000001 00000000-0000-4000-8000-000000000002',
+    'a=rtcp-fb:* transport-cc', 'a=mid:audio-0', '',
+  ].join('\r\n');
+  return [
+    `INVITE sip:${target}@172.21.0.1:36120;transport=WS SIP/2.0`,
+    `Via: SIP/2.0/WS 172.21.0.2:8088;rport;branch=z9hG4bK-${id};alias`,
+    `From: <sip:CALLER_101@${fromHost}>;tag=from-${id}`,
+    `To: <sip:${target}@172.21.0.1>`,
+    `Contact: <sip:asterisk@${contactHost}:5060;transport=ws>`,
+    `Call-ID: ${id}`, 'CSeq: 23765 INVITE',
+    'Allow: OPTIONS, REGISTER, SUBSCRIBE, NOTIFY, PUBLISH, INVITE, ACK, BYE, CANCEL, UPDATE, PRACK, MESSAGE, INFO, REFER',
+    'Supported: 100rel, timer, replaces, norefersub, histinfo',
+    'Session-Expires: 1800', 'Min-SE: 90', 'Max-Forwards: 70',
+    'User-Agent: Asterisk PBX 22.11.0', 'Content-Type: application/sdp',
+    'Content-Length: ' + Buffer.byteLength(sdp), '', sdp,
+  ].join('\r\n');
+}
+
+// Complete a simulated PBX-initiated dialog using the browser's real Contact
+// and To tag. The fixture deliberately uses the same socket as the INVITE.
+function asteriskDialogRequest(invite, answer, method, cseq) {
+  const contact = (header(answer, 'Contact').match(/<([^>]+)>/) || [])[1];
+  assert.ok(contact, 'browser answer Contact');
+  return [
+    `${method} ${contact} SIP/2.0`,
+    `Via: SIP/2.0/WS 172.21.0.2:8088;rport;branch=z9hG4bK-${method.toLowerCase()}-${cseq};alias`,
+    'From: ' + header(invite, 'From'), 'To: ' + header(answer, 'To'),
+    'Call-ID: ' + header(invite, 'Call-ID'), `CSeq: ${cseq} ${method}`,
+    'Max-Forwards: 70', 'Content-Length: 0', '', '',
+  ].join('\r\n');
 }
 
 function pageShim() {
@@ -151,7 +249,26 @@ async function hasPackets(page) {
   });
 }
 async function mediaBoth(a, b) {
-  await until(async () => await hasPackets(a) && await hasPackets(b), 'bidirectional RTP and decoded audio energy', 18000);
+  try {
+    await until(async () => await hasPackets(a) && await hasPackets(b), 'bidirectional RTP and decoded audio energy', 18000);
+  } catch (error) {
+    if (process.env.PHONE_REALCHECK_TRACE) {
+      for (const page of [a, b]) console.log('MEDIA', await page.evaluate(async () => {
+        const pc = currentSession?.connection;
+        if (!pc) return 'no peer connection';
+        const items = [];
+        (await pc.getStats()).forEach(s => {
+          if (['inbound-rtp', 'outbound-rtp', 'candidate-pair'].includes(s.type))
+            items.push({ type: s.type, kind: s.kind, state: s.state, packetsReceived: s.packetsReceived,
+              packetsSent: s.packetsSent, totalAudioEnergy: s.totalAudioEnergy });
+        });
+        const candidates = sdp => (sdp || '').split(/\r?\n/).filter(line => line.startsWith('a=candidate:'));
+        return { ice: pc.iceConnectionState, connection: pc.connectionState, items,
+          localCandidates: candidates(pc.localDescription?.sdp), remoteCandidates: candidates(pc.remoteDescription?.sdp) };
+      }));
+    }
+    throw error;
+  }
   check('both real peers exchange RTP, decode non-silent audio and attach a remote audio track', true);
 }
 async function closed(page) {
@@ -178,13 +295,15 @@ async function main() {
   const base = 'http://127.0.0.1:' + server.address().port;
   let executablePath = process.env.CHROMIUM, browser;
   let args = ['--no-sandbox', '--disable-setuid-sandbox'];
-  if (!executablePath) {
-    const chromium = require('@sparticuz/chromium');
-    executablePath = await chromium.executablePath(); args = chromium.args;
-  }
   try {
+    if (!executablePath) {
+      const imported = require('@sparticuz/chromium');
+      const chromium = imported.default || imported;
+      executablePath = await chromium.executablePath(); args = chromium.args;
+    }
     browser = await puppeteer.launch({ executablePath, headless: true, args: [...args.filter(arg => arg !== '--single-process'),
-      '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'] });
+      '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required',
+      '--disable-features=WebRtcHideLocalIpsWithMdns'] });
     // Separate contexts emulate different users/devices and prevent local
     // settings from the first page auto-signing the second page into 101.
     const a = await (await browser.createBrowserContext()).newPage();
@@ -198,10 +317,104 @@ async function main() {
     await signIn(a, base, '101'); await signIn(b, base, '102');
     check('both real JsSIP clients register through SIP-over-WebSocket', contacts.has('101') && contacts.has('102'));
 
+    // Asterisk can fall back to a single-label Docker ID in From and Contact.
+    // JsSIP 3.10.1 rejects either numeric-leading hostname before it can send
+    // even 100 Trying. Reproduce the observed wire shape before proving that
+    // a valid browser endpoint from_domain rings and can answer the same SDP.
+    const target = contacts.get('102');
+    assert.ok(target.contactUser, 'REGISTER contact username');
+    const pbx = {
+      readyState: WebSocket.OPEN,
+      send(message) { if (/^BYE /i.test(message)) replyOk(target, message); },
+    };
+    for (const [id, fromHost, contactHost] of [
+      ['bad-from', '123abc456def', 'sip.test'],
+      ['bad-contact', 'sip.test', '123abc456def'],
+    ]) {
+      dialogs.set(id, [pbx, target]);
+      target.send(asteriskInvite(target.contactUser, fromHost, contactHost, id));
+      await wait(500);
+      check('JsSIP reproduces the dropped Asterisk INVITE with invalid ' + id.slice(4) + ' host',
+        !records.some(record => record.callId === id && /^SIP\/2\.0 /.test(record.first))
+        && await b.$eval('#incoming-actions', el => el.classList.contains('hidden')));
+    }
+    const fixedId = 'valid-browser-from-domain';
+    dialogs.set(fixedId, [pbx, target]);
+    const fixedInvite = asteriskInvite(target.contactUser, 'sip.test', 'sip.test', fixedId);
+    target.send(fixedInvite);
+    await ringing(b);
+    await until(() => records.some(record => record.callId === fixedId && /^SIP\/2\.0 180/.test(record.first)), 'Asterisk-style 180 Ringing');
+    check('valid SIP host in the Asterisk-style From and Contact produces 100 and 180 and displays the incoming call',
+      records.some(record => record.callId === fixedId && /^SIP\/2\.0 100/.test(record.first))
+      && records.some(record => record.callId === fixedId && /^SIP\/2\.0 180/.test(record.first)));
+    await until(() => b.evaluate(() => !!ringerSource), 'incoming ringtone');
+    check('real Chromium starts a local Web Audio ringtone with non-zero samples',
+      await b.evaluate(() => !!ringerSource && ringerSource.loop && ringerContext.state === 'running'
+        && ringerSource.buffer.getChannelData(0).some(sample => Math.abs(sample) > 0.01)));
+    await b.click('#answer-btn');
+    check('the ringtone stops immediately on answer', await b.evaluate(() => ringerSource === null));
+    await until(() => finalsFor(fixedId).some(item => /^SIP\/2\.0 200/.test(item.first)), 'Asterisk-style SDP answer');
+    const fixedAnswer = finalsFor(fixedId).find(item => /^SIP\/2\.0 200/.test(item.first)).message;
+    check('real Chromium accepts the captured Asterisk SDP shape and sends a 200 OK', true);
+    await b.evaluate(() => { window.__pbxConfirmed = false; currentSession.on('confirmed', () => { window.__pbxConfirmed = true; }); });
+    target.send(asteriskDialogRequest(fixedInvite, fixedAnswer, 'ACK', 23765));
+    await until(() => b.evaluate(() => window.__pbxConfirmed), 'Asterisk-style ACK confirms dialog');
+    await b.click('#hangup-btn'); await closed(b);
+    await until(() => records.some(record => record.callId === fixedId && record.method === 'BYE'), 'browser BYE to Asterisk-style contact');
+    check('the simulated PBX ACK confirms the dialog and browser BYE targets the corrected Contact',
+      records.some(record => record.callId === fixedId && /^BYE sip:asterisk@sip\.test(?::5060)?;transport=ws /i.test(record.first)));
+
+    // Exercise the other hang-up direction too: the browser must match the
+    // dialog and acknowledge a PBX BYE after the synthetic ACK.
+    const remoteByeId = 'valid-browser-remote-bye';
+    const remoteByeInvite = asteriskInvite(target.contactUser, 'sip.test', 'sip.test', remoteByeId);
+    dialogs.set(remoteByeId, [pbx, target]); target.send(remoteByeInvite);
+    await ringing(b); await b.click('#answer-btn');
+    await until(() => finalsFor(remoteByeId).some(item => /^SIP\/2\.0 200/.test(item.first)), 'second Asterisk-style SDP answer');
+    const remoteByeAnswer = finalsFor(remoteByeId).find(item => /^SIP\/2\.0 200/.test(item.first)).message;
+    await b.evaluate(() => { window.__pbxConfirmed = false; currentSession.on('confirmed', () => { window.__pbxConfirmed = true; }); });
+    target.send(asteriskDialogRequest(remoteByeInvite, remoteByeAnswer, 'ACK', 23765));
+    await until(() => b.evaluate(() => window.__pbxConfirmed), 'second Asterisk-style ACK');
+    target.send(asteriskDialogRequest(remoteByeInvite, remoteByeAnswer, 'BYE', 23766));
+    await closed(b);
+    await until(() => records.some(record => record.callId === remoteByeId && /^SIP\/2\.0 200/.test(record.first) && / BYE$/i.test(record.cseq)), '200 to PBX BYE');
+    check('the browser accepts and acknowledges a simulated PBX BYE in the corrected dialog', true);
+
+    // A broken or unavailable audio device must not throw out of the
+    // newRTCSession callback and suppress the SIP 180 response.
+    await b.evaluate(async () => {
+      if (ringerContext) await ringerContext.close();
+      ringerContext = null;
+      window.__originalRingerContext = window.AudioContext;
+      window.AudioContext = class { constructor() { throw new Error('test audio device failure'); } };
+    });
+    const noToneId = 'ringer-unavailable';
+    dialogs.set(noToneId, [pbx, target]);
+    target.send(asteriskInvite(target.contactUser, 'sip.test', 'sip.test', noToneId));
+    await ringing(b);
+    await until(() => records.some(record => record.callId === noToneId && /^SIP\/2\.0 180/.test(record.first)), '180 without ringtone');
+    await until(() => b.$eval('#enable-ringing-btn', el => !el.classList.contains('hidden')), 'unavailable ringer prompt');
+    check('unavailable local ringtone does not suppress SIP 180 or the answer controls',
+      await b.$eval('#enable-ringing-btn', el => !el.classList.contains('hidden') && /unavailable/i.test(el.textContent)));
+    const ringLayout = await b.evaluate(() => {
+      const answer = document.getElementById('answer-btn').getBoundingClientRect();
+      const decline = document.getElementById('decline-btn').getBoundingClientRect();
+      const prompt = document.getElementById('enable-ringing-btn').getBoundingClientRect();
+      return { answer: answer.bottom, decline: decline.bottom, prompt: prompt.bottom, screen: innerHeight };
+    });
+    check('ringing prompt and answer/decline remain visible on a small viewport',
+      ringLayout.answer <= ringLayout.screen && ringLayout.decline <= ringLayout.screen && ringLayout.prompt <= ringLayout.screen);
+    await b.click('#decline-btn'); await closed(b);
+    await b.evaluate(() => { window.AudioContext = window.__originalRingerContext; });
+
     // Stall completion at BOTH ends: the app must release actual candidates
     // after a bounded interval to send the initial INVITE and then the 200 OK.
     await a.evaluate(() => { window.__stallIce = true; });
     await b.evaluate(() => { window.__stallIce = true; });
+    // The VM's WebSocket peer is local to Asterisk, so its SDP c= can stay
+    // private even with usable ICE candidates. Prove real browsers still use
+    // those candidates by deliberately changing c= on both loopback legs.
+    privateConnectionLine = true;
     let start = Date.now(), index = records.length;
     await dial(a, '102'); await ringing(b);
     const invite = newInviteAfter(index);
@@ -223,13 +436,22 @@ async function main() {
     check('stalled incoming gathering sends a real 200 OK with candidates before PBX timeout',
       ok.time - start >= 7000 && ok.time - start < 16000 && /a=candidate:/i.test(ok.message));
     await mediaBoth(a, b);
+    check('a private SDP connection line does not prevent ICE-selected bidirectional audio in the loopback test',
+      rewrittenConnectionLines >= 2);
     await a.click('#hangup-btn'); await closed(a); await closed(b);
+    privateConnectionLine = false;
 
     // Reverse call direction with normal browser gathering.
     await a.evaluate(() => { window.__stallIce = false; });
     await b.evaluate(() => { window.__stallIce = false; });
+    challengeNextInvite = true;
     index = records.length; await dial(b, '101'); await ringing(a);
-    const reverse = newInviteAfter(index); await a.click('#answer-btn');
+    const reverse = newInviteAfter(index);
+    check('browser outgoing INVITE survives an Asterisk-style 401 digest challenge',
+      !!reverse && records.filter(record => record.callId === reverse.callId && record.method === 'INVITE').length === 2
+      && records.some(record => record.callId === reverse.callId && record.method === 'INVITE'
+        && validInviteDigest(record.message, '102')));
+    await a.click('#answer-btn');
     await until(() => finalsFor(reverse.callId).some(item => /^SIP\/2\.0 200/.test(item.first)), 'reverse 200 OK');
     await mediaBoth(a, b);
     check('the reverse call direction also sends INVITE and 200 OK', !!reverse);

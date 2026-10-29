@@ -274,7 +274,7 @@ function shellWorker({ offline = false } = {}) {
 /* The page as a browser receives it, with phone.js executed for real. */
 function boot({ settings = null, recents = null, contacts = null, password = null,
                 clipboard = '', prompts = [], fetchImpl = null, search = '', opener = null,
-                audioOutputs = null } = {}) {
+                audioOutputs = null, ringAudio = null } = {}) {
   const page = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8')
     .replace(/<script[^>]*jssip[^>]*><\/script>/i, '');
   const errors = [];
@@ -282,6 +282,7 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
   virtualConsole.on('jsdomError', error => errors.push(error.message));
   virtualConsole.on('error', (...args) => errors.push(args.join(' ')));
   const sip = makeFakeSip();
+  const ringStats = { started: 0, stopped: 0, disconnected: 0, resumed: 0, samples: null, contexts: [] };
   const dom = new JSDOM(page, {
     runScripts: 'dangerously', pretendToBeVisual: true, virtualConsole,
     url: `https://phone.example.com/phone${search}`,
@@ -291,6 +292,24 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
       /* jsdom seams: media, clipboard, prompts and a Date the test can move. */
       window.HTMLMediaElement.prototype.play = () => Promise.resolve();
       window.HTMLMediaElement.prototype.pause = () => {};
+      if (ringAudio) {
+        window.AudioContext = class FakeAudioContext {
+          constructor() { this.state = ringAudio === 'running' ? 'running' : 'suspended'; this.sampleRate = 8000; this.destination = {}; ringStats.contexts.push(this); }
+          createBuffer(channels, length) {
+            const data = new Float32Array(length); ringStats.samples = data;
+            return { getChannelData: () => data };
+          }
+          createBufferSource() {
+            return { connect() {}, start() { ringStats.started++; }, stop() { ringStats.stopped++; },
+              disconnect() { ringStats.disconnected++; } };
+          }
+          resume() {
+            ringStats.resumed++;
+            if (ringAudio === 'blocked') return Promise.reject(new Error('Autoplay blocked'));
+            this.state = 'running'; if (this.onstatechange) this.onstatechange(); return Promise.resolve();
+          }
+        };
+      }
       Object.defineProperty(window.HTMLMediaElement.prototype, 'srcObject', {
         configurable: true,
         get() { return this._srcObject || null; },
@@ -330,7 +349,7 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
   const script = d.createElement('script');
   script.textContent = fs.readFileSync(path.join(WEB, 'phone.js'), 'utf8');
   d.body.appendChild(script);
-  return { dom, w, d, errors, sip, dialog };
+  return { dom, w, d, errors, sip, dialog, ringStats };
 }
 
 const shown = (d, id) => !d.getElementById(id).classList.contains('hidden');
@@ -880,6 +899,80 @@ async function main() {
 
   /* ---------------------------------------------------- incoming calls */
   section('Incoming calls');
+  {
+    const ringing = boot({ ringAudio: 'running' });
+    await signIn(ringing);
+    const call = ringing.sip.instances[0].receive({ caller: '101' });
+    await settle(20);
+    check('an incoming call starts a real local looping ringtone without touching call media',
+      ringing.ringStats.started === 1 && ringing.ringStats.samples.length === 32000
+      && ringing.ringStats.samples.some(sample => Math.abs(sample) > 0.01)
+      && !call._answered);
+    ringing.d.getElementById('answer-btn').click();
+    await settle(20);
+    check('answering immediately stops and disconnects the local ringtone',
+      ringing.ringStats.stopped === 1 && ringing.ringStats.disconnected === 1 && !!call._answered);
+    await hangUp(ringing); ringing.dom.window.close();
+
+    const locked = boot({ ringAudio: 'suspended' });
+    await signIn(locked);
+    locked.sip.instances[0].receive({ caller: '102' });
+    await settle(20);
+    check('an incoming call clearly offers to unlock browser-blocked ringing',
+      shown(locked.d, 'enable-ringing-btn') && locked.ringStats.started === 1);
+    locked.d.getElementById('enable-ringing-btn').click();
+    await settle(20);
+    check('the user gesture resumes ringing and hides the unlock prompt',
+      locked.ringStats.resumed === 1 && !shown(locked.d, 'enable-ringing-btn'));
+    locked.d.getElementById('decline-btn').click(); await settle(20);
+    check('decline stops the ringtone', locked.ringStats.stopped === 1);
+    locked.dom.window.close();
+
+    const reset = boot({ ringAudio: 'running' });
+    await signIn(reset); reset.sip.instances[0].receive({ caller: '102' }); await settle(20);
+    const oldContext = reset.ringStats.contexts[0]; oldContext.state = 'closed'; oldContext.onstatechange();
+    check('a closed audio context exposes the ringer unlock prompt', shown(reset.d, 'enable-ringing-btn'));
+    reset.d.getElementById('enable-ringing-btn').click(); await settle(20);
+    check('a user gesture recreates a closed audio context and resumes the ringtone',
+      reset.ringStats.contexts.length === 2 && reset.ringStats.started === 2
+      && reset.ringStats.stopped === 1 && !shown(reset.d, 'enable-ringing-btn'));
+    reset.d.getElementById('decline-btn').click(); await settle(20); reset.dom.window.close();
+
+    const blocked = boot({ ringAudio: 'blocked' });
+    await signIn(blocked);
+    const blockedCall = blocked.sip.instances[0].receive({ caller: '103' }); await settle(20);
+    blocked.d.getElementById('enable-ringing-btn').click(); await settle(20);
+    check('autoplay rejection leaves the incoming controls usable and the prompt visible',
+      shown(blocked.d, 'enable-ringing-btn') && shown(blocked.d, 'incoming-actions'));
+    blocked.d.getElementById('answer-btn').click(); await settle(20);
+    check('a blocked ringtone never prevents the call from being answered',
+      !!blockedCall._answered && blocked.ringStats.stopped === 1);
+    await hangUp(blocked); blocked.dom.window.close();
+
+    const cancelled = boot({ ringAudio: 'running' });
+    await signIn(cancelled);
+    const cancelledCall = cancelled.sip.instances[0].receive({ caller: '104' });
+    await settle(20); cancelledCall.terminate(); await settle(20);
+    check('remote cancellation stops the ringtone and closes the call screen',
+      cancelled.ringStats.stopped === 1 && !shown(cancelled.d, 'active-call-view'));
+    cancelled.dom.window.close();
+
+    const instant = boot({ ringAudio: 'running' });
+    await signIn(instant);
+    const instantCall = instant.sip.instances[0].receive({ caller: '105' });
+    instantCall.terminate(); await settle(20);
+    check('a call cancelled before deferred audio setup never starts a late ringtone',
+      instant.ringStats.started === 0 && !shown(instant.d, 'active-call-view'));
+    instant.dom.window.close();
+
+    const quickAnswer = boot({ ringAudio: 'running' });
+    await signIn(quickAnswer);
+    const quickCall = quickAnswer.sip.instances[0].receive({ caller: '106' });
+    quickAnswer.d.getElementById('answer-btn').click(); await settle(20);
+    check('an immediate answer never starts a late ringtone during the conversation',
+      !!quickCall._answered && quickAnswer.ringStats.started === 0);
+    await hangUp(quickAnswer); quickAnswer.dom.window.close();
+  }
   {
     const env = boot();
     await signIn(env);
