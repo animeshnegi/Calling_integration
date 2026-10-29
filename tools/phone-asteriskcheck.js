@@ -6,7 +6,8 @@
  * same machine; this is NOT a test of the deployed VM, public NAT or carrier.
  *
  * Linux prerequisites: Asterisk 22 with PJSIP/WebSocket/DTLS-SRTP modules,
- * pjsua, a C compiler, the Python app requirements, puppeteer-core and Chrome.
+ * pjsua (2.17, including --stdout-no-buf), a C compiler, the Python app
+ * requirements, puppeteer-core and Chrome.
  * Point the test at binaries rather than installing or modifying a real PBX:
  *   ASTERISK_BIN=/path/to/asterisk ASTERISK_MODULES=/path/to/asterisk/modules \
  *   PJSUA_BIN=/path/to/pjsua PYTHON=/path/to/python node tools/phone-asteriskcheck.js
@@ -74,6 +75,10 @@ function staticServer() {
   return http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const name = url.pathname === '/phone' ? 'phone.html' : path.basename(url.pathname);
+    if (name === 'phone-hold.wav') {
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store' });
+      res.end(fs.readFileSync(path.join(ROOT, 'asterisk', 'moh', 'engineerip-hold.wav'))); return;
+    }
     if (!/^(phone\.html|phone\.js|phone\.css|jssip\.min\.js|sw\.js|manifest\.json)$/.test(name)) {
       res.writeHead(404).end(); return;
     }
@@ -140,6 +145,25 @@ async function audioFlows(page) {
     return received > 10 && sent > 10 && energy > 0 && stream && stream.getAudioTracks().length > 0;
   });
 }
+async function packetCounts(page) {
+  return page.evaluate(async () => {
+    let received = 0, sent = 0;
+    const stats = await currentSession.connection.getStats();
+    stats.forEach(row => {
+      if ((row.kind || row.mediaType) !== 'audio') return;
+      if (row.type === 'inbound-rtp') received += row.packetsReceived || 0;
+      if (row.type === 'outbound-rtp') sent += row.packetsSent || 0;
+    });
+    return { received, sent };
+  });
+}
+async function packetsResume(a, b) {
+  const before = await Promise.all([packetCounts(a), packetCounts(b)]);
+  await until(async () => {
+    const after = await Promise.all([packetCounts(a), packetCounts(b)]);
+    return after.every((row, index) => row.received > before[index].received + 5 && row.sent > before[index].sent + 5);
+  }, 'media after unhold', 15000);
+}
 async function stopChild(child, input = '') {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   if (input && child.stdin.writable) child.stdin.write(input);
@@ -175,10 +199,21 @@ async function main() {
     const rtpStart = 20000 + 2 * Math.floor(Math.random() * 12000);
 
     write(config, `[directories]\nastetcdir => ${etc}\nastmoddir => ${MODULES}\nastvarlibdir => ${data}\nastdbdir => ${data}\nastkeydir => ${path.join(data, 'keys')}\nastdatadir => ${data}\nastagidir => ${path.join(data, 'agi-bin')}\nastspooldir => ${spool}\nastrundir => ${socketDir}\nastlogdir => ${logs}\n[options]\nverbose = 1\n`);
-    write(path.join(etc, 'modules.conf'), fs.readFileSync(path.join(ROOT, 'asterisk/config/modules.conf'), 'utf8'));
+    // External PJProject installations can have fewer PJSIP module slots than
+    // Asterisk's bundled build. Omit unrelated presence/publishing supplements
+    // in this fixture; its call, WebRTC and MOH modules remain unchanged.
+    const optionalPjsip = ['res_pjsip_aoc','res_pjsip_dialog_info_body_generator','res_pjsip_exten_state',
+      'res_pjsip_mwi','res_pjsip_mwi_body_generator','res_pjsip_outbound_publish',
+      'res_pjsip_pidf_body_generator','res_pjsip_pidf_digium_body_supplement',
+      'res_pjsip_pidf_eyebeam_body_supplement','res_pjsip_publish_asterisk','res_pjsip_xpidf_body_generator',
+      'res_pjsip_one_touch_record_info','res_pjsip_t38','res_pjsip_history','res_pjsip_messaging',
+      'res_pjsip_refer','res_pjsip_sips_contact','res_pjsip_acl','res_pjsip_logger'];
+    write(path.join(etc, 'modules.conf'), fs.readFileSync(path.join(ROOT, 'asterisk/config/modules.conf'), 'utf8')
+      + '\n' + optionalPjsip.map(name => `noload => ${name}.so`).join('\n') + '\n');
     write(path.join(etc, 'pjsip.conf'), `[global]\ntype=global\nendpoint_identifier_order=ip,username,auth_username,anonymous\n[transport-udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:${sipPort}\n[transport-wss]\ntype=transport\nprotocol=wss\nbind=0.0.0.0\n#include pjsip.dynamic.conf\n`);
     write(path.join(etc, 'http.conf'), `[general]\nenabled=yes\nbindaddr=127.0.0.1\nbindport=${wsPort}\n`);
     write(path.join(etc, 'rtp.conf'), `[general]\nrtpstart=${rtpStart}\nrtpend=${rtpStart + 100}\nicesupport=yes\n`);
+    write(path.join(etc, 'musiconhold.conf'), `[default]\nmode=files\ndirectory=${path.join(ROOT, 'asterisk', 'moh')}\n`);
     write(path.join(etc, 'logger.conf'), '[general]\n[logfiles]\nconsole => notice,warning,error,verbose\n');
 
     // Simulate Docker's numeric-leading container hostname for this Asterisk
@@ -198,7 +233,11 @@ async function main() {
       return /Asterisk Ready\./.test(astLog);
     }, 'Asterisk startup', 30000);
     const cli = command => execFileSync(ASTERISK, ['-C', config, '-rx', command], { encoding: 'utf8', env: astEnv });
-    check('actual Asterisk has the generated WebRTC endpoint', /from_domain\s*:\s*sip\.test/i.test(cli(`pjsip show endpoint ${ids.browser_102}`)));
+    const webEndpoint = cli(`pjsip show endpoint ${ids.browser_102}`);
+    check('actual Asterisk has the generated WebRTC endpoint and hold passthrough',
+      /from_domain\s*:\s*sip\.test/i.test(webEndpoint) && /moh_passthrough\s*:\s*true/i.test(webEndpoint));
+    check('actual Asterisk loads the packaged hold-music class', /class:\s*default/i.test(cli('moh show classes')));
+    check('actual Asterisk has its PJSIP channel driver', /chan_pjsip\.so.*Running/i.test(cli('module show like chan_pjsip')));
 
     server = staticServer();
     await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
@@ -254,6 +293,23 @@ async function main() {
     await until(() => frame(bf, index, 'in', /^ACK /i, id), 'Asterisk ACK');
     await until(async () => await audioFlows(a) && await audioFlows(b), 'browser-to-browser audio through Asterisk', 25000);
     check('actual Asterisk answers with ACK and relays decoded audio in both directions', true);
+
+    const holdIndex = bf.length;
+    await a.click('#hold-btn');
+    await b.waitForFunction(() => !document.getElementById('hold-notice').classList.contains('hidden')
+      && /other person put you on hold/i.test(document.getElementById('hold-notice').textContent), { timeout: 15000 });
+    await until(() => b.evaluate(() => !document.getElementById('hold-audio').paused
+      && document.getElementById('hold-audio').currentTime > 0.1), 'hold music in remote browser');
+    check('actual Asterisk forwards browser hold as SDP; the other browser shows hold and plays music',
+      bf.slice(holdIndex).some(item => item.direction === 'in' && /^INVITE /i.test(item.message)
+        && /a=sendonly/i.test(item.message)));
+    await a.waitForFunction(() => !document.getElementById('hold-btn').disabled, { timeout: 15000 });
+    await a.click('#hold-btn');
+    await b.waitForFunction(() => document.getElementById('hold-notice').classList.contains('hidden')
+      && document.getElementById('hold-audio').paused, { timeout: 15000 });
+    await a.waitForFunction(() => !document.getElementById('hold-btn').disabled, { timeout: 15000 });
+    await packetsResume(a, b);
+    check('actual Asterisk forwards unhold, stops hold music, and restores bidirectional RTP', true);
     await b.click('#hangup-btn'); await closed(a); await closed(b);
     await until(() => frame(bf, index, 'out', /^BYE /i, id), 'browser BYE');
     await until(() => bf.slice(index).some(item => item.direction === 'in' && /^SIP\/2\.0 200/i.test(item.message)
@@ -276,10 +332,14 @@ async function main() {
     // A real plain UDP/RTP SIP client stands in for a Zoiper-style endpoint.
     // It loops incoming audio, allowing the browser to verify decoded energy.
     const uri = `sip:127.0.0.1:${sipPort}`;
+    const plainRecording = path.join(tmp, 'plain-hold.wav');
     pjsua = spawn(PJSUA, [`--id=sip:${ids.plain_102}@127.0.0.1:${sipPort}`, `--registrar=${uri}`,
       '--realm=*', `--username=${ids.plain_102}`, `--password=${PASSWORD}`, `--local-port=${clientPort}`,
-      '--bound-addr=127.0.0.1', '--auto-answer=200', '--auto-loop', '--null-audio', '--no-tcp', '--log-level=4', '--app-log-level=4']);
-    const addPlain = chunk => { plainLog = (plainLog + chunk.toString()).slice(-100000); };
+      '--bound-addr=127.0.0.1', '--auto-answer=200', '--auto-loop', '--null-audio',
+      `--rec-file=${plainRecording}`, '--auto-rec', '--no-tcp', '--stdout-no-buf', '--log-level=4', '--app-log-level=4']);
+    // Keep offsets stable for this short disposable run; truncating a rolling
+    // log invalidates logIndex and can hide the subsequent DISCONNECTED line.
+    const addPlain = chunk => { plainLog += chunk.toString(); };
     let plainError = null;
     pjsua.on('error', error => { plainError = error; });
     pjsua.stdout.on('data', addPlain); pjsua.stderr.on('data', addPlain);
@@ -296,8 +356,35 @@ async function main() {
       && / INVITE$/i.test(header(item.message, 'CSeq'))), 'browser-to-plain SIP answer');
     await until(() => audioFlows(a), 'browser-to-plain SIP audio', 25000);
     check('browser-to-plain SIP call reaches Asterisk and exchanges decoded audio', /Request msg INVITE/i.test(plainLog.slice(logIndex)));
+    check('plain SIP endpoint keeps PBX music-on-hold rather than passthrough',
+      /moh_passthrough\s*:\s*false/i.test(cli(`pjsip show endpoint ${ids.plain_102}`)));
+    await a.click('#hold-btn');
+    await a.waitForFunction(() => !document.getElementById('hold-btn').disabled
+      && /Resume/.test(document.getElementById('hold-btn').textContent), { timeout: 15000 });
+    await wait(1000); // discard any microphone/echo buffered before hold
+    const startOfHeldMusic = fs.statSync(plainRecording).size;
+    await wait(2000);
+    const heldBytes = fs.readFileSync(plainRecording).subarray(startOfHeldMusic);
+    let energy = 0, samples = 0;
+    for (let i = 0; i + 1 < heldBytes.length; i += 2) { const value = heldBytes.readInt16LE(i); energy += value * value; samples++; }
+    check('the plain SIP client actually receives non-silent PBX hold music',
+      samples > 4000 && Math.sqrt(energy / samples) > 300);
+    await a.click('#hold-btn');
+    await a.waitForFunction(() => !document.getElementById('hold-btn').disabled
+      && /Hold/.test(document.getElementById('hold-btn').textContent), { timeout: 15000 });
+    const beforeResume = await packetCounts(a);
+    await until(async () => { const after = await packetCounts(a); return after.received > beforeResume.received + 5 && after.sent > beforeResume.sent + 5; }, 'plain SIP audio after unhold', 15000);
+    check('browser-to-plain SIP audio resumes after hold', true);
     await a.click('#hangup-btn'); await closed(a);
-    await until(() => /\[DISCONNECTED\]|state changed to DISCONNECTED/i.test(plainLog.slice(logIndex)), 'plain SIP disconnect', 10000);
+    try {
+      await until(() => /\[DISCONNECTED\]|state changed to DISCONNECTED/i.test(plainLog.slice(logIndex)), 'plain SIP disconnect', 10000);
+    } catch (error) {
+      console.error('Plain SIP process exit:', pjsua.exitCode, pjsua.signalCode,
+        '\nPBX channels:', cli('core show channels concise'), '\nPlain teardown events:',
+        plainLog.slice(logIndex).split(/\r?\n/).filter(line => /(?:BYE|DISCONNECT|Call \d+ state|timed out)/i.test(line)
+          && !/Authorization:|password/i.test(line)).slice(-30).join('\n'));
+      throw error;
+    }
 
     index = af.length;
     pjsua.stdin.write(`m\nsip:101@127.0.0.1:${sipPort}\n`);
@@ -310,6 +397,18 @@ async function main() {
     await until(() => frame(af, index, 'in', /^ACK /i, plainId), 'ACK to browser from Asterisk');
     await until(() => audioFlows(a), 'plain SIP to browser audio', 25000);
     check('plain SIP to browser call answers and exchanges decoded audio', true);
+    pjsua.stdin.write('H\n');
+    await a.waitForFunction(() => !document.getElementById('hold-notice').classList.contains('hidden')
+      && /other person put you on hold/i.test(document.getElementById('hold-notice').textContent), { timeout: 15000 });
+    await until(() => a.evaluate(() => !document.getElementById('hold-audio').paused
+      && document.getElementById('hold-audio').currentTime > 0.1), 'plain SIP holding browser plays music');
+    check('a plain SIP caller puts the browser on hold visibly with music', true);
+    pjsua.stdin.write('v\n');
+    await a.waitForFunction(() => document.getElementById('hold-notice').classList.contains('hidden')
+      && document.getElementById('hold-audio').paused, { timeout: 15000 });
+    const plainBeforeResume = await packetCounts(a);
+    await until(async () => { const after = await packetCounts(a); return after.received > plainBeforeResume.received + 5 && after.sent > plainBeforeResume.sent + 5; }, 'audio after plain SIP unhold', 15000);
+    check('plain SIP unhold stops browser music and restores media', true);
     pjsua.stdin.write('h\n'); await closed(a);
     await until(() => frame(af, index, 'in', /^BYE /i, plainId), 'Asterisk BYE after plain SIP hangup');
     check('plain SIP hangup reaches the browser as a PBX BYE', true);
@@ -318,6 +417,9 @@ async function main() {
     // SIP credentials are throwaway fixtures. Avoid printing captured SIP
     // frames or authorization headers even on failure.
     if (astLog) console.error('Temporary Asterisk log tail:\n' + astLog.slice(-6000));
+    if (plainLog) console.error('Plain SIP call-state log:\n' + plainLog.split(/\r?\n/)
+      .filter(line => /DISCONNECTED|call.*(?:state|hold)|state.*call/i.test(line) && !/Authorization:/i.test(line))
+      .slice(-30).join('\n'));
     throw error;
   } finally {
     await stopChild(pjsua, 'q\n');

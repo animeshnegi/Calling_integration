@@ -17,11 +17,11 @@
  * wins every time it exists and the cache answers only when offline. The name
  * still bumps on layout changes so activation drops older caches.
  */
-const CACHE = "eip-phone-v12";
-const VERSION = "12";
+const CACHE = "eip-phone-v13";
+const VERSION = "13";
 /* The page requests versioned CSS/JS, so a browser with last release's
    public-cached /phone.js cannot answer the new page from its old URL. */
-const SHELL = ["/phone", `/phone.css?v=${VERSION}`, `/phone.js?v=${VERSION}`, "/jssip.min.js", "/manifest.json"];
+const SHELL = ["/phone", `/phone.css?v=${VERSION}`, `/phone.js?v=${VERSION}`, `/phone-hold.wav?v=${VERSION}`, "/jssip.min.js", "/manifest.json"];
 const SHELL_PATHS = SHELL.map(path => new URL(path, location.origin).pathname);
 
 self.addEventListener("install", e => e.waitUntil(

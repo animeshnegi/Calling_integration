@@ -149,6 +149,11 @@ def test_browser_sip_domain_does_not_change_plain_or_carrier_endpoints(tmp_path:
     plain = text.split(f"[{username}]\ntype=endpoint", 1)[1].split("\n\n", 1)[0]
     provider = text.split("from_domain=carrier.example.com", 1)
     assert "from_domain=sip.example.com\n" in browser
+    # The browser receives remote hold/unhold re-INVITEs and plays hold music
+    # locally. Plain phones and providers retain Asterisk's normal PBX MOH.
+    assert "moh_passthrough=yes\n" in browser
+    assert "moh_passthrough=" not in plain
+    assert text.count("moh_passthrough=yes") == 1
     assert "from_domain=" not in plain
     assert len(provider) == 2  # Existing carrier domain remains unchanged.
     assert text.count("from_domain=sip.example.com") == 1

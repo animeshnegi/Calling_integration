@@ -74,6 +74,12 @@ def test_the_softphone_surface_is_served(tmp_path: Path):
     assert worker.status_code == 200
     assert worker.headers["Service-Worker-Allowed"] == "/"
 
+    hold = client.get("/phone-hold.wav?v=13")
+    assert hold.status_code == 200 and hold.mimetype == "audio/wav"
+    assert hold.get_data().startswith(b"RIFF")
+    assert hold.headers["X-Content-Type-Options"] == "nosniff"
+    assert hold.headers["Cache-Control"] == "public, max-age=3600"
+
 
 def test_the_softphone_loads_its_sip_stack_from_this_origin(tmp_path: Path):
     """The SIP stack is vendored, not fetched from a CDN.

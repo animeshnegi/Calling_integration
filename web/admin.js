@@ -2668,6 +2668,49 @@ async function showExtensionCredentials(extension) {
    sign-in then goes to that window by postMessage - never into a URL, the
    history or storage - and only after the window says it is ready. */
 const softphoneWindows = [];
+/* A new popup can be autoplay-locked even though the operator clicked Open
+   softphone in this window. Prepare a console-side fallback on that trusted
+   click, and use it only while a registered phone window says its own ringer
+   is blocked. No caller information or SIP credentials cross this channel. */
+let consoleRingerContext = null, consoleRingerSource = null, consoleRingerWatch = null;
+const consoleRingingPhones = new Set();
+function prepareConsoleRinger() {
+  try {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return;
+    if (!consoleRingerContext || consoleRingerContext.state === 'closed') consoleRingerContext = new Context();
+    if (consoleRingerContext.state !== 'running') {
+      const pending = consoleRingerContext.resume();
+      if (pending?.then) pending.then(updateConsoleRinger).catch(() => {});
+    }
+  } catch { /* The phone still presents its own enable-sound prompt. */ }
+}
+function updateConsoleRinger() {
+  for (const entry of consoleRingingPhones) if (entry.win.closed) consoleRingingPhones.delete(entry);
+  if (!consoleRingingPhones.size) {
+    if (consoleRingerSource) {
+      try { consoleRingerSource.stop(); } catch { /* already stopped */ }
+      try { consoleRingerSource.disconnect(); } catch { /* already disconnected */ }
+      consoleRingerSource = null;
+    }
+    clearInterval(consoleRingerWatch); consoleRingerWatch = null;
+    return;
+  }
+  if (!consoleRingerWatch) consoleRingerWatch = setInterval(updateConsoleRinger, 2000);
+  if (consoleRingerSource || !consoleRingerContext || consoleRingerContext.state !== 'running') return;
+  try {
+    const context = consoleRingerContext, rate = context.sampleRate;
+    const buffer = context.createBuffer(1, rate * 4, rate), samples = buffer.getChannelData(0);
+    for (let i = 0; i < rate * 1.5; i++) {
+      const t = i / rate, segment = t < .65 ? t : t >= .85 ? t - .85 : -1;
+      if (segment < 0) continue;
+      const envelope = Math.min(1, segment / .02, (.65 - segment) / .02);
+      samples[i] = .22 * envelope * (Math.sin(2 * Math.PI * 440 * t) + Math.sin(2 * Math.PI * 480 * t));
+    }
+    const source = context.createBufferSource(); source.buffer = buffer; source.loop = true; source.connect(context.destination);
+    consoleRingerSource = source; source.start();
+  } catch { consoleRingerSource = null; }
+}
 
 /* The softphone window is the size of a phone (390 x 860 - the browser's own
    frame takes a little of it), centred on the screen, with no toolbars. The page
@@ -2686,6 +2729,9 @@ async function openSoftphone(key) {
   if (!row.webrtc_enabled) {
     return notify('Tick Browser phone on this extension first - the softphone signs in over the browser connection', true);
   }
+  // Keep this inside the operator's click, before the asynchronous credential
+  // request; browsers may not allow a newly opened window to autoplay later.
+  prepareConsoleRinger();
   // One softphone window per extension: a second click brings the first one forward
   // and hands it fresh credentials, rather than opening a window that never hears.
   const open = softphoneWindows.find(item => item.key === key && !item.win.closed);
@@ -2733,11 +2779,16 @@ function sendSoftphone(entry) {
 }
 
 window.addEventListener('message', event => {
-  if (event.origin !== location.origin || event.data?.type !== 'eip-softphone:ready') return;
+  if (event.origin !== location.origin) return;
   const entry = softphoneWindows.find(item => item.win === event.source);
   if (!entry) return;
-  entry.ready = true;
-  sendSoftphone(entry);
+  if (event.data?.type === 'eip-softphone:ready') {
+    entry.ready = true; sendSoftphone(entry);
+  } else if (event.data?.type === 'eip-softphone:ring-start') {
+    consoleRingingPhones.add(entry); updateConsoleRinger();
+  } else if (event.data?.type === 'eip-softphone:ring-stop') {
+    consoleRingingPhones.delete(entry); updateConsoleRinger();
+  }
 });
 
 /* Rotate the password a device registers with, then show the new one. */

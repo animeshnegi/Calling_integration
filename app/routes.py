@@ -538,6 +538,16 @@ def register_routes(app, service):
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 
+    @app.get("/phone-hold.wav")
+    def phone_hold_music():
+        """The same original loop the PBX plays to held plain-SIP phones."""
+        response = send_from_directory(
+            str(Path(app.root_path).parent / "asterisk" / "moh"),
+            "engineerip-hold.wav", mimetype="audio/wav",
+        )
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
     @app.get("/jssip.min.js")
     def phone_sip_stack():
         """The vendored JsSIP browser build the softphone registers with.

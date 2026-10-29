@@ -28,7 +28,7 @@ const assetVersion = () => {
 const VERSION = assetVersion();
 const VERSIONED_CSS = `/phone.css?v=${VERSION}`;
 const VERSIONED_JS = `/phone.js?v=${VERSION}`;
-const SHELL_URLS = ['/phone', VERSIONED_CSS, VERSIONED_JS, '/jssip.min.js', '/manifest.json'];
+const SHELL_URLS = ['/phone', VERSIONED_CSS, VERSIONED_JS, `/phone-hold.wav?v=${VERSION}`, '/jssip.min.js', '/manifest.json'];
 
 let passed = 0;
 const failures = [];
@@ -99,11 +99,12 @@ function makeFakeSip() {
          gathering and the SIP response; answer() itself does not confirm. */
       answer(options) { this._answered = options; this.sendConnection(); },
       mute(options) { this._muted = options; },
-      hold() { this._held = true; this.emit('hold'); },
-      unhold() { this._held = false; this.emit('unhold'); },
+      unmute(options) { this._muted = { audio: false, unmutedWith: options }; },
+      hold(options, done) { this._held = true; this.emit('hold', { originator: 'local' }); if (done) done(); return true; },
+      unhold(options, done) { this._held = false; this.emit('unhold', { originator: 'local' }); if (done) done(); return true; },
       sendDTMF(tone) { this._dtmf.push(String(tone)); },
       /* The other end of the call, driven by the test. */
-      ring() { this.emit('progress'); },
+      ring(code = 180, body = '') { this.emit('progress', { originator: 'remote', response: { status_code: code, body } }); },
       connect() { peer.iceConnectionState = 'connected'; this.emit('confirmed'); },
       fail(cause) { this._ended = true; this.emit('failed', { cause }); },
       sendConnection() {
@@ -274,7 +275,7 @@ function shellWorker({ offline = false } = {}) {
 /* The page as a browser receives it, with phone.js executed for real. */
 function boot({ settings = null, recents = null, contacts = null, password = null,
                 clipboard = '', prompts = [], fetchImpl = null, search = '', opener = null,
-                audioOutputs = null, ringAudio = null } = {}) {
+                ringAudio = null, holdPlayback = 'running' } = {}) {
   const page = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8')
     .replace(/<script[^>]*jssip[^>]*><\/script>/i, '');
   const errors = [];
@@ -283,6 +284,7 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
   virtualConsole.on('error', (...args) => errors.push(args.join(' ')));
   const sip = makeFakeSip();
   const ringStats = { started: 0, stopped: 0, disconnected: 0, resumed: 0, samples: null, contexts: [] };
+  const holdStats = { started: 0, stopped: 0, blocked: holdPlayback === 'blocked' };
   const dom = new JSDOM(page, {
     runScripts: 'dangerously', pretendToBeVisual: true, virtualConsole,
     url: `https://phone.example.com/phone${search}`,
@@ -290,8 +292,14 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
       window.JsSIP = sip.api;
       if (opener) Object.defineProperty(window, 'opener', { value: opener, configurable: true });
       /* jsdom seams: media, clipboard, prompts and a Date the test can move. */
-      window.HTMLMediaElement.prototype.play = () => Promise.resolve();
-      window.HTMLMediaElement.prototype.pause = () => {};
+      window.HTMLMediaElement.prototype.play = function () {
+        if (this.id === 'hold-audio') {
+          holdStats.started++;
+          if (holdStats.blocked) return Promise.reject(new Error('Autoplay blocked'));
+        }
+        return Promise.resolve();
+      };
+      window.HTMLMediaElement.prototype.pause = function () { if (this.id === 'hold-audio') holdStats.stopped++; };
       if (ringAudio) {
         window.AudioContext = class FakeAudioContext {
           constructor() { this.state = ringAudio === 'running' ? 'running' : 'suspended'; this.sampleRate = 8000; this.destination = {}; ringStats.contexts.push(this); }
@@ -318,17 +326,6 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
       Object.defineProperty(window.navigator, 'clipboard', {
         configurable: true, value: { readText: async () => clipboard },
       });
-      /* The speaker button switches to a device id the browser itself reports;
-         the seam hands it the output list the test wants it to see. */
-      Object.defineProperty(window.navigator, 'mediaDevices', {
-        configurable: true,
-        value: {
-          enumerateDevices: async () => audioOutputs || [
-            { kind: 'audiooutput', deviceId: 'default', label: 'Default output' },
-            { kind: 'audiooutput', deviceId: 'speaker-1', label: 'Loudspeaker' },
-          ],
-        },
-      });
       window.prompt = () => (prompts.length ? prompts.shift() : null);
       window.alert = () => {};
       window.fetch = fetchImpl || (async () => ({ ok: false, status: 404, json: async () => ({}) }));
@@ -349,7 +346,7 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
   const script = d.createElement('script');
   script.textContent = fs.readFileSync(path.join(WEB, 'phone.js'), 'utf8');
   d.body.appendChild(script);
-  return { dom, w, d, errors, sip, dialog, ringStats };
+  return { dom, w, d, errors, sip, dialog, ringStats, holdStats };
 }
 
 const shown = (d, id) => !d.getElementById(id).classList.contains('hidden');
@@ -361,7 +358,7 @@ function captureSetupTimers(env) {
   const pending = new Map();
   let next = 1000000;
   env.w.setTimeout = (fn, delay, ...args) => {
-    if (delay !== 8000 && delay !== 20000) return originalSet(fn, delay, ...args);
+    if (![250, 500, 800, 4000, 8000, 20000].includes(delay)) return originalSet(fn, delay, ...args);
     const id = next++; pending.set(id, { fn, delay, args }); return id;
   };
   env.w.clearTimeout = id => { if (pending.has(id)) pending.delete(id); else originalClear(id); };
@@ -638,26 +635,17 @@ async function main() {
       JSON.stringify(placed.session._muted) === '{"audio":true}'
       && d.getElementById('mute-btn').classList.contains('active'), JSON.stringify(placed.session._muted));
     d.getElementById('mute-btn').click();
-    check('unmute turns the microphone back on',
-      JSON.stringify(placed.session._muted) === '{"audio":false}'
+    check('unmute calls the SIP unmute method and turns the microphone back on',
+      placed.session._muted.audio === false && placed.session._muted.unmutedWith.audio === true
       && !d.getElementById('mute-btn').classList.contains('active'));
     d.getElementById('hold-btn').click();
     check('hold holds the far end', placed.session._held === true && d.getElementById('hold-btn').classList.contains('active'));
     d.getElementById('hold-btn').click();
     check('unhold releases it', placed.session._held === false);
-    d.getElementById('speaker-btn').click();
-    await settle(20);
-    check('without output routing the speaker button explains itself and never silences the call',
-      d.getElementById('remote-audio').muted === false
-      && !d.getElementById('speaker-btn').classList.contains('active')
-      && /cannot switch audio output/i.test(d.getElementById('active-status').textContent),
-      d.getElementById('active-status').textContent);
-    d.getElementById('speaker-btn').click();
-    await settle(20);
-    check('and trying again keeps the far end audible too', d.getElementById('remote-audio').muted === false);
+    check('the speaker/handset selector is absent and Windows keeps the default audio output',
+      !d.getElementById('speaker-btn') && d.getElementById('remote-audio').muted === false);
     d.getElementById('mute-btn').click();
     d.getElementById('hold-btn').click();
-    d.getElementById('speaker-btn').click();
 
     await hangUp(env);
     check('hanging up terminates the SIP session', placed.session._terminated === true);
@@ -674,52 +662,16 @@ async function main() {
     typeDigits(env.d, '15559998888');
     env.d.getElementById('call-btn').click();
     await settle(20);
-    check('the next call starts unmuted, unheld and on the earpiece',
+    check('the next call starts unmuted, unheld and on the system output',
       !env.d.getElementById('mute-btn').classList.contains('active')
       && !env.d.getElementById('hold-btn').classList.contains('active')
-      && !env.d.getElementById('speaker-btn').classList.contains('active')
+      && !env.d.getElementById('speaker-btn')
       && env.d.getElementById('remote-audio').muted === false
       && session(env).session._muted === null);
     await hangUp(env);
     check('and that call is filed under its own number',
       JSON.parse(env.w.localStorage.getItem('eip-phone-recents'))[0].number === '15559998888');
     env.dom.window.close();
-
-    const rerouted = boot();
-    rerouted.w.HTMLMediaElement.prototype.setSinkId = function (device) { this._sink = device; return Promise.resolve(); };
-    await signIn(rerouted);
-    typeDigits(rerouted.d, '15550001111');
-    rerouted.d.getElementById('call-btn').click();
-    await settle(20);
-    rerouted.d.getElementById('speaker-btn').click();
-    await settle(20);
-    check('a browser that can route audio is handed a device id it reported',
-      rerouted.d.getElementById('remote-audio')._sink === 'speaker-1',
-      rerouted.d.getElementById('remote-audio')._sink);
-    check('and the far end is left audible while it does',
-      rerouted.d.getElementById('remote-audio').muted === false
-      && rerouted.d.getElementById('speaker-btn').classList.contains('active'));
-    rerouted.d.getElementById('speaker-btn').click();
-    await settle(20);
-    check('turning speaker off goes back to the default output',
-      rerouted.d.getElementById('remote-audio')._sink === ''
-      && !rerouted.d.getElementById('speaker-btn').classList.contains('active'));
-    rerouted.dom.window.close();
-
-    const refused = boot();
-    refused.w.HTMLMediaElement.prototype.setSinkId = function () { return Promise.reject(new Error('device is gone')); };
-    await signIn(refused);
-    typeDigits(refused.d, '15550002222');
-    refused.d.getElementById('call-btn').click();
-    await settle(20);
-    refused.d.getElementById('speaker-btn').click();
-    await settle(20);
-    check('a failed output switch says why and keeps the call audible',
-      refused.d.getElementById('remote-audio').muted === false
-      && !refused.d.getElementById('speaker-btn').classList.contains('active')
-      && /Could not switch audio output/i.test(refused.d.getElementById('active-status').textContent),
-      refused.d.getElementById('active-status').textContent);
-    refused.dom.window.close();
 
     const failing = boot();
     await signIn(failing);
@@ -818,6 +770,110 @@ async function main() {
     mic.dom.window.close();
   }
 
+  /* ---------------------------------------- ringback and hold call feedback */
+  section('Ringback and hold');
+  {
+    const internal = boot({ ringAudio: 'running' });
+    const call = await startTestCall(internal, '102');
+    call.session.ring(100);
+    check('a 100 Trying response does not falsely play a ringing tone', internal.ringStats.started === 0);
+    call.session.ring(180);
+    check('extension 180 Ringing starts a non-silent local ringback loop',
+      internal.ringStats.started === 1 && internal.ringStats.samples.some(sample => Math.abs(sample) > 0.05));
+    call.session.ring(180);
+    check('repeated ringing responses do not start overlapping tones', internal.ringStats.started === 1);
+    call.session.emit('sdp', { originator: 'remote', sdp: 'v=0\r\nm=audio' });
+    check('remote early media stops local ringback so announcements are not covered', internal.ringStats.stopped === 1);
+    call.session.ring(180);
+    check('ringback stays off after early media, even if another 180 arrives', internal.ringStats.started === 1);
+    call.session.connect(); await hangUp(internal); internal.dom.window.close();
+
+    const external = boot({ ringAudio: 'running' });
+    const outside = await startTestCall(external, '15551234567');
+    outside.session.ring(183);
+    check('an external call with progress but no early SDP also has audible ringback', external.ringStats.started === 1);
+    outside.session.ring(183, 'v=0\r\nm=audio');
+    check('a carrier-provided SDP stops the generated tone', external.ringStats.stopped === 1);
+    outside.session.fail('Busy Here'); await settle(20);
+    check('a failed external call stops ringback and reports the failure',
+      external.ringStats.stopped === 1 && /Busy Here/.test(external.d.getElementById('dial-hint').textContent));
+    external.dom.window.close();
+
+    const silentSdp = boot({ ringAudio: 'running' });
+    await signIn(silentSdp); const silenceTimers = captureSetupTimers(silentSdp);
+    typeDigits(silentSdp.d, '104'); silentSdp.d.getElementById('call-btn').click(); await settle(20);
+    const silentCall = session(silentSdp).session;
+    silentCall.ring(180, 'v=0\r\nm=audio');
+    check('a 180 with SDP first gives carrier early audio a chance',
+      silentSdp.ringStats.started === 0 && silenceTimers.count(800) === 1);
+    silenceTimers.run(800); await settle(20);
+    check('when that 180 carries no audible media, a local ringback fills the silence', silentSdp.ringStats.started === 1);
+    silentCall.connection._stats = [{ type: 'inbound-rtp', kind: 'audio', packetsReceived: 4, totalAudioEnergy: 0.01 }];
+    silenceTimers.run(500); await settle(20);
+    check('local ringback stops as soon as the far end provides real audio',
+      silentSdp.ringStats.stopped === 1 && silenceTimers.count(500) === 0);
+    silentCall.terminate(); silentSdp.dom.window.close();
+
+    const announcement = boot({ ringAudio: 'running' });
+    await signIn(announcement); const announceTimers = captureSetupTimers(announcement);
+    typeDigits(announcement.d, '104'); announcement.d.getElementById('call-btn').click(); await settle(20);
+    const announceCall = session(announcement).session;
+    announceCall.ring(180, 'v=0\r\nm=audio'); announceCall.ring(183, 'v=0\r\nm=audio');
+    check('a carrier announcement cancels a pending silent-180 fallback',
+      announceTimers.count(800) === 0 && announcement.ringStats.started === 0);
+    announceCall.terminate(); announcement.dom.window.close();
+
+    const racing = boot({ ringAudio: 'running' });
+    await signIn(racing); const raceTimers = captureSetupTimers(racing);
+    typeDigits(racing.d, '104'); racing.d.getElementById('call-btn').click(); await settle(20);
+    const racingCall = session(racing).session;
+    let finishStats; racingCall.connection.getStats = () => new Promise(resolve => {
+      if (!finishStats) finishStats = resolve; else resolve([]);
+    });
+    racingCall.ring(180, 'v=0\r\nm=audio'); raceTimers.run(800);
+    racingCall.connect(); finishStats([]); await settle(20);
+    check('an in-flight early-media probe cannot start ringback after answer', racing.ringStats.started === 0);
+    await hangUp(racing); racing.dom.window.close();
+
+    const answer = boot({ ringAudio: 'running' });
+    const answered = await startTestCall(answer, '105'); answered.session.ring(); answered.session.connect();
+    check('answering stops the local ringback immediately', answer.ringStats.stopped === 1);
+    await hangUp(answer); answer.dom.window.close();
+
+    const hold = boot();
+    const heldCall = await startTestCall(hold, '102'); heldCall.session.connect(); await settle(20);
+    hold.d.getElementById('hold-btn').click();
+    check('local hold shows an honest hold notice and changes the control to Resume',
+      shown(hold.d, 'hold-notice') && /You put this call on hold/.test(hold.d.getElementById('hold-notice').textContent)
+      && /Resume/.test(hold.d.getElementById('hold-btn').textContent) && hold.holdStats.started === 0);
+    hold.d.getElementById('hold-btn').click();
+    check('local resume clears the hold notice', !shown(hold.d, 'hold-notice') && !heldCall.session._held);
+    heldCall.session.emit('hold', { originator: 'remote' }); await settle(20);
+    check('remote hold visibly tells the user and starts the local hold music',
+      shown(hold.d, 'hold-notice') && /other person put you on hold/i.test(hold.d.getElementById('hold-notice').textContent)
+      && hold.holdStats.started === 1 && hold.d.getElementById('mute-btn').disabled);
+    heldCall.session.emit('unhold', { originator: 'remote' }); await settle(20);
+    check('remote resume stops music and restores the connected call',
+      !shown(hold.d, 'hold-notice') && hold.holdStats.stopped >= 1 && !hold.d.getElementById('mute-btn').disabled);
+    heldCall.session.hold = () => false;
+    hold.d.getElementById('hold-btn').click();
+    check('a refused or still-busy SIP hold never pretends the call is held',
+      !hold.d.getElementById('hold-btn').classList.contains('active')
+      && !shown(hold.d, 'hold-notice') && /not ready/i.test(hold.d.getElementById('active-status').textContent));
+    await hangUp(hold); hold.dom.window.close();
+
+    const blocked = boot({ holdPlayback: 'blocked' });
+    const blockedCall = await startTestCall(blocked, '103'); blockedCall.session.connect(); await settle(20);
+    blockedCall.session.emit('hold', { originator: 'remote' }); await settle(20);
+    check('blocked hold music exposes an actionable unlock rather than hiding the hold',
+      shown(blocked.d, 'hold-notice') && shown(blocked.d, 'enable-audio-btn')
+      && /hold music/i.test(blocked.d.getElementById('enable-audio-btn').textContent));
+    blocked.holdStats.blocked = false; blocked.d.getElementById('enable-audio-btn').click(); await settle(20);
+    check('the audio unlock retries hold music and hides the prompt',
+      blocked.holdStats.started === 2 && !shown(blocked.d, 'enable-audio-btn'));
+    await hangUp(blocked); blocked.dom.window.close();
+  }
+
   /* ------------------------------------------ bounded ICE and real ordering */
   section('ICE gathering and SIP setup');
   {
@@ -826,32 +882,59 @@ async function main() {
     const timers = captureSetupTimers(env);
     typeDigits(env.d, '102'); env.d.getElementById('call-btn').click(); await settle(20);
     const call = session(env).session;
-    let hostReady = 0, relayReady = 0;
+    let hostReady = 0, reflexiveReady = 0;
     call.emit('icecandidate', { candidate: { candidate: 'typ host' }, ready: () => { hostReady++; } });
-    call.emit('icecandidate', { candidate: { candidate: 'typ relay' }, ready: () => { relayReady++; } });
-    check('a first host candidate is not released immediately, leaving time for TURN',
-      hostReady === 0 && relayReady === 0 && timers.count(8000) === 1);
-    timers.run(8000);
-    check('the bounded gather releases the latest candidates if gathering stalls',
-      hostReady === 0 && relayReady === 1 && timers.count(8000) === 0);
+    check('a host candidate is not released immediately, leaving time for NAT discovery',
+      hostReady === 0 && timers.count(4000) === 1 && timers.count(250) === 0);
+    call.emit('icecandidate', { candidate: { candidate: 'typ srflx' }, ready: () => { reflexiveReady++; } });
+    check('a public reflexive candidate schedules a quick release instead of the old eight-second wait',
+      timers.count(250) === 1 && timers.count(4000) === 1);
+    timers.run(250);
+    check('the fast release includes the latest candidates and clears the fallback',
+      hostReady === 0 && reflexiveReady === 1 && timers.count(4000) === 0);
     call.emit('sending');
     check('sending the INVITE cancels the no-signalling watchdog', timers.count(20000) === 0);
     call.terminate(); env.dom.window.close();
+
+    const turn = boot(); await signIn(turn);
+    turn.w.eval('iceServers = [{ urls: ["stun:example.test", "turns:relay.test"], username: "x", credential: "y" }]');
+    const turnTimers = captureSetupTimers(turn);
+    typeDigits(turn.d, '103'); turn.d.getElementById('call-btn').click(); await settle(20);
+    const turnCall = session(turn).session;
+    let turnReady = 0;
+    turnCall.emit('icecandidate', { candidate: { type: 'host' }, ready: () => { turnReady++; } });
+    turnCall.emit('icecandidate', { candidate: { type: 'srflx' }, ready: () => { turnReady++; } });
+    check('with TURN configured a host or reflexive candidate does not discard a slower relay',
+      turnTimers.count(8000) === 1 && turnTimers.count(250) === 0 && turnReady === 0);
+    turnCall.emit('icecandidate', { candidate: { type: 'relay' }, ready: () => { turnReady++; } });
+    check('a relay candidate allows a quick release', turnTimers.count(250) === 1);
+    turnTimers.run(250);
+    check('the TURN fast release waits until the relay exists', turnReady === 1 && turnTimers.count(8000) === 0);
+    turnCall.terminate(); turn.dom.window.close();
 
     const complete = boot(); await signIn(complete);
     const completedTimers = captureSetupTimers(complete);
     typeDigits(complete.d, '103'); complete.d.getElementById('call-btn').click(); await settle(20);
     const completedCall = session(complete).session;
     let released = 0;
-    completedCall.emit('icecandidate', { ready: () => { released++; } });
+    completedCall.emit('icecandidate', { candidate: { type: 'host' }, ready: () => { released++; } });
     completedCall.emit('sdp', { originator: 'local' });
     check('normal gathering completion cancels the early-release timer',
-      completedTimers.count(8000) === 0 && released === 0);
-    completedCall.emit('icecandidate', { ready: () => { released++; } });
+      completedTimers.count(4000) === 0 && released === 0);
+    completedCall.emit('icecandidate', { candidate: { type: 'host' }, ready: () => { released++; } });
     completedCall.terminate();
     check('ending a call cancels both candidate and setup timers',
-      completedTimers.count(8000) === 0 && completedTimers.count(20000) === 0);
+      completedTimers.count(4000) === 0 && completedTimers.count(20000) === 0);
     complete.dom.window.close();
+
+    const hostOnly = boot(); await signIn(hostOnly);
+    const hostTimers = captureSetupTimers(hostOnly);
+    typeDigits(hostOnly.d, '103'); hostOnly.d.getElementById('call-btn').click(); await settle(20);
+    const hostCall = session(hostOnly).session; let fallbackReady = 0;
+    hostCall.emit('icecandidate', { candidate: { type: 'host' }, ready: () => { fallbackReady++; } });
+    hostTimers.run(4000);
+    check('host-only gathering is bounded at four seconds, rather than eight', fallbackReady === 1);
+    hostCall.terminate(); hostOnly.dom.window.close();
 
     const stuck = boot(); await signIn(stuck);
     const stuckTimers = captureSetupTimers(stuck);
@@ -956,6 +1039,19 @@ async function main() {
     check('remote cancellation stops the ringtone and closes the call screen',
       cancelled.ringStats.stopped === 1 && !shown(cancelled.d, 'active-call-view'));
     cancelled.dom.window.close();
+
+    const posted = [];
+    const opener = { closed: false, postMessage(message, origin) { posted.push({ type: message.type, origin }); } };
+    const fallback = boot({ search: '?connect=extension', opener, ringAudio: 'suspended' });
+    await signIn(fallback);
+    const fallbackCall = fallback.sip.instances[0].receive({ caller: '104' }); await settle(20);
+    check('a blocked popup asks only its same-origin console to play the incoming ringtone',
+      posted.some(row => row.type === 'eip-softphone:ring-start' && row.origin === 'https://phone.example.com')
+      && shown(fallback.d, 'ringer-notice'));
+    fallback.d.getElementById('enable-ringing-btn').click(); await settle(20);
+    check('unlocking the popup stops the console fallback to avoid double ringing',
+      posted.some(row => row.type === 'eip-softphone:ring-stop') && !shown(fallback.d, 'ringer-notice'));
+    fallbackCall.terminate(); await settle(20); fallback.dom.window.close();
 
     const instant = boot({ ringAudio: 'running' });
     await signIn(instant);

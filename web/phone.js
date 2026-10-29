@@ -1,15 +1,16 @@
 const doc=document;
 const $=id=>doc.getElementById(id);
 const input=$("number-input"),display=$("dial-display"),hint=$("dial-hint"),state=$("connection-state");
-const installBtn=$("install-btn"),remoteAudio=$("remote-audio"),settingsDialog=$("settings-dialog"),loginScreen=$("login-screen"),phoneApp=$("phone-app");
-let deferredInstall=null,ua=null,currentSession=null,currentCallAnswered=false,currentCallStatus="completed",callStartedAt=null,timer=null,muted=false,held=false;
-let currentSipSettings=null,remoteStream=null,audioPlayPending=false,sipEverRegistered=false;
+const installBtn=$("install-btn"),remoteAudio=$("remote-audio"),holdAudio=$("hold-audio"),settingsDialog=$("settings-dialog"),loginScreen=$("login-screen"),phoneApp=$("phone-app");
+let deferredInstall=null,ua=null,currentSession=null,currentCallAnswered=false,currentCallStatus="completed",callStartedAt=null,timer=null,muted=false,held=false,remoteHeld=false;
+let currentSipSettings=null,remoteStream=null,audioPlayPending=false,holdAudioBlocked=false,holdNegotiating=false,sipEverRegistered=false;
+let remoteAudioAttempt=0,holdAudioAttempt=0;
 let keepaliveTimer=null,reconnectTimer=null,qualityTimer=null,preparationTimer=null,currentIceCleanup=null;
-let ringerContext=null,ringerSource=null,ringerSession=null;
-/* JsSIP waits for ICE gathering to finish before sending an INVITE or a 200
-   answer. Some unreachable STUN/TURN servers never finish before the PBX's
-   ring timeout. Once candidates exist, bound that wait without inventing any. */
-const ICE_GATHER_LIMIT_MS=8000,CALL_SETUP_LIMIT_MS=20000;
+let ringerContext=null,ringerSource=null,ringerSession=null,ringbackSource=null,consoleRingerRequested=false;
+/* Give NAT discovery a short head start and prefer reflexive/relay candidates;
+   retain the longer fallback when TURN is configured so a usable relay is not
+   discarded just because a host candidate appeared first. */
+const ICE_HOST_WAIT_MS=4000,ICE_TURN_WAIT_MS=8000,ICE_SETTLE_MS=250,CALL_SETUP_LIMIT_MS=20000;
 /* A REGISTER is both a contact refresh and a WebSocket keepalive. Some reverse
    proxies/CDNs close an idle WSS around 100-120 seconds; without traffic the
    phone silently stops receiving calls until the page is reloaded. */
@@ -56,6 +57,11 @@ const MIC_CONSTRAINTS={audio:{echoCancellation:true,noiseSuppression:true,autoGa
 const DEFAULT_ICE_SERVERS=[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}];
 let iceServers=DEFAULT_ICE_SERVERS;
 const iceConfig=()=>({iceServers:Array.isArray(iceServers)&&iceServers.length?iceServers:DEFAULT_ICE_SERVERS});
+const hasTurnServer=()=>iceConfig().iceServers.some(server=>{
+  const urls=Array.isArray(server?.urls)?server.urls:[server?.urls];
+  return urls.some(url=>/^turns?:/i.test(String(url||"")))
+});
+const candidateType=candidate=>String(candidate?.type||(/\btyp\s+(host|srflx|prflx|relay)\b/i.exec(candidate?.candidate||"")||[])[1]||"").toLowerCase();
 const cleanNumber=v=>String(v||"").replace(/[^0-9+*#]/g,"");
 const sipDomain=()=>settings().domain||location.hostname;
 /* Where the SIP WebSocket lives: this page's own host, never the SIP domain.
@@ -76,10 +82,19 @@ function setState(text,mode=false){
 }
 function setCallStatus(text){const el=$("active-status");if(el)el.textContent=text}
 function setCallPhase(phase){const el=$("active-call-view");if(el)el.dataset.phase=phase}
-function showAudioUnlock(visible,message){
+function updateAudioUnlock(){
   const btn=$("enable-audio-btn");if(!btn)return;
-  btn.classList.toggle("hidden",!visible);
-  if(message)btn.textContent=message
+  btn.classList.toggle("hidden",!audioPlayPending&&!holdAudioBlocked);
+  btn.textContent=holdAudioBlocked?"🔊 Tap to play hold music":"🔊 Tap to enable call audio"
+}
+function syncConsoleRinger(ready){
+  const requested=!!ringerSession&&!ready;
+  if(requested===consoleRingerRequested)return;
+  consoleRingerRequested=requested;
+  // The opener only accepts messages from one of its own same-origin phone
+  // windows. It can ring using the gesture that opened this window, even if
+  // autoplay is still locked in the new window itself.
+  try{if(window.opener&&!window.opener.closed)window.opener.postMessage({type:requested?"eip-softphone:ring-start":"eip-softphone:ring-stop"},location.origin)}catch{}
 }
 /* The remote audio element cannot ring before a call is answered. Generate a
    short local tone instead, with no microphone, extra asset or RTP changes.
@@ -87,9 +102,11 @@ function showAudioUnlock(visible,message){
    on the dialer and an actionable prompt on the incoming-call screen. */
 function updateRingerUi(){
   const ready=!!ringerContext&&ringerContext.state==="running"&&(!ringerSession||!!ringerSource);
-  const bell=$("enable-ringer-btn"),prompt=$("enable-ringing-btn");
+  const bell=$("enable-ringer-btn"),prompt=$("enable-ringing-btn"),notice=$("ringer-notice");
   if(bell)bell.classList.toggle("hidden",ready);
+  if(notice)notice.classList.toggle("hidden",ready);
   if(prompt)prompt.classList.toggle("hidden",!ringerSession||ready);
+  syncConsoleRinger(ready);
 }
 function ringerPrompt(text){const prompt=$("enable-ringing-btn");if(prompt)prompt.textContent=text}
 function getRingerContext(){
@@ -130,12 +147,14 @@ function startRingtone(session){
   try{
     const context=getRingerContext();
     if(!context){ringerPrompt("Incoming sound unavailable in this browser");updateRingerUi();return}
-    // 1.5 seconds of gentle dual-tone ringing followed by 2.5 seconds quiet.
     // A looping buffer is independent of background-tab timer throttling.
+    // Two audible bursts are easier to recognise than the previous quiet tone.
     const rate=context.sampleRate,buffer=context.createBuffer(1,rate*4,rate),samples=buffer.getChannelData(0);
     for(let i=0;i<rate*1.5;i++){
-      const t=i/rate,envelope=Math.min(1,t/0.02,(1.5-t)/0.02);
-      samples[i]=0.10*envelope*(Math.sin(2*Math.PI*440*t)+Math.sin(2*Math.PI*480*t))
+      const t=i/rate,segment=t<0.65?t:t>=0.85?t-0.85:-1;
+      if(segment<0)continue;
+      const envelope=Math.min(1,segment/0.02,(0.65-segment)/0.02);
+      samples[i]=0.22*envelope*(Math.sin(2*Math.PI*440*t)+Math.sin(2*Math.PI*480*t))
     }
     const source=context.createBufferSource();source.buffer=buffer;source.loop=true;source.connect(context.destination);
     ringerSource=source;source.start();updateRingerUi()
@@ -147,25 +166,59 @@ function startRingtone(session){
 }
 if($("enable-ringer-btn"))$("enable-ringer-btn").onclick=unlockRinger;
 if($("enable-ringing-btn"))$("enable-ringing-btn").onclick=unlockRinger;
+if($("ringer-notice"))$("ringer-notice").onclick=unlockRinger;
+function stopRingback(){
+  const source=ringbackSource;ringbackSource=null;
+  if(source){try{source.stop()}catch{};try{source.disconnect()}catch{}}
+}
+function startRingback(session){
+  if(currentSession!==session||currentCallAnswered||ringbackSource)return;
+  try{
+    const context=getRingerContext();if(!context)return;
+    const rate=context.sampleRate,buffer=context.createBuffer(1,rate*4,rate),samples=buffer.getChannelData(0);
+    for(let i=0;i<rate*1.5;i++){
+      const t=i/rate,segment=t<0.65?t:t>=0.85?t-0.85:-1;
+      if(segment<0)continue;
+      const envelope=Math.min(1,segment/0.02,(0.65-segment)/0.02);
+      samples[i]=0.16*envelope*(Math.sin(2*Math.PI*425*t)+Math.sin(2*Math.PI*450*t))
+    }
+    const source=context.createBufferSource();source.buffer=buffer;source.loop=true;source.connect(context.destination);
+    ringbackSource=source;source.start()
+  }catch{stopRingback()}
+}
 function playRemoteAudio(){
-  audioPlayPending=true;
+  const token=++remoteAudioAttempt;audioPlayPending=true;
   remoteAudio.muted=false;
   let attempt;
-  try{attempt=remoteAudio.play()}catch{attempt=null}
+  try{attempt=remoteAudio.play()}catch{updateAudioUnlock();return}
   if(attempt&&typeof attempt.then==="function"){
-    attempt.then(()=>{audioPlayPending=false;showAudioUnlock(false)})
-      .catch(()=>showAudioUnlock(true,"🔊 Tap to enable call audio"))
-  }else{audioPlayPending=false;showAudioUnlock(false)}
+    attempt.then(()=>{if(token===remoteAudioAttempt){audioPlayPending=false;updateAudioUnlock()}})
+      .catch(()=>{if(token===remoteAudioAttempt)updateAudioUnlock()})
+  }else{audioPlayPending=false;updateAudioUnlock()}
+}
+function stopHoldMusic(){
+  holdAudioAttempt++;holdAudioBlocked=false;
+  try{holdAudio.pause();holdAudio.currentTime=0}catch{}
+  updateAudioUnlock()
+}
+function playHoldMusic(session){
+  if(!session||currentSession!==session||!remoteHeld)return;
+  const token=++holdAudioAttempt;let attempt;
+  try{attempt=holdAudio.play()}catch{holdAudioBlocked=true;updateAudioUnlock();return}
+  if(attempt&&typeof attempt.then==="function"){
+    attempt.then(()=>{if(token===holdAudioAttempt){holdAudioBlocked=false;updateAudioUnlock()}})
+      .catch(()=>{if(token===holdAudioAttempt&&currentSession===session&&remoteHeld){holdAudioBlocked=true;updateAudioUnlock()}})
+  }else{holdAudioBlocked=false;updateAudioUnlock()}
 }
 function resetRemoteAudio(){
+  remoteAudioAttempt++;
   try{remoteAudio.pause()}catch{}
   remoteStream=null;remoteAudio.srcObject=null;remoteAudio.muted=false;
-  audioPlayPending=false;showAudioUnlock(false)
+  audioPlayPending=false;stopHoldMusic();updateAudioUnlock()
 }
-/* Browsers sometimes need a user gesture before an auto-playing media element
-   will make a sound. The call and answer buttons are gestures; a later tap
-   anywhere can still unlock the remote track if that first attempt was blocked. */
-doc.addEventListener("pointerdown",()=>{if(audioPlayPending)playRemoteAudio();unlockRinger()},{capture:true,passive:true});
+/* The call/answer gesture unlocks media; a later tap can retry either stream
+   if a browser or OS blocks playback. */
+doc.addEventListener("pointerdown",()=>{if(audioPlayPending)playRemoteAudio();if(holdAudioBlocked)playHoldMusic(currentSession);unlockRinger()},{capture:true,passive:true});
 doc.addEventListener("keydown",()=>unlockRinger(),{capture:true});
 function showNumber(){const v=input.value.trim();display.textContent=v||"Enter number";hint.classList.remove("error");hint.textContent=v?"Ready to call":"Direct paste is supported"}
 function showDialError(message){nav("dialer-view");hint.classList.add("error");hint.textContent=message}
@@ -337,7 +390,7 @@ function bindPeer(pc){
       if(!currentSession||currentSession.connection!==pc)return;
       const ice=pc.iceConnectionState;
       if(ice==="checking")setCallStatus(currentCallAnswered?"Connecting audio…":"Preparing call and network connection…");
-      else if((ice==="connected"||ice==="completed")&&currentCallAnswered)setCallStatus("Connected");
+      else if((ice==="connected"||ice==="completed")&&currentCallAnswered){if(held||remoteHeld)updateHoldUi();else setCallStatus("Connected")}
       else if(ice==="disconnected")setCallStatus("Network interrupted — reconnecting audio…");
       else if(ice==="failed")setCallStatus("Media connection failed. Check ICE/TURN and the server's RTP UDP ports.")
     })
@@ -365,10 +418,25 @@ function startPreparationTimer(session){
     endCall("Call setup timed out. Allow microphone access and check the ICE/STUN/TURN connection, then try again.",true,"failed");
   },CALL_SETUP_LIMIT_MS)
 }
+function updateHoldUi(){
+  const button=$("hold-btn"),notice=$("hold-notice");
+  button.classList.toggle("active",held);button.setAttribute("aria-pressed",held?"true":"false");
+  button.querySelector(".control-label").textContent=held?"Resume":"Hold";
+  button.disabled=!currentCallAnswered||holdNegotiating;
+  $("mute-btn").disabled=held||remoteHeld;
+  const text=held&&remoteHeld?"Both sides are on hold":remoteHeld?"The other person put you on hold":held?"You put this call on hold":"";
+  notice.textContent=text;notice.classList.toggle("hidden",!text);
+  if(text)setCallStatus("On hold");
+  else if(currentCallAnswered){
+    const ice=currentSession?.connection?.iceConnectionState;
+    setCallStatus(ice==="connected"||ice==="completed"?"Connected":"Connecting audio…")
+  }
+}
 function attachSession(session,incoming=false){
   currentSession=session;currentCallAnswered=false;currentCallStatus="completed";
-  muted=false;held=false;resetRemoteAudio();
-  ["mute-btn","hold-btn","speaker-btn","dtmf-btn"].forEach(id=>$(id).classList.remove("active"));
+  muted=false;held=false;remoteHeld=false;holdNegotiating=false;stopRingback();resetRemoteAudio();
+  ["mute-btn","hold-btn","dtmf-btn"].forEach(id=>$(id).classList.remove("active"));
+  updateHoldUi();
   $("dtmf-panel").classList.add("hidden");$("dtmf-btn").setAttribute("aria-expanded","false");
   $("active-number").textContent=input.value||"Unknown";
   $("active-call-view").classList.remove("hidden");
@@ -379,31 +447,78 @@ function attachSession(session,incoming=false){
   callStartedAt=null;startTimer();
   setCallStatus(incoming?"Incoming call":"Preparing call… Allow microphone access if prompted.");setCallPhase(incoming?"incoming":"dialing");
   const active=()=>currentSession===session;
-  // JsSIP normally waits for ICE gathering to finish before emitting the
-  // outgoing INVITE or the incoming 200 OK. Give STUN/TURN a chance, but once
-  // at least one candidate exists, do not wait beyond the PBX's ring timeout.
-  let candidateTimer=null,releaseCandidate=null;
-  const clearCandidateTimer=()=>{if(candidateTimer!==null)clearTimeout(candidateTimer);candidateTimer=null;releaseCandidate=null};
-  currentIceCleanup=clearCandidateTimer;
+  // Never send a candidate-free offer. A reflexive candidate (or a relay if
+  // TURN is configured) can be used promptly instead of waiting on a second,
+  // unreachable STUN server. Host-only fallback is bounded, but TURN gets the
+  // longer window needed for relays; ordinary gathering completion still wins.
+  let candidateTimer=null,fastCandidateTimer=null,releaseCandidate=null,earlyMedia=false,earlyProbeTimer=null,earlyProbeToken=0;
+  const stopEarlyMediaProbe=()=>{earlyProbeToken++;if(earlyProbeTimer!==null)clearTimeout(earlyProbeTimer);earlyProbeTimer=null};
+  const watchEarlyRinging=()=>{
+    stopEarlyMediaProbe();const token=earlyProbeToken;
+    const probe=async()=>{
+      earlyProbeTimer=null;
+      const pc=session.connection;if(!active()||currentCallAnswered||token!==earlyProbeToken||!pc||typeof pc.getStats!=="function")return;
+      let rows;try{rows=statsRows(await pc.getStats())}catch{return}
+      if(!active()||currentCallAnswered||token!==earlyProbeToken)return;
+      const heard=rows.some(row=>row.type==="inbound-rtp"&&(row.kind==="audio"||row.mediaType==="audio")&&
+        (typeof row.totalAudioEnergy==="number"?row.totalAudioEnergy>0:(row.packetsReceived||0)>0));
+      if(heard){stopRingback();stopEarlyMediaProbe();return}
+      startRingback(session);earlyProbeTimer=setTimeout(probe,500)
+    };
+    earlyProbeTimer=setTimeout(probe,800)
+  };
+  const clearCandidateTimer=()=>{
+    if(candidateTimer!==null)clearTimeout(candidateTimer);
+    if(fastCandidateTimer!==null)clearTimeout(fastCandidateTimer);
+    candidateTimer=null;fastCandidateTimer=null;releaseCandidate=null
+  };
+  const releaseIce=()=>{const ready=releaseCandidate;clearCandidateTimer();if(active()&&ready)ready()};
+  currentIceCleanup=()=>{clearCandidateTimer();stopEarlyMediaProbe()};
   session.on("icecandidate",event=>{
     if(!active()||!event||typeof event.ready!=="function")return;
     releaseCandidate=event.ready;
-    if(candidateTimer===null)candidateTimer=setTimeout(()=>{
-      const ready=releaseCandidate;candidateTimer=null;releaseCandidate=null;
-      if(active()&&ready)ready()
-    },ICE_GATHER_LIMIT_MS)
+    const turn=hasTurnServer(),type=candidateType(event.candidate);
+    if(candidateTimer===null)candidateTimer=setTimeout(releaseIce,turn?ICE_TURN_WAIT_MS:ICE_HOST_WAIT_MS);
+    if(fastCandidateTimer===null&&(type==="relay"||(!turn&&type==="srflx")))fastCandidateTimer=setTimeout(releaseIce,ICE_SETTLE_MS)
   });
-  session.on("sdp",event=>{if(event?.originator==="local")clearCandidateTimer()});
+  session.on("sdp",event=>{
+    if(event?.originator==="local")clearCandidateTimer();
+    else if(active()&&!incoming&&!currentCallAnswered&&event?.sdp){earlyMedia=true;stopEarlyMediaProbe();stopRingback()}
+  });
   session.on("sending",()=>{if(active())clearPreparationTimer()});
-  session.on("progress",()=>{if(active()){setCallStatus("Ringing…");setCallPhase("ringing")}});
+  session.on("progress",event=>{
+    if(!active()||incoming||currentCallAnswered)return;
+    const code=Number(event?.response?.status_code);
+    if(code!==180&&code!==183)return;
+    if(event?.response?.body){
+      earlyMedia=true;stopRingback();
+      // A 180 can carry SDP but still send silence. Add ringback only while
+      // no decoded audio has arrived, and stop as soon as it does. A 183 with
+      // media is left entirely to the carrier (it may be an announcement).
+      if(code===180)watchEarlyRinging();else stopEarlyMediaProbe()
+    }else if(!earlyMedia)startRingback(session);
+    setCallStatus(code===180?"Ringing…":"Connecting…");setCallPhase("ringing")
+  });
   const accepted=()=>{
     if(!active())return;
-    clearPreparationTimer();stopRingtone();currentCallAnswered=true;$("active-label").textContent="Call";
+    clearPreparationTimer();stopEarlyMediaProbe();stopRingtone();stopRingback();currentCallAnswered=true;$("active-label").textContent="Call";
     const ice=session.connection?.iceConnectionState;
     setCallStatus(ice==="connected"||ice==="completed"?"Connected":"Connecting audio…");
-    setCallPhase("connected");playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)
+    setCallPhase("connected");updateHoldUi();playRemoteAudio();callStartedAt=callStartedAt||Date.now();startTimer();startQualityWatch(session)
   };
   session.on("accepted",accepted);session.on("confirmed",accepted);
+  session.on("hold",event=>{
+    if(!active())return;
+    if(event?.originator==="remote"){remoteHeld=true;playHoldMusic(session)}
+    else if(event?.originator==="local")held=true;
+    updateHoldUi()
+  });
+  session.on("unhold",event=>{
+    if(!active())return;
+    if(event?.originator==="remote"){remoteHeld=false;stopHoldMusic()}
+    else if(event?.originator==="local")held=false;
+    updateHoldUi()
+  });
   session.on("getusermediafailed",()=>{if(active())endCall("Microphone unavailable. Allow microphone access and retry.",true,"failed")});
   // JsSIP can emit failed before getusermediafailed, and an incoming SDP
   // creation error may otherwise leave the screen stuck after it replies 500.
@@ -448,7 +563,7 @@ function startTimer(){
 function endCall(message="Call ended",terminate=true,status="completed"){
   const session=currentSession;
   if(!session)return;
-  currentSession=null;stopRingtone();
+  currentSession=null;stopRingtone();stopRingback();remoteHeld=false;held=false;holdNegotiating=false;
   clearPreparationTimer();if(currentIceCleanup)currentIceCleanup();currentIceCleanup=null;
   if(terminate){currentCallStatus=status;try{if(!session.isEnded?.())session.terminate()}catch{}}
   const number=input.value.trim();
@@ -626,8 +741,25 @@ $("answer-btn").onclick=()=>{
 };
 $("decline-btn").onclick=()=>endCall("Call declined",true,"declined");
 $("hangup-btn").onclick=()=>endCall("Call ended",true,"completed");
-$("mute-btn").onclick=()=>{if(!currentSession)return;muted=!muted;currentSession.mute({audio:muted});$("mute-btn").classList.toggle("active",muted)};
-$("hold-btn").onclick=()=>{if(!currentSession)return;held=!held;held?currentSession.hold():currentSession.unhold();$("hold-btn").classList.toggle("active",held)};
+$("mute-btn").onclick=()=>{
+  if(!currentSession||held||remoteHeld)return;
+  try{
+    const next=!muted;
+    if(next)currentSession.mute({audio:true});else currentSession.unmute({audio:true});
+    muted=next;$("mute-btn").classList.toggle("active",muted)
+  }catch{setCallStatus("Could not change microphone mute. Try again.")}
+};
+$("hold-btn").onclick=()=>{
+  const session=currentSession;if(!session||!currentCallAnswered||holdNegotiating)return;
+  holdNegotiating=true;updateHoldUi();
+  try{
+    const done=()=>{if(currentSession===session){holdNegotiating=false;updateHoldUi()}};
+    const accepted=held?session.unhold({},done):session.hold({},done);
+    if(accepted===false){holdNegotiating=false;updateHoldUi();setCallStatus("Hold is not ready yet — try again.")}
+  }catch{
+    holdNegotiating=false;updateHoldUi();setCallStatus("Could not change hold — try again.")
+  }
+};
 /* In-call DTMF: a real softphone must be able to navigate an IVR without
    leaving the call screen. The same keys work from the physical keyboard. */
 function sendDtmf(tone){
@@ -642,40 +774,7 @@ $("dtmf-btn").onclick=()=>{
   $("dtmf-btn").setAttribute("aria-expanded",open?"true":"false")
 };
 doc.querySelectorAll("#dtmf-panel [data-dtmf]").forEach(key=>key.onclick=()=>sendDtmf(key.dataset.dtmf));
-$("enable-audio-btn").onclick=()=>playRemoteAudio();
-$("speaker-btn").onclick=async()=>{
-  const on=!$("speaker-btn").classList.contains("active");
-  /* Route the remote audio to another output where the browser can pick one.
-     "speaker" is not a device id - setSinkId only accepts an id the browser
-     itself reported - and a failed switch must never fall back to muting the
-     far end. Where the browser cannot route outputs at all (iOS Safari), the
-     button says so and leaves the call playing exactly where it was. */
-  const say=message=>{const el=currentSession?$("active-status"):$("dial-hint");if(el)el.textContent=message;$("speaker-btn").title=message};
-  if(typeof remoteAudio.setSinkId!=="function"){
-    say("This browser cannot switch audio output. The call keeps playing on the default output.");
-    return;
-  }
-  try{
-    let target="";
-    if(on){
-      const devices=navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices
-        ? await navigator.mediaDevices.enumerateDevices() : [];
-      const outputs=devices.filter(d=>d.kind==="audiooutput"&&d.deviceId);
-      const chosen=outputs.find(d=>d.deviceId!=="default")||outputs[0];
-      if(!chosen){
-        say("No second audio output was found. The call keeps playing on the default output.");
-        return;
-      }
-      target=chosen.deviceId;
-    }
-    await remoteAudio.setSinkId(target);   // "" returns to the default output
-    $("speaker-btn").classList.toggle("active",on);
-    $("speaker-btn").title=on?"Remote audio is on the loudspeaker":"Remote audio is on the default output";
-  }catch(err){
-    $("speaker-btn").classList.toggle("active",false);
-    say("Could not switch audio output: "+(err&&err.message||err)+". The call keeps playing on the current output.");
-  }
-};
+$("enable-audio-btn").onclick=()=>{if(audioPlayPending)playRemoteAudio();if(holdAudioBlocked)playHoldMusic(currentSession)};
 
 $("login-form").onsubmit=async e=>{
   e.preventDefault();
@@ -706,7 +805,7 @@ $("connect-btn").onclick=async()=>{
 $("logout-btn").onclick=()=>{
   stopKeepalive();stopReconnectWatchdog();sipEverRegistered=false;
   try{if(ua)ua.stop()}catch{}ua=null;handoff=null;iceServers=DEFAULT_ICE_SERVERS;
-  currentSession=null;stopRingtone();clearPreparationTimer();if(currentIceCleanup)currentIceCleanup();currentIceCleanup=null;resetRemoteAudio();clearInterval(timer);stopQualityWatch();
+  currentSession=null;stopRingtone();stopRingback();remoteHeld=false;held=false;holdNegotiating=false;clearPreparationTimer();if(currentIceCleanup)currentIceCleanup();currentIceCleanup=null;resetRemoteAudio();clearInterval(timer);stopQualityWatch();
   sessionStorage.removeItem(secretKey);localStorage.removeItem(storeKey);settingsDialog.close();setState("Offline");showLogin("You have been logged out.");$("login-password").focus()
 };
 $("refresh-recents").onclick=loadRecents;
@@ -728,6 +827,7 @@ window.addEventListener("appinstalled",()=>installBtn.classList.add("hidden"));
    instead of waiting for a call that Asterisk can no longer deliver. */
 window.addEventListener("online",()=>{if(ua)ensureSipConnection()});
 window.addEventListener("offline",()=>{stopKeepalive();setState("Offline")});
+window.addEventListener("beforeunload",()=>{stopRingtone();stopRingback()});
 doc.addEventListener("visibilitychange",()=>{if(!doc.hidden&&ua)ensureSipConnection()});
 if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js").catch(()=>{});
 

@@ -20,6 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser web ./web
+# The browser and Asterisk use the same original instrumental hold loop.
+COPY --chown=appuser:appuser asterisk/moh ./asterisk/moh
 COPY --chown=appuser:appuser wsgi.py ./wsgi.py
 COPY --chown=appuser:appuser deploy/THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
 

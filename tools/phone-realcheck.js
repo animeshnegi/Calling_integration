@@ -305,6 +305,10 @@ function respondToStun(socket, message, peer) {
 async function main() {
   const server = http.createServer((req, res) => {
     const name = new URL(req.url, 'http://localhost').pathname === '/phone' ? 'phone.html' : path.basename(new URL(req.url, 'http://localhost').pathname);
+    if (name === 'phone-hold.wav') {
+      res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store' });
+      res.end(fs.readFileSync(path.join(__dirname, '..', 'asterisk', 'moh', 'engineerip-hold.wav'))); return;
+    }
     if (!/^(phone\.html|phone\.js|phone\.css|jssip\.min\.js|sw\.js|manifest\.json)$/.test(name)) { res.writeHead(404).end(); return; }
     const type = name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : name.endsWith('.json') ? 'application/json' : 'text/html';
     res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
@@ -434,8 +438,9 @@ async function main() {
     await b.click('#decline-btn'); await closed(b);
     await b.evaluate(() => { window.AudioContext = window.__originalRingerContext; });
 
-    // Stall completion at BOTH ends: the app must release actual candidates
-    // after a bounded interval to send the initial INVITE and then the 200 OK.
+    // Stall the completion events at BOTH ends. The app should release as
+    // soon as the local STUN responder supplies a reflexive candidate, instead
+    // of waiting for the old eight-second deadline.
     await a.evaluate(() => { window.__stallIce = true; });
     await b.evaluate(() => { window.__stallIce = true; });
     // The VM's WebSocket peer is local to Asterisk, so its SDP c= can stay
@@ -445,8 +450,11 @@ async function main() {
     let start = Date.now(), index = records.length;
     await dial(a, '102'); await ringing(b);
     const invite = newInviteAfter(index);
-    check('stalled outgoing gathering still sends an actual INVITE after the candidate wait',
-      !!invite && invite.time - start >= 7000 && invite.time - start < 16000 && /a=candidate:/i.test(invite.message));
+    check('a reflexive candidate sends the real outgoing INVITE promptly despite stalled completion',
+      !!invite && invite.time - start < 5000 && /a=candidate:.* typ srflx/i.test(invite.message));
+    await until(() => a.evaluate(() => !!ringbackSource), 'outgoing ringback');
+    check('a real browser plays generated ringback while the extension rings',
+      await a.evaluate(() => !!ringbackSource && ringbackSource.loop && ringbackSource.buffer.getChannelData(0).some(x => Math.abs(x) > .05)));
     start = Date.now(); await b.click('#answer-btn');
     const layout = await b.evaluate(() => {
       const status = document.getElementById('active-status');
@@ -460,11 +468,27 @@ async function main() {
       && layout.statusBottom <= layout.screen && layout.hangupBottom <= layout.screen);
     await until(() => finalsFor(invite.callId).some(item => /^SIP\/2\.0 200/.test(item.first)), 'incoming 200 OK');
     const ok = finalsFor(invite.callId).find(item => /^SIP\/2\.0 200/.test(item.first));
-    check('stalled incoming gathering sends a real 200 OK with candidates before PBX timeout',
-      ok.time - start >= 7000 && ok.time - start < 16000 && /a=candidate:/i.test(ok.message));
+    check('a reflexive candidate also sends the real 200 OK promptly',
+      ok.time - start < 5000 && /a=candidate:.* typ srflx/i.test(ok.message));
     await mediaBoth(a, b);
     check('a private SDP connection line does not prevent ICE-selected bidirectional audio in the loopback test',
       rewrittenConnectionLines >= 2);
+    check('the real browser stops ringback after the other party answers', await a.evaluate(() => !ringbackSource));
+    await a.evaluate(() => { window.__stallIce = false; });
+    await b.evaluate(() => { window.__stallIce = false; });
+    const holdIndex = records.length;
+    await a.click('#hold-btn');
+    await b.waitForFunction(() => !document.getElementById('hold-notice').classList.contains('hidden')
+      && /other person put you on hold/i.test(document.getElementById('hold-notice').textContent));
+    await until(() => b.evaluate(() => !document.getElementById('hold-audio').paused
+      && document.getElementById('hold-audio').currentTime > 0.1), 'browser hold-music playback');
+    check('real JsSIP sends hold SDP and the remote browser shows hold while playing the song',
+      records.slice(holdIndex).some(item => item.method === 'INVITE' && /a=sendonly/i.test(item.message)));
+    await a.waitForFunction(() => !document.getElementById('hold-btn').disabled);
+    await a.click('#hold-btn');
+    await b.waitForFunction(() => document.getElementById('hold-notice').classList.contains('hidden')
+      && document.getElementById('hold-audio').paused);
+    check('unhold clears the remote notice and stops its hold music', true);
     await a.click('#hangup-btn'); await closed(a); await closed(b);
     privateConnectionLine = false;
 

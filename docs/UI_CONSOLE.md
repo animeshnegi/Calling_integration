@@ -567,7 +567,7 @@ pages are linkable.
   JsSIP in place of the vendored build and a fake SIP session in place of the WebRTC stack, and
   walks what the page promises: sign-in and auto-reconnect, the keypad and paste, an
   outbound call from dialling to hangup (the target, the audio-only offer, the remote
-  audio track, the timer, mute/hold/speaker, one recents row), incoming answer/decline, a
+  audio track, the timer, mute/hold/keypad, one recents row), incoming answer/decline, a
   caller who gives up, a second caller while busy, API-backed call history with an
   escaped payload, contacts, the settings dialog and logout. It also covers the silent-call
   regressions: a peer connection created synchronously inside `ua.call()`, a bare remote
@@ -576,6 +576,10 @@ pages are linkable.
   and a fixed End Call footer that stays visible while the DTMF keypad is open. jsdom has
   no media engine, dialog or clipboard, so those are stubbed; what the page asks the SIP
   stack to do is recorded instead, which is the part a browser cannot check for us.
+* `node tools/phone-popup-audiocheck.js` — uses real Chromium with autoplay restrictions
+  to verify that a blocked phone window can request ringing from its trusted console
+  opener and that ringing stops. It does not test physical speakers. The optional
+  `tools/phone-asteriskcheck.js` adds loopback Asterisk and plain SIP hold/media checks.
 * `node tools/uicheck.js` — boots the real console in jsdom against captured fixtures
   and asserts the promises above: refreshes that paint nothing, only customers dial,
   customer-first pickers, the flow builder's administrator mode, the system board, the

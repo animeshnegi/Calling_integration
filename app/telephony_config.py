@@ -543,6 +543,10 @@ class TelephonyConfigSync:
                     # Without it, a numeric-leading Docker hostname can make
                     # JsSIP silently discard the INVITE before ringing.
                     f"from_domain={browser_domain}",
+                    # For browser legs, relay HOLD/UNHOLD by SIP re-INVITE so
+                    # the softphone can show the remote hold and play its local
+                    # hold loop. Plain SIP/carrier legs keep the PBX's MOH.
+                    "moh_passthrough=yes",
                     f"allow={self.INTERNAL_CODECS}",
                 ]
                 browser_endpoint = [

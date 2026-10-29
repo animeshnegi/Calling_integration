@@ -49,9 +49,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          echo "       installed before ./configure? Refusing to ship this image." >&2; \
          exit 1; \
        fi \
-    && for module in res_http_websocket res_pjsip_transport_websocket; do \
+    && for module in res_http_websocket res_pjsip_transport_websocket res_musiconhold format_wav; do \
          if [ ! -f "/usr/lib/asterisk/modules/${module}.so" ]; then \
-           echo "ERROR: ${module}.so was not built; /ws cannot serve SIP WebSockets. Refusing this image." >&2; \
+           echo "ERROR: required ${module}.so was not built; WebSocket calls or hold music cannot work. Refusing this image." >&2; \
            exit 1; \
          fi; \
        done \
@@ -65,6 +65,9 @@ COPY config/ /etc/asterisk/
 # Recordings the operator supplies (see sounds/custom/README.md). The directory
 # may hold nothing but that note, in which case the stock prompts are used.
 COPY sounds/ /var/lib/asterisk/sounds/
+# The data volume at /var/lib/asterisk survives upgrades. Keep the packaged
+# hold loop outside it so an existing volume cannot mask the new music.
+COPY moh/ /usr/share/asterisk/engineerip-moh/
 COPY entrypoint.sh configure-ice.sh /
 # Windows Git checkouts can convert shell scripts to CRLF. Normalize them in the image.
 RUN sed -i 's/\r$//' /entrypoint.sh /configure-ice.sh \

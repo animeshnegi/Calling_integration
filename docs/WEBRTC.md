@@ -66,12 +66,30 @@ carrier From domains are unchanged. The configuration worker reloads PJSIP
 when the endpoint is updated. Check the live endpoint and a fresh call after
 release; the file alone is not proof that a running Asterisk loaded it.
 
-The browser plays a local ringtone while the incoming call is pending and stops
-it on answer, decline, cancellation or logout. A browser may block sound until
-there has been a user gesture: tap the bell in the phone header to enable call
-sounds, or use the prompt on an incoming call. Ringtone playback uses the
-browser's output device and does not affect RTP audio. Keep the phone open;
-browser/OS background and autoplay policies may still limit notifications.
+The browser plays an audible local ringtone while the incoming call is pending
+and stops it on answer, decline, cancellation or logout. Browsers can block
+sound before a gesture in a newly opened window: use **Enable incoming call
+sound** on the phone if it appears. When the phone was opened from the console,
+the console also provides a same-origin, gesture-unlocked ringing fallback
+while the phone window is blocked; keep the console open for that fallback.
+The browser and Windows must both allow sound, the chosen Windows default
+output must be unmuted, and OS/browser policies can still silence a background
+window. The ringtone is local and never changes call RTP.
+
+When the PBX reports ringing without usable early audio, the caller hears local
+ringback. A carrier's 183 early media is left alone so announcements are not
+covered; when a 180 contains SDP but no decoded audio, ringback fills the
+silence and stops as soon as real audio arrives. Answer, failure and hangup
+also stop it. Sound plays on the Windows/browser default output; the call menu
+no longer overrides the output device.
+
+Asterisk plays the packaged instrumental loop to held plain SIP/carrier legs.
+Browser endpoints instead pass hold/unhold in SIP re-INVITEs; the held browser
+shows **The other person put you on hold** and plays the same loop locally.
+Resume stops the loop and restores call audio. A third-party phone's own display
+is controlled by that phone: it may hear Asterisk's music without showing a
+hold badge. Both API and Asterisk images must be updated, and all softphone
+windows must be reopened to use the new browser hold handling.
 
 The two endpoints hold two media modes, and the endpoint a call is placed
 towards is what decides the media it is set up with - so a browser and a
@@ -263,15 +281,17 @@ trace does not prove why the answer was missing, or whether an outbound browser
 INVITE was sent. Keep signalling and RTP failures separate when investigating.
 
 JsSIP 3.10.1 waits for local ICE gathering before sending an initial INVITE or
-an incoming 200 OK. The phone now waits up to eight seconds **after its first
-candidate** for STUN/TURN, then asks JsSIP to proceed with the candidates it
-has. Normal completion proceeds immediately. If there are no candidates (or
-microphone permission remains pending), the phone reports a setup timeout
-instead of spinning forever. Answer is marked and timed only on SIP acceptance;
-ICE checking before then is displayed as preparation, not connected audio.
-Microphone denial remains visible after the call screen closes. A very slow
-TURN server can still miss the eight-second window; do not treat this limit as
-proof a relay candidate was gathered.
+an incoming 200 OK. With STUN-only settings, a reflexive candidate triggers a
+short 250 ms settling window; if only host candidates arrive, the fallback is
+four seconds. When TURN is configured, the phone waits for a relay candidate
+before the quick release and allows up to eight seconds for it. Normal
+completion proceeds immediately. A slow STUN server or TURN relay may still
+arrive after its fallback, so this is not proof a usable candidate was gathered;
+verify restrictive networks and use a working TURN server where required. No
+candidate is ever invented. If there are no candidates (or microphone
+permission remains pending), the phone reports a setup timeout instead of
+spinning forever. Answer is marked and timed only on SIP acceptance; ICE
+checking before then is displayed as preparation, not connected audio.
 
 Asterisk 22's PJSIP `external_media_address` can rewrite the SDP `c=` address
 when its NAT rules treat the signalling destination as external; a local reverse
@@ -425,10 +445,10 @@ fix registration/NAT/firewall before debugging browser audio.
 
 The active call screen is now a full-height glass shell instead of one long
 scrolling column. The caller, timer, codec badge and audio-unlock prompt live in
-a fixed header; mute/speaker/hold/keypad and DTMF live in a scrollable body;
+a fixed header; mute/hold/keypad and DTMF live in a scrollable body;
 **End Call, Answer/Decline and the live status live in a fixed footer**. Opening
 the DTMF keypad can no longer push End Call below the window. The screen has
 distinct dialling, ringing, connected and ended phase styling, larger touch
 targets, `touch-action: manipulation`, reduced-motion support, and short-window
-rules. Versioned `/phone.css?v=12` / `/phone.js?v=12` and service-worker cache
-`eip-phone-v12` ensure the new phone code replaces a cached old call screen.
+rules. Versioned `/phone.css?v=13` / `/phone.js?v=13` and service-worker cache
+`eip-phone-v13` ensure the new phone code replaces a cached old call screen.

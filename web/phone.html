@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f6fa">
   <meta name="description" content="EngineerIP Phone — secure SIP calling, recents, contacts and messages.">
-  <meta name="eip-phone-version" content="12">
+  <meta name="eip-phone-version" content="13">
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" type="image/png" href="https://engineerip.com/static/img/logo.png">
   <link rel="apple-touch-icon" href="https://engineerip.com/static/img/logo.png">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
-  <link rel="stylesheet" href="/phone.css?v=12">
+  <link rel="stylesheet" href="/phone.css?v=13">
   <title>EngineerIP Phone</title>
 </head>
 <body>
@@ -77,6 +77,11 @@
           <button id="settings-btn" class="icon-btn" title="Phone settings" aria-label="Phone settings">⚙</button>
         </div>
       </header>
+      <button id="ringer-notice" class="ringer-notice" type="button">
+        <span aria-hidden="true">🔔</span>
+        <span><strong>Enable incoming call sound</strong><small>Click once so this window can ring on your computer.</small></span>
+        <span aria-hidden="true">›</span>
+      </button>
 
       <div class="search-row">
         <div class="search-box">
@@ -130,6 +135,7 @@
             <div class="call-avatar-wrap"><div class="active-avatar" id="call-avatar">E</div></div>
             <div id="active-label" class="active-label">Calling</div>
             <h2 id="active-number">—</h2>
+            <div id="hold-notice" class="hold-notice hidden" role="status" aria-live="polite"></div>
             <div class="call-meta">
               <span id="call-timer" class="call-timer">00:00</span>
               <span id="call-quality" class="call-quality hidden" role="status" aria-live="polite"></span>
@@ -141,8 +147,7 @@
           <div class="call-body">
             <div class="call-controls" aria-label="Call controls">
               <button id="mute-btn" class="control-btn" type="button"><span class="control-icon">🎙</span><span class="control-label">Mute</span></button>
-              <button id="speaker-btn" class="control-btn" type="button"><span class="control-icon">🔊</span><span class="control-label">Speaker</span></button>
-              <button id="hold-btn" class="control-btn" type="button"><span class="control-icon">⏸</span><span class="control-label">Hold</span></button>
+              <button id="hold-btn" class="control-btn" type="button" aria-pressed="false"><span class="control-icon">⏸</span><span class="control-label">Hold</span></button>
               <button id="dtmf-btn" class="control-btn" type="button" aria-expanded="false"><span class="control-icon">⌨</span><span class="control-label">Keypad</span></button>
             </div>
             <div id="dtmf-panel" class="dtmf-panel hidden" aria-label="In-call keypad">
@@ -187,11 +192,12 @@
   </dialog>
 
   <audio id="remote-audio" autoplay playsinline></audio>
+  <audio id="hold-audio" src="/phone-hold.wav?v=13" preload="auto" loop playsinline></audio>
   <!-- The SIP stack ships with the phone, same origin: a third-party CDN is
        never on the critical path to placing a call. If that copy could not be
        fetched, fall back to the pinned upstream build before phone.js runs. -->
   <script src="/jssip.min.js"></script>
   <script>if(!window.JsSIP)document.write('<script src="https://cdn.jsdelivr.net/gh/versatica/JsSIP@3.10.1/dist/jssip.min.js"><\/script>');</script>
-  <script src="/phone.js?v=12"></script>
+  <script src="/phone.js?v=13"></script>
 </body>
 </html>
