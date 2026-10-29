@@ -2,9 +2,10 @@
 
 This guide is for building the CPU-intensive Asterisk image on a personal computer and running the completed images on a smaller Google Compute Engine VM.
 
-For the browser call-setup/ICE candidate release, build **both** images and use
-[`WEBRTC-RELEASE.md`](WEBRTC-RELEASE.md); this update is image-only but does
-require recreating Asterisk during a maintenance window.
+For the current calling and voicemail-delivery release, build **both** images
+and use [`WEBRTC-RELEASE.md`](WEBRTC-RELEASE.md). This update is image-only but
+requires recreating Asterisk during a maintenance window for hold music and
+shared mailbox permissions.
 
 ## Image-only / Windows users: why a host installer can be missing
 
@@ -484,10 +485,10 @@ not force G.711 globally or disable bridging just to hide an unclassified crash.
 5. Make one existing external-call smoke test without altering its working
    credentials, provider codecs or routing.
 
-No Docker/Asterisk/SIP phones are available in the coding sandbox, so build-policy
-and dialplan tests cannot certify those live media/crash checks. The user's live
-exit event/backtrace and this acceptance run are required before declaring the
-reported incident resolved.
+Local Asterisk, simulated SIP clients and browser tests exercise loopback calls,
+but cannot certify the actual VM, carrier, public NAT, physical speakers or the
+reported live crash. The live exit event/backtrace and this acceptance run are
+required before declaring that incident resolved.
 
 ## Email delivery and optional voicemail-to-text
 
@@ -510,12 +511,14 @@ In **Email Delivery** (platform administrator only):
    DNS/TLS/connectivity failures. Keys and raw provider bodies are never returned.
    Elastic Email uses v2 form fields, including multipart audio attachments, and
    a `success: false` response is a failure even when HTTP is 200.
-4. Enable automatic voicemail email, and set the **notification email on each
-   extension** (or the email in a user's profile for its assigned extension).
-   A mailbox must be active and voicemail-enabled. The same `101` on two DIDs
-   is matched using its full scoped mailbox identity, never a digits-only
-   fallback. Editing an unrelated extension field retains its recipient;
-   explicitly clearing the recipient stops notifications for that mailbox.
+4. Enable automatic voicemail email and confirm the associated customer's
+   account email. A blank override uses that address for **new** recordings;
+   previously recorded messages remain in the console. A custom extension
+   address takes priority; **Do not send voicemail email** explicitly opts out.
+   The mailbox must be active and voicemail enabled by its switch or a flow
+   step. Number-scoped mailboxes are matched exactly; ambiguous account links
+   and mismatched line/extension owners are not guessed. Older clients that
+   explicitly clear a recipient still turn delivery off.
 
 ### Optional local transcript alongside the attachment
 
@@ -561,11 +564,13 @@ worker, not in the loop that checks IVR timeouts. It checks INBOX/urgent message
 on a roughly 30-second schedule, skips audio modified in the last 10 seconds,
 limits attachments to 20 MiB, and processes up to 20 delivery attempts per scan.
 Large backlogs and provider latency can take longer. Previously undelivered
-INBOX/urgent messages can be sent after fixing a recipient or provider setting.
-Accepted delivery history is retained across this upgrade to avoid re-sending
-old audio; distinct later calls with identical audio have separate identities. A network timeout can leave acceptance unknown, so a
-retry can produce a duplicate; inbox delivery/exactly-once delivery is not
-promised by a provider HTTP response.
+INBOX/urgent messages with an explicit custom recipient may still be sent
+after fixing the provider; automatic account-recipient delivery starts at its
+persistent new-message cutoff and leaves older audio in the console. Accepted
+delivery history is retained across upgrades to avoid re-sending old audio;
+distinct later calls with identical audio have separate identities. A network
+timeout can leave acceptance unknown, so a retry can produce a duplicate; inbox
+delivery/exactly-once delivery is not promised by a provider HTTP response.
 
 Failed attempts have a 60-second retry delay and a five-attempt limit. An atomic
 claim prevents simultaneous workers from sending the same pending message;
@@ -574,26 +579,23 @@ attempt limit). Saving a replacement provider key, changing the provider or send
 re-enabling email resets failed-attempt limits, without re-sending accepted
 emails. Correcting the local recognizer does not resend audio already accepted.
 
-For the Windows-built, image-only installation, rebuild/export the **API image
-on the workstation**, transfer/load it on the VM, then recreate **both API and
-ARI-worker services** from that same new image using your existing Compose
-configuration and `--no-build`, in a maintenance window. For the repository
-Compose service names, after loading the new image:
+For this Windows-built, image-only release, rebuild/export **both API and
+Asterisk images on the workstation** and transfer/load them on the VM. Follow
+[`WEBRTC-RELEASE.md`](WEBRTC-RELEASE.md) to recreate Asterisk, the ARI worker
+and the API with `--no-build` during a maintenance window. Asterisk's new image
+repairs existing shared-mailbox permissions, sets the group-writable umask for
+new recordings, and provides hold music. The API image includes the offline
+recognizer and the image-embedded speech self-test. No proxy or outbound
+routing change is needed. Do not build or download a model on the VM.
 
-```bash
-cd /opt/Calling_integration
-docker compose up -d --no-build --no-deps --force-recreate telephony-api telephony-ari
-```
-
-Do not build on the VM. The workstation build installs the recognizer wheel and
-its bundled model into the image; the VM does not download a model. Retain the
-`.env`, `SECRET_KEY`, database and voicemail volumes; back up the database
-first. SQLite and MySQL automatically migrate the email sender to Elastic Email, retaining the saved key; transcription remains off
-by default; obsolete hosted transcription keys are erased from an existing
-config table. No Asterisk image, outbound dialplan or proxy configuration change
-is needed for this email update. Run the test email after deployment, then
-leave a test voicemail and verify its recipient, attachment and optional
-transcript.
+Retain `.env`, `SECRET_KEY`, the database and voicemail volumes; back up the
+database first. SQLite and MySQL automatically migrate the email sender to
+Elastic Email, retaining the saved key; transcription remains off by default.
+Obsolete hosted transcription keys are erased from an existing config table.
+`docker load` does not update the host Compose file, so verify both API and ARI
+use the shared voicemail mount and `engineerip` context as the guide explains.
+Run the test email after deployment, then leave a new test voicemail and verify
+its recipient, attachment, notice and optional transcript.
 
 Local regressions include a real offline decode of an 8 kHz CMU-licensed speech
 sample, mocked provider responses and a local Elastic Email form/attachment contract test. They do not prove live email

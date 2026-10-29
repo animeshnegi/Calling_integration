@@ -223,23 +223,24 @@ two-way call audio.
 
 ---
 
-## 5. Recreate application services from the loaded image (manual fallback)
+## 5. Recreate services from both loaded images (manual fallback)
 
-There is no VM build:
+The combined calling/voicemail release requires both the API and Asterisk
+images, including its mailbox-permission repair. Schedule a maintenance window:
+recreating Asterisk ends active calls. There is no VM build:
 
 ```bash
 cd /opt/Calling_integration
-TAG=20261027-local1
-IMAGE_TAG="$TAG" docker compose up -d --no-build --force-recreate \
-  telephony-api telephony-ari
-docker compose ps telephony-api telephony-ari
+TAG=calling-voicemail-20261029  # use the tag that was actually loaded
+IMAGE_TAG="$TAG" docker compose up -d --no-build --no-deps --force-recreate \
+  asterisk telephony-ari telephony-api
+docker compose ps
 ```
 
-Both services use the **same** rebuilt `engineerip/telephony-api` image: the
-API serves the admin UI; `telephony-ari` runs the voicemail email worker and the
-offline recognizer. Recreating these two does not recreate Asterisk and does
-not change outbound calling. Replacing the Asterisk image is a separate
-maintenance-window decision.
+The API and ARI services use the **same** rebuilt `engineerip/telephony-api`
+image: the API serves the admin UI; `telephony-ari` runs the voicemail email
+worker and offline recognizer. Asterisk uses the rebuilt PBX image for hold
+music and shared mailbox permissions. No outbound routing change is required.
 
 Run the bundled read-only verification:
 
@@ -265,27 +266,39 @@ phone, or prove internal-call audio. Those checks follow.
 
 ## 6. Email sending
 
-After the new API image is loaded, recreate **both** the API and ARI worker;
-for this email-only update no Asterisk image, host-tools archive, proxy change or
-server build is required:
+Use the coordinated API and Asterisk image deployment in section 5; the PBX
+image is needed for the shared-volume permission repair and hold audio. Keep
+`.env`, `SECRET_KEY`, MySQL/SQLite data and voicemail volumes. Startup keeps a
+previously saved Elastic Email key; no provider switch or key re-entry is
+required. Previous SendGrid HTTP 4xx rejections are made eligible for retry
+again by a one-time reset; accepted or ambiguous timeout records are not reset
+by the migration. Recognisable SendGrid (`SG.`) keys are blocked until replaced
+with an Elastic Email key.
+
+New voicemail with a blank extension recipient is sent to the associated active
+account email; older recordings remain in the console. An explicit override is
+preserved and takes priority, while **Do not send voicemail email** opts out.
+A voicemail step in an enabled flow counts even if the separate extension
+voicemail switch is off. All messages include an automated/do-not-reply notice.
+
+`docker load` does not update the host's old Compose file. Verify the worker's
+non-secret config and the existing volume mounts:
 
 ```bash
-cd /opt/Calling_integration
-docker compose up -d --no-build --no-deps --force-recreate telephony-api telephony-ari
+IMAGE_TAG="$TAG" docker compose exec -T telephony-ari python -c \
+  'from app.config import Config; print(Config.VOICEMAIL_PATH, Config.VOICEMAIL_CONTEXT)'
 ```
 
-Use the same image tag as your existing Compose setup. Keep `.env`, `SECRET_KEY`,
-MySQL/SQLite data and voicemail volumes. Startup automatically switches the
-email sender to Elastic Email and keeps a previously saved Elastic Email key;
-no provider switch or key re-entry is required. Previous SendGrid HTTP 4xx
-rejections are made eligible for retry again by a one-time reset; accepted or
-ambiguous timeout records are not reset by the migration. Recognisable SendGrid (`SG.`)
-keys are blocked until replaced with an Elastic Email key.
+Expected: `/app/voicemail engineerip`. Both API and worker must mount the
+existing voicemail volume at `/app/voicemail`, and Asterisk must mount the same
+volume at `/var/spool/asterisk/voicemail`. If the ARI values differ, change
+only those two values in the existing `.env` and recreate the worker with the
+same image tag. Do not print the rest of `.env` or replace the volume.
 
 Hard-refresh the admin page (`Ctrl+F5`), open **Email Delivery** and click
 **Save & send test email** with a test recipient. Elastic Email needs Send HTTP
-permission and a verified sender. Turn on voicemail email and set the extension's
-notification address for automatic delivery. If a new test still reports
+permission and a verified sender. Turn on voicemail email and confirm the
+associated account email or extension override. If a new test still reports
 `SendGrid HTTP 401`, the old API image or browser page is still in use.
 
 The provider test uses the same Elastic Email v2 POST form fields as the working
@@ -315,7 +328,7 @@ Correct sequence:
 
 1. Enable **Enable voicemail email**.
 2. Enable **Include a voicemail transcript**.
-3. Save; set the extension's notification email and leave voicemail enabled.
+3. Save; confirm the associated account email or extension override and enable voicemail in the extension or its flow.
 4. Leave a **new, unread, non-sensitive test voicemail**.
 5. Wait at least 10 seconds for the file to settle, then up to about 30–60
    seconds for the ARI worker's next scan.
@@ -328,17 +341,14 @@ not test transcription. To test the recognizer without a voicemail:
 
 ```bash
 cd /opt/Calling_integration
-TAG=20261027-local1
-docker run --rm --network none -w /app \
-  -v "$PWD/scripts/check-voicemail-transcription.py:/tmp/check.py:ro" \
-  -v "$PWD/deploy/fixtures/goforward-8k.wav:/tmp/goforward-8k.wav:ro" \
-  "engineerip/telephony-api:$TAG" python /tmp/check.py \
-  --sample /tmp/goforward-8k.wav
+TAG=calling-voicemail-20261029  # use the tag that was actually loaded
+docker run --rm --network none "engineerip/telephony-api:$TAG" \
+  python /app/deploy-kit/scripts/check-voicemail-transcription.py
 # Expected: "status": "transcribed", "go forward ten meters"
 ```
 
-Bind-mounting the corrected host script and sample also verifies an older
-loaded image whose `/app/deploy-kit` still has the former wrong fixture path.
+This test is embedded in the current image; it does not require host scripts,
+Internet access, a live voicemail, or an email provider.
 
 Status meanings:
 

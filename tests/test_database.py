@@ -176,3 +176,43 @@ def test_boot_failures_back_off_instead_of_hot_looping():
     worker = (ROOT / "app" / "ari_worker.py").read_text()
     assert "time.sleep(10)" in wsgi and "raise" in wsgi
     assert "time.sleep(10)" in worker
+
+
+def test_sqlite_context_closes_and_preserves_commit_and_rollback(tmp_path):
+    import sqlite3
+    import pytest
+    database = Database("sqlite:///" + str(tmp_path / "transactions.db"))
+    with database.connect() as db:
+        db.execute("CREATE TABLE sample (value TEXT)")
+        db.execute("INSERT INTO sample VALUES ('committed')")
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.execute("SELECT 1")
+    with pytest.raises(RuntimeError):
+        with database.connect() as db:
+            db.execute("INSERT INTO sample VALUES ('rolled back')")
+            raise RuntimeError("simulate failure")
+    with database.connect() as db:
+        assert [row[0] for row in db.execute("SELECT value FROM sample")] == ["committed"]
+
+
+def test_sqlite_repeated_scans_do_not_accumulate_descriptors_without_gc(tmp_path):
+    import gc
+    import os
+    import pytest
+    proc_fds = Path("/proc/self/fd")
+    if not proc_fds.is_dir():
+        pytest.skip("requires Linux process descriptor accounting")
+    database = Database("sqlite:///" + str(tmp_path / "descriptors.db"))
+    gc.collect()
+    before = len(os.listdir(proc_fds))
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for _ in range(300):
+            with database.connect() as db:
+                db.execute("SELECT 1").fetchone()
+        assert len(os.listdir(proc_fds)) <= before + 3
+    finally:
+        if was_enabled:
+            gc.enable()
+        gc.collect()

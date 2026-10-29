@@ -667,14 +667,14 @@ function renderAll() {
   renderEmailSettings();
   renderFlow();
 
-  // The profile names the extension it was assigned. The store keeps the digits
-  // there, and a row is named by its key - the digits decide which one, and a
-  // digits-only profile picks the single row that carries them, never a guess.
+  // Prefer the full number-scoped key. A legacy digits-only profile is usable
+  // only when exactly one visible extension carries those digits; never guess.
   const assigned = String(state.assigned_extension || '');
-  const myExtension = state.extensions.find(x => x.extension === assigned)
-    || (assigned && !assigned.includes('@')
-      ? state.extensions.filter(x => extensionDigitsOf(x.extension) === assigned)[0]
-      : null);
+  const shortMatches = assigned && !assigned.includes('@')
+    ? state.extensions.filter(x => extensionDigitsOf(x.extension) === assigned) : [];
+  const myExtension = assigned.includes('@')
+    ? state.extensions.find(x => x.extension === assigned)
+    : (shortMatches.length === 1 ? shortMatches[0] : null);
   $('profile-recording-form').hidden = !myExtension;
   $('profile-recording').checked = !!myExtension?.recording_enabled;
   // The platform's switch can veto every device. Say so, instead of leaving a
@@ -2890,7 +2890,11 @@ const templates = {
         <label class="check"><input name="voicemail_enabled" type="checkbox" ${existing?.voicemail_enabled ? 'checked' : ''}> Enable voicemail</label>
         <label class="field">Voicemail PIN<input name="voicemail_pin" type="password" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="${existing ? 'Leave blank to keep existing' : '4 to 10 digits'}"></label>
       </div>
-      <label class="field">Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(existing?.voicemail_email || '')}"><small>New messages are sent here when voicemail email is enabled.</small></label>
+      <label class="field">Voicemail email delivery<select name="voicemail_email_mode">
+        <option value="auto" ${existing?.voicemail_email_mode !== 'off' ? 'selected' : ''}>Send to the associated account (or address below)</option>
+        <option value="off" ${existing?.voicemail_email_mode === 'off' ? 'selected' : ''}>Do not send voicemail email</option>
+      </select><small>Automatic delivery must also be enabled under Email Delivery. Switching to the account address or re-enabling after an opt-out sends new recordings only.</small></label>
+      <label class="field">Override notification email (optional)<input name="voicemail_email" type="email" placeholder="Use associated account email" value="${esc(existing?.voicemail_email || '')}"><small>Leave blank to use the associated customer's account email. A specified address takes priority.</small></label>
       <label class="check"><input name="webrtc_enabled" type="checkbox" ${existing?.webrtc_enabled ? 'checked' : ''}> Answers in the browser (WebRTC)<small>Browser softphones sign in on their own WebRTC identity beside this extension's phones, so a desk phone or Zoiper keeps working here too - each device rings on the media it speaks. The Softphone button appears only while this is on.</small></label>`,
     };
   },
@@ -4579,7 +4583,7 @@ wire('profile-email-form', 'submit', async event => {
   try {
     await api('/admin/api/profile/email', { method: 'POST', body: JSON.stringify({ email: val('profile-email') }) });
     profileEmailDirty = false;
-    notify('Voicemail email updated');
+    notify('Account email updated');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });

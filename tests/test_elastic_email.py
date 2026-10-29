@@ -97,8 +97,8 @@ def test_real_form_posts_match_v2_and_voicemail_uploads_audio(elastic_system, mo
     assert test["form"] == {
         "apikey": "ELASTIC-secret", "subject": "EngineerIP email delivery test",
         "from": "verified@example.com", "fromName": "Voicemail Team", "to": "test@example.com",
-        "bodyText": "Your EngineerIP email configuration is working. This test contains no voicemail audio and does not test transcription.",
-        "bodyHtml": "<p>Your EngineerIP email configuration is working.</p><p>This test contains no voicemail audio and does not test transcription.</p>",
+        "bodyText": "Your EngineerIP email configuration is working. This test contains no voicemail audio and does not test transcription.\n\nThis is an automated message. The sending email address is not associated with a user. Please do not reply.",
+        "bodyHtml": "<p>Your EngineerIP email configuration is working.</p><p>This test contains no voicemail audio and does not test transcription.</p><p>This is an automated message. The sending email address is not associated with a user. Please do not reply.</p>",
         "isTransactional": "true",
     }
     assert voicemail["content_type"].startswith("multipart/form-data;")

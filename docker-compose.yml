@@ -83,6 +83,10 @@ services:
       CALLS_DB_PATH: /app/instance/calls.db
       ARI_READY_PATH: /app/instance/ari.ready
       ASTERISK_DYNAMIC_CONFIG_PATH: /app/asterisk-config/pjsip.dynamic.conf
+      # The worker and API must scan the same mounted Asterisk mailbox volume,
+      # even when an old .env contains a different VOICEMAIL_PATH or context.
+      VOICEMAIL_PATH: /app/voicemail
+      VOICEMAIL_CONTEXT: engineerip
     depends_on:
       asterisk:
         condition: service_healthy

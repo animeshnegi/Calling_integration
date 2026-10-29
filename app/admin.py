@@ -309,6 +309,7 @@ class SettingsStore:
                     db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','true') ON DUPLICATE KEY UPDATE value='true',updated_at=CURRENT_TIMESTAMP")
                     db.execute("INSERT IGNORE INTO settings(`key`,value) VALUES('recording_policy_v2_initialized','true')")
                 self._migrate_email_to_elastic(db)
+                self._init_voicemail_recipient_cutover(db)
             return
         with self._connect() as db:
             db.executescript("""
@@ -328,6 +329,8 @@ class SettingsStore:
                     sip_password_enc TEXT NOT NULL, webrtc_enabled INTEGER NOT NULL DEFAULT 0,
                     recording_enabled INTEGER NOT NULL DEFAULT 1, voicemail_enabled INTEGER NOT NULL DEFAULT 0,
                     voicemail_pin_enc TEXT NOT NULL DEFAULT '', voicemail_email TEXT NOT NULL DEFAULT '',
+                    voicemail_email_mode TEXT NOT NULL DEFAULT 'auto', voicemail_email_auto_since_ms INTEGER NOT NULL DEFAULT 0,
+                    voicemail_email_resume_since_ms INTEGER NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL DEFAULT 1, owner_user_id INTEGER,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(phone_number_id, extension)
@@ -389,6 +392,7 @@ class SettingsStore:
                     if column not in existing:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             self._migrate_email_to_elastic(db)
+            self._init_voicemail_recipient_cutover(db)
             # Old hosted-transcription credentials are no longer needed. Keep
             # the legacy column for safe, additive upgrades, but erase its value.
             if "transcription_api_key_enc" in {r["name"] for r in db.execute("PRAGMA table_info(email_config)").fetchall()}:
@@ -458,6 +462,12 @@ class SettingsStore:
                 db.execute("ALTER TABLE extensions ADD COLUMN voicemail_pin_enc TEXT NOT NULL DEFAULT ''")
             if "voicemail_email" not in extension_columns:
                 db.execute("ALTER TABLE extensions ADD COLUMN voicemail_email TEXT NOT NULL DEFAULT ''")
+            if "voicemail_email_mode" not in extension_columns:
+                db.execute("ALTER TABLE extensions ADD COLUMN voicemail_email_mode TEXT NOT NULL DEFAULT 'auto'")
+            if "voicemail_email_auto_since_ms" not in extension_columns:
+                db.execute("ALTER TABLE extensions ADD COLUMN voicemail_email_auto_since_ms INTEGER NOT NULL DEFAULT 0")
+            if "voicemail_email_resume_since_ms" not in extension_columns:
+                db.execute("ALTER TABLE extensions ADD COLUMN voicemail_email_resume_since_ms INTEGER NOT NULL DEFAULT 0")
             # Multi-tenant ownership. NULL means a platform-owned legacy resource.
             for table, definition in (
                 ("extensions", "owner_user_id INTEGER"),
@@ -687,14 +697,11 @@ class SettingsStore:
                         (item["digits"], number_id, item["id"]),
                     )
                     changed += 1
-            # Administrator profiles name an extension the short way: the digits
-            # a person reads.
-            for row in db.execute("SELECT id,extension FROM admin_users").fetchall():
-                key = str(row["extension"] or "").strip()
-                digits = extension_digits(key)
-                if key and key != digits:
-                    db.execute("UPDATE admin_users SET extension=? WHERE id=?", (digits, row["id"]))
-                    changed += 1
+            # Profiles can already carry a number-scoped extension key. Keep it:
+            # stripping the number would make a later profile email change
+            # ambiguous or point at another mailbox with the same three digits.
+            # A legacy digits-only profile remains digits-only until explicitly
+            # reassigned; never infer a missing number during this migration.
             # A device account keeps the key that says which line's extension it
             # signs in as. A bare legacy link becomes that key while one row of
             # that account answers those digits - the line the device names, else
@@ -881,7 +888,9 @@ class SettingsStore:
             where = " WHERE e.owner_user_id=?" if owner_user_id is not None else ""
             rows = db.execute(
                 "SELECT e.id,e.extension,e.phone_number_id,e.display_name,e.sip_username,e.webrtc_enabled,"
-                "e.recording_enabled,e.voicemail_enabled,e.voicemail_email,e.active,e.owner_user_id,n.number AS number "
+                "e.recording_enabled,e.voicemail_enabled,e.voicemail_email,e.voicemail_email_mode,"
+                "e.voicemail_email_auto_since_ms,e.voicemail_email_resume_since_ms,e.active,e.owner_user_id,n.number AS number,"
+                "n.owner_user_id AS number_owner_user_id "
                 "FROM extensions e LEFT JOIN phone_numbers n ON n.id=e.phone_number_id" + where,
                 (int(owner_user_id),) if owner_user_id is not None else (),
             ).fetchall()
@@ -1413,11 +1422,22 @@ class SettingsStore:
             raise ValueError("Voicemail notification email is invalid")
         with self._connect() as db:
             row = db.execute(
-                "SELECT id,sip_username,sip_password_enc,voicemail_enabled,voicemail_pin_enc,voicemail_email,owner_user_id,phone_number_id "
+                "SELECT id,sip_username,sip_password_enc,voicemail_enabled,voicemail_pin_enc,voicemail_email,"
+                "voicemail_email_mode,voicemail_email_auto_since_ms,voicemail_email_resume_since_ms,owner_user_id,phone_number_id "
                 "FROM extensions WHERE id=?", (int(existing["id"]),)
             ).fetchone() if existing is not None else None
             if row is not None and "voicemail_email" not in data:
                 voicemail_email = row["voicemail_email"]
+            if "voicemail_email_mode" in data:
+                voicemail_email_mode = str(data["voicemail_email_mode"] or "").strip().lower()
+                if voicemail_email_mode not in {"auto", "off"}:
+                    raise ValueError("Voicemail email setting must be auto or off")
+            elif "voicemail_email" in data:
+                # Older clients only had an address field: explicitly clearing
+                # it was their way to turn notifications off. Keep that intent.
+                voicemail_email_mode = "auto" if voicemail_email else "off"
+            else:
+                voicemail_email_mode = row["voicemail_email_mode"] if row is not None else "auto"
             created = row is None
             # Who this extension belongs to, and who is being asked to own it. A
             # request that says nothing about the owner keeps the one the row has,
@@ -1454,6 +1474,25 @@ class SettingsStore:
                 ).fetchone() if target_id is not None else None
                 if clash:
                     raise ValueError(f"Extension {digits} is already on that phone number")
+            owner_changed = row is not None and not same_account(row["owner_user_id"], new_owner)
+            if owner_changed and voicemail_email == row["voicemail_email"]:
+                # A retained address belongs to the former customer, not the new
+                # one. An explicitly changed address is a deliberate override.
+                voicemail_email = ""
+            auto_since_ms = int(row["voicemail_email_auto_since_ms"] or 0) if row is not None else 0
+            if voicemail_email_mode == "auto" and not voicemail_email and (
+                row is None or row["voicemail_email_mode"] != "auto" or row["voicemail_email"]
+                or owner_changed or target_id != row["phone_number_id"]
+            ):
+                # Enabling the owner fallback must not email a backlog recorded
+                # before that choice (or before a reassignment).
+                auto_since_ms = int(time.time() * 1000)
+            resume_since_ms = int(row["voicemail_email_resume_since_ms"] or 0) if row is not None else 0
+            if row is not None and ((row["voicemail_email_mode"] == "off" and voicemail_email_mode == "auto")
+                                    or owner_changed or target_id != row["phone_number_id"]):
+                # The opt-out period or a former owner's mailbox must never be
+                # sent to any recipient, even a deliberately supplied override.
+                resume_since_ms = int(time.time() * 1000)
             # Devices authenticate with this name, so it is derived here and never
             # accepted from a caller: the account, the extension and the line it
             # answers on. Editing keeps the identity a registered phone already
@@ -1482,25 +1521,27 @@ class SettingsStore:
             if created:
                 db.execute(
                     "INSERT INTO extensions(extension,phone_number_id,display_name,sip_username,sip_password_enc,"
-                    "webrtc_enabled,recording_enabled,voicemail_enabled,voicemail_pin_enc,voicemail_email,active,owner_user_id) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "webrtc_enabled,recording_enabled,voicemail_enabled,voicemail_pin_enc,voicemail_email,"
+                    "voicemail_email_mode,voicemail_email_auto_since_ms,voicemail_email_resume_since_ms,active,owner_user_id) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         digits, target_id, str(data.get("display_name", "")).strip()[:120], username, encrypted,
                         int(bool(data.get("webrtc_enabled"))), int(bool(data.get("recording_enabled", False))),
-                        int(voicemail_enabled), voicemail_pin_enc, voicemail_email,
-                        int(bool(data.get("active", True))), new_owner,
+                        int(voicemail_enabled), voicemail_pin_enc, voicemail_email, voicemail_email_mode, auto_since_ms,
+                        resume_since_ms, int(bool(data.get("active", True))), new_owner,
                     ),
                 )
             else:
                 db.execute(
                     "UPDATE extensions SET extension=?,phone_number_id=?,display_name=?,sip_username=?,sip_password_enc=?,"
                     "webrtc_enabled=?,recording_enabled=?,voicemail_enabled=?,voicemail_pin_enc=?,voicemail_email=?,"
-                    "active=?,owner_user_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    "voicemail_email_mode=?,voicemail_email_auto_since_ms=?,voicemail_email_resume_since_ms=?,active=?,owner_user_id=?,"
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (
                         digits, target_id, str(data.get("display_name", "")).strip()[:120], username, encrypted,
                         int(bool(data.get("webrtc_enabled"))), int(bool(data.get("recording_enabled", False))),
-                        int(voicemail_enabled), voicemail_pin_enc, voicemail_email,
-                        int(bool(data.get("active", True))), new_owner, row["id"],
+                        int(voicemail_enabled), voicemail_pin_enc, voicemail_email, voicemail_email_mode, auto_since_ms,
+                        resume_since_ms, int(bool(data.get("active", True))), new_owner, row["id"],
                     ),
                 )
         owner = new_owner
@@ -2069,6 +2110,12 @@ class SettingsStore:
         with self._connect() as db:
             if owner_user_id and not db.execute("SELECT 1 FROM admin_users WHERE id=? AND role='user' AND active=1", (owner_user_id,)).fetchone():
                 raise ValueError("Customer account is not active")
+            existing_number = db.execute("SELECT id,owner_user_id FROM phone_numbers WHERE number=?", (number,)).fetchone()
+            if existing_number and not same_account(existing_number["owner_user_id"], owner_user_id):
+                # Keep recordings made for a former line owner out of future
+                # emails, even if the line is later returned to that owner.
+                db.execute("UPDATE extensions SET voicemail_email_resume_since_ms=? WHERE phone_number_id=?",
+                           (int(time.time() * 1000), existing_number["id"]))
             if data.get("provider") and not db.execute(
                 "SELECT 1 FROM sip_providers WHERE name=? AND active=1", (str(data.get("provider")).strip(),)
             ).fetchone():
@@ -3805,6 +3852,53 @@ class SettingsStore:
             rows = db.execute("SELECT id,username,email,extension,full_name,company_name,job_role,phone,role,active,created_at,updated_at FROM admin_users ORDER BY username").fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _profile_mailbox(db, extension):
+        """Resolve a profile to exactly one active mailbox, never guess digits."""
+        key = str(extension or "").strip()
+        digits, scope = extension_digits(key), extension_scope(key)
+        if not digits:
+            return None
+        rows = db.execute(
+            "SELECT id,extension,phone_number_id,owner_user_id,voicemail_email,voicemail_email_mode,active "
+            "FROM extensions WHERE extension=?", (digits,),
+        ).fetchall()
+        if scope:
+            line = db.execute("SELECT id FROM phone_numbers WHERE number=?", (scope,)).fetchone()
+            rows = [row for row in rows if line and row["phone_number_id"] == line["id"]]
+        # Include inactive rows in the ambiguity check. A previously assigned,
+        # now-inactive mailbox must not be mistaken for a different active one.
+        return rows[0] if len(rows) == 1 and rows[0]["active"] else None
+
+    @staticmethod
+    def _sync_profile_mailbox_email(db, mailbox, user_id, old_email, email):
+        if not mailbox or mailbox["voicemail_email_mode"] == "off":
+            return
+        owner = mailbox["owner_user_id"]
+        if owner is not None and not same_account(owner, user_id):
+            return
+        current = str(mailbox["voicemail_email"] or "")
+        # Respect a separately configured address. A blank row dynamically uses
+        # its owner or exact profile association, so never turn it into an
+        # explicit override (which would also bypass the new-message cutoff).
+        if not current or current != old_email:
+            return
+        since = int(time.time() * 1000) if not email else 0
+        db.execute(
+            "UPDATE extensions SET voicemail_email=?,voicemail_email_auto_since_ms="
+            "CASE WHEN ?=0 THEN voicemail_email_auto_since_ms ELSE ? END,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (email, since, since, int(mailbox["id"])),
+        )
+
+    @staticmethod
+    def _profile_association_cutover(db, mailbox, old_extension, new_extension):
+        if (mailbox is not None and mailbox["owner_user_id"] is None and not mailbox["voicemail_email"]
+                and mailbox["voicemail_email_mode"] == "auto" and str(old_extension or "") != new_extension):
+            # Explicitly attaching a profile later must not send recordings from
+            # before that user was attached to this ownerless mailbox.
+            db.execute("UPDATE extensions SET voicemail_email_auto_since_ms=? WHERE id=?",
+                       (int(time.time() * 1000), int(mailbox["id"])))
+
     def save_user(self, data, current_user_id: int | None = None):
         username = str(data.get("username", "")).strip().lower()
         email = str(data.get("email", "")).strip().lower()
@@ -3824,30 +3918,14 @@ class SettingsStore:
         if role not in {"admin", "user"}:
             raise ValueError("Role must be admin or user")
         with self._connect() as db:
-            mailbox_row = None
-            if extension:
-                # A profile names an extension the short way - the digits a person
-                # reads - or the key once several lines carry those digits. It is
-                # resolved once here, so every write below lands on one row.
-                key = str(extension).strip()
-                digits, scope = extension_digits(key), extension_scope(key)
-                rows = db.execute(
-                    "SELECT id,extension,phone_number_id FROM extensions WHERE extension=? AND active=1",
-                    (digits,),
-                ).fetchall()
-                if scope:
-                    line = db.execute("SELECT id FROM phone_numbers WHERE number=?", (scope,)).fetchone()
-                    mailbox_row = next(
-                        (item for item in rows if line and item["phone_number_id"] == line["id"]), None
-                    )
-                else:
-                    plain = [item for item in rows if item["phone_number_id"] in (None, "")]
-                    picked = plain or (rows if len(rows) == 1 else [])
-                    mailbox_row = picked[0] if len(picked) == 1 else None
-                if mailbox_row is None:
-                    raise ValueError("User extension must be active")
+            mailbox_row = self._profile_mailbox(db, extension) if extension else None
+            if extension and mailbox_row is None:
+                raise ValueError("User extension must be active and unambiguous")
             user_id = data.get("id")
-            existing = db.execute("SELECT id,password_hash FROM admin_users WHERE id=?", (int(user_id),)).fetchone() if user_id else None
+            existing = db.execute("SELECT id,password_hash,email,extension FROM admin_users WHERE id=?", (int(user_id),)).fetchone() if user_id else None
+            if (role == "user" and mailbox_row is not None and mailbox_row["owner_user_id"] is not None
+                    and not same_account(mailbox_row["owner_user_id"], existing["id"] if existing else None)):
+                raise ValueError("User extension belongs to another customer")
             if not existing and len(password) < 14:
                 raise ValueError("A new user password must be at least 14 characters")
             if password and not 14 <= len(password) <= 256:
@@ -3871,19 +3949,15 @@ class SettingsStore:
             if existing:
                 db.execute("UPDATE admin_users SET username=?,email=?,extension=?,full_name=?,company_name=?,job_role=?,phone=?,role=?,active=?,password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                            (username, email, extension, full_name, company_name, job_role, phone, role, active, password_hash, existing["id"]))
-                if role == "user" and extension and email and mailbox_row is not None:
-                    db.execute(
-                        "UPDATE extensions SET voicemail_email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                        (email, int(mailbox_row["id"])),
-                    )
+                if role == "user" and extension and email:
+                    self._sync_profile_mailbox_email(db, mailbox_row, existing["id"], existing["email"], email)
+                    self._profile_association_cutover(db, mailbox_row, existing["extension"], extension)
                 return existing["id"]
             user_id = db.execute("INSERT INTO admin_users(username,email,extension,full_name,company_name,job_role,phone,role,active,password_hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
                                  (username, email, extension, full_name, company_name, job_role, phone, role, active, password_hash)).lastrowid
-            if role == "user" and extension and email and mailbox_row is not None:
-                db.execute(
-                    "UPDATE extensions SET voicemail_email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (email, int(mailbox_row["id"])),
-                )
+            if role == "user" and extension and email:
+                self._sync_profile_mailbox_email(db, mailbox_row, user_id, "", email)
+                self._profile_association_cutover(db, mailbox_row, "", extension)
             return user_id
 
     def delete_user(self, user_id: int, current_user_id: int):
@@ -3913,18 +3987,25 @@ class SettingsStore:
         if email and (len(email) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)):
             raise ValueError("Email is invalid")
         with self._connect() as db:
+            row = db.execute("SELECT email,extension,role FROM admin_users WHERE id=?", (int(user_id),)).fetchone()
             db.execute("UPDATE admin_users SET email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (email, int(user_id)))
-            row = db.execute("SELECT extension FROM admin_users WHERE id=?", (int(user_id),)).fetchone()
-        # The profile names one extension; the mailbox lives on it, so the row is
-        # resolved exactly and a digits-only name that several rows carry changes
-        # nothing rather than every one of them.
-        wanted = self._extension_row(str(row["extension"])) if row and row["extension"] else None
-        if wanted is not None:
-            with self._connect() as db:
-                db.execute(
-                    "UPDATE extensions SET voicemail_email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (email, wanted["id"]),
-                )
+            if row and row["role"] == "user" and row["extension"]:
+                mailbox = self._profile_mailbox(db, row["extension"])
+                self._sync_profile_mailbox_email(db, mailbox, user_id, row["email"], email)
+
+    def _init_voicemail_recipient_cutover(self, db):
+        """Start automatic account-recipient delivery without emailing old audio.
+
+        A legacy blank address could mean either unconfigured or deliberately
+        blank. The approved upgrade sends only newly recorded messages using the
+        associated account. A durable, atomic marker keeps multiple API/ARI
+        workers and restarts from moving the cutover forward.
+        """
+        insert = "INSERT IGNORE" if self.database.is_mysql else "INSERT OR IGNORE"
+        db.execute(
+            f"{insert} INTO settings(`key`,value) VALUES(?,?)",
+            ("voicemail_associated_email_since_ms", str(int(time.time() * 1000))),
+        )
 
     @staticmethod
     def _migrate_email_to_elastic(db):

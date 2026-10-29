@@ -11,9 +11,14 @@ from typing import Any
 import requests
 
 from . import local_transcription
+from .telephony_config import configured_voicemail
 from .voicemail import mailbox_name
 
 ELASTIC_EMAIL_URL = "https://api.elasticemail.com/v2/email/send"
+AUTOMATED_NOTICE = (
+    "This is an automated message. The sending email address is not associated "
+    "with a user. Please do not reply."
+)
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_MESSAGES_PER_SCAN = 20
 logger = logging.getLogger(__name__)
@@ -66,6 +71,8 @@ class VoicemailEmailNotifier:
             fallback = "Transcription is unavailable for this message. Please listen to the attached audio."
             text += f"\n{fallback}\n"
             markup += f"<p>{fallback}</p>"
+        text += f"\n{AUTOMATED_NOTICE}\n"
+        markup += f"<p>{html.escape(AUTOMATED_NOTICE)}</p>"
         body: dict[str, Any] = {
             "to": recipient, "from_email": config["from_email"],
             "from_name": config.get("from_name") or "EngineerIP Voicemail",
@@ -169,32 +176,99 @@ class VoicemailEmailNotifier:
             audio_bytes = audio.read_bytes()
             if len(audio_bytes) > MAX_ATTACHMENT_BYTES:
                 return None
-            return current, audio, audio_bytes
+            return current, audio, audio_bytes, stat.st_mtime_ns // 1_000_000
+
+    def _mailbox_recipients(self) -> dict[str, tuple[str, int | None, int]]:
+        """Resolve recipients and automatic-delivery cutoffs without guessing."""
+        # Use the same mailbox decisions as the Asterisk renderer: a voicemail
+        # step in either flow is sufficient, even with the separate desk switch
+        # off. Never match the three digits across number-scoped mailboxes.
+        all_rows = self.settings_store.list_extensions()
+        rows = [row for row in all_rows if row.get("active")]
+        live_keys, _ = configured_voicemail(self.settings_store, rows)
+        users = {str(user["id"]): user for user in self.settings_store.list_users()
+                 if user.get("active") and user.get("role") == "user"}
+        # Legacy platform-owned mailboxes may have an explicitly assigned user
+        # profile instead of an owner. Match a full key or globally unique digits
+        # (including inactive extensions); multiple profiles are ambiguous too.
+        by_key = {row["key"]: row for row in all_rows}
+        by_digits: dict[str, list[dict]] = {}
+        for row in all_rows:
+            by_digits.setdefault(row["digits"], []).append(row)
+        profile_users: dict[str, list[dict]] = {}
+        for user in users.values():
+            assigned = str(user.get("extension") or "").strip()
+            if not assigned:
+                continue
+            scoped = by_key.get(assigned) if "@" in assigned else None
+            matches = ([scoped] if scoped else []) if "@" in assigned else by_digits.get(assigned, [])
+            if len(matches) == 1 and matches[0].get("owner_user_id") is None:
+                profile_users.setdefault(matches[0]["key"], []).append(user)
+        try:
+            cutover_ms = int(self.settings_store.get_settings()["voicemail_associated_email_since_ms"])
+        except (KeyError, TypeError, ValueError):
+            # Fail closed if an incomplete migration cannot establish which
+            # recordings predate automatic account-recipient delivery.
+            cutover_ms = None
+            logger.error("Voicemail associated-recipient cutover is missing or invalid")
+        result: dict[str, tuple[str, int | None, int]] = {}
+        for extension in rows:
+            if extension["key"] not in live_keys or extension.get("voicemail_email_mode") == "off":
+                continue
+            if (extension.get("number") and str(extension.get("owner_user_id") or "")
+                    != str(extension.get("number_owner_user_id") or "")):
+                # A line in the middle of reassignment must not retain a former
+                # tenant's custom address, either. Wait for ownership to agree.
+                continue
+            recipient = str(extension.get("voicemail_email") or "").strip()
+            # A resumed opt-out or ownership change is new-only for all
+            # recipients, including a deliberately configured custom address.
+            resume_since_ms = int(extension.get("voicemail_email_resume_since_ms") or 0)
+            auto_since_ms = resume_since_ms or None
+            if not recipient:
+                owner_id = extension.get("owner_user_id")
+                if cutover_ms is None:
+                    continue
+                if owner_id is not None:
+                    # Owner and number must name the same active customer.
+                    if (not extension.get("number")
+                            or str(extension.get("number_owner_user_id")) != str(owner_id)):
+                        continue
+                    account = users.get(str(owner_id))
+                else:
+                    # An ownerless legacy mailbox needs exactly one explicit,
+                    # unambiguous user-profile assignment; never guess a tenant.
+                    assigned_users = profile_users.get(extension["key"], [])
+                    account = assigned_users[0] if len(assigned_users) == 1 else None
+                recipient = str((account or {}).get("email") or "").strip()
+                if not recipient:
+                    continue
+                auto_since_ms = max(cutover_ms, int(extension.get("voicemail_email_auto_since_ms") or 0), resume_since_ms)
+            result[mailbox_name(extension["key"])] = (recipient, auto_since_ms, int(extension["id"]))
+        return result
 
     def process(self) -> int:
         config = self.settings_store.get_email_config(include_key=True)
         if not config.get("enabled") or not config.get("api_key") or not config.get("from_email"):
             return 0
-        # Public extension digits are NOT globally unique. Never use a digits
-        # fallback: extension 101 on two numbers may belong to different tenants.
-        extensions = {mailbox_name(row.get("key") or row["extension"]): row
-                      for row in self.settings_store.list_extensions()
-                      if row.get("active") and row.get("voicemail_enabled")}
+        recipients = self._mailbox_recipients()
         delivered = attempts = 0
         for candidate in self.voicemail_store.list_messages():
             if candidate["folder"] not in {"inbox", "urgent"}:
                 continue
-            extension = extensions.get(candidate["mailbox"])
-            recipient = str((extension or {}).get("voicemail_email") or "").strip()
-            if not recipient:
+            target = recipients.get(candidate["mailbox"])
+            if target is None:
                 continue
+            recipient, auto_since_ms, row_id = target
             try:
                 snapshot = self._snapshot(candidate)
             except (OSError, ValueError):
                 continue  # One removed/incomplete message must not stop the scan.
             if not snapshot:
                 continue
-            message, audio, audio_bytes = snapshot
+            message, audio, audio_bytes, modified_ms = snapshot
+            if auto_since_ms is not None and modified_ms < auto_since_ms:
+                continue  # Older audio stays in the console; no surprise backlog.
             fingerprint = self._fingerprint(message, audio_bytes)
             if not self.settings_store.claim_voicemail_delivery(
                     fingerprint, message["mailbox"], recipient,
@@ -202,9 +276,28 @@ class VoicemailEmailNotifier:
                     received_at=message.get("received_at")):
                 continue
             transcript, transcription_status = self._transcribe(config, audio, audio_bytes)
-            success, error = self._send(config, self._payload(config, recipient, message, audio,
-                                                           audio_bytes=audio_bytes, transcript=transcript,
-                                                           transcription_status=transcription_status))
+            # Recognition can take a while, and one scan can process many
+            # messages. Re-check opt-out, owner/recipient, flow and cutover just
+            # before sending so an old scan does not leak a newly reassigned box.
+            current = self._mailbox_recipients().get(message["mailbox"])
+            current_config = self.settings_store.get_email_config(include_key=True)
+            if (not current or current[0] != recipient or current[2] != row_id
+                    or (current[1] is not None and modified_ms < current[1])
+                    or not current_config.get("enabled") or not current_config.get("api_key")
+                    or not current_config.get("from_email")):
+                self.settings_store.finish_voicemail_delivery(
+                    fingerprint, False, "Recipient or email settings changed before sending; no email was sent.",
+                    transcription_status,
+                )
+                attempts += 1
+                if attempts >= MAX_MESSAGES_PER_SCAN:
+                    break
+                continue
+            if not current_config.get("transcription_enabled"):
+                transcript, transcription_status = None, "disabled"
+            success, error = self._send(current_config, self._payload(current_config, recipient, message, audio,
+                                                                   audio_bytes=audio_bytes, transcript=transcript,
+                                                                   transcription_status=transcription_status))
             self.settings_store.finish_voicemail_delivery(fingerprint, success, error, transcription_status)
             delivered += int(success)
             attempts += 1
@@ -222,6 +315,9 @@ class VoicemailEmailNotifier:
         message = {"mailbox": "test", "caller_id": "EngineerIP test", "received_at": "now", "duration_seconds": 0, "message": "test"}
         payload = self._payload(config, recipient, message, None)
         payload["subject"] = "EngineerIP email delivery test"
-        payload["text"] = "Your EngineerIP email configuration is working. This test contains no voicemail audio and does not test transcription."
-        payload["html"] = "<p>Your EngineerIP email configuration is working.</p><p>This test contains no voicemail audio and does not test transcription.</p>"
+        payload["text"] = ("Your EngineerIP email configuration is working. This test contains no voicemail audio "
+                           f"and does not test transcription.\n\n{AUTOMATED_NOTICE}")
+        payload["html"] = ("<p>Your EngineerIP email configuration is working.</p>"
+                           "<p>This test contains no voicemail audio and does not test transcription.</p>"
+                           f"<p>{html.escape(AUTOMATED_NOTICE)}</p>")
         return self._send(config, payload)

@@ -86,8 +86,14 @@ rtpend=$RTP_END
 icesupport=yes
 #include dynamic/rtp.ice.conf
 EOF
-mkdir -p /var/spool/asterisk/voicemail
+# Asterisk creates mailbox subdirectories with 0777 masked by its umask and
+# message files with 0666 masked by its umask. Docker's usual 0022 leaves the
+# shared telephony group unable to create Old/Urgent or move/delete messages.
+# Repair existing named-volume contents, not just the root, without following
+# symlinks. New directories inherit telephony and group write via setgid/umask.
 chown -R asterisk:telephony /var/spool/asterisk/voicemail
+chmod -R g+rwX /var/spool/asterisk/voicemail
+find /var/spool/asterisk/voicemail -type d -exec chmod g+s {} +
 chmod 2770 /var/spool/asterisk/voicemail
 
 cat > "$ASTERISK_CONFIG_DIR/ari.conf" <<EOF
@@ -180,4 +186,7 @@ fi
 # RestartCount climbs and every call is dropped).
 ASTERISK_BIN="$(command -v asterisk)"
 export PATH
+# Apply after generating root-owned config files so the asterisk user can read
+# them. The process inherits this for every new voicemail folder and recording.
+umask 0007
 exec "$ASTERISK_BIN" -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"

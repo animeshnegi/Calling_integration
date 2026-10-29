@@ -18,6 +18,55 @@ from .admin import (
 from .ami import AsteriskAMI
 
 
+def configured_voicemail(store: SettingsStore, extensions: list[dict]) -> tuple[set[str], dict[str, str]]:
+    """Every extension whose mailbox must exist and take messages.
+
+    Two decisions lead here, and either one is enough: the desk's own
+    voicemail switch, and a "Voice Mail" step anywhere in a stored flow.
+    Before, only the switch counted - so a customer who answered Voice Mail
+    in the routing panel got a dead end ("the voicemail function is not
+    working"), because no mailbox and no dialplan extension were ever
+    written for it. The flow step is itself the decision to take messages.
+    """
+    keys = {str(row["key"]) for row in extensions if row.get("voicemail_enabled")}
+    by_key = {str(row["key"]): str(row["key"]) for row in extensions}
+    by_mailbox = {extension_mailbox(str(row["key"])): str(row["key"]) for row in extensions}
+
+    def resolve(value: str, number: str) -> str:
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        if value in by_key:
+            return value
+        mailbox = extension_mailbox(value)
+        if mailbox in by_mailbox:
+            return by_mailbox[mailbox]
+        digits = extension_digits(value)
+        for row in extensions:
+            if number and str(row.get("number") or "") == number and str(row.get("digits") or "") == digits:
+                return str(row["key"])
+        return ""
+
+    pins: dict[str, str] = {}
+    flows = [(row, str(row.get("phone_number") or "")) for row in store.list_call_routes()]
+    flows += [(row, "") for row in store.list_routing_flows()]
+    for flow, number in flows:
+        for node in ((flow.get("route") or {}).get("nodes") or []):
+            if not isinstance(node, dict) or str(node.get("type")) != "voicemail":
+                continue
+            if node.get("enabled") is False:
+                continue
+            key = resolve(node.get("mailbox"), number)
+            if key:
+                keys.add(key)
+                pin = str(node.get("pin") or "").strip()
+                if pin:
+                    # The Call Handling tab carries the mailbox settings;
+                    # the pin written there is the pin for the box.
+                    pins.setdefault(key, pin)
+    return keys, pins
+
+
 class TelephonyConfigSync:
     """Render DB-managed SIP and DID objects into internal Asterisk include files."""
 
@@ -682,52 +731,7 @@ class TelephonyConfigSync:
         return "\n".join(lines) + "\n"
 
     def voicemail_keys(self, extensions: list[dict]) -> set[str]:
-        """Every extension whose mailbox must exist and take messages.
-
-        Two decisions lead here, and either one is enough: the desk's own
-        voicemail switch, and a "Voice Mail" step anywhere in a stored flow.
-        Before, only the switch counted - so a customer who answered Voice Mail
-        in the routing panel got a dead end ("the voicemail function is not
-        working"), because no mailbox and no dialplan extension were ever
-        written for it. The flow step is itself the decision to take messages.
-        """
-        keys = {str(row["key"]) for row in extensions if row.get("voicemail_enabled")}
-        by_key = {str(row["key"]): str(row["key"]) for row in extensions}
-        by_mailbox = {extension_mailbox(str(row["key"])): str(row["key"]) for row in extensions}
-
-        def resolve(value: str, number: str) -> str:
-            value = str(value or "").strip()
-            if not value:
-                return ""
-            if value in by_key:
-                return value
-            mailbox = extension_mailbox(value)
-            if mailbox in by_mailbox:
-                return by_mailbox[mailbox]
-            digits = extension_digits(value)
-            for row in extensions:
-                if number and str(row.get("number") or "") == number and str(row.get("digits") or "") == digits:
-                    return str(row["key"])
-            return ""
-
-        pins: dict[str, str] = {}
-        flows = [(row, str(row.get("phone_number") or "")) for row in self.store.list_call_routes()]
-        flows += [(row, "") for row in self.store.list_routing_flows()]
-        for flow, number in flows:
-            for node in ((flow.get("route") or {}).get("nodes") or []):
-                if not isinstance(node, dict) or str(node.get("type")) != "voicemail":
-                    continue
-                if node.get("enabled") is False:
-                    continue
-                key = resolve(node.get("mailbox"), number)
-                if key:
-                    keys.add(key)
-                    pin = str(node.get("pin") or "").strip()
-                    if pin:
-                        # The Call Handling tab carries the mailbox settings;
-                        # the pin written there is the pin for the box.
-                        pins.setdefault(key, pin)
-        self._flow_voicemail_pins = pins
+        keys, self._flow_voicemail_pins = configured_voicemail(self.store, extensions)
         return keys
 
     def render_voicemail(self) -> str:

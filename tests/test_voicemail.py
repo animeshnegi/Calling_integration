@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import stat
 
 from app.voicemail import VoicemailStore
 
@@ -35,3 +37,29 @@ def test_invalid_voicemail_paths_are_rejected(tmp_path):
     store = VoicemailStore(str(tmp_path))
     assert store.audio_path("../101", "inbox", "msg0000") is None
     assert store.delete("101", "../../etc", "msg0000") is False
+
+
+def test_api_created_directories_are_shared_even_with_default_umask(tmp_path):
+    create_message(tmp_path)
+    store = VoicemailStore(str(tmp_path))
+    previous = os.umask(0o022)
+    try:
+        assert store.mark_read("101", "inbox", "msg0000")
+    finally:
+        os.umask(previous)
+    mode = (tmp_path / "engineerip/101/Old").stat().st_mode
+    assert mode & stat.S_IWGRP and mode & stat.S_ISGID
+    assert not (mode & stat.S_IRWXO)
+
+
+def test_rejects_symlink_escapes_before_creating_missing_folder(tmp_path):
+    root = tmp_path / "voicemail"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "engineerip").mkdir(parents=True)
+    (root / "engineerip/101").symlink_to(outside, target_is_directory=True)
+    store = VoicemailStore(str(root))
+    import pytest
+    with pytest.raises(ValueError):
+        store._folder("101", "old", create=True)
+    assert not (outside / "Old").exists()

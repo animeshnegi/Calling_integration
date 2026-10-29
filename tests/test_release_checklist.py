@@ -51,9 +51,9 @@ def test_release_checklist_covers_images_files_keys_transcription_and_softphone(
         "docker image save --output", "scp ", "sha256sum -c", "docker image load --input",
         "tar -xzf /tmp/softphone-proxy-tools.tar.gz", "Never upload or overwrite `.env`",
         "python3 scripts/finish-deployment.py", "--image-tar",
-        "--sample /tmp/goforward-8k.wav", "bind-mounting",
-        "IMAGE_TAG=\"$TAG\" docker compose up -d --no-build --force-recreate",
-        "telephony-api telephony-ari", "bash scripts/verify-release.sh",
+        "/app/deploy-kit/scripts/check-voicemail-transcription.py", "--network none",
+        "IMAGE_TAG=\"$TAG\" docker compose up -d --no-build --no-deps --force-recreate",
+        "asterisk telephony-ari telephony-api", "bash scripts/verify-release.sh",
         "Save & send test email", "HTTP 401", "HTTP 403", "Recent email deliveries",
         "Include a voicemail transcript", "check-voicemail-transcription.py",
         "install-softphone-proxy.py", "check-softphone-websocket.py",
@@ -195,3 +195,18 @@ def test_finish_deployment_offline_check_uses_corrected_host_script(monkeypatch)
                for part in command)
     assert any(part.endswith("goforward-8k.wav:/tmp/goforward-8k.wav:ro") for part in command)
     assert command[-2:] == ["--sample", "/tmp/goforward-8k.wav"]
+
+
+def test_calling_voicemail_release_uses_two_imported_images_without_server_source():
+    guide = (ROOT / "docs/WEBRTC-RELEASE.md").read_text()
+    for item in (
+        "docker build --platform linux/amd64 -t \"engineerip/telephony-api:$Tag\" .",
+        "docker build --platform linux/amd64 -t \"engineerip/asterisk:$Tag\" ./asterisk",
+        "docker save -o", "docker load -i", "cd /opt/Calling_integration",
+        'IMAGE_TAG="$TAG" docker compose up -d --no-build --no-deps --force-recreate asterisk telephony-ari telephony-api',
+        "/app/deploy-kit/scripts/check-voicemail-transcription.py", "--network none",
+        "/app/voicemail engineerip", "**new** recordings", "inbox and spam",
+    ):
+        assert item in guide
+    assert "does not need Git, source changes, a compiler" in guide
+    assert "do **not** run `docker compose down -v`" in guide

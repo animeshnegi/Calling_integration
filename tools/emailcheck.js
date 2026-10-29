@@ -86,6 +86,20 @@ async function run() {
     await settle();
     check('HTTP 200 test failures persist inline instead of showing false success',d.getElementById('email-feedback').textContent.includes('Elastic Email HTTP 401'));
     check('a failed test does not undo a successful key save',!d.getElementById('email-key').value && fixture.email_config.has_api_key);
+    w.eval("openModal('extension', state.extensions[0])");
+    let mode = d.querySelector('#modal-fields [name=voicemail_email_mode]');
+    check('a blank address defaults to the associated account', mode.value === 'auto' &&
+      d.querySelector('#modal-fields').textContent.includes('associated customer'));
+    check('the address override remains optional', d.querySelector('#modal-fields [name=voicemail_email]').value === '');
+    mode.value = 'off';
+    d.getElementById('modal-form').dispatchEvent(new w.Event('submit', {bubbles:true, cancelable:true}));
+    await settle();
+    const extensionSave = posts(env, '/admin/api/extensions').at(-1);
+    check('explicit per-extension opt-out is saved', extensionSave && JSON.parse(extensionSave.body).voicemail_email_mode === 'off');
+    w.eval("state.extensions[0].voicemail_email_mode = 'off'; openModal('extension', state.extensions[0])");
+    mode = d.querySelector('#modal-fields [name=voicemail_email_mode]');
+    check('editing preserves the explicit opt-out', mode.value === 'off');
+    w.eval('closeModal()');
     check('no browser runtime errors', env.errors.length === 0);
   } finally { env.dom.window.close(); }
   console.log(`\n${checks} email UI checks passed.`);

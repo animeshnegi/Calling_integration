@@ -10,7 +10,7 @@
 2. If no key is saved, enter the Elastic Email API key with **Send HTTP** permission, without `Bearer`. Use an address or domain verified in that Elastic Email account as the sender.
 3. Enter the sender name and a test recipient, then select **Save & send test email**. The test saves the current settings first and works while automatic notifications are disabled.
 4. If the provider accepts the test, check the inbox/spam and Elastic Email activity. Acceptance means queued, not delivered.
-5. Turn on **Enable voicemail email** and set each extension's notification address to receive future voicemails.
+5. Turn on **Enable voicemail email**. A new voicemail uses the associated customer's account email by default. In **Extensions**, choose an optional override address or **Do not send voicemail email** for each extension as needed.
 
 The integration uses the legacy v2 `https://api.elasticemail.com/v2/email/send` endpoint, matching the working Python example. It sends `apikey`, `subject`, `from`, `fromName`, `to`, `bodyText`, `bodyHtml` and `isTransactional` as POST form fields. Voicemail audio is attached as a multipart file, not sent to a transcription service. It checks both HTTP status and the v2 JSON `success` flag; HTTP 200 with `success: false` is an error. The API key is in the request body, not the URL, and redirect following is disabled.
 
@@ -20,15 +20,25 @@ The API key is encrypted in the settings database using a key derived from `SECR
 
 ## Set a recipient
 
-Administrators can set **Voicemail notification email** while adding or editing an extension. An extension user can update their own address under **Security > My voicemail email**. Updating a user's own email also updates the assigned extension's voicemail recipient.
+Each active extension has **Voicemail email delivery**:
 
-Automatic email requires an active, voicemail-enabled extension with a valid notification email, an enabled and configured provider with a verified sender, and a new or urgent voicemail. The application's attachment cap is 20 MiB; provider/account email-size limits can be lower. The audio is still available in the voicemail inbox if email delivery fails.
+- **Send to the associated account (or address below)** with a blank override uses the active customer's account email. Updating **Security > My account email** changes this destination automatically, without rewriting an extension's custom address.
+- A nonempty **Override notification email** takes priority over the account email. Existing custom recipients are preserved; the previous delivery/retry behavior for them is unchanged.
+- **Do not send voicemail email** disables both automatic and custom delivery for that extension; it does not delete voicemail. An older client that explicitly clears its address still turns email off, preserving its previous meaning.
+
+On upgrade, previously blank recipients automatically use the associated account for **new recordings only**. Older recordings remain in the console and are not emailed as a surprise backlog. Switching from a custom address to the account or newly attaching a profile to an ownerless mailbox also starts a new-only cutoff. After an opt-out is lifted or a line/extension changes ownership, only new recordings are emailed to **any** recipient, including an override. Cutoffs persist across restarts. When the line and extension have different owners, email is paused—even for a saved override—until ownership is consistent. No address is guessed for ambiguous legacy profiles or inactive/missing account owners.
+
+Email requires a configured, globally enabled Elastic Email sender, an active extension with voicemail enabled either by its switch **or an enabled voicemail step in a flow**, and a new or urgent recording. For number-scoped customer extensions, the customer and number owners must match; an ownerless legacy mailbox needs exactly one unambiguous active user profile explicitly attached to it or a custom address. The application's attachment cap is 20 MiB; provider/account email-size limits can be lower. The audio remains in the voicemail inbox if email or transcription fails.
+
+Both the voicemail email and test email include: **“This is an automated message. The sending email address is not associated with a user. Please do not reply.”**
 
 ## Delivery processing
 
 The ARI worker scans voicemail roughly every 30 seconds, fingerprints the message, claims it atomically, and submits the text/HTML and audio to Elastic Email. Failed attempts retry up to five times; changing the key or sender resets failed attempts, but accepted messages are not sent again. A timeout can have an unknown result; check provider activity before retrying to avoid duplicates. Provider acceptance does not guarantee inbox delivery.
 
-For an image-only deployment, build/export the API image on Windows, load it on the VM, and recreate both `telephony-api` and `telephony-ari` with `--no-build`; do not rebuild the VM or change Asterisk, proxy, outbound calling, `.env`, or the existing volumes. SQLite/MySQL automatically migrate legacy provider settings to Elastic Email and reset previous SendGrid HTTP 4xx rejections once, without resetting accepted mail or ambiguous timeouts. Live account credentials, network reachability and actual inbox delivery still require a test in the deployed environment.
+For this combined calling/voicemail release, build and export **both the API and Asterisk images on Windows**, load them on the VM, and recreate `asterisk`, `telephony-ari`, and `telephony-api` with `--no-build` during a maintenance window. The Asterisk image fixes existing shared-volume permissions and sets the future mailbox umask, as well as supplying hold music. See [the image-only release guide](WEBRTC-RELEASE.md); no server build, proxy change, or outbound-routing change is required. Preserve `.env`, `SECRET_KEY`, the database and all voicemail volumes. The API and ARI worker must both use `/app/voicemail` and context `engineerip`; the current Compose file pins these, but `docker load` does not update an older host Compose file. Verify the ARI configuration after deployment as described in the guide.
+
+SQLite/MySQL automatically migrate legacy provider settings to Elastic Email and reset previous SendGrid HTTP 4xx rejections once, without resetting accepted mail or ambiguous timeouts. Live provider acceptance and actual inbox delivery still require a test in the deployed environment.
 
 ## User roles
 
@@ -46,25 +56,16 @@ The system prevents an administrator from deleting their own account, disabling/
 
 ### Extension user
 
-An extension user is assigned exactly one active extension and can access only:
+A customer user can access their own assigned numbers and extensions, associated call records and mailboxes, and their own email address and password. A profile's optional extension reference is not required for voicemail on customer-owned numbers; the number and extension ownership establish the associated account.
 
-- dashboard totals for the assigned extension;
-- call history for that extension;
-- recordings belonging to that extension;
-- voicemail belonging to that mailbox;
-- their own email address and password.
-
-Backend authorization enforces this scope. Hiding sidebar items is only a UI convenience and is not the security boundary. Requests that try to select another extension are overridden or rejected.
+Backend authorization enforces customer scope. Hiding sidebar items is only a UI convenience and is not the security boundary.
 
 ## Create a user
 
-1. Open **Users** as an administrator.
-2. Select **Add user**.
-3. Set username, optional email, role, assigned extension, and an initial password of at least 14 characters.
-4. Keep the account active and save.
-5. Give credentials to the user through a secure channel and ask them to change the password.
-
-For extension users, an assigned active extension is mandatory. Administrators may be unassigned and can access all extensions.
+1. Open **Users** as an administrator and select **Add user**.
+2. Enter a username, account email and an initial password of at least 14 characters. Keep the customer account active and save.
+3. Assign the customer's number and extensions. The account email is the automatic voicemail destination unless an extension has an override or email is off.
+4. Give credentials to the user through a secure channel and ask them to change the password.
 
 ## Security recommendations
 
@@ -87,11 +88,13 @@ Check the Elastic Email API key and Send HTTP permission, the verified sender, a
 
 ### Test succeeds but voicemail email is not sent
 
-Confirm the extension has a notification email, the message is still New/Urgent, the ARI worker is running, and the attachment is below 20 MiB. Inspect:
+Confirm **Enable voicemail email** is on, the sender is verified, the extension's delivery choice is not off, and its associated active account has an email (or a valid override is set). Check that the line and extension belong to the same account, the recording is new/unread and was made after the automatic-recipient cutover, and the ARI worker is running. Allow at least 10 seconds for the recording to settle and 30–60 seconds for a scan. Oversize or unsupported transcription never deletes the voicemail. Inspect **Recent email deliveries**, Elastic Email activity, inbox/spam and:
 
 ```bash
 docker compose logs --tail=200 telephony-ari
 ```
+
+The email test button does not test voicemail, attachments or transcription. To check speech recognition, enable **Include a voicemail transcript** and leave a fresh spoken English voicemail, or run the offline image test in [the release guide](WEBRTC-RELEASE.md). Transcription is best-effort; if it fails, the email still includes the audio.
 
 ### User sees another extension
 
