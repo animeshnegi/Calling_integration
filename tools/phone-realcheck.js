@@ -5,21 +5,21 @@
  * Chrome:
  *   npm install --no-save puppeteer-core ws
  *   CHROMIUM=/path/to/chromium node tools/phone-realcheck.js
- * For the bundled headless build used in this regression, install
- * @sparticuz/chromium@131.0.1 (newer sandbox builds may expose different ICE
- * interfaces). The checks still require actual RTP and non-silent audio.
+ * For a bundled headless build, install @sparticuz/chromium as well.
  *
  * Two real Chrome pages use the shipped phone.js and vendored JsSIP. A tiny
  * loopback SIP-over-WebSocket relay below handles REGISTER and forwards SIP
- * dialogs; it is deliberately not an Asterisk replacement. Actual browser
+ * dialogs; it is deliberately not an Asterisk replacement. A loopback STUN
+ * responder removes any dependency on Internet STUN. Actual browser
  * RTCPeerConnections, fake microphone devices, DTLS-SRTP and RTP packets are
- * used. We suppress only ICE's completion notification to reproduce a slow
- * STUN/TURN server; actual host candidates and media transport stay real.
+ * used. We suppress ICE's completion notification to exercise the app's slow
+ * gathering timeout; actual candidates and media transport stay real.
  * This does NOT test the deployed VM, carrier or Internet NAT/firewall.
  */
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const dgram = require('dgram');
 const crypto = require('crypto');
 const assert = require('assert/strict');
 const puppeteer = require('puppeteer-core');
@@ -206,7 +206,7 @@ function pageShim() {
     return remove.call(this, type, wrapped || callback, options);
   };
 }
-async function signIn(page, base, name) {
+async function signIn(page, base, name, stunPort) {
   await page.evaluateOnNewDocument(pageShim);
   await page.goto(base + '/phone', { waitUntil: 'domcontentloaded' });
   await page.type('#login-username', name);
@@ -220,8 +220,9 @@ async function signIn(page, base, name) {
     console.error('Sign-in status:', await page.$eval('#login-status', el => el.textContent));
     throw error;
   }
-  // Do not depend on public STUN servers for this loopback regression.
-  await page.evaluate(() => { iceServers = [{ urls: 'stun:127.0.0.1:9' }]; });
+  // Use the local responder, not a public (or intentionally black-holed)
+  // STUN server. The separate shim below simulates delayed completion.
+  await page.evaluate(port => { iceServers = [{ urls: `stun:127.0.0.1:${port}` }]; }, stunPort);
 }
 async function dial(page, number) {
   await page.$eval('#number-input', (input, value) => {
@@ -281,6 +282,26 @@ function finalsFor(callId) {
   return records.filter(item => item.callId === callId && /^SIP\/2\.0 [2-6]\d\d/.test(item.first) && / INVITE$/i.test(item.cseq));
 }
 
+// Minimal RFC 5389 Binding success for an IPv4 request. This responder is
+// bound to loopback only and is solely a test fixture, not a production STUN
+// service. It keeps the real ICE agent healthy while the page shim delays
+// the completion events observed by JsSIP.
+function respondToStun(socket, message, peer) {
+  if (message.length < 20 || message.readUInt16BE(0) !== 0x0001 || message.readUInt32BE(4) !== 0x2112a442) return;
+  const address = peer.address.split('.').map(Number);
+  if (address.length !== 4 || address.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)) return;
+  const response = Buffer.alloc(32);
+  response.writeUInt16BE(0x0101, 0); // Binding success
+  response.writeUInt16BE(12, 2);
+  message.copy(response, 4, 4, 20); // magic cookie and transaction id
+  response.writeUInt16BE(0x0020, 20); // XOR-MAPPED-ADDRESS
+  response.writeUInt16BE(8, 22);
+  response[25] = 1; // IPv4
+  response.writeUInt16BE(peer.port ^ 0x2112, 26);
+  for (let i = 0; i < 4; i++) response[28 + i] = address[i] ^ message[4 + i];
+  socket.send(response, peer.port, peer.address);
+}
+
 async function main() {
   const server = http.createServer((req, res) => {
     const name = new URL(req.url, 'http://localhost').pathname === '/phone' ? 'phone.html' : path.basename(new URL(req.url, 'http://localhost').pathname);
@@ -293,9 +314,15 @@ async function main() {
   wss.on('connection', socket => socket.on('message', data => onSip(socket, data)));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = 'http://127.0.0.1:' + server.address().port;
-  let executablePath = process.env.CHROMIUM, browser;
+  let executablePath = process.env.CHROMIUM, browser, stun;
   let args = ['--no-sandbox', '--disable-setuid-sandbox'];
   try {
+    stun = dgram.createSocket('udp4');
+    stun.on('message', (message, peer) => respondToStun(stun, message, peer));
+    await new Promise((resolve, reject) => {
+      stun.once('error', reject);
+      stun.bind(0, '127.0.0.1', () => { stun.removeListener('error', reject); resolve(); });
+    });
     if (!executablePath) {
       const imported = require('@sparticuz/chromium');
       const chromium = imported.default || imported;
@@ -314,7 +341,7 @@ async function main() {
       page.on('pageerror', error => { errors.push(error.message); if (process.env.PHONE_REALCHECK_TRACE) console.error('PAGE', error); });
       if (process.env.PHONE_REALCHECK_TRACE) page.on('console', message => console.log('BROWSER', message.text()));
     }
-    await signIn(a, base, '101'); await signIn(b, base, '102');
+    await signIn(a, base, '101', stun.address().port); await signIn(b, base, '102', stun.address().port);
     check('both real JsSIP clients register through SIP-over-WebSocket', contacts.has('101') && contacts.has('102'));
 
     // Asterisk can fall back to a single-label Docker ID in From and Contact.
@@ -496,6 +523,7 @@ async function main() {
   } finally {
     if (browser) await browser.close();
     wss.clients.forEach(client => client.terminate()); wss.close(); server.close();
+    if (stun) { try { stun.close(); } catch (error) { if (error.code !== 'ERR_SOCKET_DGRAM_NOT_RUNNING') throw error; } }
   }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
