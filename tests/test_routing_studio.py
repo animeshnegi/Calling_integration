@@ -260,3 +260,128 @@ def test_forwarded_to_desk_with_ringing_off_takes_its_message_without_a_loop(stu
     assert asterisk.continued == [("internal-forward", "voicemail-inbound", extension_mailbox(target))]
     assert "internal-forward" not in asterisk.hung_up
     assert calls.get(call.call_id).ended_at
+
+def test_sequential_ring_calls_one_extension_at_a_time_then_runs_voicemail(studio):
+    service, asterisk, calls, settings, owner, general, _, general_keys, primary_keys = studio
+    first, second = general_keys["101"], general_keys["102"]
+    settings.save_call_route(owner, {"phone_number": general, "route": {"nodes": [
+        {"type": "sequential", "extensions": [first, second], "timeout": 10, "configured": True},
+        {"type": "voicemail", "mailbox": first, "enabled": True, "configured": True},
+    ]}})
+
+    call = service.start_inbound(
+        {"id": "sequential-call", "caller": {"number": "+13025550000"}},
+        general, first,
+    )
+    assert [extension for _, extension in asterisk.inbound_legs] == [first]
+    first_leg = calls.get(call.call_id).employee_channel_id
+
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": first_leg}})
+    current = calls.get(call.call_id)
+    assert [extension for _, extension in asterisk.inbound_legs] == [first, second]
+    assert current.extension == second
+    second_leg = current.employee_channel_id
+    assert second_leg != first_leg
+
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": second_leg}})
+    assert asterisk.continued == [("sequential-call", "voicemail-inbound", extension_mailbox(first))]
+
+
+def test_inactive_number_flow_falls_back_without_running_its_ivr(studio):
+    _, _, _, settings, owner, general, _, general_keys, _ = studio
+    menu = {**settings.default_ivr_node(), "keys": [{"key": "1", "target": general_keys["102"]}]}
+    settings.save_call_route(owner, {
+        "phone_number": general, "active": False,
+        "route": {"nodes": [menu, {"type": "ring_group", "extensions": [general_keys["102"]], "timeout": 25}]},
+    })
+
+    plan = settings.inbound_plan(general)
+    assert plan.get("kind") != "ivr"
+    assert plan["destinations"] == [general_keys["101"]]
+
+
+def test_overnight_business_hours_are_open_after_midnight_and_before_close(studio, monkeypatch):
+    from app import admin as admin_module
+
+    _, _, _, settings, owner, general, _, general_keys, _ = studio
+
+    class FakeDateTime:
+        clock = "23:00"
+        weekday = 1
+
+        @classmethod
+        def now(cls):
+            return cls()
+
+        def isoweekday(self):
+            return type(self).weekday
+
+        def strftime(self, _format):
+            return type(self).clock
+
+    monkeypatch.setattr(admin_module, "datetime", FakeDateTime)
+    settings.save_call_route(owner, {"phone_number": general, "route": {"nodes": [
+        {"type": "business_hours", "start": "22:00", "end": "06:00", "days": [1]},
+        {"type": "ring_group", "extensions": [general_keys["101"]], "timeout": 25},
+    ]}})
+
+    FakeDateTime.clock = "23:00"
+    FakeDateTime.weekday = 1  # Monday: selected start day
+    assert settings.inbound_plan(general)["outside_hours"] is False
+    FakeDateTime.clock = "05:00"
+    FakeDateTime.weekday = 2  # Tuesday morning still belongs to Monday's window
+    assert settings.inbound_plan(general)["outside_hours"] is False
+    FakeDateTime.clock = "23:00"
+    FakeDateTime.weekday = 2  # Tuesday evening is not selected
+    assert settings.inbound_plan(general)["outside_hours"] is True
+    FakeDateTime.clock = "12:00"
+    assert settings.inbound_plan(general)["outside_hours"] is True
+
+
+def test_inactive_extension_handling_is_not_applied_to_inbound_calls(studio):
+    service, asterisk, _, settings, owner, _, primary, _, primary_keys = studio
+    desk = primary_keys["101"]
+    settings.save_routing_flow(owner, {
+        "target_type": "extension", "target": desk, "active": False,
+        "route": {"nodes": [
+            {"type": "extension", "extension": desk, "ring_enabled": False,
+             "timeout": 15, "no_answer": "hangup", "configured": True},
+        ]},
+    })
+
+    plan = settings.inbound_plan(primary)
+    assert plan["destinations"] == [desk]
+    call = service.start_inbound(
+        {"id": "inactive-desk-flow", "caller": {"number": "+13025550000"}},
+        primary, desk,
+    )
+    assert [extension for _, extension in asterisk.inbound_legs] == [desk]
+    assert call is not None
+
+def test_ivr_fallback_respects_sequential_ring_strategy(studio):
+    service, asterisk, calls, settings, owner, general, _, general_keys, _ = studio
+    first, second = general_keys["101"], general_keys["102"]
+    settings.save_call_route(owner, {"phone_number": general, "route": {"nodes": [
+        settings.default_ivr_node(),
+        {"type": "sequential", "extensions": [first, second], "timeout": 10, "configured": True},
+        {"type": "voicemail", "mailbox": first, "enabled": True, "configured": True},
+    ]}})
+
+    call = service.start_inbound(
+        {"id": "ivr-sequential-fallback", "caller": {"number": "+13025550000"}},
+        general, first,
+    )
+    session = service._ivr_sessions_map()["ivr-sequential-fallback"]
+    service._ivr_fallback(session, "")
+
+    current = calls.get(call.call_id)
+    assert [extension for _, extension in asterisk.inbound_legs] == [first]
+    first_leg = current.employee_channel_id
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": first_leg}})
+
+    current = calls.get(call.call_id)
+    assert [extension for _, extension in asterisk.inbound_legs] == [first, second]
+    assert current.extension == second
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": current.employee_channel_id}})
+    assert asterisk.continued == [("ivr-sequential-fallback", "voicemail-inbound", extension_mailbox(first))]
+

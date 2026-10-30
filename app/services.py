@@ -436,6 +436,67 @@ class TelephonyService:
             self._ivr_sessions = sessions
         return sessions
 
+    def _sequential_sessions_map(self) -> dict[str, dict[str, Any]]:
+        """Live sequential-ring state, keyed by call ID, for the ARI worker."""
+        sessions = getattr(self, "_sequential_inbound", None)
+        if sessions is None:
+            sessions = {}
+            self._sequential_inbound = sessions
+        return sessions
+
+    def _start_next_sequential_destination(self, call_id: str) -> bool:
+        """Ring the next destination in a sequential number-flow step.
+
+        Devices belonging to one extension may ring together, but the next
+        extension is not started until every device for the current one ends.
+        """
+        sessions = self._sequential_sessions_map()
+        session = sessions.get(str(call_id))
+        call = self.store.get(str(call_id))
+        if not session or not call or call.ended_at or call.answered:
+            sessions.pop(str(call_id), None)
+            return False
+
+        destinations = session["destinations"]
+        while session["next_index"] < len(destinations):
+            destination_index = session["next_index"]
+            session["next_index"] += 1
+            destination = str(destinations[destination_index])
+            endpoints = self.dial_endpoints(destination, session["number"])
+            legs: list[str] = []
+            timeout = int((session["timeouts"] or {}).get(destination, session["timeout"]))
+            for endpoint_index, endpoint in enumerate(endpoints):
+                try:
+                    leg = self.asterisk.create_inbound_employee_leg(
+                        call_id, destination, session["customer_channel_id"],
+                        index=destination_index * 10 + endpoint_index, endpoint=endpoint,
+                        timeout=timeout,
+                    )
+                except Exception:
+                    continue
+                legs.append(str(leg))
+                self._leg_index[str(leg)] = str(call_id)
+            if not legs:
+                continue
+
+            # Old legs have all ended before this method is called. Drop their
+            # indexes and keep only the current destination in the call record.
+            for old_leg, _ in self._leg_pairs(call):
+                self._leg_index.pop(old_leg, None)
+            updated = self.store.update(
+                str(call_id), extension=destination, status="ringing",
+                employee_channel_id=legs[0],
+                employee_channel_ids=",".join(f"{leg}|{destination}" for leg in legs),
+            )
+            self.notify_crm(
+                "call.employee_ringing", updated,
+                {"sequential_index": destination_index + 1, "destination": destination},
+            )
+            return True
+
+        sessions.pop(str(call_id), None)
+        return False
+
     # How long a caller has to press the next digit when what they typed could
     # still grow into a longer extension.
     IVR_INTERDIGIT = 1.4
@@ -550,6 +611,19 @@ class TelephonyService:
             # The menu answers the call; nobody rings until the caller asks for
             # an extension, so there is no employee to report as ringing yet.
             return self._start_ivr(call, channel, plan)
+        if plan.get("ring_strategy") == "sequential" and destinations:
+            self._sequential_sessions_map()[call_id] = {
+                "destinations": destinations,
+                "next_index": 0,
+                "number": number,
+                "customer_channel_id": channel_id,
+                "timeout": int(plan.get("timeout") or 30),
+                "timeouts": dict(plan.get("timeouts") or {}),
+            }
+            if self._start_next_sequential_destination(call_id):
+                return self.store.get(call_id)
+            self._inbound_no_answer(self.store.get(call_id), plan, "inbound_no_ringing_device")
+            return self.store.get(call_id)
         self.notify_crm("call.employee_ringing", call)
         legs: list[tuple[str, str]] = []
         ring_timeout = int(plan.get("timeout") or 30)
@@ -577,6 +651,7 @@ class TelephonyService:
 
     def _inbound_no_answer(self, call: Call, plan: dict, reason: str = "inbound_not_answered") -> None:
         """One incoming no-answer path, including desks with ringing disabled."""
+        self._sequential_sessions_map().pop(call.call_id, None)
         if call.ended_at:
             return
         if call.status not in {"forwarding", "ringing_fallback"} and self._ring_fallbacks(call, plan):
@@ -839,6 +914,25 @@ class TelephonyService:
             owner = next((row.get("owner_user_id") for row in self.settings_store.list_numbers() if row["number"] == number), None)
             plan = self.settings_store.apply_desk_handling({**plan, "destinations": destinations}, destinations, number, owner)
             destinations = plan["destinations"]
+        if destinations and plan.get("ring_strategy") == "sequential":
+            call = self.store.get(session["call_id"])
+            if call:
+                plan = {**plan, "destinations": destinations}
+                self._sequential_sessions_map()[call.call_id] = {
+                    "destinations": destinations,
+                    "next_index": 0,
+                    "number": str(session.get("number") or ""),
+                    "customer_channel_id": channel_id,
+                    "timeout": int(plan.get("timeout") or 30),
+                    "timeouts": dict(plan.get("timeouts") or {}),
+                }
+                if self._start_next_sequential_destination(call.call_id):
+                    self.notify_crm("call.ivr_fallback", self.store.get(call.call_id), {
+                        "digits": digits, "ring_strategy": "sequential",
+                    })
+                    return
+                self._inbound_no_answer(self.store.get(call.call_id), plan, "ivr_no_ringing_device")
+                return
         if destinations:
             legs: list[tuple[str, str]] = []
             dial_plan = [
@@ -1051,6 +1145,7 @@ class TelephonyService:
             self.notify_crm("call.recording_failed", updated)
 
     def _finalize(self, call_id: str, reason: str, keep: str = "") -> None:
+        self._sequential_sessions_map().pop(str(call_id), None)
         with self._finalize_lock:
             if call_id in self._finalizing:
                 return
@@ -1189,6 +1284,7 @@ class TelephonyService:
                 return
             employee_legs = [leg for leg, _ in self._leg_pairs(current)]
             if current.direction == "inbound" and channel_id in employee_legs:
+                self._sequential_sessions_map().pop(current.call_id, None)
                 answered_extension = next((ext for leg, ext in self._leg_pairs(current) if leg == channel_id), current.extension)
                 others = [leg for leg in employee_legs if leg != channel_id]
                 updated = self.store.update(
@@ -1261,6 +1357,8 @@ class TelephonyService:
                     return
                 self._leg_index.pop(str(channel_id), None)
                 if employee_leg and call.direction == "inbound" and call.customer_channel_id:
+                    if self._start_next_sequential_destination(call.call_id):
+                        return
                     # Nobody picked up. A journey that ends in voicemail keeps
                     # the caller; one that ends in a forward number rings it
                     # with the caller still waiting; the default flow simply
