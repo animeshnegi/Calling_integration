@@ -371,6 +371,7 @@ ok = hmac.compare_digest(expected, received)</pre>
         <tr><td><code>call.bridged</code></td><td>Both legs are connected and talking.</td></tr>
         <tr><td><code>call.ivr_extension_selected</code></td><td>The caller chose an extension from the menu. Carries <code>digits</code> and <code>extension</code>.</td></tr>
         <tr><td><code>call.ivr_fallback</code></td><td>The menu sent the caller to its fallback, for an invalid or unanswered choice.</td></tr>
+        <tr><td><code>call.forwarding</code></td><td>Nobody answered the desk, and the journey’s forward number is being rung with the caller waiting.</td></tr>
         <tr><td><code>call.voicemail</code></td><td>The call was handed to voicemail. <code>reason</code>: <code>ivr_no_selection</code> or <code>inbound_not_answered</code>.</td></tr>
         <tr><td><code>call.missed</code></td><td>An inbound call went unanswered and was not sent to voicemail. <code>reason</code> says why.</td></tr>
         <tr><td><code>call.recording_started</code> · <code>call.recording_finished</code> · <code>call.recording_failed</code></td><td>Recording lifecycle for the devices that record.</td></tr>
@@ -392,7 +393,8 @@ ok = hmac.compare_digest(expected, received)</pre>
     <table>
       <thead><tr><th>Value</th><th>What it looks like</th></tr></thead>
       <tbody>
-        <tr><td>SIP username</td><td>The account label, the extension and the number's digits, joined by underscores — for example <code>MERIDIAN_101_13025550001</code>. The platform generates it, keeps it unique across the whole platform, and it cannot be edited. It is the device's login identity, and a caller never dials it.</td></tr>
+        <tr><td>SIP username</td><td>The account label, the extension and the number's digits, joined by underscores — for example <code>MERIDIAN_101_13025550001</code>. The platform generates it, keeps it unique across the whole platform, and it cannot be edited. It is the device's login identity, and a caller never dials it. Desk phones and softphones like Zoiper use this one.</td></tr>
+        <tr><td>Browser softphone username</td><td>The SIP username with <code>-webrtc</code> after it — for example <code>MERIDIAN_101_13025550001-webrtc</code>. Shown only while the extension answers in the browser. The browser softphone signs in on this identity automatically; it is never typed into a desk phone.</td></tr>
         <tr><td>SIP password</td><td>A generated secret with upper case, lower case, digits and symbols, rotatable from the same sheet with <b>Change password</b>. A linked device account's password is what actually authenticates, so rotating changes that one.</td></tr>
         <tr><td>Registration server</td><td><code>{{SIP_HOST}}</code> — this deployment's own SIP address, with the port and transport (UDP, TCP or TLS). An administrator sets it once under <b>Platform Settings → Server addresses</b>, as an IP address or a subdomain whose DNS record points directly at this server — never through a web proxy, because SIP and call audio travel over UDP.</td></tr>
         <tr><td>Numbers</td><td>The line the extension belongs to. It calls out with that number as caller ID, and its three digits reach it on that line.</td></tr>
@@ -404,7 +406,7 @@ ok = hmac.compare_digest(expected, received)</pre>
     <div class="note">Registration server, API base and webhook URLs all come from the one address in
       <b>Platform Settings → Server addresses</b>, so changing it once changes every link a customer is given.</div>
     <div class="note">A browser softphone needs the extension's <b>Answers in the browser (WebRTC)</b> option ticked, which the console shows as
-      <b>Browser phone</b>. A hardware phone or desktop softphone registers on its own extension, without that option.</div>
+      <b>Browser phone</b>. The browser signs in on its own <code>-webrtc</code> identity beside the extension's phones, so a hardware phone or desktop softphone can share the same extension - each device rings on the media it speaks.</div>
   </section>
 
   <section id="errors">
@@ -442,7 +444,7 @@ ok = hmac.compare_digest(expected, received)</pre>
     <h3>Two ways to sign in</h3>
     <ul>
       <li><b>From the console:</b> press <b>Softphone</b> on an extension's card or in its credentials sheet. A new window opens already signed in as that extension, with nothing to type.</li>
-      <li><b>By hand:</b> open <code>/phone</code> and enter the extension's SIP username, SIP password and SIP domain from the Credentials sheet. The WebSocket address fills in automatically unless you change it.</li>
+      <li><b>By hand:</b> open <code>/phone</code> and enter the extension's browser softphone username (the SIP username with <code>-webrtc</code> after it), SIP password and SIP domain from the Credentials sheet. The WebSocket address fills in automatically unless you change it.</li>
     </ul>
     <h3>Using it</h3>
     <ol>

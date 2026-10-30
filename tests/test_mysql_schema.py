@@ -61,6 +61,10 @@ class RecordingConnection:
         self.sink.append(str(sql))
 
         class Result:
+            # Real SQLite/PyMySQL cursors expose affected-row counts for the
+            # one-time email migration's INSERT OR IGNORE.
+            rowcount = 1
+
             def fetchone(self):
                 return None
 
@@ -102,6 +106,9 @@ def test_reconcile_upgrades_the_legacy_extensions_table():
     statements = reconcile_statements({"extensions": LEGACY_EXTENSIONS})
 
     assert "ALTER TABLE extensions ADD COLUMN phone_number_id BIGINT" in statements
+    assert "ALTER TABLE extensions ADD COLUMN voicemail_email_mode VARCHAR(12) NOT NULL DEFAULT 'auto'" in statements
+    assert "ALTER TABLE extensions ADD COLUMN voicemail_email_auto_since_ms BIGINT NOT NULL DEFAULT '0'" in statements
+    assert "ALTER TABLE extensions ADD COLUMN voicemail_email_resume_since_ms BIGINT NOT NULL DEFAULT '0'" in statements
     assert any(s.startswith("ALTER TABLE extensions MODIFY COLUMN extension VARCHAR(64) NOT NULL") for s in statements)
     # The primary key is planned by the identity migration, never by reconcile.
     assert not any(" id " in s or s.endswith(" id") for s in statements)

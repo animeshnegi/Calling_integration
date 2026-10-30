@@ -17,7 +17,8 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);background:radial-gradient(circle at 10% 0%,#e5ecff 0,transparent 34%),radial-gradient(circle at 100% 15%,#f1e6ff 0,transparent 32%),var(--bg);-webkit-font-smoothing:antialiased}
 button,input{font:inherit}
-button{cursor:pointer}
+button{cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.keypad button,.call-btn,.control-btn,.dtmf-panel button{user-select:none;-webkit-user-select:none}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .keypad button:focus-visible,.call-btn:focus-visible,.nav-item:focus-visible,.tool-btn:focus-visible{outline-offset:3px}
 .hidden{display:none!important}
@@ -46,11 +47,20 @@ button{cursor:pointer}
 .state.online i{background:var(--green)}
 .state.offline{color:#b45309}
 .state.offline i{background:#f59e0b}
+.state.connecting{color:#b45309}
+.state.connecting i{background:#f59e0b;animation:statepulse 1.4s ease-in-out infinite}
+@keyframes statepulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.7)}}
 .top-actions{display:flex;gap:7px}
 .icon-btn,.paste-btn,.clear-btn,.text-btn,.round-btn{border:0;background:transparent;color:var(--muted)}
 .icon-btn{width:40px;height:40px;border-radius:12px;font-size:18px}
 .icon-btn:hover{background:var(--surface2);color:var(--text)}
 .install-btn{font-size:22px;color:var(--accent)}
+.ringer-notice{flex:0 0 auto;display:flex;align-items:center;gap:10px;text-align:left;margin:2px 16px 6px;padding:8px 11px;border:1px solid #fbbf24;border-radius:13px;background:#fffbeb;color:#92400e}
+.ringer-notice>span:nth-child(2){flex:1;min-width:0}
+.ringer-notice strong,.ringer-notice small{display:block}
+.ringer-notice strong{font-size:11px;line-height:1.3}
+.ringer-notice small{font-size:10px;line-height:1.35;color:#92400e}
+.ringer-notice>span:last-child{font-size:20px}
 
 /* the number field */
 .search-row{flex:0 0 auto;padding:4px 16px 8px}
@@ -68,7 +78,8 @@ button{cursor:pointer}
 #dialer-view.active{display:flex;flex-direction:column;overflow-y:auto}
 .selected-contact{flex:0 0 auto;text-align:center;padding:clamp(4px,1.6vh,14px) 0 clamp(4px,1.2vh,10px)}
 .dial-display{font-size:clamp(22px,3.6vh,28px);font-weight:750;letter-spacing:-.025em;min-height:34px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 8px}
-.dial-hint{font-size:12px;color:var(--muted);margin-top:2px}
+.dial-hint{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.35}
+.dial-hint.error{color:#b42318;font-weight:700}
 
 /* the keypad: its rows take the height the window leaves over */
 .keypad{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:minmax(44px,min(74px,11vh));align-content:center;gap:min(12px,1.7vh) min(16px,4vw);width:100%;max-width:310px;margin:0 auto}
@@ -109,25 +120,88 @@ h2{margin:3px 0 0;font-size:27px;letter-spacing:-.04em}
 .empty-state p{font-size:13px;line-height:1.65;margin:0}
 .compact{padding-top:35px}
 
-/* ---- in a call -------------------------------------------------------------- */
-.active-call{position:absolute;inset:0;background:linear-gradient(180deg,#f7f8fc,#fff);z-index:5;display:flex;flex-direction:column;align-items:center;padding:clamp(28px,7vh,64px) 22px 22px;overflow-y:auto;overscroll-behavior:contain}
-.active-avatar{width:clamp(64px,11vh,96px);height:clamp(64px,11vh,96px);border-radius:30px;display:grid;place-items:center;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;font-size:clamp(26px,4vh,35px);font-weight:800;box-shadow:0 18px 45px #4f46e533}
-.active-label{margin-top:18px;color:var(--muted);font-size:13px}
-.active-call h2{font-size:clamp(24px,3.8vh,31px);margin-top:5px;word-break:break-all;text-align:center}
-.active-call #call-timer{color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
-.call-quality{margin-top:11px;padding:5px 13px;border-radius:999px;background:#4f46e50e;color:var(--muted);font-size:11px;font-weight:750;letter-spacing:.02em}
-.call-quality.good{background:#16a34a14;color:#15803d}
-.call-quality.warn{background:#f59e0b1a;color:#b45309}
-.call-controls{display:flex;gap:12px;margin-top:auto;margin-bottom:22px}
-.control-btn{width:72px;height:60px;border:1px solid var(--line);border-radius:18px;background:#fff;color:var(--text);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:18px}
-.control-btn span{font-size:10px;color:var(--muted)}
-.control-btn.active{background:#4f46e512;color:var(--accent);border-color:#4f46e530}
-.hangup-btn{width:68px;height:68px;border-radius:50%;border:0;background:var(--red);color:#fff;font-size:24px;transform:rotate(135deg);box-shadow:0 15px 30px #ef444433}
-.active-status{font-size:12px;color:var(--muted);margin-top:13px}
-.incoming-actions{display:flex;gap:10px;margin-top:auto;margin-bottom:18px}
-.answer-btn,.decline-btn{border:0;border-radius:13px;height:46px;padding:0 20px;font-weight:800}
-.answer-btn{background:var(--green);color:#fff}
+/* ---- in a call: premium shell with a permanently visible action footer ---- */
+.active-call{position:absolute;inset:0;z-index:5;overflow:hidden;background:#f6f7fb}
+.call-shell{position:relative;isolation:isolate;height:100%;height:100dvh;display:flex;flex-direction:column;color:var(--text);background:linear-gradient(180deg,#eef1ff 0%,#f8f9fd 42%,#ffffff 100%)}
+.call-ambient{position:absolute;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(circle at 15% 8%,#4f46e526 0,transparent 32%),radial-gradient(circle at 88% 18%,#7c3aed1f 0,transparent 34%),radial-gradient(circle at 50% 100%,#16a34a14 0,transparent 38%)}
+.call-head{flex:0 0 auto;text-align:center;padding:clamp(20px,5vh,48px) 22px 8px}
+.call-secure{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;background:#ffffffaa;border:1px solid #ffffffcc;color:#5b6480;font-size:9px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;box-shadow:0 8px 24px #34435e0c;backdrop-filter:blur(12px)}
+.call-secure>span{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px #16a34a1a}
+.call-avatar-wrap{display:grid;place-items:center;margin-top:clamp(12px,3vh,26px)}
+.active-avatar{position:relative;width:clamp(70px,12vh,104px);height:clamp(70px,12vh,104px);border-radius:32px;display:grid;place-items:center;background:linear-gradient(135deg,#4f46e5,#8b5cf6);color:#fff;font-size:clamp(28px,4.2vh,38px);font-weight:800;box-shadow:0 22px 50px #4f46e540,inset 0 1px 0 #ffffff55}
+.active-avatar::after{content:"";position:absolute;inset:-8px;border-radius:38px;border:1px solid #4f46e533;opacity:.65}
+.active-call[data-phase="ringing"] .active-avatar::after,
+.active-call[data-phase="dialing"] .active-avatar::after{animation:callring 1.8s ease-out infinite}
+.active-call[data-phase="incoming"] .active-avatar::after{animation:callring 1.8s ease-out infinite}
+.active-call[data-phase="connected"] .call-secure>span{background:#16a34a}
+.active-call[data-phase="connected"] .active-label{background:#16a34a14;color:#15803d}
+@keyframes callring{0%{transform:scale(.92);opacity:.75}100%{transform:scale(1.22);opacity:0}}
+.active-label{display:inline-block;margin-top:18px;padding:6px 14px;border-radius:999px;background:#4f46e50f;color:#5b53a8;font-size:10px;font-weight:850;letter-spacing:.12em;text-transform:uppercase}
+.active-call h2{font-size:clamp(23px,3.8vh,32px);line-height:1.15;letter-spacing:-.035em;margin:10px 0 0;word-break:break-word;text-align:center}
+.hold-notice{display:inline-block;max-width:100%;margin-top:8px;padding:7px 12px;border-radius:12px;background:#fffbeb;color:#92400e;border:1px solid #fbbf24;font-size:12px;font-weight:750;line-height:1.3}
+.call-meta{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:8px}
+.call-timer{font-size:14px;font-weight:750;color:#4b556f;font-variant-numeric:tabular-nums;letter-spacing:.04em}
+.call-quality{margin-top:0;padding:5px 12px;border-radius:999px;background:#ffffffcc;border:1px solid var(--line);color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.02em;box-shadow:0 6px 18px #34435e0a}
+.call-quality.good{background:#16a34a14;color:#15803d;border-color:#16a34a22}
+.call-quality.warn{background:#f59e0b1a;color:#b45309;border-color:#f59e0b33}
+.audio-unlock{display:block;margin:12px auto 0;border:0;border-radius:999px;padding:10px 18px;background:linear-gradient(135deg,#f59e0b,#f97316);color:#fff;font-size:12px;font-weight:800;box-shadow:0 10px 25px #f59e0b33;animation:statepulse 2s ease-in-out infinite}
+
+.call-body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;justify-content:flex-end;gap:12px;padding:10px 20px 14px}
+.call-controls{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;width:100%;max-width:300px;margin:0 auto}
+.control-btn{width:100%;height:62px;border:1px solid #ffffffcc;border-radius:20px;background:#ffffffcc;color:var(--text);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;box-shadow:0 10px 28px #34435e12,inset 0 1px 0 #fff;backdrop-filter:blur(14px);transition:transform .12s,background .12s,border-color .12s,box-shadow .12s}
+.control-btn:hover{background:#fff;box-shadow:0 14px 32px #34435e1a}
+.control-btn:active{transform:scale(.94)}
+.control-icon{font-size:19px;line-height:1}
+.control-label{font-size:9px;font-weight:750;color:var(--muted);line-height:1}
+.control-btn.active{background:#4f46e514;color:var(--accent);border-color:#4f46e533}
+.control-btn.active .control-label{color:var(--accent)}
+.control-btn:disabled{opacity:.5;cursor:not-allowed}
+.dtmf-panel{width:min(270px,100%);display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0 auto;padding:10px;border-radius:22px;background:#ffffffb8;border:1px solid #ffffffdd;box-shadow:0 12px 34px #34435e12;backdrop-filter:blur(14px)}
+.dtmf-panel button{height:40px;border:1px solid var(--line);border-radius:14px;background:#fff;color:var(--text);font-size:17px;font-weight:750;box-shadow:0 4px 14px #34435e0a;transition:transform .1s,background .1s}
+.dtmf-panel button:hover{background:var(--surface2)}
+.dtmf-panel button:active,.dtmf-panel button.pressed{transform:scale(.94);background:#4f46e518;color:var(--accent);border-color:#4f46e530}
+
+.call-footer{flex:0 0 auto;position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 22px calc(14px + env(safe-area-inset-bottom));border-top:1px solid #ffffffb3;background:linear-gradient(180deg,#ffffff66,#ffffffee 40%);box-shadow:0 -12px 34px #34435e0d;backdrop-filter:blur(18px)}
+.hangup-btn{width:72px;height:72px;border-radius:50%;border:0;background:linear-gradient(135deg,#fb7185,#e11d48);color:#fff;display:grid;place-items:center;box-shadow:0 16px 34px #e11d4840,inset 0 1px 0 #ffffff55;transition:transform .12s,filter .12s}
+.hangup-btn:hover{filter:brightness(1.05)}
+.hangup-btn:active{transform:scale(.93)}
+.hangup-icon{width:30px;height:30px;fill:currentColor;transform:rotate(135deg)}
+.active-status{min-height:18px;max-width:320px;text-align:center;font-size:12px;line-height:1.3;color:var(--muted);overflow-wrap:anywhere}
+.incoming-actions{display:flex;gap:10px;width:100%;max-width:320px;margin-bottom:2px}
+.answer-btn,.decline-btn{flex:1;min-width:0;border:0;border-radius:16px;height:48px;padding:0 16px;font-weight:850;box-shadow:0 10px 26px #34435e14}
+.answer-btn{background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff}
 .decline-btn{background:#fee2e2;color:#b91c1c}
+
+/* A premium dialer surface as well: glass keys, a luminous call action. */
+.phone-app{background:linear-gradient(180deg,#ffffffea,#f7f8fcf2)}
+.topbar{background:linear-gradient(180deg,#ffffffaa,transparent);backdrop-filter:blur(12px)}
+.keypad button{background:#ffffffd9;backdrop-filter:blur(10px);box-shadow:0 6px 20px #34435e0d,inset 0 1px 0 #fff}
+.keypad button:active{transform:scale(.94);background:#eef0ff}
+.call-btn{position:relative;background:linear-gradient(135deg,#2dd47f,#12a05a);box-shadow:0 16px 34px #16a34a40,inset 0 1px 0 #ffffff55}
+.call-btn::after{content:"";position:absolute;inset:-7px;border-radius:50%;border:2px solid #22c55e26;animation:phoneglow 2.4s ease-out infinite;pointer-events:none}
+@keyframes phoneglow{0%{transform:scale(.9);opacity:.9}100%{transform:scale(1.25);opacity:0}}
+@media (prefers-reduced-motion:reduce){.active-avatar::after,.audio-unlock,.state.connecting i,.call-btn::after{animation:none}}
+@media(max-height:700px){
+  .call-head{padding-top:16px}
+  .call-secure{display:none}
+  .active-avatar{width:66px;height:66px;border-radius:24px;margin-top:6px}
+  .active-label{margin-top:10px}
+  .active-call h2{font-size:23px}
+  .call-body{gap:8px;padding-top:6px;padding-bottom:8px}
+  .control-btn{height:52px;border-radius:16px}
+  .control-icon{font-size:17px}
+  .dtmf-panel button{height:34px}
+  .hangup-btn{width:62px;height:62px}
+  .call-footer{padding-top:8px;padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+}
+@media(max-height:560px){
+  .call-avatar-wrap{display:none}
+  .call-head{padding-top:10px}
+  .active-label{margin-top:0}
+  .call-body{padding-left:14px;padding-right:14px}
+  .control-btn{height:48px}
+  .dtmf-panel{grid-template-columns:repeat(6,1fr);width:100%}
+}
 
 /* ---- navigation: in the column, never over the content ---------------------- */
 .bottom-nav{flex:0 0 auto;height:calc(64px + env(safe-area-inset-bottom));background:#fffffff5;border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(4,1fr);padding:6px 8px calc(6px + env(safe-area-inset-bottom))}

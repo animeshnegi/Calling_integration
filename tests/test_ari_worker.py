@@ -292,6 +292,7 @@ class FakeTelephonyService:
         self.events = []
         self.webhook_scans = 0
         self.cleanup_scans = 0
+        self.recording_scans = 0
         self.ivr_ticks = 0
 
     def recover_incomplete_calls(self):
@@ -311,6 +312,9 @@ class FakeTelephonyService:
     def has_ivr_sessions(self):
         return False
 
+    def reconcile_recordings(self):
+        self.recording_scans += 1
+
     def cleanup_recordings(self):
         self.cleanup_scans += 1
 
@@ -321,6 +325,9 @@ class FailingEventHandlerService(FakeTelephonyService):
 
 
 class FailingMaintenanceService(FakeTelephonyService):
+    def reconcile_recordings(self):
+        raise RuntimeError("ARI unavailable")
+
     def process_webhook_deliveries(self):
         raise RuntimeError("database unavailable")
 
@@ -332,21 +339,24 @@ class FakeVoicemailNotifier:
     def __init__(self):
         self.processed = 0
 
-    def process(self):
+    def process_background(self):
         self.processed += 1
 
 
 class FailingVoicemailNotifier:
-    def process(self):
+    def process_background(self):
         raise RuntimeError("sendgrid unavailable")
 
 
-def run_main(monkeypatch, service, notifier, clock_values, *, stop_after_sleeps=1):
+def run_main(monkeypatch, service, notifier, clock_values, *, stop_after_sleeps=1, retry_callback=None):
     """Run ``ari_worker.main`` to the Nth loop sleep and return the wiring."""
+    retries = []
     app = SimpleNamespace(
         extensions={
             "telephony_service": service,
-            "telephony_config_sync": SimpleNamespace(apply=lambda: None),
+            "telephony_config_sync": SimpleNamespace(
+                apply=lambda: None, retry_pending=retry_callback or (lambda: retries.append(1))
+            ),
             "voicemail_notifier": notifier,
         },
         logger=RecordingLogger(),
@@ -379,7 +389,7 @@ def run_main(monkeypatch, service, notifier, clock_values, *, stop_after_sleeps=
     with pytest.raises(_StopLoop):
         ari_worker.main()
 
-    return SimpleNamespace(app=app, created=created, synced=synced, handler=handler, sleeps=sleeps)
+    return SimpleNamespace(app=app, created=created, synced=synced, handler=handler, sleeps=sleeps, retries=retries)
 
 
 def test_main_wires_ari_loop_and_runs_maintenance_on_schedule(monkeypatch):
@@ -400,7 +410,20 @@ def test_main_wires_ari_loop_and_runs_maintenance_on_schedule(monkeypatch):
     assert service.webhook_scans == 3
     assert notifier.processed == 2
     assert service.cleanup_scans == 1
+    assert service.recording_scans == 2
+    assert bundle.retries == [1, 1]  # pending configuration is retried every 30s
     assert bundle.sleeps == [30, 30, 30]
+
+
+def test_pending_config_failure_is_logged_and_does_not_stop_call_maintenance(monkeypatch):
+    def fail_retry():
+        raise ConnectionError("AMI temporarily down")
+
+    service = FakeTelephonyService()
+    bundle = run_main(monkeypatch, service, FakeVoicemailNotifier(), [40.0], retry_callback=fail_retry)
+    assert "Pending Asterisk RTP/configuration retry failed" in bundle.app.logger.exceptions
+    assert service.webhook_scans == 1 and service.recording_scans == 1
+    assert bundle.sleeps == [30]
 
 
 def test_main_event_handler_logs_failures_without_stopping_the_worker(monkeypatch):
@@ -424,8 +447,10 @@ def test_main_logs_maintenance_failures_and_keeps_scheduling(monkeypatch):
 
     assert bundle.app.logger.exceptions == [
         "Webhook delivery processing failed",
+        "Recording reconciliation failed",
         "Webhook delivery processing failed",
         "Voicemail email processing failed",
+        "Recording reconciliation failed",
         "Webhook delivery processing failed",
         "Voicemail email processing failed",
         "Recording retention cleanup failed",

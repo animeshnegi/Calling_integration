@@ -158,6 +158,27 @@ class CallStore:
             rows = db.execute("SELECT * FROM calls ORDER BY started_at DESC").fetchall()
         return [self._from_row(row) for row in rows if row is not None]
 
+    def mark_recording_finalizing(self, call_id: str) -> None:
+        """Never downgrade a finish event that won the teardown race."""
+        with self._lock, self._connect() as db:
+            db.execute(
+                "UPDATE calls SET recording_status='finalizing' "
+                "WHERE call_id=? AND recording_status='recording'", (call_id,),
+            )
+
+    def stale_recordings(self) -> list[Call]:
+        """Calls whose recording started but never reported finished.
+
+        The RecordingFinished event can be missed when the ARI worker restarts
+        at the wrong second; Asterisk may have stored the file while the row
+        stays 'recording' or 'finalizing' until something reconciles it.
+        """
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM calls WHERE recording_name IS NOT NULL AND recording_status IN ('recording','finalizing')"
+            ).fetchall()
+        return [self._from_row(row) for row in rows if row is not None]
+
     def search(
         self,
         *,
@@ -189,7 +210,11 @@ class CallStore:
             clauses.append("caller_id_number=?")
             values.append(number)
         if recordings_only:
-            clauses.append("recording_name IS NOT NULL AND recording_status NOT IN ('deleted','failed')")
+            # A failed recording is still a recording attempt the console must
+            # show - hiding it is what makes "the recording is not saving" look
+            # like silence instead of a named outcome. Only user-deleted rows
+            # leave the list.
+            clauses.append("(recording_name IS NOT NULL OR recording_status='failed') AND COALESCE(recording_status,'') != 'deleted'")
         if query:
             clauses.append("(phone LIKE ? OR call_id LIKE ? OR contact_id LIKE ? OR member_id LIKE ?)")
             pattern = f"%{query}%"

@@ -31,7 +31,16 @@ redeploy.
 
 `ASTERISK_EXTERNAL_ADDRESS` is only the first-boot fallback for the public SIP/RTP
 address: once the admin panel's **Service address** is configured it becomes the
-single source of truth (restart the `asterisk` container after changing it).
+single source of truth, and the configuration sync restarts Asterisk by itself
+when the rendered transports change - no manual restart needed. The Service
+address must be a name or IP that resolves to **this server's own public IP**.
+Call audio travels directly to whatever it resolves to, so a CDN or proxy DNS
+record (for example a proxied/“orange-cloud” Cloudflare record) points RTP at a
+machine that does not carry it and every call connects in silence; use a
+DNS-only record or the bare IP. A name that does not resolve at all is refused
+as a configuration error - the sync stops with a message naming the address,
+and the last configuration that rendered keeps running until the record is
+fixed.
 `ASTERISK_RTP_START`/`ASTERISK_RTP_END` (default `10000-10100`) drive both
 Asterisk's RTP range and Docker's published UDP ports, so they only need to match
 the range opened in the firewall.
@@ -252,7 +261,11 @@ SIP port 5060). Every customer credential sheet, API example and webhook URL
 follows automatically: phones are told to register at `sip.example.com:5060`,
 and all API documentation is built on `https://tel.example.com`.
 
-Example nginx server block for the web domain:
+Example nginx server block for the web domain. It carries two proxied paths:
+the consoles/API (`/`) and the softphone's WebSocket (`/ws`), forwarded to
+Asterisk's HTTP/WebSocket server on loopback (the compose file publishes
+`127.0.0.1:8088` for this; `127.0.0.1:8089` is the same listener over
+Asterisk's own TLS):
 
 ```nginx
 server {
@@ -266,11 +279,169 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Real-IP $remote_addr;
     }
+
+    include /etc/nginx/snippets/engineerip-softphone-websocket.conf;
 }
 ```
 
-Nothing is proxied for `sip.example.com` — it only needs the direct DNS record
-plus open firewall ports 5060/udp and the RTP range.
+The softphone dials `wss://<the host this page is served from>/ws` - the web
+domain, not the SIP domain. That is deliberate: the SIP address must resolve
+straight to this VM (or even be the bare IP) so call media can travel, and an
+IP cannot hold a TLS certificate - while the web domain already has HTTPS with
+a real one. The phone's settings offer the WebSocket address explicitly, so a
+different topology (e.g. carrying `/ws` on a SIP-domain vhost instead) is one
+field away.
+
+SIP and RTP on `sip.example.com` are never proxied - the plain DNS record plus
+open firewall ports 5060/udp and the RTP range are all a desk phone or a
+desktop softphone needs.
+
+### 1Panel / Docker nginx / OpenResty: install the active route
+
+**Windows-built, image-only deployment?** Docker import does not copy scripts to
+`/opt/Calling_integration`. Use the small tools archive or extract `/app/deploy-kit`
+from a newly built/imported API image first; see
+[`deploy/SOFTPHONE_TOOLS.md`](../deploy/SOFTPHONE_TOOLS.md). For the exact
+image/file upload and verification sequence, use
+[`deploy/RELEASE_CHECKLIST.md`](../deploy/RELEASE_CHECKLIST.md). After extracting the
+archive, `python3 scripts/finish-deployment.py latest tel.engineerip.com`
+performs the service start, host-tool refresh, route install and checks in one
+command. The current repair needs no server-side build, Git pull, image
+replacement or Asterisk restart.
+
+The host-nginx example below does not apply unchanged to a **bridged proxy
+container**. Its `127.0.0.1` is the proxy container itself. Pointing that upstream
+at `127.0.0.1:8088` cannot reach a loopback-published Asterisk port on the Docker
+host. A proxy in **host network mode** can use that loopback port.
+
+From the updated repository **on the Docker VM**, first preview:
+
+```bash
+sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com
+```
+
+Then apply the reviewed plan:
+
+```bash
+sudo python3 scripts/install-softphone-proxy.py --domain tel.engineerip.com \
+  --apply --connect-network
+```
+
+Use your web hostname. If multiple nginx/OpenResty containers are running, add
+`--proxy-container NAME` (find the intended proxy in `docker ps`). This is for
+nginx/OpenResty in Docker, not an external managed gateway or nginx on another VM.
+
+The installer:
+
+1. Finds the proxy binary/startup config and exact active HTTPS `server_name`
+   through `nginx -T`. It never prints that raw dump or Docker environments.
+2. Resolves the vhost to its **persistent mounted file on the VM**, refusing an
+   unmounted/read-only/ambiguous vhost or an unmanaged exact `/ws` location.
+3. Requires a real SIP WebSocket upgrade **directly from Asterisk** before any
+   modification. If Asterisk fails, it stops without changing files/networks.
+4. Uses host loopback for host networking. With bridging it uses Docker DNS
+   `engineerip-asterisk:8088`, reuses a shared network or, only with explicit
+   `--connect-network`, attaches the proxy to the existing private network.
+   No additional HTTP/ARI port is published to the Internet.
+5. Adds only the exact `/ws` location in that HTTPS vhost. It leaves certificates,
+   other sites and the existing Flask/API route intact. Before edits it saves a
+   private `*.engineerip-*.bak` backup. It preserves file-bind-mount inodes.
+6. Runs `nginx -t` and reloads **only the proxy**. Rejection restores the original
+   file and rolls back a newly added network attachment. It never restarts
+   Asterisk, changes SIP credentials or places calls.
+7. Checks `wss://HOST/ws` with trusted TLS and the real SIP subprotocol. It reports
+   **PASS only for a valid HTTP 101 handshake**. If the installed route is valid
+   but the public path still fails (e.g. an outer CDN/proxy), it keeps the valid
+   route/backup, reports `NOT VERIFIED`, and exits nonzero rather than claiming
+   the problem fixed.
+
+**Persist Docker networking in 1Panel.** A live `docker network connect` survives
+container restarts, not replacement/recreation. For a bridged proxy, add the shared
+network as an **external network in its 1Panel-managed Compose configuration**, and
+keep its existing network attachments. Adapt the actual service name; for example:
+
+```yaml
+services:
+  openresty:  # use the existing proxy service name
+    networks:
+      # Keep this service's existing networks as well.
+      - engineerip-telephony-internal
+networks:
+  engineerip-telephony-internal:
+    external: true
+    name: engineerip-telephony-internal
+```
+
+Do not add `networks` to a service that already uses `network_mode: host`; it does
+not need the additional network. The installer does not rewrite a panel's Compose
+file or remove existing networks. 1Panel may regenerate site configuration after
+panel edits: re-run the dry-run/check after such edits. Running the installer
+again is idempotent for its own route.
+
+The installer requires root, Python 3 and access to the local Docker daemon, but no
+SIP/provider password. Review and apply it on the VM; committing it to Git alone
+cannot alter the live proxy.
+
+### Apply and verify the softphone route (host nginx)
+
+The application does **not** serve `/ws`; Asterisk does. Rebuilding or importing
+the API image cannot add a route to an existing host nginx configuration. The
+ready-to-use snippet is `deploy/nginx/softphone-websocket.conf`. It exposes only
+`location = /ws`, preserves the Upgrade headers and SIP subprotocol, and uses
+`proxy_pass http://127.0.0.1:8088;` without rewriting the URI. It does not expose ARI.
+
+On the VM, from this repository:
+
+```bash
+sudo install -d -m 0755 /etc/nginx/snippets
+sudo install -m 0644 deploy/nginx/softphone-websocket.conf \
+  /etc/nginx/snippets/engineerip-softphone-websocket.conf
+sudo nginx -T 2>&1 | less
+```
+
+Find the **active HTTPS `server {}`** for your web domain, e.g.
+`server_name tel.engineerip.com;`. Back up its file, then include the snippet
+**inside that server block**, alongside `location /`, as shown above. Replace an
+existing `/ws` stanza rather than including it twice. Do not create a second
+`server_name` block or put the include at global/http scope. Copying the snippet
+without this include does not enable the route.
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+# No Asterisk restart is needed to add/reload this nginx route.
+docker port engineerip-asterisk 8088
+# Expected: 127.0.0.1:8088 (never 0.0.0.0).
+python3 scripts/check-softphone-websocket.py ws://127.0.0.1:8088/ws \
+  --origin https://tel.engineerip.com
+python3 scripts/check-softphone-websocket.py wss://tel.engineerip.com/ws
+```
+
+Use your own web hostname in place of `tel.engineerip.com`. The checker uses
+Python's standard library, verifies public TLS, sends `Sec-WebSocket-Protocol:
+sip`, validates the HTTP 101/accept/selected subprotocol, and exits nonzero on
+failure. It does not send SIP credentials, register a phone or place a call. A
+plain GET/HEAD is **not** a valid handshake test. Passing proves the transport
+upgrade only; registration and media still need their own checks.
+
+- **Direct check passes, public check returns 404:** inspect the active HTTPS
+  vhost, route precedence, and any upstream proxy/CDN. The public path is not
+  reaching a working Asterisk handler. Nginx may be forwarding it to Flask.
+- **Direct check also returns 404:** inspect Asterisk before changing nginx:
+  `docker exec engineerip-asterisk asterisk -rx "http show status"`,
+  `module show like res_http_websocket`, and
+  `module show like res_pjsip_transport_websocket`. The `/ws` URI and both modules
+  must be available. An HTTP 404 alone cannot prove which hop generated it.
+- **Direct connection refused:** check the running container/listener and its
+  loopback port mapping. If an older container needs recreation to apply changed
+  mappings, schedule it separately; recreating Asterisk can interrupt active calls.
+- **Public 502/503/504:** inspect nginx's error log and upstream connectivity.
+  If nginx itself runs in Docker, `127.0.0.1` is the nginx container, **not** the
+  host. Adapt the snippet's upstream to `asterisk:8088` on a shared private network;
+  do not expose the whole Asterisk HTTP server to the Internet.
+- **400/426:** with the checker (which sends proper Upgrade headers), inspect
+  header forwarding and the SIP subprotocol. With a plain HTTP probe these
+  responses may simply mean a handler requires a WebSocket upgrade.
+
 
 ## 15. Production hardening
 

@@ -35,10 +35,10 @@ class FakeAsterisk:
         self.hangups = []
         self.destroyed_bridges = []
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None, index=0):
         assert self.service.store.get(call_id) is not None
         self.created_call_id = call_id
-        return call_id
+        return f"{call_id}-employee" if int(index) <= 0 else f"{call_id}-employee-{int(index)}"
 
     def create_customer_leg(self, call_id, phone, provider_endpoint, employee_channel_id, caller_id_number=None):
         self.customer_calls.append((call_id, phone, provider_endpoint, employee_channel_id, caller_id_number))

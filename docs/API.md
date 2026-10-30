@@ -133,8 +133,8 @@ This endpoint is disabled by default (`ENABLE_ARI_WEBHOOK=false`) and requires f
 - Security response headers are added to Flask responses.
 - Diagnostic UI is disabled by default.
 - Browser call API is disabled by default.
-- Asterisk ARI TCP 8088 is private and is not published.
-- Asterisk WebRTC WSS port 8089 is not published by the current Compose configuration until trusted TLS/reverse-proxy access is ready.
+- Asterisk ARI TCP 8088 stays on the private Docker network and host loopback; only the exact `/ws` SIP transport is proxied publicly.
+- Asterisk TLS port 8089 is published on host loopback only. Public browser TLS normally terminates at nginx and `/ws` forwards to loopback HTTP 8088.
 
 ## Errors
 

@@ -1,18 +1,70 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import ipaddress
+import logging
 import os
 import re
+import socket
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from .admin import (
-    SettingsStore, endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox,
-    extension_scope, same_account,
+    SettingsStore, browser_username, endpoint_name as extension_endpoint, extension_digits, extension_key,
+    extension_mailbox, extension_scope, same_account,
 )
 from .ami import AsteriskAMI
+
+
+def configured_voicemail(store: SettingsStore, extensions: list[dict]) -> tuple[set[str], dict[str, str]]:
+    """Every extension whose mailbox must exist and take messages.
+
+    Two decisions lead here, and either one is enough: the desk's own
+    voicemail switch, and a "Voice Mail" step anywhere in a stored flow.
+    Before, only the switch counted - so a customer who answered Voice Mail
+    in the routing panel got a dead end ("the voicemail function is not
+    working"), because no mailbox and no dialplan extension were ever
+    written for it. The flow step is itself the decision to take messages.
+    """
+    keys = {str(row["key"]) for row in extensions if row.get("voicemail_enabled")}
+    by_key = {str(row["key"]): str(row["key"]) for row in extensions}
+    by_mailbox = {extension_mailbox(str(row["key"])): str(row["key"]) for row in extensions}
+
+    def resolve(value: str, number: str) -> str:
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        if value in by_key:
+            return value
+        mailbox = extension_mailbox(value)
+        if mailbox in by_mailbox:
+            return by_mailbox[mailbox]
+        digits = extension_digits(value)
+        for row in extensions:
+            if number and str(row.get("number") or "") == number and str(row.get("digits") or "") == digits:
+                return str(row["key"])
+        return ""
+
+    pins: dict[str, str] = {}
+    flows = [(row, str(row.get("phone_number") or "")) for row in store.list_call_routes()]
+    flows += [(row, "") for row in store.list_routing_flows()]
+    for flow, number in flows:
+        for node in ((flow.get("route") or {}).get("nodes") or []):
+            if not isinstance(node, dict) or str(node.get("type")) != "voicemail":
+                continue
+            if node.get("enabled") is False:
+                continue
+            key = resolve(node.get("mailbox"), number)
+            if key:
+                keys.add(key)
+                pin = str(node.get("pin") or "").strip()
+                if pin:
+                    # The Call Handling tab carries the mailbox settings;
+                    # the pin written there is the pin for the box.
+                    pins.setdefault(key, pin)
+    return keys, pins
 
 
 class TelephonyConfigSync:
@@ -25,6 +77,22 @@ class TelephonyConfigSync:
         self.dialplan_path = self.path.with_name("extensions.dynamic.conf")
         self.voicemail_path = self.path.with_name("voicemail.dynamic.conf")
         self.transports_path = self.path.with_name("pjsip.transports.conf")
+        # Asterisk's entrypoint publishes its actual Docker IPv4 address here.
+        # Its RTP engine reads the candidate mapping from the shared include;
+        # external_media_address can rewrite SDP c=, not ICE candidates.
+        self.ice_local_path = self.path.with_name("rtp.local-addresses")
+        self.ice_public_path = self.path.with_name("rtp.public-address")
+        self.ice_config_path = self.path.with_name("rtp.ice.conf")
+        self.ice_reload_marker = self.path.with_name("rtp-reload-pending")
+        # Shared by API workers, the ARI worker and Asterisk's boot helper, so
+        # one writer cannot clear another writer's pending reload marker.
+        self.sync_lock_path = self.path.with_name(".config-sync.lock")
+        # A restart the sync still owes Asterisk. Written before the attempt
+        # and cleared after it, so a failure (AMI briefly down while the
+        # containers boot) is picked up by the next sync instead of being
+        # lost - the files are already updated by then, and an unchanged
+        # render would otherwise never retry the restart.
+        self.restart_marker = self.path.with_name("restart-pending")
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -178,6 +246,53 @@ class TelephonyConfigSync:
     # to "local", which keeps this order when the far end offers its own.
     INTERNAL_CODECS = "g722,ulaw,alaw"
 
+    # Plain UDP phones (Zoiper, desk phones) can lose their NAT mapping after a
+    # minute or two of idleness. A short unauthenticated OPTIONS qualify keeps
+    # the contact reachable, and lets PJSIP_DIAL_CONTACTS() skip a phone that is
+    # genuinely offline instead of dialing a stale AOR name as a SIP URI.
+    PLAIN_AOR_OPTIONS = (
+        "max_contacts=5",
+        "remove_existing=yes",
+        "qualify_frequency=30",
+        "qualify_timeout=3",
+        "authenticate_qualify=no",
+        "remove_unavailable=yes",
+    )
+    BROWSER_AOR_OPTIONS = ("max_contacts=5", "remove_existing=yes")
+
+    @staticmethod
+    def _browser_sip_domain(host: str, media_address: str = "") -> str:
+        """A SIP-URI host JsSIP can parse in Asterisk's From/Contact headers.
+
+        PJSIP can fall back to gethostname() for a WebSocket dialog. Docker's
+        default single-label container ID can start with a digit, which is not
+        a valid SIP hostname: JsSIP drops the INVITE before replying or ringing.
+        Prefer the configured SIP Service address. If it is not a valid SIP
+        host, use the already-validated numeric media address, or the Docker
+        service name as a bootstrap fallback when no address exists yet.
+        """
+        def sip_host(value: str) -> str:
+            value = str(value or "").strip()
+            if not value:
+                return ""
+            try:
+                numeric = value[1:-1] if value.startswith("[") and value.endswith("]") else value
+                address = ipaddress.ip_address(numeric)
+                return f"[{address}]" if address.version == 6 else str(address)
+            except ValueError:
+                pass
+            # RFC 3261's final hostname label starts with a letter; earlier
+            # labels may start with a digit. Never put raw settings into a SIP
+            # URI unless every label and the overall length are valid.
+            if len(value) <= 253 and re.fullmatch(
+                r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+                r"[A-Za-z](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", value
+            ):
+                return value
+            return ""
+
+        return sip_host(host) or sip_host(media_address) or "asterisk"
+
     def external_address(self) -> str:
         """Single source of truth for the public SIP/RTP address: the admin
         panel's Service address (service_host). ASTERISK_EXTERNAL_ADDRESS in
@@ -185,8 +300,131 @@ class TelephonyConfigSync:
         configured = self._clean(self.store.get_settings().get("service_host") or "").strip()
         return configured or self._clean(os.environ.get("ASTERISK_EXTERNAL_ADDRESS", "")).strip()
 
+    # Address ranges that can never carry a stranger's RTP, checked against
+    # every media address the renderer advertises. Note the documentation
+    # ranges (TEST-NET etc.) are deliberately NOT listed: they are public for
+    # the purpose of this check and the tests and examples rely on them.
+    UNREACHABLE_MEDIA_NETWORKS = [
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+        "172.16.0.0/12", "192.0.0.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15",
+        "::/128", "::1/128", "fc00::/7", "fe80::/10",
+    ]
+    # Documentation ranges remain accepted for examples and offline tests.
+    DOCUMENTATION_MEDIA_NETWORKS = ["192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32"]
+    # Cloudflare's proxy edge - a proxied ("orange-cloud") DNS record resolves
+    # there. It is reachable, and still wrong: an HTTP proxy does not carry
+    # call audio. Keep in sync with https://www.cloudflare.com/ips/.
+    CLOUDFLARE_MEDIA_NETWORKS = [
+        "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+        "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+        "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+        "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+        "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+        "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+    ]
+
+    @classmethod
+    def _check_media_address(cls, address: str) -> None:
+        """Raise unless `address` is somewhere the internet can deliver RTP.
+
+        SDP and ICE promise the far end that audio has a path; an address that
+        cannot carry it produces the worst failure there is - a call that
+        connects, bills, and says nothing. So the promise is checked, not
+        assumed: private and special ranges are unreachable for a browser on
+        the internet, and Cloudflare's edge is an HTTP proxy that never
+        carries RTP.
+        """
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError:
+            raise ValueError(
+                f"Media address {address!r} is not an IP address. SDP and ICE "
+                "must advertise a numeric address; resolve the Service address "
+                "before it reaches this check."
+            ) from None
+        if parsed.is_multicast or parsed.is_reserved:
+            raise ValueError(
+                f"Media address {address} is a multicast or reserved address. "
+                "The Service address must be this server's public unicast IP."
+            )
+        for network in cls.UNREACHABLE_MEDIA_NETWORKS:
+            if parsed in ipaddress.ip_network(network):
+                raise ValueError(
+                    f"Media address {address} sits in {network}, which no browser "
+                    "on the internet can reach - the Service address must resolve "
+                    "to this server's own public IP (check for split-horizon DNS, "
+                    "or a record pointing at an internal address)."
+                )
+        for network in cls.CLOUDFLARE_MEDIA_NETWORKS:
+            if parsed in ipaddress.ip_network(network):
+                raise ValueError(
+                    f"Media address {address} is Cloudflare's proxy edge ({network}). "
+                    "A proxied (orange-cloud) DNS record hands out that edge, and an "
+                    "HTTP proxy never carries call audio: point the Service address "
+                    "at this server's own public IP with a DNS-only record."
+                )
+        if not parsed.is_global and not any(parsed in ipaddress.ip_network(network) for network in cls.DOCUMENTATION_MEDIA_NETWORKS):
+            raise ValueError(
+                f"Media address {address} is a non-public or special address. "
+                "The Service address must be this server's public IP."
+            )
+
+    @staticmethod
+    def _media_address(value: str) -> str:
+        """The validated numeric IP used for external SDP and ICE media.
+
+        PJSIP can use external_media_address for the SDP connection address;
+        the RTP engine separately needs the same IP in its ICE host-candidate
+        mapping. Resolve at render time (the API container has DNS): an
+        already-numeric address is kept as is, and a name is resolved to one.
+
+        A name that does not resolve is a configuration error and is raised as
+        one - keeping it would silently render a media address SDP cannot use,
+        which is exactly the silence this function exists to prevent. The error
+        stops the configuration sync; the last rendered configuration keeps
+        running until the Service address is fixed.
+        """
+        value = (value or "").strip()
+        if not value:
+            return value
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            pass
+        else:
+            TelephonyConfigSync._check_media_address(value)
+            return value
+        try:
+            infos = socket.getaddrinfo(value, None, proto=socket.IPPROTO_UDP)
+        except OSError as exc:
+            raise ValueError(
+                f"Service address {value!r} does not resolve to an IP address. "
+                "SDP and ICE must advertise a numeric media address, so the Service "
+                "address has to resolve to this server's own public IP - never a CDN "
+                "or proxy record, which points call audio at a machine that does not "
+                "carry it. Fix the DNS record or set the address to the public IP; "
+                "the Asterisk configuration keeps running unchanged until then."
+            ) from exc
+        if not infos:
+            raise ValueError(
+                f"Service address {value!r} resolved to no IP address. Set it to "
+                "this server's own public IP - SDP and ICE must advertise a numeric "
+                "media address."
+            )
+        # DNS can hand out several A records in rotating order. Pick the
+        # lowest address so two renders of one setting never disagree: a
+        # flapping rendered value looks like a transport change and would
+        # restart Asterisk on every sync.
+        candidates = sorted({info[4][0] for info in infos if info[0] == socket.AF_INET})
+        resolved = candidates[0] if candidates else infos[0][4][0]
+        TelephonyConfigSync._check_media_address(resolved)
+        return resolved
+
     def render_transports(self) -> str:
         external = self.external_address()
+        return self._render_transports(external, self._media_address(external))
+
+    def _render_transports(self, external: str, media: str) -> str:
         lines = [
             "; AUTO-GENERATED by EngineerIP Telephony. Do not edit manually.",
             "; The public address comes from the admin panel (Settings -> Service",
@@ -198,7 +436,7 @@ class TelephonyConfigSync:
             lines.extend([f"[transport-{proto}]", "type=transport", f"protocol={proto}", "bind=0.0.0.0:5060"])
             if external:
                 lines.extend([
-                    f"external_media_address={external}",
+                    f"external_media_address={media}",
                     f"external_signaling_address={external}",
                     *[f"local_net={net}" for net in self.LOCAL_NETS],
                 ])
@@ -206,11 +444,11 @@ class TelephonyConfigSync:
         # Browser softphones use Asterisk's HTTP/WebSocket server on 8089.
         # The WSS transport does not bind its own TCP socket; it is carried
         # by res_http_websocket through the HTTPS listener. Signalling needs no
-        # public address here (the browser is already connected through the
-        # reverse proxy), but the *media* does: ICE candidates for a WebRTC call
-        # are built from this transport, so without external_media_address the
-        # browser is told to send audio to the container's private address and
-        # the call stays silent.
+        # public signalling address here (the browser is already connected
+        # through the reverse proxy). PJSIP may rewrite the SDP connection
+        # address with external_media_address, depending on its NAT rules; ICE
+        # candidates are generated separately by res_rtp_asterisk and require
+        # the rtp.ice.conf mapping below.
         lines.extend([
             "[transport-wss]",
             "type=transport",
@@ -219,7 +457,7 @@ class TelephonyConfigSync:
         ])
         if external:
             lines.extend([
-                f"external_media_address={external}",
+                f"external_media_address={media}",
                 *[f"local_net={net}" for net in self.LOCAL_NETS],
             ])
         lines.append("")
@@ -240,7 +478,7 @@ class TelephonyConfigSync:
             return ["supported_algorithms_uas=SHA-256,MD5"]
         return []
 
-    def render_pjsip(self) -> str:
+    def render_pjsip(self, media_address: str = "") -> str:
         lines = [
             "; AUTO-GENERATED by EngineerIP Telephony. Do not edit manually.",
             "; This file contains SIP credentials and is shared only on the internal Docker network.",
@@ -261,6 +499,7 @@ class TelephonyConfigSync:
                 sip_by_digits.setdefault(extension_digits(row["extension"]), row)
         # Admin-chosen digest challenge (md5/sha256/both), same for every account.
         auth_digest = self._auth_digest_lines()
+        browser_domain: str | None = None
         configured_extensions: set[str] = set()
         # Every extension answers on its globally unique identity: the digits plus
         # the phone number they belong to (`101-13025550001`). `PJSIP/101` is not
@@ -311,12 +550,15 @@ class TelephonyConfigSync:
                 # or softphone must keep registering with the credential on its
                 # sheet.
                 aors.append(username)
-                alias_aor = [f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", ""]
-            # The endpoint the dial plan rings by default: plain RTP, so the
-            # hardware phones and softphones the credentials are shared with can
-            # answer it. A browser cannot use this media at all, which is why an
-            # extension that answers in the browser is dialled on its WebRTC
-            # endpoint instead - see `web_endpoints` in render_dialplan.
+                alias_aor = [f"[{username}]", "type=aor", *self.PLAIN_AOR_OPTIONS, ""]
+            # The endpoint the dial plan rings for a desk phone or softphone:
+            # plain RTP on the phone's own transport. A browser cannot use this
+            # media at all - and, just as importantly, a Zoiper cannot use
+            # DTLS-SRTP. Media is negotiated by the endpoint a call is placed
+            # towards and PJSIP matches a request to the endpoint named after
+            # its From user, so the two device kinds must never share one
+            # identity: a shared name answers a Zoiper with a WebRTC offer and
+            # the call connects, bills, and stays completely silent.
             endpoint_body = [
                 f"context={context}", "disallow=all", f"allow={self.INTERNAL_CODECS}", f"transport=transport-{transport}",
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
@@ -325,15 +567,18 @@ class TelephonyConfigSync:
                 f"allow_subscribe={'yes' if ext.get('voicemail_enabled') else 'no'}",
                 *([f"mailboxes={mailbox}@engineerip"] if ext.get("voicemail_enabled") else []),
             ]
-            alias_endpoint = []
-            if ext.get("webrtc_enabled") and username and username != section:
-                # A browser needs a WebRTC-capable endpoint. It is created only
-                # for an extension whose WebRTC switch is on, so switching WebRTC
-                # on - or off - never touches the plain UDP/TCP endpoint above:
-                # hardware phones and softphones keep registering and answering
-                # either way. Both endpoints share the same auth and AORs, so a
-                # device signed in on the browser is reached whichever of the two
-                # is dialled.
+            browser_endpoint = []
+            if ext.get("webrtc_enabled") and username:
+                # A browser gets a WebRTC-capable endpoint of its own: its own
+                # name (`AUMPNO_101-webrtc`), its own AOR to register against,
+                # and its own auth object holding the same password. The plain
+                # identity above belongs to plain SIP alone, so a desk phone or
+                # Zoiper and a browser signed in "as the same extension" are
+                # two separate registrations that can never trade media modes.
+                # Switching WebRTC on or off only adds or removes this block.
+                browser_name = browser_username(username)
+                if browser_domain is None:
+                    browser_domain = self._browser_sip_domain(self.external_address(), media_address)
                 browser_endpoint_body = [
                     line for line in endpoint_body
                     if not line.startswith(("transport=", "allow="))
@@ -342,21 +587,50 @@ class TelephonyConfigSync:
                     *browser_endpoint_body,
                     "transport=transport-wss",
                     "webrtc=yes",
+                    # Asterisk constructs both its initial From and Contact
+                    # from this domain when placing a call to the browser.
+                    # Without it, a numeric-leading Docker hostname can make
+                    # JsSIP silently discard the INVITE before ringing.
+                    f"from_domain={browser_domain}",
+                    # For browser legs, relay HOLD/UNHOLD by SIP re-INVITE so
+                    # the softphone can show the remote hold and play its local
+                    # hold loop. Plain SIP/carrier legs keep the PBX's MOH.
+                    "moh_passthrough=yes",
                     f"allow={self.INTERNAL_CODECS}",
                 ]
+                browser_endpoint = [
+                    f"[{browser_name}]", "type=aor", *self.BROWSER_AOR_OPTIONS, "",
+                    f"[auth-{section}-webrtc]", "type=auth", "auth_type=userpass",
+                    f"username={browser_name}", f"password={password}", *auth_digest, "",
+                    f"[{browser_name}]", "type=endpoint", f"aors={browser_name}", f"auth=auth-{section}-webrtc",
+                    f"callerid=<{digits}>", *browser_endpoint_body, "",
+                ]
+            # The alias ENDPOINT named after the SIP username - the third
+            # object from the comment above. This is load-bearing: Asterisk's
+            # username/auth_username identification is a lookup of an endpoint
+            # object BY THAT NAME (res_pjsip_endpoint_identifier_user.c:
+            # find_endpoint()), so a request signed with the SIP username is
+            # unidentified and rejected unless an endpoint of that exact name
+            # exists. It shares the plain identity's auth and AORs but is its
+            # own endpoint: a request signed `AUMPNO_101` is answered with the
+            # plain RTP body here, never the browser's DTLS-SRTP - the media
+            # mode follows the endpoint name the client signed in with.
+            alias_endpoint: list[str] = []
+            if username and username != section:
                 alias_endpoint = [
                     f"[{username}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{section}",
-                    f"callerid=<{digits}>", *browser_endpoint_body, "",
+                    *endpoint_body, "",
                 ]
             lines.extend([
                 f"; Extension {extension}",
-                f"[{section}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                f"[{section}]", "type=aor", *self.PLAIN_AOR_OPTIONS, "",
                 *alias_aor,
                 f"[auth-{section}]", "type=auth", "auth_type=userpass",
                 f"username={username}", f"password={password}", *auth_digest, "",
                 f"[{section}]", "type=endpoint", f"aors={','.join(aors)}", f"auth=auth-{section}",
                 *endpoint_body, "",
                 *alias_endpoint,
+                *browser_endpoint,
             ])
 
         extension_owners = self._extension_owners()
@@ -408,8 +682,8 @@ class TelephonyConfigSync:
             ]
             lines.extend([
                 f"; Customer device {username}",
-                f"[{endpoint}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
-                f"[{username}]", "type=aor", "max_contacts=5", "remove_existing=yes", "",
+                f"[{endpoint}]", "type=aor", *self.PLAIN_AOR_OPTIONS, "",
+                f"[{username}]", "type=aor", *self.PLAIN_AOR_OPTIONS, "",
                 f"[auth-{endpoint}]", "type=auth", "auth_type=userpass", f"username={username}", f"password={password}", *auth_digest, "",
                 f"[{endpoint}]", "type=endpoint", f"aors={endpoint},{username}", f"auth=auth-{endpoint}",
                 *device_body, "",
@@ -456,22 +730,33 @@ class TelephonyConfigSync:
                 ])
         return "\n".join(lines) + "\n"
 
+    def voicemail_keys(self, extensions: list[dict]) -> set[str]:
+        keys, self._flow_voicemail_pins = configured_voicemail(self.store, extensions)
+        return keys
+
     def render_voicemail(self) -> str:
         lines = [
             "; AUTO-GENERATED EngineerIP voicemail mailboxes.",
             "[engineerip]",
         ]
-        for extension in self.store.list_extensions():
-            if not extension["active"] or not extension.get("voicemail_enabled"):
-                continue
+        extensions = [row for row in self.store.list_extensions() if row["active"]]
+        live = self.voicemail_keys(extensions)
+        for extension in extensions:
             key = self._clean(extension["key"])
+            if key not in {self._clean(item) for item in live}:
+                continue
             # Every extension has its own mailbox, and two 101s on different
             # numbers have two separate boxes: the mailbox is the digits plus the
             # number they belong to (`101-13025550001`), never the digits alone
             # and never `101@engineerip`. The pin is the one stored for the row.
             mailbox = extension_mailbox(key)
             self.store.alias_voicemail_pin(mailbox, extension_digits(key))
-            pin = self._clean(self.store.get_voicemail_pin(mailbox) or self.store.get_voicemail_pin(key))
+            pin = self._clean(
+                self.store.get_voicemail_pin(mailbox)
+                or self.store.get_voicemail_pin(key)
+                or (getattr(self, "_flow_voicemail_pins", {}) or {}).get(str(extension["key"]))
+                or extension_digits(key)
+            )
             display_name = self._clean(extension.get("display_name") or f"Extension {extension_digits(key)}")
             lines.append(f"{mailbox} => {pin},{display_name},,,attach=no|delete=no")
         lines.append("")
@@ -497,7 +782,7 @@ class TelephonyConfigSync:
         """
         settings = self.store.get_settings()
         extensions = [row for row in self.store.list_extensions() if row["active"]]
-        voicemail_exts = {row["key"] for row in extensions if row.get("voicemail_enabled")}
+        voicemail_exts = self.voicemail_keys(extensions)
         numbers = [number for number in self.store.list_numbers() if number["active"]]
         default_digits = self._fallback_digits(str(settings.get("default_extension", "")).strip())
         fallback_digits = self._fallback_digits(str(settings.get("inbound_fallback_extension", "")).strip())
@@ -536,21 +821,40 @@ class TelephonyConfigSync:
                 key = key_for(number, candidate)
                 if key:
                     return key
-            return ""
+            return self.store.number_flow_anchor(str(number["number"]))
 
-        # An extension that answers in the browser (WebRTC enabled) is dialled on
-        # its WebRTC alias endpoint: media is negotiated by the endpoint the call
-        # is dialled *towards*, so a plain RTP offer to a browser arrives with no
-        # audio. Only extensions whose switch is on are affected - and their plain
-        # endpoint keeps working, so hardware phones are never disabled by it.
+        # An extension that answers in the browser (WebRTC enabled) carries a
+        # second, browser-only identity - see `render_pjsip`. Media is
+        # negotiated by the endpoint a call is dialled *towards*: a plain RTP
+        # offer reaches no browser, and a DTLS-SRTP offer reaches no Zoiper.
+        # The dial plan therefore rings both endpoints of such an extension in
+        # one Dial - a parallel ring, one leg per device kind, each with the
+        # media that device can speak - and the first to answer takes the call.
         web_endpoints: dict[str, str] = {}
         for row in self.store.list_extensions():
             username = self._clean(row.get("sip_username"))
-            if row.get("active") and row.get("webrtc_enabled") and username and username != extension_endpoint(str(row["key"])):
-                web_endpoints[str(row["key"])] = username
+            if row.get("active") and row.get("webrtc_enabled") and username:
+                web_endpoints[str(row["key"])] = browser_username(username)
 
-        def dial_target(key: str) -> str:
-            return web_endpoints.get(str(key)) or extension_endpoint(key)
+        def ring_targets(key: str) -> list[str]:
+            """Endpoint names whose *registered contacts* can answer a call.
+
+            Returning `PJSIP/<endpoint>` here used to make Asterisk dial the
+            endpoint's AOR list as a URI when no device was registered:
+            `ast_sip_session_create_outgoing()` falls back to `endpoint->aors`,
+            which can be `section,username`. PJSIP then logs "invalid URI
+            'section,username'" for that parallel leg. The dialplan must ask
+            PJSIP_DIAL_CONTACTS() for reachable contacts instead.
+            """
+            plain = extension_endpoint(key)
+            web = web_endpoints.get(str(key))
+            return [web, plain] if web else [plain]
+
+        def ring_dial_argument(key: str) -> str:
+            # One Dial, with each endpoint's reachable contacts expanded by
+            # PJSIP_DIAL_CONTACTS(). Empty expansions (unregistered devices)
+            # are ignored by Asterisk's '&' splitter in app_dial.c.
+            return "&".join(f"${{PJSIP_DIAL_CONTACTS({name})}}" for name in ring_targets(key))
 
         def ring_extension(key: str, spoken: str = "") -> list[str]:
             """What it takes to ring one extension, wherever it was reached from.
@@ -560,20 +864,27 @@ class TelephonyConfigSync:
             out, or to that extension's voicemail. An extension with nobody
             signed in gets a spoken answer instead of the silence a failed Dial
             leaves behind.
+
+            An extension with the WebRTC switch on rings its browser identity
+            and its plain identity together: the browser answers DTLS-SRTP and
+            nothing else does, a desk phone or softphone answers plain RTP and
+            nothing else does, and one shared identity used to answer the wrong
+            device with the wrong media - a call that connected and stayed
+            silent.
             """
-            target = dial_target(key)
             mailbox = extension_mailbox(key)
-            if key in voicemail_exts:
-                return [
-                    f" same => n,Dial(PJSIP/{target},30)",
-                    f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({mailbox}@engineerip,u))',
-                    " same => n,Hangup()",
-                ]
-            return [
-                f" same => n,Dial(PJSIP/{target},30)",
-                ' same => n,ExecIf($["${DIALSTATUS}" = "CHANUNAVAIL"]?Playback(ss-noservice))',
-                " same => n,Hangup()",
-            ]
+            tail = (
+                [f' same => n,ExecIf($["${{DIALSTATUS}}" != "ANSWER"]?VoiceMail({mailbox}@engineerip,u))']
+                if key in voicemail_exts else
+                [' same => n,ExecIf($["${DIALSTATUS}" = "CHANUNAVAIL"]?Playback(ss-noservice))']
+            )
+            # Asterisk separates parallel channels inside one Dial() with
+            # `&` - a comma separates the application's arguments instead, so
+            # `Dial(PJSIP/a,PJSIP/b,30)` would ring only `PJSIP/a` with a
+            # garbage timeout. PJSIP_DIAL_CONTACTS() expands each endpoint to
+            # its reachable contact URIs (joined with `&`), or an empty string
+            # for an unregistered device. The timeout follows after the comma.
+            return [f" same => n,Dial({ring_dial_argument(key)},30)", *tail, " same => n,Hangup()"]
 
         def extension_route(dialed: str, key: str) -> list[str]:
             """One dialable three-digit number in this context, ringing one device."""
@@ -659,12 +970,15 @@ class TelephonyConfigSync:
         # pjsip, see render_pjsip), and they are the *current phone number's* - so
         # 101 on +13025550001 and 101 on +13025550002 present their own line. A
         # device with no number is politely refused instead of leaking another
-        # customer's identity.
+        # customer's identity. The trunk test must compare *inside* $[...], like
+        # every other condition here, so GotoIf receives 0/1; the shape
+        # $["${X}"]=""] never evaluates and leaves a truthy string, which sent
+        # every outbound call to blocked - trunk assigned or not.
         outbound: list[str] = []
         for pattern in ("_+X.", "_XXXX."):
             outbound.extend([
                 f"exten => {pattern},1,NoOp(Outbound ${{EXTEN}} from endpoint ${{CHANNEL(endpoint)}})",
-                ' same => n,GotoIf($["${OUTBOUND_TRUNK}"]=""]?blocked)',
+                ' same => n,GotoIf($["${OUTBOUND_TRUNK}"=""]?blocked)',
                 " same => n,Set(CALLERID(num)=${OUTBOUND_CID})",
                 " same => n,Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)",
                 " same => n,Hangup()",
@@ -763,7 +1077,7 @@ class TelephonyConfigSync:
         lines.extend([
             "exten => s,1,NoOp(Inbound provider call ${CALLERID(all)})",
             *(
-                [f" same => n,Dial(PJSIP/{dial_target(default_key)},30)"]
+                [f" same => n,Dial({ring_dial_argument(default_key)},30)"]
                 if default_key else
                 [" same => n,Playback(ss-noservice)"]
             ),
@@ -786,11 +1100,123 @@ class TelephonyConfigSync:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
 
+    def _write_if_changed(self, path: Path, content: str) -> bool:
+        previous = path.read_text(encoding="utf-8") if path.exists() else None
+        if previous == content:
+            return False
+        self._atomic_write(path, content)
+        return True
+
+    def _prepare_webrtc_ice(self, media: str) -> None:
+        """Map Asterisk's Docker IPv4 to the validated public RTP address.
+
+        Asterisk's external_media_address can rewrite SDP c= but NOT the ICE
+        candidates generated by res_rtp_asterisk. The new Asterisk image writes
+        its own local addresses into the shared volume and includes this file
+        from rtp.conf. Older images have no local-address file; do not break
+        their normal SIP calling while they are waiting to be upgraded.
+        """
+        public = str(ipaddress.IPv4Address(media)) if media and ipaddress.ip_address(media).version == 4 else ""
+        if media and not public:
+            logging.getLogger(__name__).warning(
+                "Automatic WebRTC ICE host mapping supports the default IPv4 Docker/NAT topology only; "
+                "configure and verify candidates separately for an IPv6-only media address."
+            )
+        self._write_if_changed(self.ice_public_path, f"{public}\n" if public else "")
+        if not self.ice_local_path.exists():
+            if public:
+                logging.getLogger(__name__).warning(
+                    "Asterisk did not publish its local ICE address; update the Asterisk image as well as the API image."
+                )
+            return
+        local_addresses = set()
+        for line in self.ice_local_path.read_text(encoding="utf-8").splitlines():
+            try:
+                address = ipaddress.IPv4Address(line.strip())
+            except ipaddress.AddressValueError:
+                continue
+            if not (address.is_loopback or address.is_unspecified or address.is_link_local or address.is_multicast):
+                local_addresses.add(address)
+        if public and not local_addresses:
+            logging.getLogger(__name__).warning(
+                "No Asterisk container IPv4 was found; the public WebRTC ICE mapping could not be generated."
+            )
+        content = "; Managed for browser WebRTC; Docker publishes the same RTP ports.\n[ice_host_candidates]\n"
+        if public:
+            content += "".join(f"{address} => {public}\n" for address in sorted(local_addresses))
+        previous = self.ice_config_path.read_text(encoding="utf-8") if self.ice_config_path.exists() else None
+        if previous != content:
+            # If AMI is unavailable the next sync retries, even though the
+            # generated include has already reached the shared volume.
+            self._atomic_write(self.ice_reload_marker, "pending\n")
+            self._atomic_write(self.ice_config_path, content)
+
+    @staticmethod
+    def _section_names(text: str) -> set[str]:
+        """The `[section]` headers of a generated config file."""
+        return set(re.findall(r"^\[([^\]]+)\]", text, re.MULTILINE))
+
     def apply(self) -> None:
-        self._atomic_write(self.transports_path, self.render_transports())
-        self._atomic_write(self.path, self.render_pjsip())
+        self._run_locked()
+
+    def retry_pending(self) -> bool:
+        """Retry failed RTP reloads/restarts without polling AMI on every tick."""
+        if not (self.ice_reload_marker.exists() or self.restart_marker.exists()):
+            return False
+        return self._run_locked(only_pending=True)
+
+    def _run_locked(self, only_pending: bool = False) -> bool:
+        # Lock the whole render/write/reload transaction across processes and
+        # containers. Atomic renames alone cannot stop one worker from clearing
+        # another worker's pending reload after writing a newer ICE mapping.
+        with self.sync_lock_path.open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                # Another writer may have completed while we waited for lock.
+                if only_pending and not (self.ice_reload_marker.exists() or self.restart_marker.exists()):
+                    return False
+                self._apply_locked()
+                return True
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _apply_locked(self) -> None:
+        external = self.external_address()
+        media = self._media_address(external)
+        transports = self._render_transports(external, media)
+        previous_transports = self.transports_path.read_text(encoding="utf-8") if self.transports_path.exists() else ""
+        pjsip = self.render_pjsip(media)
+        previous_pjsip = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+        removed = self._section_names(previous_pjsip) - self._section_names(pjsip)
+        restart_needed = transports != previous_transports or bool(removed) or self.restart_marker.exists()
+        if restart_needed:
+            # Record the owed restart before any writes or RTP reload: a crash
+            # mid-transaction must not make the next render appear unchanged.
+            self._atomic_write(self.restart_marker, "pending\n")
+        self._prepare_webrtc_ice(media)
+        self._atomic_write(self.transports_path, transports)
+        self._atomic_write(self.path, pjsip)
         self._atomic_write(self.dialplan_path, self.render_dialplan())
         self._atomic_write(self.voicemail_path, self.render_voicemail())
+        if self.ice_reload_marker.exists():
+            # Reloading the RTP engine reads the candidate mapping for future
+            # calls; it does not tear down established carrier or SIP calls.
+            self.ami.reload_rtp()
+            self.ice_reload_marker.unlink(missing_ok=True)
+        if restart_needed:
+            # Two kinds of change only ever reach a running Asterisk through a
+            # restart. Transports are read at startup - `pjsip reload` never
+            # rebinds them, so a Service address set after first boot would
+            # leave every call advertising the container's private address for
+            # media: connected, billed, and completely silent. And a section
+            # that vanishes from the file (switching WebRTC off, deleting an
+            # extension) is documented to linger in memory after a reload -
+            # a stale WebRTC endpoint would keep answering a phone that must
+            # never see it again. Additions and edits reload cleanly. The
+            # restart itself waits for calls to clear (see AsteriskAMI).
+            self.ami.restart()
+            self.restart_marker.unlink(missing_ok=True)
+            return
         self.ami.reload_pjsip()
         self.ami.reload_voicemail()
         self.ami.reload_dialplan()

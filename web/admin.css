@@ -1840,3 +1840,162 @@ a.nav-item{
   .scope-field{width:100%;flex-wrap:wrap}
   .scope-field select,.scope-bar .customer-number-select{width:100%;flex:1 1 auto}
 }
+
+/* Routing studio — two focused editors, shared by operators and customers. */
+.routing-studio{--routing-tint:color-mix(in srgb,var(--acc-1) 8%,var(--surface-solid))}
+.routing-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin:6px 0 24px}
+.routing-eyebrow{display:block;color:var(--tone-violet);font-size:10px;font-weight:750;letter-spacing:.14em;margin-bottom:9px}
+.routing-heading h2{font-size:clamp(22px,2.3vw,32px);font-weight:680;letter-spacing:-.045em;line-height:1.2}
+.routing-heading p{color:var(--text-2);font-size:13px;margin-top:10px;line-height:1.7}
+.routing-badge{flex-shrink:0;font-size:11px;border:1px solid var(--line-strong);border-radius:30px;padding:8px 12px;color:var(--text-2);background:var(--surface)}
+.routing-modes{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:25px}
+.routing-modes button{display:flex;align-items:center;text-align:left;gap:15px;border:1px solid var(--line-strong);border-radius:17px;padding:21px 23px;background:var(--surface);color:var(--text);box-shadow:var(--shadow-sm);transition:border-color .18s,background .18s}
+.routing-modes button[aria-selected=true]{border-color:var(--acc-1);background:var(--routing-tint);box-shadow:0 0 0 1px var(--acc-1),var(--shadow-sm)}
+.routing-mode-icon{display:grid;place-items:center;width:43px;height:43px;border:1px solid var(--line-strong);border-radius:12px;font-size:23px;background:var(--surface-solid);color:var(--tone-violet);flex-shrink:0}
+.routing-modes b{display:block;font-size:15px;letter-spacing:-.02em;font-weight:650}
+.routing-modes small{display:block;font-size:11px;line-height:1.6;color:var(--text-2);margin-top:4px}
+.routing-mode-arrow{margin-left:auto;color:var(--text-3);font-size:20px}
+.routing-studio .scope-bar{box-shadow:none;background:transparent;padding:0 0 22px;border:0;border-bottom:1px solid var(--line);border-radius:0;margin:0 0 25px}
+.routing-studio .flow-toolbar{background:none;border:0;box-shadow:none;padding:0;margin:0 0 20px;align-items:center;gap:20px}
+.routing-studio .flow-toolbar h3{font-size:21px;font-weight:650;letter-spacing:-.035em}
+.routing-studio .flow-toolbar p{font-size:12px;color:var(--text-2);line-height:1.7;margin-top:6px}
+.routing-studio .flow-toolbar .tools{align-items:flex-end;gap:12px}
+.routing-target-label{display:block;min-width:200px;max-width:310px}
+.routing-target-label>span{display:block;font-size:10px;color:var(--text-2);font-weight:650;margin-bottom:6px}
+.routing-studio .flow-toolbar select{max-width:310px;width:100%;font-size:12px;min-height:40px}
+.routing-studio #save-route{min-height:40px;white-space:nowrap;box-shadow:0 4px 12px #4f46e526}
+.routing-save-status{font-size:12px;padding:11px 15px;background:var(--routing-tint);border:1px solid var(--line-strong);border-radius:10px;margin-bottom:18px;color:var(--text-2)}
+.routing-recipe{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:15px 20px;border:1px solid var(--line);border-radius:12px;background:var(--surface);margin-bottom:20px;overflow-x:auto}
+.routing-recipe>span{display:flex;align-items:center;gap:8px;white-space:nowrap;font-size:11px;color:var(--text-2);font-weight:550}
+.routing-recipe i{font-family:var(--font-mono);font-size:10px;font-style:normal;color:var(--tone-violet)}
+.routing-recipe>b{font-size:16px;font-weight:400;color:var(--text-3)}
+.routing-studio .flow-layout{grid-template-columns:255px minmax(0,1fr);align-items:start;gap:20px}
+.routing-studio .routing-library{padding:23px 17px;position:static;border-radius:16px;background:var(--surface-solid);box-shadow:var(--shadow-sm)}
+.routing-library .title{padding:0 5px 16px}
+.routing-library .title>span,.library-divider{font-size:9px;font-weight:750;letter-spacing:.13em;color:var(--text-3)}
+.routing-library .title h3{font-size:17px;letter-spacing:-.025em;margin:8px 0}
+.routing-library .title p{font-size:11px;line-height:1.7;color:var(--text-2)}
+.routing-studio .routing-library button{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:11px;padding:12px 9px;background:transparent;margin:0 0 8px;width:100%;color:var(--text);text-align:left;box-shadow:none}
+.routing-studio .routing-library button:hover{background:var(--routing-tint);border-color:var(--line-strong);transform:none}
+.routing-library .tile{width:33px;height:33px;border-radius:9px;display:grid;place-items:center;flex-shrink:0;font-size:16px}
+.routing-library .copy{min-width:0;flex:1}.routing-library .copy>b{display:block;font-size:11.5px;font-weight:650}.routing-library .copy small{font-size:10px;color:var(--text-2);display:block;margin-top:4px;line-height:1.5}
+.library-add{font-size:14px;color:var(--text-3)}
+.library-divider{padding:17px 5px 11px}.routing-library-note{font-size:10.5px;line-height:1.8;color:var(--text-3);border-top:1px solid var(--line);padding:15px 5px 0;margin-top:15px}
+.routing-studio .canvas{background:var(--surface-solid);border:1px solid var(--line-strong);border-radius:16px;padding:24px 35px 26px;min-height:480px;box-shadow:var(--shadow-sm);overflow:hidden}
+.routing-studio .canvas-status{font-size:10px;letter-spacing:.1em;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:24px;color:var(--text-2);gap:12px}
+.routing-studio .canvas-status small{letter-spacing:0;font-size:10px;color:var(--text-3)}
+.routing-studio .canvas .flow-node{border:1px solid var(--line-strong);background:var(--surface);border-radius:12px;padding:18px 15px;box-shadow:none;transform:none;animation:none}
+.routing-studio .canvas .flow-node:hover{border-color:var(--acc-1);background:var(--routing-tint);transform:none}
+.routing-studio .canvas .flow-node .copy b{font-size:13px;font-weight:650;letter-spacing:-.015em}.routing-studio .canvas .flow-node .copy small{font-size:11px;line-height:1.6;color:var(--text-2);margin-top:5px;overflow-wrap:anywhere}
+.routing-studio .canvas .flow-node .icon{width:37px;height:37px;border-radius:10px;box-shadow:none;flex-shrink:0}
+.routing-studio .canvas .flow-node .step{font-family:var(--font-mono);font-size:10px;color:var(--text-3)}
+.routing-studio .canvas .flow-node .remove{position:static;width:24px;height:24px;font-size:10px;opacity:1;color:var(--text-3);background:transparent}
+.routing-studio .canvas .incoming{background:var(--routing-tint);border-color:var(--line-strong)}
+.routing-studio .flow-drop{font-size:11px;color:var(--text-3);border:1px dashed var(--line-strong);border-radius:10px;padding:18px;margin-top:24px;background:transparent;min-height:0}
+.routing-studio .canvas-empty{margin-bottom:24px;padding:16px;max-width:none}.routing-studio .canvas-empty ol{display:none}
+.routing-studio .routing-departments{margin-top:25px;padding:24px;border-radius:16px;background:var(--surface-solid);box-shadow:var(--shadow-sm)}
+.routing-departments>.title{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:16px}.routing-departments h3{font-size:17px;letter-spacing:-.025em}.routing-departments .title p{font-size:11px;color:var(--text-2);margin-top:7px}
+.routing-studio[data-flow-mode=extension] .routing-library,.routing-studio[data-flow-mode=extension] .routing-recipe,.routing-studio[data-flow-mode=extension] .routing-line-scope,.routing-studio[data-flow-mode=extension] .canvas>.incoming,.routing-studio[data-flow-mode=extension] .flow-drop,.routing-studio[data-flow-mode=extension] .canvas-status,.routing-studio[data-flow-mode=extension] .canvas-empty{display:none}
+.routing-studio[data-flow-mode=extension] .flow-layout{grid-template-columns:1fr}
+.routing-studio[data-flow-mode=extension] .canvas{padding:0;background:transparent;border:0;box-shadow:none;min-height:0;overflow:visible}
+.routing-studio[data-flow-mode=extension] .scope-bar:has(.scope-field[data-admin-only][hidden]){display:none}
+.desk-editor{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(270px,1fr);gap:22px;align-items:start}
+.handling-card,.ring-sources{background:var(--surface-solid);border:1px solid var(--line-strong);border-radius:15px;box-shadow:var(--shadow-sm)}
+.handling-card header{display:flex;align-items:center;gap:13px;padding:21px 23px;border-bottom:1px solid var(--line)}
+.handling-step{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--routing-tint);color:var(--tone-violet);font-family:var(--font-mono);font-size:11px;flex-shrink:0}
+.handling-card h4,.ring-sources h4{font-size:15px;letter-spacing:-.025em;font-weight:650}.handling-card header p{font-size:10.5px;color:var(--text-2);line-height:1.6;margin-top:5px}
+.routing-toggle{display:flex;align-items:center;gap:7px;margin-left:auto;font-size:11px;white-space:nowrap;color:var(--text-2)}
+.routing-toggle input,.ring-source input{accent-color:var(--acc-1);width:17px;height:17px;flex-shrink:0}
+.handling-body{padding:22px 24px}.handling-body .field{margin:0 0 14px}.handling-body .field:last-child{margin-bottom:0}
+.handling-body select,.handling-body input{width:100%;min-height:42px;font-size:12px}
+.routing-field-note,.routing-policy-note{font-size:11px;color:var(--text-2);line-height:1.8}
+.handling-connector{display:flex;align-items:center;gap:10px;font-size:10px;color:var(--text-3);padding:12px 26px}.handling-connector span{font-size:19px}
+.routing-inline-note{background:var(--routing-tint);padding:12px;border-radius:9px;font-size:11px;line-height:1.7;margin:5px 0 15px;color:var(--text-2)}
+.routing-policy-note{padding:16px 8px;line-height:1.8;font-size:10.5px}
+.ring-sources{padding:25px}.ring-sources>p{font-size:11px;line-height:1.85;color:var(--text-2);margin-top:11px}
+.ring-source-list{margin-top:20px;display:grid;gap:9px}.ring-source{display:flex;align-items:center;gap:11px;border:1px solid var(--line-strong);border-radius:10px;padding:14px 12px;cursor:pointer;background:var(--surface)}
+.ring-source:has(input:checked){background:var(--routing-tint);border-color:var(--acc-1)}
+.ring-source>span:nth-child(2){flex:1;min-width:0}.ring-source b{font-size:12px;font-weight:650;letter-spacing:.01em;overflow-wrap:anywhere}.ring-source small{display:block;color:var(--text-2);font-size:10px;margin-top:5px}
+.source-primary{font-size:8px;font-weight:750;letter-spacing:.08em;color:var(--tone-violet)}
+.ring-source-footnote{font-size:10px;color:var(--text-3);line-height:1.85;margin-top:20px;border-top:1px solid var(--line);padding-top:17px}
+.routing-blank{padding:35px;color:var(--text-2);font-size:13px}.routing-blank p{margin-top:12px}
+.routing-studio button:focus-visible,.routing-studio [tabindex]:focus-visible{outline:2px solid var(--acc-1);outline-offset:4px}
+@media(max-width:1100px){.routing-studio .flow-toolbar{align-items:flex-start;flex-direction:column}.routing-studio .flow-toolbar .tools{width:100%;justify-content:space-between}.desk-editor{grid-template-columns:minmax(0,1fr)}.routing-target-label{max-width:none;flex:1}.routing-studio .flow-toolbar select{max-width:none}.routing-recipe{gap:18px}}
+@media(max-width:760px){.routing-heading{align-items:flex-start}.routing-badge{display:none}.routing-modes{gap:10px}.routing-modes button{padding:15px 12px;gap:10px}.routing-mode-icon{display:none}.routing-mode-arrow{display:none}.routing-modes b{font-size:13px}.routing-modes small{font-size:10px}.routing-studio .flow-layout{grid-template-columns:1fr}.routing-studio .routing-library{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:16px}.routing-library .title{grid-column:1/-1}.routing-library .library-divider,.routing-library-note{display:none}.routing-studio .routing-library button{margin:0}.routing-studio .canvas{padding:20px 16px}.routing-departments>.title{align-items:flex-start;flex-direction:column}.handling-card header{padding:18px 15px;flex-wrap:wrap}.handling-body{padding:18px}.ring-sources{padding:20px}.routing-toggle{margin-left:45px}.routing-recipe{padding:13px;font-size:10px}}
+@media(prefers-reduced-motion:reduce){.routing-studio *{animation:none!important;transition:none!important}}
+.routing-destination-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:8px 0;max-height:300px;overflow:auto;padding:2px}
+.routing-destination{display:flex;align-items:center;gap:10px;border:1px solid var(--line-strong);border-radius:10px;padding:12px;cursor:pointer;background:var(--surface)}
+.routing-destination:has(input:checked){border-color:var(--acc-1);background:color-mix(in srgb,var(--acc-1) 8%,var(--surface-solid))}
+.routing-destination input[type=checkbox]{width:17px;height:17px;min-height:0;accent-color:var(--acc-1);flex-shrink:0}
+.routing-destination b{font-size:11px;font-weight:650;line-height:1.5}.routing-destination small{display:block;font-size:10px;color:var(--text-2);margin-top:4px}
+@media(max-width:600px){.routing-destination-grid{grid-template-columns:1fr}}
+.routing-studio[data-flow-mode=number] .routing-target-label{display:none}
+.routing-studio[data-flow-mode=number] .flow-toolbar .tools{margin-left:auto;width:auto}
+/* Reset inherited flex bases: in a stacked toolbar 320px meant 320px HEIGHT. */
+.routing-studio .flow-toolbar .tools{flex:0 1 auto}
+.routing-studio .canvas .flow-node .copy{flex:1}
+.routing-studio .canvas .flow-node .step{position:static;margin-left:auto;flex-shrink:0}
+.routing-studio .canvas .flow-node .remove{flex-shrink:0}
+.routing-studio .canvas .flow-node.incoming{background:var(--routing-tint);color:var(--text);box-shadow:none}
+.routing-studio .canvas .flow-node.incoming .copy small{color:var(--text-2)}
+.routing-studio .canvas .flow-node.incoming .step{color:var(--text-2)}
+body .routing-studio .flow-toolbar{background:transparent}
+@media(max-width:760px){.routing-studio .flow-toolbar .tools{gap:12px;align-items:stretch}.routing-studio .routing-target-label{flex-basis:100%}.routing-studio .canvas .flow-node .copy small{white-space:normal}}
+
+/* Workflow selection: one searchable, customer-scoped chooser for both roles. */
+.routing-studio .routing-heading{margin-bottom:22px}
+.routing-studio .routing-heading h2{font-size:clamp(23px,2vw,29px);letter-spacing:-.035em}
+.routing-studio .routing-modes{gap:12px;margin-bottom:20px}
+.routing-studio .routing-modes button{padding:18px 20px;gap:13px;box-shadow:none}
+.routing-studio .routing-modes button[aria-selected=true]{box-shadow:0 0 0 1px var(--acc-1)}
+.routing-mode-count{margin-left:auto;color:var(--text-2);font-size:10px;white-space:nowrap;padding:5px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface)}
+.routing-selection{padding:21px 23px;background:var(--surface-solid);border:1px solid var(--line-strong);border-radius:15px;box-shadow:var(--shadow-sm);margin-bottom:28px}
+.routing-selection-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:17px}
+.routing-selection-head .routing-eyebrow{font-size:9px;margin-bottom:6px;letter-spacing:.12em}
+.routing-selection-head h3{font-size:17px;font-weight:650;letter-spacing:-.025em}
+.routing-studio .routing-selection .scope-bar{margin:0;padding:0;border:0;background:transparent;gap:0;flex:0 1 280px;min-width:0}
+.routing-selection .scope-field{width:100%;gap:7px;align-items:flex-start;flex-direction:column}
+.routing-selection .scope-field>span{font-size:10px;letter-spacing:0;text-transform:none;color:var(--text-2)}
+.routing-selection .scope-field select{width:100%;max-width:none;min-height:38px;font-size:12px}
+.routing-studio .routing-line-scope,.routing-studio .routing-target-label{display:none!important}
+body.customer-theme .routing-selection .scope-bar{display:none}
+.routing-search-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:13px}
+.routing-search{display:flex;align-items:center;gap:8px;flex:1;max-width:480px;background:var(--input-bg);border:1px solid var(--line-strong);border-radius:9px;padding:0 12px;color:var(--text-3)}
+.routing-search:focus-within{border-color:var(--acc-1);box-shadow:0 0 0 3px #6366f119}
+.routing-search>span{font-size:22px;line-height:1}
+.routing-search input[type=search]{border:0;box-shadow:none;background:transparent;outline:none;min-width:0;min-height:40px;width:100%;padding:8px 0;font-size:12px;color:var(--text)}
+.routing-search input[type=search]:focus{box-shadow:none;outline:none}
+.routing-search kbd{font:10px var(--font-sans);font-weight:500;color:var(--text-3);border:1px solid var(--line);border-radius:4px;padding:3px 5px}
+#routing-workflow-count{font-size:11px;color:var(--text-2);white-space:nowrap}
+.routing-workflow-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;max-height:246px;overflow:auto;padding:2px;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+.routing-workflow-options button{display:flex;align-items:center;gap:10px;padding:14px 12px;border:1px solid var(--line-strong);border-radius:10px;color:var(--text);background:var(--surface-solid);text-align:left;min-width:0;transition:background .16s,border-color .16s}
+.routing-workflow-options button:hover{border-color:var(--acc-1);background:var(--routing-tint)}
+.routing-workflow-options button[aria-selected=true]{border-color:var(--acc-1);background:var(--routing-tint);box-shadow:inset 0 0 0 .5px var(--acc-1)}
+.workflow-choice-icon{display:grid;place-items:center;width:31px;height:34px;border-radius:8px;flex-shrink:0;background:var(--routing-tint);color:var(--tone-violet);font-size:18px}
+.workflow-choice-copy{min-width:0;flex:1}.workflow-choice-copy>b{display:block;font-size:12px;letter-spacing:.01em;font-weight:650;overflow-wrap:anywhere}
+.workflow-choice-copy>span{display:block;font-size:10.5px;line-height:1.6;color:var(--text-2);margin-top:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.workflow-choice-copy>small{display:block;font-size:9px;line-height:1.6;margin-top:3px;color:var(--text-3);overflow-wrap:anywhere}
+.workflow-choice-state{align-self:stretch;display:flex;flex-direction:column;align-items:flex-end;justify-content:space-between;gap:8px;flex-shrink:0}
+.workflow-choice-state>span{font-size:8px;white-space:nowrap;color:var(--text-3)}
+.workflow-choice-state>i{font-style:normal;font-size:10px;width:16px;height:16px;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line-strong);color:var(--text-3)}
+[aria-selected=true]>.workflow-choice-state>i{background:var(--fill-1);color:white;border-color:var(--fill-1)}
+.routing-no-results{padding:23px 12px;color:var(--text-2);font-size:12px;line-height:1.7;text-align:center;border:1px dashed var(--line-strong);border-radius:10px;margin:2px}
+.routing-studio .flow-toolbar{margin-bottom:19px;align-items:center}
+.routing-studio .routing-selected-meta{font-size:11px;line-height:1.6;color:var(--text-2);margin-top:6px}
+.routing-studio .flow-toolbar #routing-editor-description{font-size:11px;color:var(--text-3);margin-top:7px}
+.routing-studio .flow-toolbar .tools{margin-left:auto!important;width:auto!important;flex:0 0 auto}
+.routing-studio #save-route{min-width:128px}
+.routing-editor-empty{border:1px dashed var(--line-strong);border-radius:14px;background:var(--surface);text-align:center;padding:42px 20px;color:var(--text-2)}
+.routing-editor-empty>span{font-size:27px;color:var(--tone-violet)}
+.routing-editor-empty h3{font-size:16px;color:var(--text);margin-top:12px}.routing-editor-empty p{font-size:12px;line-height:1.8;margin-top:8px}
+.routing-studio[data-has-target=false] .flow-toolbar,.routing-studio[data-has-target=false] .routing-recipe,.routing-studio[data-has-target=false] .flow-layout{display:none}
+.routing-team-details{margin-top:25px;border:1px solid var(--line-strong);border-radius:13px;background:var(--surface-solid);box-shadow:var(--shadow-sm)}
+.routing-team-details>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:19px 22px;cursor:pointer;list-style:none;font-size:13px;font-weight:650;color:var(--text)}
+.routing-team-details>summary::-webkit-details-marker{display:none}.routing-team-details>summary small{display:block;color:var(--text-2);font-size:10.5px;font-weight:400;margin-top:5px}
+.routing-team-details>summary>span:last-child{font-size:21px;color:var(--text-3);font-weight:400}
+.routing-team-details[open]>summary{border-bottom:1px solid var(--line)}
+.routing-team-details[open]>summary>span:last-child{transform:rotate(45deg)}
+.routing-studio .routing-team-details .routing-departments{margin:0;border:0;box-shadow:none;border-radius:0 0 13px 13px}
+@media(max-width:1250px){.routing-workflow-options{grid-template-columns:repeat(2,minmax(0,1fr))}.routing-studio .routing-mode-count{display:none}}
+@media(max-width:760px){.routing-studio .routing-modes button{padding:15px 12px}.routing-studio .routing-modes b{font-size:12px;line-height:1.45}.routing-selection{padding:17px 15px;margin-bottom:22px}.routing-selection-head{align-items:stretch;flex-direction:column;gap:12px}.routing-studio .routing-selection .scope-bar{flex:0 1 auto;width:100%}.routing-workflow-options{grid-template-columns:1fr;max-height:250px}.routing-workflow-options button{padding:13px 12px}.routing-search-row{gap:10px;align-items:stretch;flex-wrap:wrap}.routing-search{max-width:none;flex-basis:100%}.routing-search kbd{display:none}#routing-workflow-count{font-size:10px}.routing-studio .flow-toolbar{gap:14px}.routing-studio .flow-toolbar .tools{width:100%!important;margin-left:0!important}.routing-studio #save-route{flex:1}.routing-studio .flow-toolbar h3{font-size:19px}.routing-team-details>summary{padding:17px 16px}.routing-studio .routing-team-details .routing-departments{padding:17px}}
+.routing-studio .flow-toolbar>div:first-child{min-width:0;max-width:100%;overflow-wrap:anywhere}

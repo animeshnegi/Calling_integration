@@ -53,16 +53,33 @@ class VoicemailStore:
         self._lock = threading.Lock()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def _folder(self, mailbox: str, folder: str) -> Path:
+    def _folder(self, mailbox: str, folder: str, *, create: bool = False) -> Path:
         mailbox = mailbox_name(mailbox)
         if not MAILBOX_RE.fullmatch(str(mailbox)) or folder.lower() not in FOLDERS:
             raise ValueError("Invalid voicemail mailbox or folder")
         context_root = (self.root / self.context).resolve()
         path = self.root / self.context / str(mailbox) / FOLDERS[folder.lower()]
-        path.mkdir(parents=True, exist_ok=True)
         resolved = path.resolve()
         if context_root not in resolved.parents:
             raise ValueError("Invalid voicemail path")
+        if create:
+            # API-created directories must be writable by Asterisk too. The API
+            # process normally has umask 0022, so mkdir(mode=2770) alone would
+            # still strip group write. Chmod only directories we just made; old
+            # directories may belong to the separate Asterisk UID.
+            for directory in (self.root / self.context, self.root / self.context / str(mailbox), path):
+                try:
+                    directory.mkdir(mode=0o770)
+                except FileExistsError:
+                    if not directory.is_dir():
+                        raise
+                else:
+                    directory.chmod(0o2770)
+            resolved = path.resolve()
+            if context_root not in resolved.parents:
+                raise ValueError("Invalid voicemail path")
+        # Asterisk creates folders as needed. Listing or playing an existing
+        # message must not require permission to create Old or Urgent.
         return resolved
 
     @staticmethod
@@ -111,11 +128,18 @@ class VoicemailStore:
                     audio = self._audio_path(directory, stem)
                     if not audio:
                         continue
+                    try:
+                        info = audio.stat()
+                    except OSError:
+                        # A user or Asterisk can move/delete this message while
+                        # a scan is listing it. One vanished file must not stop
+                        # notifications for the rest of the mailboxes.
+                        continue
                     meta = self._metadata(text_file)
                     try:
                         timestamp = datetime.fromtimestamp(int(meta.get("origtime", "0")), timezone.utc).isoformat()
                     except (TypeError, ValueError, OSError):
-                        timestamp = datetime.fromtimestamp(audio.stat().st_mtime, timezone.utc).isoformat()
+                        timestamp = datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()
                     try:
                         duration = max(0, int(meta.get("duration", "0") or 0))
                     except (TypeError, ValueError):
@@ -124,7 +148,7 @@ class VoicemailStore:
                         "id": f"{box}:{folder_key}:{stem}", "mailbox": box, "folder": folder_key,
                         "message": stem, "caller_id": meta.get("callerid", "Unknown caller"),
                         "caller_channel": meta.get("callerchan", ""), "duration_seconds": duration,
-                        "received_at": timestamp, "format": audio.suffix.lstrip(".").lower(), "size_bytes": audio.stat().st_size,
+                        "received_at": timestamp, "format": audio.suffix.lstrip(".").lower(), "size_bytes": info.st_size,
                     })
         return sorted(result, key=lambda item: item["received_at"], reverse=True)
 
@@ -206,7 +230,7 @@ class VoicemailStore:
                 )
                 if not stems:
                     continue
-                destination = self._folder(str(mailbox), folder_key)
+                destination = self._folder(str(mailbox), folder_key, create=True)
                 existing = {path.stem for path in destination.glob("msg[0-9][0-9][0-9][0-9].*")}
                 for stem in stems:
                     index = 0
@@ -235,7 +259,7 @@ class VoicemailStore:
             files = self._message_files(source, message)
             if not files:
                 return False
-            destination = self._folder(mailbox, "old")
+            destination = self._folder(mailbox, "old", create=True)
             existing = {path.stem for path in destination.glob("msg[0-9][0-9][0-9][0-9].*")}
             index = 0
             while f"msg{index:04d}" in existing:

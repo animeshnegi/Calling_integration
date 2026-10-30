@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from dialplan_helpers import dynamic_dial
+
 from app import create_app
 from app import admin as admin_module
 from app.config import Config
@@ -29,7 +31,7 @@ class FakeAsterisk:
     def health(self):
         return {"system": "Asterisk Test"}
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None, index=0):
         return call_id
 
     def hangup(self, channel_id):
@@ -436,15 +438,19 @@ def test_extension_flows_are_validated_and_tenant_isolated(tmp_path):
     store.save_extension({"extension": "701", "sip_password": "theta-secret"}, user_id)
     store.save_extension({"extension": "801", "sip_password": "iota-secret"}, other_id)
 
+    # A desk's flow is its no-answer policy: ring the desk, take a message.
     own = customer.post("/admin/api/call-routes", json={
         "target_type": "extension", "target": "701",
-        "route": {"nodes": [{"type": "simultaneous", "extensions": ["701"], "timeout": 25, "configured": True}]},
+        "route": {"nodes": [
+            {"type": "extension", "extension": "701", "configured": True},
+            {"type": "voicemail", "mailbox": "701", "configured": True},
+        ]},
     })
     assert own.status_code == 200
 
     foreign_ring = customer.post("/admin/api/call-routes", json={
         "target_type": "extension", "target": "701",
-        "route": {"nodes": [{"type": "simultaneous", "extensions": ["801"], "timeout": 25, "configured": True}]},
+        "route": {"nodes": [{"type": "extension", "extension": "801", "configured": True}]},
     })
     assert foreign_ring.status_code == 400
 
@@ -454,8 +460,19 @@ def test_extension_flows_are_validated_and_tenant_isolated(tmp_path):
     })
     assert foreign_target.status_code == 400
 
-    bad_timeout = customer.post("/admin/api/call-routes", json={
+    # Journey steps on a desk are refused and named, so the customer knows to
+    # move them to the main number where the engine runs them.
+    journey = customer.post("/admin/api/call-routes", json={
         "target_type": "extension", "target": "701",
+        "route": {"nodes": [{"type": "simultaneous", "extensions": ["701"], "timeout": 25, "configured": True}]},
+    })
+    assert journey.status_code == 400
+    assert "main number" in (journey.get_json().get("error") or "")
+
+    store.save_group({"name": "Team", "members": ["701"], "timeout": 25}, user_id)
+    group_id = str(next(g["id"] for g in store.list_groups(user_id) if g["name"] == "Team"))
+    bad_timeout = customer.post("/admin/api/call-routes", json={
+        "target_type": "group", "target": group_id,
         "route": {"nodes": [{"type": "simultaneous", "extensions": ["701"], "timeout": 400}]},
     })
     assert bad_timeout.status_code == 400
@@ -649,7 +666,7 @@ class RingingAsterisk(FakeAsterisk):
     def start_bridge_recording(self, *args, **kwargs):
         return None
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None, timeout=30):
         leg = f"{call_id}-employee" if index == 0 else f"{call_id}-employee-{index}"
         self.legs.append((leg, extension))
         self.live.append(leg)
@@ -937,6 +954,74 @@ def test_sip_username_is_generated_and_cannot_be_changed(tmp_path):
         assert identity(item["extension"]).match(item["sip_username"]), item
 
 
+def test_the_browser_softphone_gets_its_own_identity_beside_the_phone(tmp_path):
+    """One password, two identities: the browser's carries `-webrtc`.
+
+    Asterisk answers a request on the endpoint named after its From user, so a
+    Zoiper and a browser sharing one username trade media modes - the phone is
+    offered DTLS-SRTP and every call connects and goes silent. The credentials
+    sheet therefore shows the browser identity only while the extension answers
+    in the browser, and the Softphone button exists only then.
+    """
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    _, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")
+    plain = store.reveal_extension_credentials("101", user_id)
+    assert plain["webrtc_enabled"] is False
+    assert plain["webrtc_sip_username"] == ""
+
+    store.save_extension({"extension": "101", "webrtc_enabled": True}, user_id)
+    both = store.reveal_extension_credentials("101", user_id)
+    assert both["webrtc_enabled"] is True
+    assert both["webrtc_sip_username"] == f"{both['sip_username']}-webrtc"
+    assert both["webrtc_sip_username"] != both["sip_username"]
+    # The password is shared on purpose: one secret to know, two identities.
+    assert both["sip_password"] == plain["sip_password"]
+
+
+def test_browser_ice_servers_travel_with_the_softphone_sign_in(tmp_path):
+    """The softphone needs STUN (or TURN) to find a media path at all.
+
+    A browser behind a router only offers its private address without one and
+    every call rings in silence. The platform's list is validated as the
+    browser's own RTCIceServer shape and handed to every softphone window the
+    console opens; blank means the built-in public STUN default.
+    """
+    app = make_app(tmp_path)
+    store = app.extensions["settings_store"]
+    admin = admin_client(app)
+    customer, user_id = customer_client(app, "meridian")
+    assign_number(store, user_id, "+13025550001")
+
+    # A TURN server with credentials, as a network behind strict NAT needs.
+    saved = admin.post("/admin/api/settings", json={
+        "ice_servers": '[{"urls": "turn:turn.example.com", "username": "u", "credential": "p"}]',
+    })
+    assert saved.status_code == 200, saved.json
+    credentials = customer.get("/admin/api/extensions/101/credentials").json["credentials"]
+    assert credentials["ice_servers"] == [
+        {"urls": "turn:turn.example.com", "username": "u", "credential": "p"}
+    ]
+
+    # Malformed JSON, wrong shapes and non-ICE schemes are refused up front -
+    # an RTCPeerConnection would reject them at call time, mid-call.
+    for bad in (
+        "not json",
+        '{"urls": "stun:host"}',
+        '[{"urls": "http://turn.example.com"}]',
+        '[{"urls": "stun:host", "username": 5}]',
+        "[]junk",
+    ):
+        refused = admin.post("/admin/api/settings", json={"ice_servers": bad})
+        assert refused.status_code == 400, (bad, refused.json)
+
+    # Blank falls back to the built-in STUN list, and the sheet says so.
+    assert admin.post("/admin/api/settings", json={"ice_servers": ""}).status_code == 200
+    credentials = customer.get("/admin/api/extensions/101/credentials").json["credentials"]
+    assert credentials["ice_servers"] == []
+
+
 def test_the_effective_password_is_the_one_that_rotates(tmp_path):
     """Changing the password changes what the phone actually registers with."""
     app = make_app(tmp_path)
@@ -1101,6 +1186,11 @@ def test_the_registration_address_is_the_platforms_own_not_the_carriers(tmp_path
 
     saved = admin.post("/admin/api/settings", json={"service_host": "pbx.meridian-voice.test", "service_sip_port": "5080"})
     assert saved.status_code == 200, saved.json
+    # Saved but not applied: the name resolves to nothing, and SDP and ICE need
+    # a numeric media address. The save is accepted (DNS can come up after the
+    # address is entered) but the console is told exactly why the running
+    # Asterisk configuration did not change - never silently left stale.
+    assert "does not resolve" in saved.json.get("warning", ""), saved.json
     for client in (admin, customer):
         credentials = client.get("/admin/api/extensions/101/credentials").json["credentials"]
         assert credentials["server"] == "pbx.meridian-voice.test"
@@ -1620,7 +1710,10 @@ def test_three_101s_on_three_numbers_stay_three_devices(tmp_path):
     for number in keys:
         assert f"[101-{number.lstrip('+')}]\ntype=aor" in rendered
     assert "[101]\ntype=aor" not in rendered
-    assert rendered.count("identify_by=username,auth_username") == 3
+    # Each extension renders two endpoints - the canonical one and the alias
+    # named after its SIP username (the name endpoint identification looks
+    # up) - so identify_by appears twice per extension.
+    assert rendered.count("identify_by=username,auth_username") == 6
 
 
 def test_a_lines_device_is_dialled_by_its_endpoint_name(tmp_path):
@@ -1662,11 +1755,11 @@ def test_a_lines_device_is_dialled_by_its_endpoint_name(tmp_path):
     dialplan = sync.render_dialplan()
     # Every extension of a line is dialled by its own globally unique name; the
     # digits alone name nothing, which is what keeps the two 101s apart.
-    assert "Dial(PJSIP/101-13025550001,30)" in dialplan
-    assert "Dial(PJSIP/101-13025550002,30)" in dialplan
+    assert dynamic_dial("101-13025550001") in dialplan
+    assert dynamic_dial("101-13025550002") in dialplan
     # Only the carrier trunk is dialled as user@trunk; every internal device is
     # named, so no key with its `@` ever reaches PJSIP as a section name.
-    targets = [target for target in re.findall(r"Dial\(PJSIP/([^,)]+)", dialplan) if not target.startswith("${")]
+    targets = re.findall(r"PJSIP_DIAL_CONTACTS\(([^)]+)\)", dialplan)
     assert targets and not any("@" in target for target in targets), targets
     pjsip = sync.render_pjsip()
     assert "\n[101-13025550001]\n" in pjsip and "\n[101-13025550002]\n" in pjsip
@@ -1722,3 +1815,56 @@ def test_extensions_run_from_101_to_999_only_and_the_card_softphone_key_is_uniqu
         response = admin.get(f"/admin/api/extensions/{quote(key, safe='')}/credentials")
         assert response.status_code == 200, (key, response.json)
         assert response.json["credentials"]["sip_username"].endswith(f"_101_{expected}"), response.json
+
+
+def test_saving_a_flow_applies_the_mailbox_and_dialplan(tmp_path, monkeypatch):
+    from app.telephony_config import TelephonyConfigSync
+    from app.admin import extension_mailbox
+    import app as app_module
+
+    app = make_app(tmp_path)
+    customer, owner = customer_client(app, "mailbox-save")
+    store = app.extensions["settings_store"]
+    store.save_extension({"extension": "401", "sip_password": "desk-password-401"}, owner)
+    applied = []
+
+    class ReloadAMI:
+        def reload_pjsip(self): applied.append("pjsip")
+        def reload_voicemail(self): applied.append("voicemail")
+        def reload_dialplan(self): applied.append("dialplan")
+        def restart(self): applied.append("restart")
+
+    real_sync = TelephonyConfigSync
+
+    def sync_with_fake_ami(settings, ami, path):
+        return real_sync(settings, ReloadAMI(), path)
+
+    monkeypatch.setattr(app_module, "TelephonyConfigSync", sync_with_fake_ami)
+    # Seed the current transport/PJSIP files so the flow edit exercises reload,
+    # not a first-boot restart. No network services are used by this test.
+    sync = real_sync(store, ReloadAMI(), app.config["ASTERISK_DYNAMIC_CONFIG_PATH"])
+    sync.apply()
+    applied.clear()
+    response = customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "401", "name": "Desk",
+        "route": {"nodes": [
+            {"type": "extension", "extension": "401", "timeout": 15, "configured": True},
+            {"type": "voicemail", "mailbox": "401", "pin": "4567", "enabled": True, "configured": True},
+        ]},
+    })
+    assert response.status_code == 200, response.json
+    assert not response.json["warning"]
+    assert applied == ["pjsip", "voicemail", "dialplan"]
+    assert f"{extension_mailbox('401')} => 4567," in sync.voicemail_path.read_text()
+    assert "[voicemail-inbound]" in sync.dialplan_path.read_text()
+
+    def broken_sync(*args):
+        raise RuntimeError("AMI unavailable")
+
+    monkeypatch.setattr(app_module, "TelephonyConfigSync", broken_sync)
+    response = customer.post("/admin/api/call-routes", json={
+        "target_type": "extension", "target": "401", "name": "Desk",
+        "route": {"nodes": [{"type": "extension", "extension": "401", "configured": True}]},
+    })
+    assert response.status_code == 200
+    assert response.json["warning"] == "AMI unavailable"

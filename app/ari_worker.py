@@ -51,8 +51,22 @@ def main() -> None:
     last_cleanup = 0.0
     last_voicemail_scan = 0.0
     last_webhook_scan = 0.0
+    last_recording_scan = 0.0
+    last_config_retry = 0.0
     while True:
         now = time.monotonic()
+        if now - last_config_retry >= 30:
+            try:
+                app.extensions["telephony_config_sync"].retry_pending()
+            except Exception:
+                app.logger.exception("Pending Asterisk RTP/configuration retry failed")
+            last_config_retry = now
+        if now - last_recording_scan >= 30:
+            try:
+                service.reconcile_recordings()
+            except Exception:
+                app.logger.exception("Recording reconciliation failed")
+            last_recording_scan = now
         if now - last_webhook_scan >= 5:
             try:
                 service.process_webhook_deliveries()
@@ -61,7 +75,7 @@ def main() -> None:
             last_webhook_scan = now
         if now - last_voicemail_scan >= 30:
             try:
-                app.extensions["voicemail_notifier"].process()
+                app.extensions["voicemail_notifier"].process_background()
             except Exception:
                 app.logger.exception("Voicemail email processing failed")
             last_voicemail_scan = now

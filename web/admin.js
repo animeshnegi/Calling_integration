@@ -60,6 +60,7 @@ function countTo(el, target) {
 
 /* --------------------------------------------------------------- 2. State */
 let csrf = '';
+let emailSettingsDirty = false, emailSettingsBusy = false, profileEmailDirty = false;
 let state = {
   extensions: [], phone_numbers: [], providers: [], webhooks: [], webhook_deliveries: [],
   users: [], customers: [], sip_accounts: [], requests: [], activity: [], notifications: [],
@@ -77,7 +78,7 @@ const pageMeta = {
   numbers: ['Numbers', 'Ownership, assignment and outbound caller ID'],
   sipaccounts: ['Devices & SIP', 'Credentials, connected devices and live registration'],
   extensions: ['Extensions', 'Internal destinations grouped by customer'],
-  routing: ['Call Routing', 'Design the incoming call journey visually'],
+  routing: ['Call Routing', 'Number journeys & extension call handling'],
   calls: ['Calls', 'Inbound and outbound activity across extensions'],
   recordings: ['Recordings', 'Search and play secure call audio'],
   voicemails: ['Voicemail', 'Messages organised by mailbox'],
@@ -88,7 +89,7 @@ const pageMeta = {
   requests: ['Requests', 'Approve customer provisioning requests'],
   activity: ['Activity', 'Important platform and customer actions'],
   providers: ['Carrier Providers', 'Platform carrier connections — administrator only'],
-  email: ['Email Delivery', 'SendGrid voicemail attachments'],
+  email: ['Email Delivery', 'Voicemail attachments and transcripts'],
   settings: ['Platform Settings', 'Global routing and recording policy'],
 };
 /* Pages a customer account must never open. Administrator-only resources are
@@ -590,26 +591,32 @@ function renderScopeBars() {
 /* The customer an administrator picked changes the numbers the page offers. */
 function applyScopeOwner(value) {
   if (!state.is_admin) return;
-  scopeOwner = value === '' || value == null ? null : Number(value);
-  customerNumber = '';
+  const nextOwner = value === '' || value == null ? null : Number(value);
+  if (nextOwner === scopeOwner) { renderScopeBars(); return; }
+  if (!allowRoutingNavigation()) { renderScopeBars(); return; }
+  scopeOwner = nextOwner;
+  routingSearch.number = ''; routingSearch.extension = '';
+  const remembered = routingLastTarget.get(`${routingOwner()}:${routingMode}`);
+  customerNumber = routingMode === 'number' && remembered ? flowTargetParts(remembered).target : '';
   renderScopeBars();
-  refreshScope();
+  refreshScope(remembered);
 }
 /* The number picked on the bar changes every list below it. */
 function applyCustomerNumber(number) {
   const next = String(number || '');
   if (next && !scopeNumbers().some(x => String(x.number) === next)) return;
+  if (routingMode === 'number' && next !== chosenCustomerNumber() && !allowRoutingNavigation()) { renderScopeBars(); return; }
   customerNumber = next;
   renderScopeBars();
   refreshScope();
 }
 /* Re-read everything that follows the scope, once, from one place. */
-function refreshScope() {
+function refreshScope(preferredFlow) {
   callOffset = 0; recordingOffset = 0;
   renderScopeExtensionSelects();
   renderExtensions(); renderNumbers(); renderSipAccounts(); renderBilling(); renderDeviceNumbers();
   renderApiKeys(); renderWebhooks(); renderDeliveries();
-  renderFlow(state.is_admin ? undefined : flowKey('number', customerNumber));
+  renderFlow(preferredFlow);
   renderGroups();
   loadCalls(); loadRecordings(); loadVoicemails();
 }
@@ -660,14 +667,14 @@ function renderAll() {
   renderEmailSettings();
   renderFlow();
 
-  // The profile names the extension it was assigned. The store keeps the digits
-  // there, and a row is named by its key - the digits decide which one, and a
-  // digits-only profile picks the single row that carries them, never a guess.
+  // Prefer the full number-scoped key. A legacy digits-only profile is usable
+  // only when exactly one visible extension carries those digits; never guess.
   const assigned = String(state.assigned_extension || '');
-  const myExtension = state.extensions.find(x => x.extension === assigned)
-    || (assigned && !assigned.includes('@')
-      ? state.extensions.filter(x => extensionDigitsOf(x.extension) === assigned)[0]
-      : null);
+  const shortMatches = assigned && !assigned.includes('@')
+    ? state.extensions.filter(x => extensionDigitsOf(x.extension) === assigned) : [];
+  const myExtension = assigned.includes('@')
+    ? state.extensions.find(x => x.extension === assigned)
+    : (shortMatches.length === 1 ? shortMatches[0] : null);
   $('profile-recording-form').hidden = !myExtension;
   $('profile-recording').checked = !!myExtension?.recording_enabled;
   // The platform's switch can veto every device. Say so, instead of leaving a
@@ -679,7 +686,7 @@ function renderAll() {
     : myExtension?.recording_enabled
       ? 'Calls on this extension are recorded. Switch it off to stop recording this device.'
       : 'Recording is off for this extension. Switch it on to record calls on this device.';
-  $('profile-email').value = state.email || '';
+  if (!profileEmailDirty) $('profile-email').value = state.email || '';
   markStagger();
 }
 
@@ -719,7 +726,7 @@ function renderCustomers() {
       <div class="tags">${u.active ? tag('Active', 'on') : tag('Disabled', 'off')}${tag('Administrator', 'violet')}</div>
       <div class="row-actions"><span class="cell-sub">Managed from the platform</span></div>
     </div>`).join('') || empty('No additional administrators', 'The bootstrap administrator remains active.', '⌂'));
-  if (currentPage === 'routing') { renderScopeBars(); renderFlow($('route-target')?.value); renderGroups(); }
+  if (currentPage === 'routing') { renderScopeBars(); renderFlow(); renderGroups(); }
   markStagger();
 }
 
@@ -818,16 +825,16 @@ function renderNumbers() {
         <p style="font-size:12px;color:var(--text-2)">${state.is_admin ? esc(sip?.label || 'No device linked') : 'Managed by EIP'}${onLine.length ? ` · ${esc(onLine.map(row => extensionDigitsOf(row.extension)).join(', '))}` : ''}</p>
         <div class="tags" style="margin-top:7px">
           ${x.active ? tag('Active', 'on') : tag('Disabled', 'off')}
-          ${tag(x.inbound_extension ? `Rings ${extensionDigitsOf(x.inbound_extension)}` : 'No extension yet', 'info')}
+          ${tag(x.inbound_extension ? `Primary desk ${extensionDigitsOf(x.inbound_extension)}` : savedFlowFor('number', x.number) ? 'Shared number flow' : 'No journey yet', 'info')}
           ${onLine.length ? tag(`${onLine.length} extension${onLine.length === 1 ? '' : 's'} on this number`, 'violet') : ''}
-          ${tag(`${money(x.monthly_price_cents ?? 500)}/mo`)}
+          ${tag(`${money(x.monthly_price_cents ?? 500)}/month`)}
           ${x.default_outbound ? tag('Default caller ID', 'violet') : ''}
           ${x.discontinue_at ? tag(`Ends ${fmtDay(x.discontinue_at)}`, expiring ? 'off' : 'warn') : ''}
         </div>
       </div>
       <div class="row-actions">
-        ${x.inbound_extension
-          ? `<button class="btn ghost sm" data-extension-flow="${esc(x.inbound_extension)}">Call flow</button>`
+        ${x.owner_user_id
+          ? `<button class="btn ghost sm" data-number-flow="${esc(x.number)}">Number flow</button>`
           : ''}
         ${(x.owner_user_id !== null && x.owner_user_id !== undefined)
           ? `<button class="btn ghost sm" data-add-extension="${esc(x.number)}">Add extension</button>`
@@ -1020,7 +1027,7 @@ function extensionCard(x, { wired, primary, index }) {
       ${kv('Device', deviceLine)}
     </div>
     <div class="ws-card-actions">
-      <button class="btn primary sm" data-softphone="${esc(x.key || x.extension)}" title="${x.webrtc_enabled ? 'Open the softphone signed in as this extension' : 'Tick Browser phone on this extension first'}">Softphone</button>
+      ${x.webrtc_enabled ? `<button class="btn primary sm" data-softphone="${esc(x.key || x.extension)}" title="Open the softphone signed in as this extension">Softphone</button>` : ''}
       <button class="btn primary sm" data-extension-credentials="${esc(x.key || x.extension)}">Show credentials</button>
       <button class="btn ghost sm" data-extension-flow="${esc(x.extension)}">Call flow</button>
     </div>
@@ -1412,6 +1419,11 @@ function renderServiceAddress() {
   if (digest && document.activeElement !== digest) {
     digest.value = String((state.settings || {}).sip_auth_digest || 'md5').toLowerCase();
   }
+  const ice = $('service-ice-servers');
+  if (ice && document.activeElement !== ice) {
+    const configured = String((state.settings || {}).ice_servers || '').trim();
+    ice.value = configured ? JSON.stringify(JSON.parse(configured)) : '';
+  }
   const stateTag = $('service-address-state');
   if (stateTag) {
     stateTag.textContent = service.configured ? 'Set by the platform' : (service.host ? 'Using this console\'s address' : 'Not set');
@@ -1479,17 +1491,25 @@ function renderSettings() {
   markStagger();
 }
 
+function updateEmailKeyStatus() {
+  const config = state.email_config || {};
+  $('email-key-status').textContent = config.has_api_key ? 'API key configured — leave blank to keep it' : 'No API key configured';
+  $('email-key').placeholder = config.has_api_key ? 'Leave blank to keep existing' : 'Enter Elastic Email API key';
+}
 function renderEmailSettings() {
   const config = state.email_config || {};
-  $('email-enabled').checked = !!config.enabled;
-  $('sendgrid-from').value = config.from_email || '';
-  $('sendgrid-name').value = config.from_name || 'EIP Telephony Voicemail';
-  $('sendgrid-key-status').textContent = config.has_api_key ? 'API key configured — leave blank to keep it' : 'No API key configured';
+  if (!emailSettingsDirty && !emailSettingsBusy) {
+    $('email-enabled').checked = !!config.enabled;
+    $('email-from').value = config.from_email || '';
+    $('email-name').value = config.from_name || 'EIP Telephony Voicemail';
+    $('transcription-enabled').checked = !!config.transcription_enabled;
+  }
+  updateEmailKeyStatus();
   const rows = state.email_deliveries || [];
   paint('email-delivery-list', rows.length ? `
-    <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
+    <table class="data"><thead><tr><th>Mailbox</th><th>Recipient</th><th>Status</th><th>Transcript</th><th>Attempts</th><th>Updated</th><th>Error</th></tr></thead>
     <tbody>${rows.map(x => `<tr>
-      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${statusPill(x.status, `mail-${x.id}`)}</td>
+      <td class="cell-strong">${esc(x.mailbox)}</td><td>${esc(x.recipient)}</td><td>${esc(x.status === 'delivered' ? 'Accepted by email provider' : x.status)}</td><td>${esc((x.transcription_status || 'disabled').replaceAll('_', ' '))}</td>
       <td>${esc(x.attempts)}</td><td>${esc(fmtDate(x.updated_at))}</td><td>${esc(x.last_error || '—')}</td>
     </tr>`).join('')}</tbody></table>` : empty('No delivery attempts', 'New voicemail email attempts will appear here.', '✎'));
 }
@@ -1577,7 +1597,7 @@ async function loadRecordings() {
     const from = val('recording-from'), to = val('recording-to');
     // An administrator reading one customer keeps that customer's recordings only.
     const owned = state.is_admin && scopeOwner !== null
-      ? new Set(state.extensions.filter(x => Number(x.owner_user_id) === Number(scopeOwner)).map(x => x.extension)) : null;
+      ? new Set(state.extensions.filter(x => Number(x.owner_user_id) === Number(scopeOwner)).map(x => x.key || x.extension)) : null;
     const calls = data.calls.filter(x =>
       (!owned || owned.has(x.extension)) &&
       (!from || String(x.started_at).slice(0, 10) >= from) &&
@@ -1601,7 +1621,9 @@ async function loadRecordings() {
               ${x.recording_status === 'finalized'
                 ? `<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
                    <a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a>`
-                : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
+                : x.recording_status === 'failed'
+                  ? '<small style="color:var(--danger)">Recording failed. No playable audio is available; check the ARI worker and Asterisk recording logs for this call ID.</small>'
+                  : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
             </div>
           </div>`).join('')}</div>
       </div>`).join('') || empty('No recordings found', 'Try another extension, or complete a recorded call.', '◉'));
@@ -1705,22 +1727,24 @@ function flowOwnerId() {
   if (!state.is_admin) return routingOwner();
   const { type, target } = flowTargetParts($('route-target')?.value);
   if (type === 'number') return (state.phone_numbers || []).find(x => x.number === target)?.owner_user_id ?? routingOwner();
-  if (type === 'extension') return (state.extensions || []).find(x => x.extension === target)?.owner_user_id ?? routingOwner();
+  if (type === 'extension') return (state.extensions || []).find(x => (x.key || x.extension) === target)?.owner_user_id ?? routingOwner();
   if (type === 'group') return (state.groups || []).find(x => String(x.id) === String(target))?.owner_user_id ?? routingOwner();
   return routingOwner();
 }
 function routeTargets() {
   const targets = [];
   const owner = routingOwner();
-  // A flow belongs to one customer, so the builder only offers that customer's
-  // own extensions and groups. A number is not a target for anyone: the
-  // workflow that answers its calls is the workflow of the extension wired to
-  // it, and the platform keeps the number's own ring plan in step with the
-  // devices a customer adds.
+  // The journey belongs to the main number: it is the one the engine runs when
+  // the line rings, and it is what carries menus, hours, voicemail and
+  // forwarding. A desk keeps a smaller flow of its own - ring, then take a
+  // message - and groups stay in the list below.
   const mine = row => !state.is_admin || owner === null || row.owner_user_id === owner;
-  const line = chosenCustomerNumber();
-  (state.extensions || []).filter(x => x.active && mine(x) && (!line || String(x.number) === line)).forEach(x => targets.push({
-    key: flowKey('extension', x.extension), section: 'Extensions', type: 'extension', target: x.extension,
+  (state.phone_numbers || []).filter(x => x.active && mine(x)).forEach(x => targets.push({
+    key: flowKey('number', x.number), section: 'Main numbers', type: 'number', target: String(x.number),
+    label: `Main line ${x.number} — incoming journey`,
+  }));
+  (state.extensions || []).filter(x => x.active && mine(x)).forEach(x => targets.push({
+    key: flowKey('extension', x.key || x.extension), section: 'Extensions', type: 'extension', target: x.key || x.extension,
     label: `${extensionLabel(x.extension)} — ${x.display_name || 'Extension'}`,
   }));
   (state.groups || []).filter(mine).forEach(group => targets.push({
@@ -1753,12 +1777,12 @@ function savedFlowFor(type, target) {
 function renderRouteTargets(preferred) {
   const select = $('route-target');
   if (!select) return '';
-  // A customer never sees this list: a number is not an editable target for
-  // them, and their navigation lives in the two pickers above.
+  // Compatibility select, kept in sync with the visible workflow chooser.
+  // Both roles use the same searchable number/extension cards.
   if (!state.is_admin) { select.innerHTML = ''; return ''; }
-  const targets = routeTargets();
   const prior = preferred ?? select.value;
-  const sections = ['Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
+  const targets = routeTargets().filter(t => t.type === routingMode || (t.type === 'group' && t.key === preferred));
+  const sections = ['Main numbers', 'Extensions', 'Groups'].filter(section => targets.some(t => t.section === section));
   select.innerHTML = sections.map(section => `<optgroup label="${section}">${targets.filter(t => t.section === section)
     .map(t => `<option value="${esc(t.key)}">${esc(t.label)}</option>`).join('')}</optgroup>`).join('');
   if (targets.some(t => t.key === prior)) select.value = prior;
@@ -1774,21 +1798,21 @@ function flowTargetOwner(type, target) {
   return (state.groups || []).find(row => String(row.id) === String(target))?.owner_user_id;
 }
 
-/* Open the builder on one target, from any page. A number key stands for the
-   workflow of the extension that answers it - for the administrator as much as
-   for the customer - and an administrator lands on the customer that target
-   belongs to, so saving can never write across customers. */
+/* Open the exact workflow from any page; never redirect a number to its desk.
+   Confirm before discarding a draft, and follow the target's customer scope. */
 function focusRouteTarget(key) {
-  if (!key) return;
+  if (!key || key === currentFlowKey()) return;
+  if (!allowRoutingNavigation()) return;
   const { type, target } = flowTargetParts(key);
-  const extension = type === 'number' ? extensionAnsweringNumber(target) : (type === 'extension' ? String(target) : '');
   const number = type === 'number' ? String(target) : numberAnsweredBy(target);
-  const resolved = extension ? flowKey('extension', extension) : key;
+  const resolved = key;
+  routingMode = type === 'extension' ? 'extension' : 'number';
   if (state.is_admin) {
     // The scope follows the target: its customer, then the number it answers.
     const picked = flowTargetParts(resolved);
     const owner = flowTargetOwner(picked.type, picked.target);
     if (owner) scopeOwner = Number(owner);
+    if (picked.type === 'number') customerNumber = String(picked.target);
     if (picked.type === 'extension') {
       const line = (state.extensions || []).find(x => String(x.extension) === String(picked.target))?.number;
       if (line) customerNumber = String(line);
@@ -1799,24 +1823,29 @@ function focusRouteTarget(key) {
   } else {
     // The customer's pickers follow: the number they were sent to, then the
     // extension's workflow.
-    renderCustomerRoutePickers(number ? flowKey('number', number) : key);
+    if (number) customerNumber = number;
+    renderCustomerRoutePickers(resolved);
     applyFlowTarget(resolved);
   }
   renderGroups();
 }
 
-/* What the builder is editing, kept as state rather than re-read from a
-   picker: an administrator has one target picker, a customer navigates a number
-   and then an extension, and a group flow can be opened from its own row without
-   any picker changing. One value, however it was reached. */
+/* One exact target, independent of the compatibility selects. Both roles use
+   the searchable chooser; external links can also open an owned workflow. */
 let flowTargetKey = '';
+let routingMode = 'number';
+let deskRingSources = null;
+let routingDirty = false;
+const routingSearch = {number:'', extension:''};
+const routingLastTarget = new Map();
 
 function currentFlowKey() {
-  return flowTargetKey || (state.is_admin ? ($('route-target')?.value || '') : '');
+  return flowTargetKey;
 }
 
 /* The name shown on the canvas's incoming-call node. */
 function flowEntryLabel(type, target) {
+  if (type === 'number') return `Main line ${target} — incoming journey`;
   if (state.is_admin) {
     const select = $('route-target');
     if (select && select.value === flowTargetKey) return select.selectedOptions[0]?.textContent || String(target);
@@ -1833,29 +1862,46 @@ function flowEntryLabel(type, target) {
 }
 
 function applyFlowTarget(key) {
+  const changed = flowTargetKey !== (key || '');
+  routingDirty = false;
   flowTargetKey = key || '';
   const { type, target } = flowTargetParts(flowTargetKey);
+  if (type) routingMode = type === 'extension' ? 'extension' : 'number';
+  deskRingSources = null;
+  if (flowTargetKey) routingLastTarget.set(`${routingOwner()}:${routingMode}`, flowTargetKey);
   const saved = flowTargetKey ? savedFlowFor(type, target) : null;
-  flowNodes = saved?.route?.nodes ? saved.route.nodes.map(node => ({ ...node })) : [];
+  // A draft must not share nested IVR mappings or destination arrays with state.
+  flowNodes = JSON.parse(JSON.stringify(saved?.route?.nodes || []));
   // Never re-label a button that is mid-save or showing its confirmation.
   const save = $('save-route');
-  if (save && !saveFlowBusy && save.dataset.state !== 'saved') {
+  if (save && !saveFlowBusy && (changed || save.dataset.state !== 'saved')) {
     setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked');
   }
   const entry = $('flow-entry-number');
   if (entry) {
     entry.textContent = flowTargetKey
       ? (flowEntryLabel(type, target) || flowTargetKey)
-      : (state.is_admin ? 'Add an extension or group to begin' : 'Pick a number, then an extension');
+      : (state.is_admin ? 'Choose a main line, extension or group' : 'Choose the main line or a desk');
   }
+  renderRoutingMode();
   renderFlowNodes();
+  renderFlowPalette();
   renderIvrHint();
 }
 
 function renderFlow(preferred) {
+  if (!preferred && routingDirty && flowTargetKey) {
+    const {type, target} = flowTargetParts(flowTargetKey);
+    const owner = flowTargetOwner(type, target);
+    if ((!state.is_admin || Number(owner) === Number(routingOwner())) && (type !== 'number' || target === chosenCustomerNumber())) return;
+  }
+  if (saveFlowBusy) return;
+  if (preferred) routingMode = flowTargetParts(preferred).type === 'extension' ? 'extension' : 'number';
+  if (!routingResources().length) { applyFlowTarget(''); return; }
   if (state.is_admin) {
     if (!$('route-target')) return;
-    applyFlowTarget(renderRouteTargets(preferred));
+    const wanted = preferred || (routingMode === 'number' ? flowKey('number', chosenCustomerNumber()) : undefined);
+    applyFlowTarget(renderRouteTargets(wanted));
     return;
   }
   applyFlowTarget(renderCustomerRoutePickers(preferred));
@@ -1899,23 +1945,26 @@ function numberAnsweredBy(extension) {
 function renderCustomerRoutePickers(preferred) {
   const extensionSelect = $('route-extension');
   if (!extensionSelect) return '';
-  // The number is the one on the scope bar; the extension list is that number's.
-  const wanted = flowTargetParts(preferred || '');
+  // The number is the one on the scope bar. Its journey answers the line; each
+  // desk below it owns only its no-answer behaviour.
   const effectiveNumber = chosenCustomerNumber();
   if (!state.is_admin) {
     customerNumber = effectiveNumber;
     renderScopeBars();
   }
-  const { all } = extensionsForNumber(effectiveNumber);
-  const option = x => `<option value="${esc(x.extension)}" title="${esc(extensionLabel(x.extension))}">${esc(extensionDigitsOf(x.extension))} — ${esc(scopeShort(x.display_name || 'Unnamed', 24))}</option>`;
-  extensionSelect.innerHTML = all.map(option).join('') || '<option value="">No extensions on this number yet</option>';
+  const all = (state.extensions || []).filter(x => x.active);
+  const deskOption = x => `<option value="${esc(flowKey('extension', x.key || x.extension))}">${esc(extensionLabel(x.key || x.extension))} — ${esc(x.display_name || 'Desk')}</option>`;
+  const options = routingMode === 'extension' ? all.map(deskOption) : (effectiveNumber
+    ? [`<option value="${esc(flowKey('number', effectiveNumber))}">${esc(effectiveNumber)} — number flow</option>`] : []);
+  extensionSelect.innerHTML = options.join('') || '<option value="">No number selected yet</option>';
 
-  const wantedExtension = wanted.type === 'extension' ? String(wanted.target) : extensionAnsweringNumber(effectiveNumber);
-  const effectiveExtension = all.some(x => String(x.extension) === String(wantedExtension))
-    ? String(wantedExtension)
-    : String(all[0]?.extension ?? '');
-  extensionSelect.value = effectiveExtension;
-  return effectiveExtension ? flowKey('extension', effectiveExtension) : '';
+  const wanted = String(preferred || flowTargetKey || '');
+  const known = options.length && [...extensionSelect.options].map(option => option.value);
+  const effective = known && known.includes(wanted)
+    ? wanted
+    : (known[0] || '');
+  extensionSelect.value = effective;
+  return effective;
 }
 
 function renderGroups() {
@@ -1930,10 +1979,9 @@ function renderGroups() {
     return `<div class="row${active ? ' selected' : ''}">
       <span class="row-icon">◎</span>
       <div><h3>${esc(group.name)}</h3><p>${group.members.length ? group.members.map(ext => esc(extensionLabel(ext))).join(' · ') : 'No members yet'} · rings for ${group.timeout}s</p></div>
-      <div class="tags">${flow ? tag(`${flow.route?.nodes?.length || 0} step flow`, 'info') : tag('Default flow', 'off')}${group.active ? '' : tag('Paused', 'off')}</div>
+      <div class="tags">${tag('Department', 'info')}${group.active ? '' : tag('Paused', 'off')}</div>
       <div class="row-actions">
         <button class="btn ghost sm" data-edit-group="${group.id}">Edit</button>
-        <button class="btn ghost sm" data-group-flow="${group.id}">Call flow</button>
         <button class="btn danger sm" data-delete-group="${group.id}">Delete</button>
       </div>
     </div>`;
@@ -1957,17 +2005,266 @@ function flowGroupOptions(selected = '') {
     `<option value="${group.id}" ${String(selected) === String(group.id) ? 'selected' : ''}>${esc(group.name)} — ${group.members.length} member${group.members.length === 1 ? '' : 's'}</option>`).join('')}`;
 }
 
+/* What each kind of flow may carry. The journey - menu, hours, rings,
+   voicemail, forwarding - belongs to the main number's flow, because that is
+   the flow the engine runs for its calls. A desk's flow is its no-answer
+   policy: ring the desk, then its mailbox. A menu or a forward on a desk is
+   not a smaller journey; it is a step nothing will ever run. */
+const DESK_NODE_TYPES = new Set(['extension', 'voicemail', 'forward']);
+function nodeTypeAllowed(kind, targetType = flowTargetParts(currentFlowKey()).type) {
+  return targetType !== 'extension' || DESK_NODE_TYPES.has(kind);
+}
+function syncIvrMapMode() {
+  const mode = document.querySelector('[data-map-mode]');
+  const rows = document.getElementById('ivr-map-rows');
+  const show = !!mode && mode.value === 'keys';
+  if (rows) rows.hidden = !show;
+  document.querySelectorAll('[data-add-map]').forEach(button => { button.hidden = !show; });
+}
+document.getElementById('flow-config-fields')?.addEventListener('click', event => {
+  if (event.target.closest('[data-add-map]')) {
+    const rows = document.getElementById('ivr-map-rows');
+    const mode = document.querySelector('[data-map-mode]');
+    if (mode) mode.value = 'keys';
+    if (rows) rows.insertAdjacentHTML('beforeend', ivrMapRow());
+    syncIvrMapMode();
+    return;
+  }
+  const remove = event.target.closest('[data-remove-map]');
+  if (remove) remove.closest('.map-row')?.remove();
+});
+document.getElementById('flow-config-fields')?.addEventListener('change', event => {
+  if (event.target.matches('[data-map-mode]')) syncIvrMapMode();
+  if (event.target.matches('[name=group_id]')) {
+    const group = (state.groups || []).find(group => String(group.id) === event.target.value);
+    if (group) document.querySelectorAll('#flow-config-fields [name=extensions]').forEach(input => { input.checked = group.members.includes(input.value); });
+  }
+});
+
+function renderFlowPalette() {
+  const { type } = flowTargetParts(currentFlowKey());
+document.querySelectorAll('[data-node-type]').forEach(button => {
+    const allowed = nodeTypeAllowed(button.dataset.nodeType, type);
+    button.hidden = !allowed;
+    button.draggable = allowed;
+  });
+  const hint = $('palette-logic-hint');
+  if (hint) {
+    hint.textContent = type === 'extension'
+      ? 'Ring devices and handle unanswered calls here. Business hours and IVR belong to Number flow.'
+      : '';
+    hint.hidden = !hint.textContent;
+  }
+}
+
+function routingResources(mode = routingMode) {
+  const owner = routingOwner();
+  if (state.is_admin && owner === null) return [];
+  const owns = row => !state.is_admin || Number(row.owner_user_id) === Number(owner);
+  return (mode === 'number' ? state.phone_numbers || [] : state.extensions || [])
+    .filter(row => row.active && owns(row)).map(row => {
+      const target = mode === 'number' ? String(row.number) : String(row.key || row.extension);
+      return {key:flowKey(mode, target), target, row,
+        title:mode === 'number' ? target : `Extension ${extensionDigitsOf(target)}`,
+        name:mode === 'number' ? (row.description || 'Business number') : (row.display_name || 'Unnamed extension'),
+        detail:mode === 'number' ? 'Incoming number' : `Primary number ${row.number || 'not assigned'}`};
+    });
+}
+
+function allowRoutingNavigation() {
+  if (saveFlowBusy) { notify('Please wait for this workflow to finish saving', true); return false; }
+  if (routingDirty && !confirm('Discard unsaved changes to this workflow?')) return false;
+  routingDirty = false;
+  return true;
+}
+
+function renderRoutingChoices() {
+  const host = $('routing-workflow-options');
+  if (!host) return;
+  const resources = routingResources();
+  const query = (routingSearch[routingMode] || '').trim().toLowerCase();
+  const compact = text => String(text).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const matches = resources.filter(item => !query || `${item.title} ${item.name} ${item.detail}`.toLowerCase().includes(query)
+    || (compact(query) && compact(`${item.target} ${item.row.number || ''}`).includes(compact(query))));
+  const selected = currentFlowKey();
+  const tabKey = matches.some(item => item.key === selected) ? selected : matches[0]?.key;
+  host.innerHTML = matches.map(item => {
+    const saved = savedFlowFor(routingMode, item.target);
+    const status = saved ? saved.active === false || saved.active === 0 ? 'Paused' : 'Saved flow' : 'Default';
+    return `<button type="button" role="option" aria-selected="${item.key === selected}" tabindex="${item.key === tabKey ? '0' : '-1'}" data-workflow-key="${esc(item.key)}" ${saveFlowBusy ? 'disabled' : ''}>
+      <span class="workflow-choice-icon" aria-hidden="true">${routingMode === 'number' ? '☎' : '⌁'}</span>
+      <span class="workflow-choice-copy"><b>${esc(item.title)}</b><span>${esc(item.name)}</span>${routingMode === 'extension' ? `<small>${esc(item.detail)}</small>` : ''}</span>
+      <span class="workflow-choice-state"><span>${status}</span><i aria-hidden="true">${item.key === selected ? '✓' : ''}</i></span>
+    </button>`;
+  }).join('');
+  $('routing-workflow-count').textContent = `${matches.length}${query ? ` of ${resources.length}` : ''} ${routingMode === 'number' ? 'number' : 'extension'}${matches.length === 1 ? '' : 's'}`;
+  const empty = $('routing-no-results');
+  empty.hidden = matches.length > 0;
+  empty.textContent = resources.length ? 'No matches. Try a different number, extension or name.'
+    : state.is_admin && routingOwner() === null ? 'Choose a customer to see their workflows.'
+    : routingMode === 'number' ? 'No active numbers yet. Assign a number before setting up its flow.'
+    : 'No active extensions yet. Add an extension before setting up call handling.';
+}
+
+function renderRoutingMode() {
+  const desk = routingMode === 'extension';
+  const {type, target} = flowTargetParts(currentFlowKey());
+  const item = routingResources().find(item => item.key === currentFlowKey());
+  const valid = !!item || type === 'group';
+  $('page-routing').dataset.flowMode = routingMode;
+  $('page-routing').dataset.hasTarget = String(valid);
+  document.querySelectorAll('[data-routing-mode]').forEach(button => {
+    const active = button.dataset.routingMode === routingMode;
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  for (const mode of ['number', 'extension']) {
+    const count = routingResources(mode).length;
+    $(`${mode}-flow-count`).textContent = `${count} ${mode === 'number' ? 'number' : 'extension'}${count === 1 ? '' : 's'}`;
+  }
+  $('routing-workspace').setAttribute('aria-labelledby', desk ? 'extension-flow-tab' : 'number-flow-tab');
+  $('routing-editor-kicker').textContent = desk ? 'EXTENSION CALL HANDLING' : 'NUMBER FLOW';
+  $('routing-editor-title').textContent = item ? `${item.title}${desk ? ` · ${item.name}` : ''}` : type === 'group' ? flowEntryLabel(type, target) : 'Choose a workflow';
+  $('routing-selected-meta').textContent = item ? (desk ? item.detail : item.name) : '';
+  $('routing-editor-description').textContent = desk
+    ? 'Ring device → No answer → Voicemail or forwarding'
+    : 'Business hours → IVR → Department or extension → Fallback';
+  $('routing-choose-title').textContent = desk ? 'Choose an extension' : 'Choose a number';
+  $('routing-target-caption').textContent = desk ? 'Extension' : 'Number';
+  $('routing-editor-empty').hidden = valid;
+  const input = $('routing-workflow-search');
+  input.placeholder = desk ? 'Search by extension, name or primary number' : 'Search by number or label';
+  input.setAttribute('aria-label', desk ? 'Search extensions' : 'Search numbers');
+  input.value = routingSearch[routingMode] || '';
+  renderRoutingChoices();
+  if (!saveFlowBusy) $('save-route').disabled = !valid;
+}
+
+function markRoutingDirty() {
+  routingDirty = true;
+  setSaveFlowState('ready', 'Unsaved changes — save to apply to incoming calls');
+}
+
+function addRoutingStep(kind) {
+  if (!canDesignFlows() || routingMode === 'extension') return;
+  const existing = flowNodes.findIndex(node => node.type === kind);
+  if (['business_hours', 'ivr', 'voicemail', 'forward'].includes(kind) && existing >= 0) {
+    openFlowConfig(existing);
+    return;
+  }
+  if (['voicemail', 'forward'].includes(kind)) {
+    const fallbackIndex = flowNodes.findIndex(node => ['voicemail', 'forward'].includes(node.type));
+    if (fallbackIndex >= 0) {
+      if (!confirm('Replace the existing number fallback with this action?')) return;
+      flowNodes[fallbackIndex] = flowStepDefaults({type:kind, configured:false});
+      markRoutingDirty(); renderFlowNodes(); openFlowConfig(fallbackIndex);
+      return;
+    }
+  }
+  const rank = type => ({business_hours:0, ivr:1, extension:2, simultaneous:2, sequential:2, ring_group:2, voicemail:3, forward:3}[type] ?? 2);
+  let index = flowNodes.findIndex(node => rank(node.type) > rank(kind));
+  if (index < 0) index = flowNodes.length;
+  const node = flowStepDefaults({type:kind, configured:false});
+  flowNodes.splice(index, 0, node);
+  markRoutingDirty();
+  renderFlowNodes();
+  openFlowConfig(index);
+}
+
+function directRingSources(key) {
+  const owner = flowOwnerId();
+  return (state.phone_numbers || []).filter(number => number.active && (!state.is_admin || Number(number.owner_user_id) === Number(owner))).filter(number => {
+    const flow = savedFlowFor('number', number.number);
+    if (!flow) return String(number.inbound_extension) === key;
+    return (flow.route?.nodes || []).some(node => {
+      if (node.enabled === false) return false;
+      if (node.type === 'extension') return node.extension === key;
+      if (!['ring_group','simultaneous','sequential'].includes(node.type)) return false;
+      const group = (state.groups || []).find(group => String(group.id) === String(node.group_id));
+      return (node.extensions?.length ? node.extensions : group?.members || []).includes(key);
+    });
+  }).map(number => number.number);
+}
+
+function renderDeskHandling() {
+  const {target:key} = flowTargetParts(currentFlowKey());
+  const row = (state.extensions || []).find(row => String(row.key || row.extension) === key);
+  if (!row) {
+    $('flow-nodes').innerHTML = '<div class="routing-blank"><h3>Choose an extension</h3><p>Add a desk to this customer to configure its incoming calls.</p></div>';
+    return;
+  }
+  const ring = flowNodes.find(node => node.type === 'extension' && node.extension === key) || {};
+  const vm = flowNodes.find(node => node.type === 'voicemail' && node.enabled !== false);
+  const nextDesk = flowNodes.find(node => node.type === 'extension' && node.extension !== key);
+  const forward = flowNodes.find(node => node.type === 'forward');
+  const action = ring.no_answer || (nextDesk ? 'extension' : vm ? 'voicemail' : forward ? 'forward' : row.voicemail_enabled ? 'voicemail' : 'hangup');
+  const checked = deskRingSources || directRingSources(key);
+  const owner = flowOwnerId();
+  const numbers = (state.phone_numbers || []).filter(number => number.active && (!state.is_admin || Number(number.owner_user_id) === Number(owner)));
+  const choices = [['voicemail','Send to voicemail'],['extension','Forward to another extension'],['forward','Forward to an external number'],['hangup','End the call']];
+  $('flow-canvas').classList.add('has-nodes');
+  $('flow-nodes').innerHTML = `<div class="desk-editor">
+    <div class="desk-policy">
+      <section class="handling-card"><header><span class="handling-step">01</span><div><h4>Ring this device</h4><p>All registered phones for this extension.</p></div><label class="routing-toggle"><input id="desk-ring-enabled" type="checkbox" ${ring.ring_enabled !== false ? 'checked' : ''}><span>Ring device</span></label></header>
+        <div class="handling-body"><label class="field">Ring for<select id="desk-ring-timeout">${[10,15,20,25,30,45,60,90,120,...(ring.timeout && ![10,15,20,25,30,45,60,90,120].includes(Number(ring.timeout)) ? [Number(ring.timeout)] : [])].sort((a,b)=>a-b).map(seconds => `<option value="${seconds}" ${Number(ring.timeout || 25) === seconds ? 'selected' : ''}>${seconds} seconds</option>`).join('')}</select></label><p class="routing-field-note" id="desk-ring-note">When ringing is off, the no-answer action runs immediately.</p></div>
+      </section>
+      <div class="handling-connector"><span>↓</span> No answer or device unavailable</div>
+      <section class="handling-card"><header><span class="handling-step">02</span><div><h4>Choose what happens next</h4><p>A clear ending, never a dead end.</p></div></header>
+        <div class="handling-body"><label class="field">No-answer action<select id="desk-no-answer">${choices.map(([value,label]) => `<option value="${value}" ${action === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+          <div data-desk-action="voicemail"><div class="routing-inline-note">✉ Messages go to <b>${esc(extensionLabel(key))}</b>'s private mailbox.</div><label class="field">Mailbox PIN<input id="desk-mailbox-pin" type="password" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,8}" maxlength="8" value="${esc(vm?.pin || '')}" placeholder="Keep existing PIN"></label><p class="routing-field-note">Dial <b>*97</b> from this desk to record your greeting and access the mailbox.</p></div>
+          <div data-desk-action="extension"><label class="field">Forward to extension<select id="desk-next-extension"><option value="">Choose an extension</option>${flowExtensionOptions(nextDesk?.extension || '')}</select></label><p class="routing-field-note">One forwarding round, so desks cannot create a loop.</p></div>
+          <div data-desk-action="forward"><label class="field">Forward to number<input id="desk-forward-number" type="tel" value="${esc(forward?.phone || '')}" placeholder="+13025550123" pattern="\\+[1-9][0-9]{7,14}"></label><p class="routing-field-note">Use international E.164 format. Carrier charges may apply.</p></div>
+        </div>
+      </section>
+      <div class="routing-policy-note">Number-level fallback takes precedence when configured. This desk's policy follows it across assigned incoming numbers.</div>
+    </div>
+    <aside class="ring-sources"><div class="routing-eyebrow">CONNECTED NUMBERS</div><h4>Numbers that ring this desk</h4><p>Choose a primary line, a shared company number, or both. Each selected number adds this desk to its direct ring stage.</p><div class="ring-source-list">${numbers.map(number => `<label class="ring-source"><input type="checkbox" name="desk-ring-source" value="${esc(number.number)}" ${checked.includes(number.number) ? 'checked' : ''}><span><b>${esc(number.number)}</b><small>${String(row.number) === String(number.number) ? 'Primary number' : esc(number.description || 'Shared incoming number')}</small></span>${String(row.number) === String(number.number) ? '<span class="source-primary">PRIMARY</span>' : ''}</label>`).join('') || '<p>No active numbers assigned yet.</p>'}</div><div class="ring-source-footnote">Your primary number, SIP credentials and outbound caller ID stay unchanged.<br><br>Numbers with an IVR still follow their menu first; these checkboxes control the direct ring stage, not IVR key mappings.</div></aside>
+  </div>`;
+  $('desk-next-extension')?.querySelectorAll('option').forEach(option => { if (option.value === key) option.remove(); });
+  syncDeskActionVisibility();
+}
+
+function syncDeskActionVisibility() {
+  const action = $('desk-no-answer')?.value;
+  document.querySelectorAll('[data-desk-action]').forEach(section => { section.hidden = section.dataset.deskAction !== action; });
+}
+
+function syncDeskHandling() {
+  const {target:key} = flowTargetParts(currentFlowKey());
+  if (!$('desk-ring-enabled')) return false;
+  const action = $('desk-no-answer').value;
+  const timeout = Number($('desk-ring-timeout').value);
+  const nodes = [{type:'extension', extension:key, timeout, ring_enabled:$('desk-ring-enabled').checked, no_answer:action, configured:true, label:`Ring device ${$('desk-ring-enabled').checked ? 'on' : 'off'} · ${timeout}s`}];
+  if (action === 'voicemail') {
+    const pin = $('desk-mailbox-pin').value.trim();
+    if (pin && !/^[0-9]{4,8}$/.test(pin)) { notify('The mailbox PIN must be 4 to 8 digits', true); return false; }
+    nodes.push({type:'voicemail', mailbox:key, enabled:true, pin, configured:true, label:'Send to voicemail'});
+  } else if (action === 'extension') {
+    const destination = $('desk-next-extension').value;
+    if (!destination || destination === key) { notify('Choose another extension for unanswered calls', true); return false; }
+    nodes.push({type:'extension', extension:destination, timeout:25, configured:true, label:'Forward unanswered call'});
+  } else if (action === 'forward') {
+    const phone = $('desk-forward-number').value.trim();
+    if (!/^\+[1-9]\d{7,14}$/.test(phone)) { notify('Use an international number, for example +13025550123', true); return false; }
+    nodes.push({type:'forward', phone, timeout:25, configured:true, label:'Forward unanswered call'});
+  }
+  flowNodes = nodes;
+  deskRingSources = [...document.querySelectorAll('[name="desk-ring-source"]:checked')].map(input => input.value);
+  return true;
+}
+
 function renderFlowNodes() {
   const host = $('flow-nodes');
   if (!host) return;
   host.innerHTML = flowNodes.map((node, index) => `
-    <div class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="${canDesignFlows()}" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
+    <div role="button" tabindex="0" aria-label="Configure ${esc(flowLabel(node.type))}" class="flow-node type-${esc(node.type)} ${node.configured ? 'configured' : ''}" draggable="${canDesignFlows()}" data-flow-index="${index}" style="--i:${Math.min(index, 8)}">
       <span class="icon ${FLOW_TILES[node.type] || 'tile-ext'}">${FLOW_ICONS[node.type] || '◇'}</span>
       <div class="copy"><b>${esc(flowLabel(node.type))}</b><small>${esc(node.label || (canDesignFlows() ? 'Click to configure this step' : 'Step in this call flow'))}</small></div>
       <span class="step">${String(index + 1).padStart(2, '0')}</span>
       ${canDesignFlows() ? `<button class="remove" data-remove-node="${index}" aria-label="Remove step">✕</button>` : ''}
     </div>`).join('');
   $('flow-canvas').classList.toggle('has-nodes', flowNodes.length > 0);
+  if (routingMode === 'extension') renderDeskHandling();
 }
 
 /* The voices the platform can read a prompt in, from the server, so the list
@@ -1993,7 +2290,7 @@ function renderIvrHint() {
   const extensions = (state.extensions || []).filter(x => x.active && (!owner || x.owner_user_id === owner));
   const threshold = Number(state.ivr_auto_above || 5);
   if (extensions.length > threshold) {
-    hint.textContent = `This account has ${extensions.length} extensions, so a phone menu is added to every call flow automatically. Edit its text and voice here whenever you like.`;
+    hint.textContent = `This account has ${extensions.length} extensions, so a phone menu is added to every main line automatically. Edit its text and voice here whenever you like.`;
     hint.hidden = false;
   } else {
     hint.hidden = true;
@@ -2020,15 +2317,23 @@ function flowExtensionOptions(selected = []) {
   const line = flowLineNumber();
   const available = (state.is_admin && owner
     ? state.extensions.filter(x => x.owner_user_id === owner)
-    : state.extensions).filter(x => !line || String(x.number) === line);
+    : state.extensions);
   return available.filter(x => x.active).map(x =>
-    `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+    `<option value="${esc(x.extension)}" ${values.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('');
 }
 
 /* What a freshly added step should already contain. A ring step on a number
    starts with every device the customer owns, which is how their main line
    behaves: add an extension and its phone joins the ring. An extension step
    rings that device; a group step rings its members. */
+function flowDestinationCards(selected = []) {
+  const owner = flowOwnerId();
+  return `<div class="routing-destination-grid">${(state.extensions || []).filter(row => row.active && (!state.is_admin || Number(row.owner_user_id) === Number(owner))).map(row => {
+    const key = row.key || row.extension;
+    return `<label class="routing-destination"><input type="checkbox" name="extensions" value="${esc(key)}" ${selected.includes(key) ? 'checked' : ''}><span><b>${esc(extensionLabel(key))} — ${esc(row.display_name || 'Desk')}</b><small>Primary line ${esc(row.number || 'Unassigned')}</small></span></label>`;
+  }).join('')}</div>`;
+}
+
 function flowStepDefaults(node) {
   if (node?.type === 'ivr' && !node.prompt) {
     // The menu is usable the moment it is dropped in: the platform wording and
@@ -2038,20 +2343,50 @@ function flowStepDefaults(node) {
       input_timeout: node.input_timeout || 6, attempts: node.attempts || 2, fallback: node.fallback || '',
     };
   }
+  if (node?.type === 'extension' && !node.extension) {
+    const { type, target } = flowTargetParts(currentFlowKey() || $('route-target')?.value);
+    return {
+      ...node,
+      extension: type === 'extension' ? String(target) : '',
+      timeout: node.timeout || 25,
+    };
+  }
+  if (node?.type === 'voicemail' && !node.mailbox) {
+    const { type, target } = flowTargetParts(currentFlowKey() || $('route-target')?.value);
+    return { ...node, mailbox: type === 'extension' ? String(target) : '', enabled: node.enabled !== false, pin: node.pin || '' };
+  }
+  if (node?.type === 'ivr') {
+    return { ...node, keys: Array.isArray(node.keys) ? node.keys : [] };
+  }
   if (!['simultaneous', 'sequential', 'ring_group'].includes(node?.type)) return node;
   if ((node.extensions || []).length) return node;
   // The target is the workflow being edited, whichever picker opened it: the
-  // administrator's list or the customer's number-then-extension pair.
+  // administrator's list or the customer's main-line-then-desk pair.
   const { type, target } = flowTargetParts(currentFlowKey() || $('route-target')?.value);
   const owner = flowOwnerId();
   const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || !owner || x.owner_user_id === owner));
-  // A number has no workflow of its own, but a key for one can still arrive from
-  // a stored link: it stands for every device the customer has.
-  if (type === 'number') return { ...node, extensions: mine.map(x => x.extension) };
+  // The line's journey starts by ringing every device on that very line: add a
+  // desk and its phone joins the ring. Other lines' desks never do.
+  if (type === 'number') {
+    const line = String(target || '');
+    const onLine = mine.filter(x => !line || String(x.number) === line);
+    return { ...node, extensions: (onLine.length ? onLine : mine).map(x => x.extension) };
+  }
   if (type === 'extension') return { ...node, extensions: [target] };
   const group = (state.groups || []).find(x => String(x.id) === String(target));
   if (type === 'group' && group) return { ...node, extensions: [...group.members] };
   return node;
+}
+
+function ivrMapRow(entry = {}) {
+  const keyOptions = ['1','2','3','4','5','6','7','8','9','0']
+    .map(digit => `<option value="${digit}" ${String(entry.key) === digit ? 'selected' : ''}>${digit}</option>`).join('');
+  return `<div class="map-row" style="display:flex;gap:8px;align-items:center;margin:6px 0">
+    <select name="map_key" aria-label="Key">${keyOptions}</select>
+    <span aria-hidden="true">→</span>
+    <select name="map_target" aria-label="Destination"><option value="">Choose destination</option>${flowExtensionOptions(entry.target || '')}</select>
+    <button type="button" class="icon-btn" data-remove-map aria-label="Remove mapping">✕</button>
+  </div>`;
 }
 
 function openFlowConfig(index) {
@@ -2075,17 +2410,32 @@ function openFlowConfig(index) {
   } else if (['simultaneous', 'sequential', 'ring_group'].includes(node.type)) {
     fields = `<label class="field">Ring a saved group<select name="group_id">${flowGroupOptions(node.group_id)}</select>
         <small>Choosing a group fills in its members below; you can still adjust them for this step.</small></label>
-      <label class="field">Ring destinations<select name="extensions" multiple size="6" required>${flowExtensionOptions(node.extensions || [])}</select><small>Select at least one extension.</small></label>
+      <div class="field"><span>Ring these extensions</span>${flowDestinationCards(node.extensions || [])}<small>Choose one or more desks from this customer's numbers.</small></div>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
   } else if (node.type === 'extension') {
-    fields = `<label class="field">Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension || '')}</select></label>`;
+    const desk = flowTargetParts(currentFlowKey()).type === 'extension';
+    fields = `<label class="field">Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension || '')}</select>
+        <small>${desk ? 'The first step rings this desk itself; a later step is where an unanswered call is handed.' : 'The extension this step rings.'}</small></label>
+      <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required>
+        <small>How long this extension rings before the flow moves on.</small></label>`;
   } else if (node.type === 'voicemail') {
-    fields = `<label class="field">Voicemail mailbox<select name="mailbox" required><option value="">Choose mailbox</option>${flowExtensionOptions(node.mailbox || '')}</select></label>`;
+    fields = `<label class="field switch-line"><input type="checkbox" name="enabled" ${node.enabled !== false ? 'checked' : ''}> Take messages (voicemail on)</label>
+      <label class="field">Voicemail mailbox<select name="mailbox" required><option value="">Choose mailbox</option>${flowExtensionOptions(node.mailbox || '')}</select></label>
+      <label class="field">Mailbox PIN (4–8 digits)<input name="pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" value="${esc(node.pin || '')}" placeholder="Leave empty to keep the stored PIN"></label>
+      <p class="field-hint">Greeting: dial <b>*97</b> from the mailbox's own phone to record or change it. Messages and greetings live in the mailbox until deleted.</p>`;
   } else if (node.type === 'forward') {
     fields = `<label class="field">Forward to E.164 number<input name="phone" type="tel" pattern="\\+[1-9][0-9]{7,14}" placeholder="+13025550123" value="${esc(node.phone || '')}" required></label>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
   } else if (node.type === 'ivr') {
-    fields = `<label class="field">Spoken prompt<textarea name="prompt" rows="3" maxlength="400" required>${esc(node.prompt || '')}</textarea>
+    const mapRows = (node.keys || []).map(entry => ivrMapRow(entry)).join('');
+    fields = `<label class="field">Key mappings<select name="map_mode" data-map-mode>
+        <option value="keys" ${(node.keys || []).length ? 'selected' : ''}>Press a key (1, 2, 3 …) for a destination</option>
+        <option value="digits" ${(node.keys || []).length ? '' : 'selected'}>Callers type the full extension number</option>
+      </select>
+        <small>Mapped keys answer immediately; with no mappings the classic menu accepts full extension numbers.</small></label>
+      <div class="map-rows" id="ivr-map-rows">${mapRows}</div>
+      <button type="button" class="btn ghost sm" data-add-map>＋ Add key mapping</button>
+      <label class="field">Spoken prompt<textarea name="prompt" rows="3" maxlength="400" required>${esc(node.prompt || '')}</textarea>
         <small>Read out before the caller is asked to type an extension — 400 characters at most.</small></label>
       <div class="field-row">
         <label class="field">Voice<select name="voice">${ivrVoiceOptions(node.voice)}</select></label>
@@ -2097,6 +2447,7 @@ function openFlowConfig(index) {
   }
   $('flow-config-title').textContent = `Configure ${flowLabel(node.type)}`;
   $('flow-config-fields').innerHTML = common + fields;
+  if (node.type === 'ivr') syncIvrMapMode();
   openOverlay('flow-config-modal');
 }
 
@@ -2116,6 +2467,7 @@ function saveFlowConfig(event) {
     const groupId = String(form.get('group_id') || '');
     const group = (state.groups || []).find(x => String(x.id) === groupId);
     node.extensions = form.getAll('extensions');
+    node.enabled = true;
     if (group && !node.extensions.length) node.extensions = [...group.members];
     node.timeout = Number(form.get('timeout'));
     if (group) node.group_id = groupId; else delete node.group_id;
@@ -2123,10 +2475,19 @@ function saveFlowConfig(event) {
     node.label = node.label || `${group ? `${group.name} · ` : ''}${node.extensions.join(', ')} · ${node.timeout}s`;
   } else if (node.type === 'extension') {
     node.extension = form.get('extension');
-    node.label = node.label || `Extension ${node.extension}`;
+    node.timeout = Number(form.get('timeout')) || 25;
+    const deskKey = String(flowTargetParts(currentFlowKey()).type === 'extension' ? flowTargetParts(currentFlowKey()).target : '');
+    node.label = !deskKey
+      ? (node.label || `Extension ${node.extension}`)
+      : (String(node.extension) === deskKey
+        ? `Ring ${extensionDigitsOf(node.extension)} · ${node.timeout}s`
+        : `If unanswered: ring ${extensionDigitsOf(node.extension)}`);
   } else if (node.type === 'voicemail') {
     node.mailbox = form.get('mailbox');
-    node.label = node.label || `Mailbox ${node.mailbox}`;
+    node.enabled = form.get('enabled') === 'on';
+    node.pin = String(form.get('pin') || '').trim();
+    if (node.pin && !/^[0-9]{4,8}$/.test(node.pin)) return notify('The mailbox PIN must be 4 to 8 digits', true);
+    node.label = node.enabled ? (node.label || `Mailbox ${node.mailbox}`) : 'Voicemail off';
   } else if (node.type === 'forward') {
     node.phone = form.get('phone');
     node.timeout = Number(form.get('timeout'));
@@ -2137,9 +2498,20 @@ function saveFlowConfig(event) {
     node.input_timeout = Number(form.get('input_timeout')) || 6;
     node.attempts = Number(form.get('attempts')) || 2;
     node.fallback = String(form.get('fallback') || '');
-    node.label = node.label || 'Enter an extension';
+    const mode = String(form.get('map_mode') || 'digits');
+    const mapKeys = form.getAll('map_key'), mapTargets = form.getAll('map_target');
+    node.keys = mode === 'keys'
+      ? mapKeys.map((key, index) => ({ key: String(key), target: String(mapTargets[index] || '') })).filter(row => row.target)
+      : [];
+    if (node.keys.length && new Set(node.keys.map(row => row.key)).size !== node.keys.length) {
+      return notify('Each IVR key can be used only once', true);
+    }
+    node.label = node.keys.length
+      ? node.keys.map(row => `Press ${row.key}`).join(' · ')
+      : (node.label === 'Enter an extension' ? '' : node.label) || 'Enter an extension';
   }
   node.configured = true;
+  markRoutingDirty();
   renderFlowNodes();
   closeOverlay('flow-config-modal');
   notify('Routing step configured');
@@ -2196,7 +2568,7 @@ function groupMemberOptions(item) {
     ? state.extensions.filter(x => x.owner_user_id === Number(owner))
     : state.extensions;
   const selected = item?.members || [];
-  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+  return available.filter(x => x.active).map(x => `<option value="${esc(x.extension)}" ${selected.includes(x.extension) ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('');
 }
 
 /* The credentials a device registers with. One sheet per extension: the whole
@@ -2216,6 +2588,7 @@ function credentialLines(c) {
     `Extension: ${extensionLabel(c.extension)}`,
     `SIP username: ${c.sip_username}`,
     `SIP password: ${c.sip_password}`,
+    ...(c.webrtc_enabled ? [`Browser softphone username: ${c.webrtc_sip_username}`] : []),
     `Registration server: ${c.server ? `${c.server}:${c.port}` : 'ask EIP for your registration host'}`,
     `Transport: ${String(c.transport || 'udp').toUpperCase()}`,
     `Number: ${(c.numbers || []).join(', ') || 'none assigned yet'}`,
@@ -2230,6 +2603,10 @@ function credentialSheetBody({ credentials: c, rotating }) {
     ['Extension', extensionLabel(c.extension), false],
     ['SIP username', c.sip_username, true],
     ['SIP password', c.sip_password, true],
+    // The browser softphone signs in on its own identity - the plain one
+    // belongs to desk phones and Zoiper. Shown only when this extension
+    // answers in the browser; the softphone fills it in on its own.
+    ...(c.webrtc_enabled ? [['Browser softphone username', c.webrtc_sip_username, true]] : []),
     ['Registration server', c.server ? `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}` : 'Ask EIP for your registration host', true],
     ['Numbers', (c.numbers || []).join(', ') || 'None assigned yet', false],
     ['Answers calls to', (c.answers || []).join(', ') || 'No number rings this yet. Set it as a number\'s incoming extension on the Numbers page.', false],
@@ -2249,7 +2626,7 @@ function credentialSheetBody({ credentials: c, rotating }) {
         </tr>`).join('')}</tbody>
     </table>
     <div class="cred-actions">
-      <button class="btn primary sm" type="button" data-softphone="${esc(c.key || c.extension)}" title="Open a softphone window signed in as this extension">Open softphone</button>
+      ${c.webrtc_enabled ? `<button class="btn primary sm" type="button" data-softphone="${esc(c.key || c.extension)}" title="Open a softphone window signed in as this extension">Open softphone</button>` : ''}
       <button class="btn ghost sm" type="button" data-cred-copy-all>Copy everything</button>
       <button class="btn ghost sm" type="button" data-cred-rotate="${esc(c.extension)}" aria-expanded="${rotating ? 'true' : 'false'}">${rotating ? 'Cancel' : 'Change password'}</button>
       <small>Anyone with these can place calls as this extension.</small>
@@ -2291,6 +2668,49 @@ async function showExtensionCredentials(extension) {
    sign-in then goes to that window by postMessage - never into a URL, the
    history or storage - and only after the window says it is ready. */
 const softphoneWindows = [];
+/* A new popup can be autoplay-locked even though the operator clicked Open
+   softphone in this window. Prepare a console-side fallback on that trusted
+   click, and use it only while a registered phone window says its own ringer
+   is blocked. No caller information or SIP credentials cross this channel. */
+let consoleRingerContext = null, consoleRingerSource = null, consoleRingerWatch = null;
+const consoleRingingPhones = new Set();
+function prepareConsoleRinger() {
+  try {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return;
+    if (!consoleRingerContext || consoleRingerContext.state === 'closed') consoleRingerContext = new Context();
+    if (consoleRingerContext.state !== 'running') {
+      const pending = consoleRingerContext.resume();
+      if (pending?.then) pending.then(updateConsoleRinger).catch(() => {});
+    }
+  } catch { /* The phone still presents its own enable-sound prompt. */ }
+}
+function updateConsoleRinger() {
+  for (const entry of consoleRingingPhones) if (entry.win.closed) consoleRingingPhones.delete(entry);
+  if (!consoleRingingPhones.size) {
+    if (consoleRingerSource) {
+      try { consoleRingerSource.stop(); } catch { /* already stopped */ }
+      try { consoleRingerSource.disconnect(); } catch { /* already disconnected */ }
+      consoleRingerSource = null;
+    }
+    clearInterval(consoleRingerWatch); consoleRingerWatch = null;
+    return;
+  }
+  if (!consoleRingerWatch) consoleRingerWatch = setInterval(updateConsoleRinger, 2000);
+  if (consoleRingerSource || !consoleRingerContext || consoleRingerContext.state !== 'running') return;
+  try {
+    const context = consoleRingerContext, rate = context.sampleRate;
+    const buffer = context.createBuffer(1, rate * 4, rate), samples = buffer.getChannelData(0);
+    for (let i = 0; i < rate * 1.5; i++) {
+      const t = i / rate, segment = t < .65 ? t : t >= .85 ? t - .85 : -1;
+      if (segment < 0) continue;
+      const envelope = Math.min(1, segment / .02, (.65 - segment) / .02);
+      samples[i] = .22 * envelope * (Math.sin(2 * Math.PI * 440 * t) + Math.sin(2 * Math.PI * 480 * t));
+    }
+    const source = context.createBufferSource(); source.buffer = buffer; source.loop = true; source.connect(context.destination);
+    consoleRingerSource = source; source.start();
+  } catch { consoleRingerSource = null; }
+}
 
 /* The softphone window is the size of a phone (390 x 860 - the browser's own
    frame takes a little of it), centred on the screen, with no toolbars. The page
@@ -2309,6 +2729,9 @@ async function openSoftphone(key) {
   if (!row.webrtc_enabled) {
     return notify('Tick Browser phone on this extension first - the softphone signs in over the browser connection', true);
   }
+  // Keep this inside the operator's click, before the asynchronous credential
+  // request; browsers may not allow a newly opened window to autoplay later.
+  prepareConsoleRinger();
   // One softphone window per extension: a second click brings the first one forward
   // and hands it fresh credentials, rather than opening a window that never hears.
   const open = softphoneWindows.find(item => item.key === key && !item.win.closed);
@@ -2329,10 +2752,20 @@ async function openSoftphone(key) {
       type: 'eip-softphone:connect',
       extension: credentials.key || key,
       label: `${credentials.digits} · ${credentials.number || ''}`.replace(/ · $/, ''),
-      sip_username: credentials.sip_username,
+      // The browser signs in on its own identity (`AUMPNO_101-webrtc`); the
+      // plain username belongs to desk phones and softphones like Zoiper.
+      sip_username: credentials.webrtc_sip_username || credentials.sip_username,
       sip_password: credentials.sip_password,
       domain: credentials.server,
-      wss: `wss://${credentials.server}/ws`,
+      // The WebSocket rides the console's own host - the SIP address may be
+      // a bare IP (the media rules require it resolves straight to this VM),
+      // and an IP cannot hold a TLS certificate. One proxied /ws path on the
+      // web vhost carries it. (Set a different address in the phone's
+      // settings for unusual topologies.)
+      wss: `wss://${location.host}/ws`,
+      // The platform's ICE servers (blank = the phone's built-in STUN default).
+      ...(Array.isArray(credentials.ice_servers) && credentials.ice_servers.length
+        ? { iceServers: credentials.ice_servers } : {}),
     };
     sendSoftphone(entry);
   } catch (error) {
@@ -2346,11 +2779,16 @@ function sendSoftphone(entry) {
 }
 
 window.addEventListener('message', event => {
-  if (event.origin !== location.origin || event.data?.type !== 'eip-softphone:ready') return;
+  if (event.origin !== location.origin) return;
   const entry = softphoneWindows.find(item => item.win === event.source);
   if (!entry) return;
-  entry.ready = true;
-  sendSoftphone(entry);
+  if (event.data?.type === 'eip-softphone:ready') {
+    entry.ready = true; sendSoftphone(entry);
+  } else if (event.data?.type === 'eip-softphone:ring-start') {
+    consoleRingingPhones.add(entry); updateConsoleRinger();
+  } else if (event.data?.type === 'eip-softphone:ring-stop') {
+    consoleRingingPhones.delete(entry); updateConsoleRinger();
+  }
 });
 
 /* Rotate the password a device registers with, then show the new one. */
@@ -2452,8 +2890,12 @@ const templates = {
         <label class="check"><input name="voicemail_enabled" type="checkbox" ${existing?.voicemail_enabled ? 'checked' : ''}> Enable voicemail</label>
         <label class="field">Voicemail PIN<input name="voicemail_pin" type="password" inputmode="numeric" pattern="[0-9]{4,10}" placeholder="${existing ? 'Leave blank to keep existing' : '4 to 10 digits'}"></label>
       </div>
-      <label class="field">Voicemail notification email<input name="voicemail_email" type="email" placeholder="employee@example.com" value="${esc(existing?.voicemail_email || '')}"><small>New messages are sent here when SendGrid is enabled.</small></label>
-      <label class="check"><input name="webrtc_enabled" type="checkbox" ${existing?.webrtc_enabled ? 'checked' : ''}> Answers in the browser (WebRTC)<small>Calls to this extension are set up as WebRTC media, which is what a browser needs. Register a hardware phone or softphone on its own extension: a plain phone refuses a WebRTC call.</small></label>`,
+      <label class="field">Voicemail email delivery<select name="voicemail_email_mode">
+        <option value="auto" ${existing?.voicemail_email_mode !== 'off' ? 'selected' : ''}>Send to the associated account (or address below)</option>
+        <option value="off" ${existing?.voicemail_email_mode === 'off' ? 'selected' : ''}>Do not send voicemail email</option>
+      </select><small>Automatic delivery must also be enabled under Email Delivery. Switching to the account address or re-enabling after an opt-out sends new recordings only.</small></label>
+      <label class="field">Override notification email (optional)<input name="voicemail_email" type="email" placeholder="Use associated account email" value="${esc(existing?.voicemail_email || '')}"><small>Leave blank to use the associated customer's account email. A specified address takes priority.</small></label>
+      <label class="check"><input name="webrtc_enabled" type="checkbox" ${existing?.webrtc_enabled ? 'checked' : ''}> Answers in the browser (WebRTC)<small>Browser softphones sign in on their own WebRTC identity beside this extension's phones, so a desk phone or Zoiper keeps working here too - each device rings on the media it speaks. The Softphone button appears only while this is on.</small></label>`,
     };
   },
   group: item => ({
@@ -2516,7 +2958,7 @@ const templates = {
         <label class="field">Assigned number<select name="phone_number"><option value="">None</option>${state.phone_numbers
           .map(x => `<option value="${esc(x.number)}" ${item?.phone_number === x.number ? 'selected' : ''}>${esc(x.number)}</option>`).join('')}</select></label>
         <label class="field">Extension<select name="extension"><option value="">None</option>${state.extensions
-          .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('')}</select></label>
+          .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('')}</select></label>
       </div>
       <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Device is active</label>`,
   }),
@@ -2545,7 +2987,7 @@ const templates = {
     fields: `<label class="field">Name<input name="name" maxlength="80" placeholder="Production CRM" required value="${esc(item?.name || '')}"></label>
       <label class="field">Endpoint URL<input name="url" type="url" maxlength="1000" placeholder="https://crm.example.com/api/telephony/events" required value="${esc(item?.url || '')}"></label>
       <label class="field">Signing secret<input name="token" type="password" autocomplete="new-password" placeholder="${item ? 'Leave blank to keep existing' : 'Optional shared secret'}"><small>When set, each delivery is signed with an HMAC-SHA256 header so your service can verify authenticity.</small></label>
-      <label class="field">Events<select name="events" multiple size="8" required>${['*','call.started','call.ringing','call.employee_ringing','call.employee_answered','call.customer_dialing','call.answered','call.bridged','call.ivr_extension_selected','call.ivr_fallback','call.voicemail','call.missed','call.recording_started','call.recording_finished','call.recording_failed','call.recording_announcement_failed','call.recording_deleted','call.completed','call.failed','call.disposition']
+      <label class="field">Events<select name="events" multiple size="8" required>${['*','call.started','call.ringing','call.employee_ringing','call.employee_answered','call.customer_dialing','call.answered','call.bridged','call.ivr_extension_selected','call.ivr_fallback','call.voicemail','call.forwarding','call.missed','call.recording_started','call.recording_finished','call.recording_failed','call.recording_announcement_failed','call.recording_deleted','call.completed','call.failed','call.disposition']
         .map(ev => `<option value="${ev}" ${(item?.events || '*').split(',').includes(ev) ? 'selected' : ''}>${ev === '*' ? 'All call events' : ev}</option>`).join('')}</select>
         <small>Select only the events this integration needs.</small></label>
       <label class="check"><input name="active" type="checkbox" ${!item || item.active ? 'checked' : ''}> Endpoint is active</label>`,
@@ -2742,7 +3184,7 @@ function openModal(type, item = null) {
       number.innerHTML = '<option value="">None</option>' + state.phone_numbers.filter(x => x.owner_user_id === id)
         .map(x => `<option value="${esc(x.number)}" ${item?.phone_number === x.number ? 'selected' : ''}>${esc(x.number)}</option>`).join('');
       extension.innerHTML = '<option value="">None</option>' + state.extensions.filter(x => x.owner_user_id === id)
-        .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+        .map(x => `<option value="${x.extension}" ${item?.extension === x.extension ? 'selected' : ''}>${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('');
     };
     owner?.addEventListener('change', update);
     update();
@@ -2755,7 +3197,7 @@ function openModal(type, item = null) {
       const fill = () => {
         members.innerHTML = state.extensions
           .filter(x => x.active && String(x.owner_user_id ?? '') === String(owner.value))
-          .map(x => `<option value="${esc(x.extension)}">${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}</option>`).join('');
+          .map(x => `<option value="${esc(x.extension)}">${esc(extensionLabel(x.extension))} — ${esc(x.display_name || 'Extension')}${x.number ? ` · ${esc(x.number)}` : ''}</option>`).join('');
       };
       owner.addEventListener('change', fill);
       fill();
@@ -3480,7 +3922,7 @@ function wsBilling() {
     <div class="ws-cards">
       <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">▣</span>
         <div><small>Recurring monthly</small><h4>${money(recurring)}</h4>
-          <p>${workspace.numbers.length} number${workspace.numbers.length === 1 ? '' : 's'} at $5/month</p></div></div></article>
+          <p>${workspace.numbers.length} number${workspace.numbers.length === 1 ? '' : 's'} at ${money(workspace.numbers[0]?.monthly_price_cents ?? 500)}/month</p></div></div></article>
       <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph" style="background:linear-gradient(140deg,${open.length ? '#b45309,#d97706' : '#15803d,#16a34a'})">${open.length ? '!' : '✓'}</span>
         <div><small>Payment status</small><h4>${open.length ? `${open.length} invoice${open.length === 1 ? '' : 's'} open` : 'All invoices settled'}</h4>
           <p>${money(open.reduce((sum, i) => sum + i.amount_cents, 0))} outstanding</p></div></div></article>
@@ -3591,9 +4033,6 @@ document.addEventListener('click', async event => {
     showPage('routing');
     if (number) {
       focusRouteTarget(flowKey('number', number));
-      $('flow-entry-number').textContent = number;
-      flowNodes = (state.call_routes || []).find(x => x.phone_number === number)?.route?.nodes || [];
-      renderFlowNodes();
     }
     return;
   }
@@ -3627,7 +4066,7 @@ document.addEventListener('click', async event => {
   if (d.credSave) return rotateExtensionPassword(d.credSave, ($('cred-new-password')?.value || '').trim());
   if (d.credGenerate) return rotateExtensionPassword(d.credGenerate, '');
 
-  if (d.removeNode !== undefined) { flowNodes.splice(Number(d.removeNode), 1); renderFlowNodes(); return; }
+  if (d.removeNode !== undefined) { markRoutingDirty(); flowNodes.splice(Number(d.removeNode), 1); renderFlowNodes(); return; }
   if (d.readNotification) {
     try { await api(`/admin/api/notifications/${d.readNotification}/read`, { method: 'POST' }); await loadState(); }
     catch (error) { notify(error.message, true); }
@@ -3681,6 +4120,7 @@ document.addEventListener('click', async event => {
   if (d.editExtension) return openModal('extension', state.extensions.find(x => (x.key || x.extension) === d.editExtension));
   if (d.softphone) return openSoftphone(d.softphone);
   if (d.extensionCredentials) return showExtensionCredentials(d.extensionCredentials);
+  if (d.numberFlow) { showPage('routing'); return focusRouteTarget(flowKey('number', d.numberFlow)); }
   if (d.extensionFlow) {
     showPage('routing');
     return focusRouteTarget(flowKey('extension', d.extensionFlow));
@@ -3849,9 +4289,12 @@ wire('flow-nodes', 'dragstart', event => {
 wire('flow-nodes', 'dragover', event => event.preventDefault());
 wire('flow-nodes', 'drop', event => {
   const target = event.target.closest('[data-flow-index]');
-  const source = Number(event.dataTransfer.getData('application/x-flow-index'));
+  const rawIndex = event.dataTransfer.getData('application/x-flow-index');
+  const source = rawIndex === '' ? NaN : Number(rawIndex);
   if (target && Number.isInteger(source) && canDesignFlows()) {
     event.preventDefault();
+    event.stopPropagation();
+    markRoutingDirty();
     const [node] = flowNodes.splice(source, 1);
     flowNodes.splice(Number(target.dataset.flowIndex), 0, node);
     renderFlowNodes();
@@ -3869,13 +4312,19 @@ const flowDesignHint = () => 'Choose a customer above to design their call flows
    what it is doing. A disabled button whose reason lives in a tooltip reads as
    broken; instead it stays live, and the toolbar prints the reason. */
 let saveFlowBusy = false;
+function lockRoutingSave(busy) {
+  const workspace = $('routing-workspace');
+  if (workspace) { workspace.inert = busy; workspace.toggleAttribute('inert', busy); }
+  document.querySelectorAll('[data-routing-mode]').forEach(button => { button.disabled = busy; });
+  $('save-route').disabled = busy || $('page-routing').dataset.hasTarget !== 'true';
+}
 const SAVE_FLOW_LABELS = { ready: 'Save flow', blocked: 'Save flow', saving: 'Saving…', saved: 'Saved ✓' };
 function setSaveFlowState(state, detail) {
   const save = $('save-route');
   if (!save) return;
   save.textContent = SAVE_FLOW_LABELS[state] || SAVE_FLOW_LABELS.ready;
   save.dataset.state = state;
-  save.disabled = state === 'saving';
+  lockRoutingSave(saveFlowBusy || state === 'saving');
   save.title = detail || (state === 'blocked' ? flowDesignHint() : '');
   const hint = $('flow-save-hint');
   if (hint) {
@@ -3892,8 +4341,8 @@ document.querySelectorAll('[data-node-type]').forEach(button => {
   button.addEventListener('dragend', () => dragging(button, false));
   button.onclick = () => {
     if (!canDesignFlows()) return notify(flowDesignHint(), true);
-    flowNodes.push({ type: button.dataset.nodeType, label: 'Click to configure' });
-    renderFlowNodes();
+    if (!nodeTypeAllowed(button.dataset.nodeType)) return notify('This step belongs to the main number\'s journey, not to a desk', true);
+    addRoutingStep(button.dataset.nodeType);
   };
 });
 wire('flow-nodes', 'dragstart', event => dragging(event.target.closest('[data-flow-index]'), true));
@@ -3908,46 +4357,102 @@ if (dragSurface) {
     depth = 0;
     dragSurface.classList.remove('drag-over');
     const type = canDesignFlows() ? event.dataTransfer.getData('text/plain') : '';
-    if (type) { flowNodes.push({ type, label: 'Click to configure' }); renderFlowNodes(); }
+    if (type && !nodeTypeAllowed(type)) return notify('This step belongs to the main number\'s journey, not to a desk', true);
+    if (type) addRoutingStep(type);
   });
 }
-wire('route-target', 'change', () => { renderFlow($('route-target').value); renderGroups(); });
-wire('route-extension', 'change', () => { renderFlow(flowKey('extension', $('route-extension').value)); renderGroups(); });
+document.querySelectorAll('[data-routing-mode]').forEach(button => {
+  button.addEventListener('click', () => {
+    const mode = button.dataset.routingMode;
+    if (mode === routingMode || !allowRoutingNavigation()) return;
+    routingMode = mode;
+    const available = routingResources(mode);
+    const remembered = routingLastTarget.get(`${routingOwner()}:${mode}`);
+    const next = available.find(item => item.key === remembered) || available[0];
+    if (next) focusRouteTarget(next.key);
+    else applyFlowTarget('');
+  });
+  button.addEventListener('keydown', event => {
+    if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = [...document.querySelectorAll('[data-routing-mode]')];
+    const next = event.key === 'Home' ? buttons[0] : event.key === 'End' ? buttons[1] : buttons.find(other => other !== button);
+    next.click(); next.focus();
+  });
+});
+wire('routing-workflow-search', 'input', event => {
+  routingSearch[routingMode] = event.target.value;
+  renderRoutingChoices();
+});
+wire('routing-workflow-options', 'click', event => {
+  const option = event.target.closest('[data-workflow-key]');
+  if (option) {
+    focusRouteTarget(option.dataset.workflowKey);
+    event.currentTarget.querySelector('[aria-selected="true"]')?.focus({preventScroll:true});
+  }
+});
+wire('routing-workflow-options', 'keydown', event => {
+  if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(event.key)) return;
+  const options = [...event.currentTarget.querySelectorAll('[data-workflow-key]')];
+  if (!options.length) return;
+  event.preventDefault();
+  const index = options.indexOf(document.activeElement);
+  const step = ['ArrowLeft','ArrowUp'].includes(event.key) ? -1 : 1;
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : (index + step + options.length) % options.length;
+  options.forEach((option, i) => { option.tabIndex = i === next ? 0 : -1; });
+  options[next].focus();
+});
+wire('flow-nodes', 'change', event => {
+  if (event.target.closest('.desk-editor')) { markRoutingDirty(); syncDeskActionVisibility(); }
+});
+wire('flow-nodes', 'input', event => {
+  if (event.target.closest('.desk-editor')) markRoutingDirty();
+});
+wire('flow-nodes', 'keydown', event => {
+  if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-flow-index]')) {
+    event.preventDefault(); openFlowConfig(Number(event.target.dataset.flowIndex));
+  }
+});
+wire('route-target', 'change', () => { focusRouteTarget($('route-target').value); renderRouteTargets(currentFlowKey()); });
+wire('route-extension', 'change', () => { focusRouteTarget($('route-extension').value); renderCustomerRoutePickers(currentFlowKey()); });
 wire('save-route', 'click', async () => {
   if (saveFlowBusy) return;                       // one save at a time
   if (!canDesignFlows()) { setSaveFlowState('blocked'); return notify(flowDesignHint(), true); }
   const { type, target } = flowTargetParts(currentFlowKey());
+  if (type === 'extension' && !syncDeskHandling()) return;
   if (!type || !target) {
-    return notify(state.is_admin ? 'Add a number, extension or group first' : 'Pick a number, then the extension to edit', true);
-  }
-  // A number carries no workflow of its own: the extension that answers it
-  // does. The pickers never offer one, and a stray key is refused the same way.
-  if (type === 'number') {
-    return notify('A number has no workflow of its own — edit the extension that answers it', true);
+    return notify(state.is_admin ? 'Add a number, extension or group first' : 'Pick the main line or a desk to edit', true);
   }
   if (!flowNodes.length || flowNodes.some(n => !n.configured)) return notify('Add and configure every routing step before saving', true);
-  const label = type === 'number' ? target : `${type} ${target}`;
+  if (type === 'extension' && flowNodes.some(n => !nodeTypeAllowed(n.type, 'extension'))) {
+    return notify('A desk can only ring and take messages — move the journey steps to the main number', true);
+  }
+  const label = type === 'number' ? `the main line ${target}` : `${type} ${target}`;
   saveFlowBusy = true;
   setSaveFlowState('saving');
   try {
     const payload = type === 'number'
       ? { target_type: 'number', phone_number: target, target, owner_user_id: flowOwnerId(), name: savedFlowFor('number', target)?.name || 'Main call flow' }
       : { target_type: type, target, owner_user_id: flowOwnerId(), name: savedFlowFor(type, target)?.name || (type === 'group' ? 'Group call flow' : 'Extension call flow') };
-    const result = await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, route: { nodes: flowNodes }, active: true }) });
+    const result = await api('/admin/api/call-routes', { method: 'POST', body: JSON.stringify({ ...payload, ...(type === 'extension' ? {ring_sources: deskRingSources} : {}), route: { nodes: flowNodes }, active: true }) });
     notify((result.auto_ivr || []).length
       ? `Call flow saved for ${label}; a phone menu was added automatically`
       : `Call flow saved for ${label}`);
-    setSaveFlowState('saved', `Saved for ${label}`);
+    if (result.warning) notify(`Flow saved, but not applied to Asterisk: ${result.warning}`, true);
+    routingDirty = false;
+    setSaveFlowState('saved', result.warning ? 'Saved — PBX apply failed' : `Saved for ${label}`);
     const id = workspace?.customer?.id, tab = wsTab;
     await loadState();
     if (id) await openCustomer(id, tab, true);
     // Leave the confirmation up long enough to read, then go back to normal.
-    setTimeout(() => { if (!saveFlowBusy) setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked'); }, 1900);
+    setTimeout(() => { if (!saveFlowBusy && !routingDirty && $('save-route').dataset.state === 'saved') setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked'); }, 1900);
   } catch (error) {
     notify(error.message, true);
     setSaveFlowState(canDesignFlows() ? 'ready' : 'blocked');
   } finally {
     saveFlowBusy = false;
+    lockRoutingSave(false);
+    renderRoutingChoices();
   }
 });
 
@@ -3978,8 +4483,9 @@ wire('platform-recording', 'change', async event => {
   const wanted = toggle.checked;
   toggle.disabled = true;
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ recording_enabled: wanted }) });
+    const result = await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ recording_enabled: wanted }) });
     notify(wanted ? 'Recording allowed platform-wide' : 'Recording stopped platform-wide');
+    if (result?.warning) notify(`Saved, but the running Asterisk configuration did not change: ${result.warning}`, true);
     await loadState();
   } catch (error) {
     toggle.checked = !wanted;
@@ -3994,40 +4500,76 @@ wire('platform-recording', 'change', async event => {
 wire('service-address-form', 'submit', async event => {
   event.preventDefault();
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
+    const result = await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({
       service_host: val('service-host').trim(), service_sip_port: val('service-sip-port').trim() || '5060',
       service_web_host: val('service-web-host').trim(),
       sip_auth_digest: val('service-sip-digest') || 'md5',
+      ice_servers: val('service-ice-servers').trim(),
     }) });
-    notify('Server addresses saved');
+    // Saved, but not applied: the renderer refuses to advertise a media
+    // address SDP cannot use, so say exactly why the phones saw no change.
+    if (result?.warning) notify(`Saved, but the running Asterisk configuration did not change: ${result.warning}`, true);
+    else notify('Server addresses saved');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
 wire('service-address-reset', 'click', async () => {
   try {
-    await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_web_host: '', service_sip_port: '5060', sip_auth_digest: 'md5' }) });
-    notify('Server addresses cleared — the console address is used');
+    const result = await api('/admin/api/settings', { method: 'POST', body: JSON.stringify({ service_host: '', service_web_host: '', service_sip_port: '5060', sip_auth_digest: 'md5' }) });
+    if (result?.warning) notify(`Saved, but the running Asterisk configuration did not change: ${result.warning}`, true);
+    else notify('Server addresses cleared — the console address is used');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });
-wire('email-form', 'submit', async event => {
-  event.preventDefault();
+wire('email-form', 'input', () => { emailSettingsDirty = true; });
+wire('email-form', 'change', () => { emailSettingsDirty = true; });
+wire('profile-email', 'input', () => { profileEmailDirty = true; });
+
+function emailFeedback(message, error = false) {
+  $('email-feedback').textContent = message;
+  notify(message, error);
+}
+async function saveEmailSettings() {
+  const result = await api('/admin/api/email-config', { method: 'POST', body: JSON.stringify({
+    enabled: $('email-enabled').checked, api_key: val('email-key'),
+    from_email: val('email-from'), from_name: val('email-name'),
+    transcription_enabled: $('transcription-enabled').checked,
+  }) });
+  $('email-key').value = '';
+  emailSettingsDirty = false;
+  state.email_config = result.email_config || state.email_config;
+  renderEmailSettings();
+}
+async function emailAction(test) {
+  if (emailSettingsBusy) return;
+  if (!$('email-form').reportValidity()) return;
+  if (test && !val('email-test')) return emailFeedback('Enter a valid test recipient email.', true);
+  emailSettingsBusy = true;
+  // Freeze the draft while saving. Never clear/overwrite edits made in flight.
+  const controls = [...$('email-form').querySelectorAll('input, select, button')];
+  controls.forEach(control => { control.disabled = true; });
+  $('email-feedback').textContent = test ? 'Saving settings and requesting test email…' : 'Saving email settings…';
   try {
-    await api('/admin/api/email-config', { method: 'POST', body: JSON.stringify({
-      enabled: $('email-enabled').checked, api_key: val('sendgrid-key'),
-      from_email: val('sendgrid-from'), from_name: val('sendgrid-name'),
-    }) });
-    $('sendgrid-key').value = '';
-    notify('SendGrid configuration saved');
-    await loadState();
-  } catch (error) { notify(error.message, true); }
-});
-wire('test-email', 'click', async () => {
-  try {
-    const result = await api('/admin/api/email-config/test', { method: 'POST', body: JSON.stringify({ email: val('sendgrid-test') }) });
-    notify(result.ok ? 'Test email accepted by SendGrid' : 'Test failed');
-  } catch (error) { notify(error.message, true); }
-});
+    await saveEmailSettings();
+    if (test) {
+      const result = await api('/admin/api/email-config/test', { method: 'POST', body: JSON.stringify({ email: val('email-test'), result_only: true }) });
+      if (result.ok !== true) throw Error(result.error || 'Email test failed. Check your email provider settings.');
+      emailFeedback('Test accepted by Elastic Email. Check your inbox/spam and Elastic Email activity for delivery.');
+    } else {
+      emailFeedback('Email configuration saved. A blank key keeps the saved Elastic Email key.');
+    }
+  } catch (error) {
+    emailFeedback(error.message, true);
+  } finally {
+    emailSettingsBusy = false;
+    controls.forEach(control => { control.disabled = false; });
+    // Updating key status must not depend on a changed polling signature.
+    renderEmailSettings();
+  }
+  await loadState();
+}
+wire('email-form', 'submit', event => { event.preventDefault(); emailAction(false); });
+wire('test-email', 'click', () => emailAction(true));
 wire('profile-recording-form', 'submit', async event => {
   event.preventDefault();
   try {
@@ -4040,7 +4582,8 @@ wire('profile-email-form', 'submit', async event => {
   event.preventDefault();
   try {
     await api('/admin/api/profile/email', { method: 'POST', body: JSON.stringify({ email: val('profile-email') }) });
-    notify('Voicemail email updated');
+    profileEmailDirty = false;
+    notify('Account email updated');
     await loadState();
   } catch (error) { notify(error.message, true); }
 });

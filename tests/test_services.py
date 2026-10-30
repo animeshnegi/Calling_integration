@@ -1,7 +1,7 @@
 import time
 from pathlib import Path
 
-from app.models import CallStore
+from app.models import Call, CallStore
 from app.services import TelephonyService
 
 
@@ -17,6 +17,12 @@ class DummyAsterisk:
         self.customer_legs = []
         self.local_legs = []
         self.local_endpoints = []
+        self.outbound_endpoints = []
+        self.hung_up = []
+        self.live_channels = []
+        self.forwarded = []
+        self.continued = []
+        self.inbound_timeouts = []
 
     def answer_channel(self, channel_id):
         self.answered.append(channel_id)
@@ -28,27 +34,37 @@ class DummyAsterisk:
     def stop_playback(self, playback_id):
         self.stopped_playbacks.append(playback_id)
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None, timeout=30):
         leg = f"{call_id}-leg-{extension}-{index}"
         self.inbound_legs.append((call_id, extension))
         self.inbound_endpoints.append(endpoint)
+        self.inbound_timeouts.append({"extension": extension, "timeout": int(timeout)})
         return leg
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata, endpoint=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata, endpoint=None, index=0):
         self.created_call = call_id
-        self.outbound_endpoint = endpoint
-        return call_id
+        self.outbound_endpoints.append(endpoint)
+        return f"{call_id}-employee" if int(index) <= 0 else f"{call_id}-employee-{int(index)}"
 
     def create_customer_leg(self, *args):
         self.customer_legs.append((args[0], args[1], args[2]))
         return f"{args[0]}-customer"
 
-    def create_local_leg(self, call_id, extension, employee_channel_id, caller_id_number=None, endpoint=None):
+    def create_local_leg(self, call_id, extension, employee_channel_id, caller_id_number=None, endpoint=None, index=0):
         self.local_legs.append((call_id, extension))
         # The channel the platform rings: the extension's own PJSIP endpoint, so
         # a line's 105 is reached by name and a key never reaches Asterisk.
         self.local_endpoints.append(endpoint)
-        return f"{call_id}-customer"
+        return f"{call_id}-customer" if int(index) <= 0 else f"{call_id}-customer-{int(index)}"
+
+    def create_forward_leg(self, call_id, phone, provider_endpoint, employee_channel_id, caller_id_number=None, timeout=25, index=1):
+        channel = f"{call_id}-customer-{int(index)}"
+        self.forwarded.append({"phone": phone, "timeout": int(timeout), "caller_id": caller_id_number})
+        self.live_channels.append(channel)
+        return channel
+
+    def continue_in_dialplan(self, channel_id, context, extension):
+        self.continued.append((channel_id, context, extension))
 
     def create_bridge(self, call_id):
         return f"bridge-{call_id}"
@@ -72,7 +88,9 @@ class DummyAsterisk:
         return None
 
     def hangup(self, *args):
-        return None
+        channel = args[0] if args else ""
+        self.hung_up.append(channel)
+        self.live_channels = [item for item in self.live_channels if item != channel]
 
     def hangup_call(self, *args):
         return None
@@ -81,7 +99,7 @@ class DummyAsterisk:
         return 0
 
     def list_channels(self):
-        return []
+        return [{"id": channel} for channel in self.live_channels]
 
 
 def make_service(tmp_path: Path):
@@ -406,7 +424,14 @@ def test_one_extension_never_gets_a_menu_by_itself(tmp_path):
     assert settings.auto_ivr_wanted(5) is False
 
 
-def test_past_five_extensions_every_flow_gains_the_menu(tmp_path):
+def test_past_five_extensions_the_main_line_gains_the_menu(tmp_path):
+    """The menu belongs to the journey of a line, never to a desk.
+
+    A desk's flow is its no-answer policy - ring the desk, then its mailbox.
+    Dropping menus on every extension was the panel offering journey steps
+    where nothing could run them: the engine answers a DID from the number's
+    journey, and a menu on a desk is configuration that never executes.
+    """
     from app.admin import SettingsStore
     settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
     owner = make_customer(settings, "bigco", "Big Co")
@@ -421,14 +446,13 @@ def test_past_five_extensions_every_flow_gains_the_menu(tmp_path):
 
     sixth = settings.add_extension_to_number(number, owner, {"extension": "106", "display_name": "Desk 106"})
     added = settings.sync_auto_ivr(owner)
-    assert f"number {number}" in added and f"extension {sixth['key']}" in added, added
-    assert len(added) >= 6, added                                       # the number, and every desk, menu first
+    assert added == [f"number {number}"], added                         # the main line, and only it
     for flow in settings.list_call_routes(owner):
         assert flow["route"]["nodes"][0]["type"] == "ivr"
         assert flow["route"]["nodes"][0]["prompt"] == settings.IVR_DEFAULT_PROMPT
         assert flow["route"]["nodes"][1]["type"] != "ivr"
     for flow in settings.list_routing_flows(owner):
-        assert flow["route"]["nodes"][0]["type"] == "ivr"
+        assert all(node["type"] != "ivr" for node in flow["route"]["nodes"])
 
     # Once again changes nothing - the rule adds, it never duplicates.
     assert settings.sync_auto_ivr(owner) == []
@@ -763,16 +787,20 @@ def test_endpoint_states_are_read_once_per_few_seconds_and_never_guessed(tmp_pat
     assert service.endpoint_states() == {}
 
 
-def test_an_extension_answering_in_the_browser_is_rung_on_its_webRTC_endpoint(tmp_path):
+def test_an_extension_answering_in_the_browser_is_rung_on_both_endpoints(tmp_path):
     """The panel follows the same rule the dial plan does.
 
-    Media is decided by the endpoint a call is placed towards, so an extension
-    marked as answering in the browser is rung on its WebRTC endpoint - both
-    when the panel dials out for it and when a caller rings it.
+    Media is decided by the endpoint a call is placed towards, and the two
+    device kinds never share one identity: the browser signs in as
+    `<username>-webrtc` on its WebRTC endpoint, a desk phone or Zoiper as
+    `<username>` on the plain one. An extension marked as answering in the
+    browser rings BOTH - when the panel dials out for it and when a caller
+    rings it - so a Zoiper on a WebRTC-ticked extension is rung with the media
+    it speaks and can actually answer.
     """
     from app.admin import SettingsStore
 
-    service, asterisk, _ = make_service(tmp_path)
+    service, asterisk, store = make_service(tmp_path)
     settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
     service.settings_store = settings
     owner = make_customer(settings, "browser-co", "Browser Co")
@@ -784,14 +812,603 @@ def test_an_extension_answering_in_the_browser_is_rung_on_its_webRTC_endpoint(tm
     web = next(row["sip_username"] for row in settings.list_extensions() if row["digits"] == "101")
 
     # The digits name one row of this account, so they are read exactly; the row
-    # behind them is the browser one, which is dialled on its WebRTC endpoint.
-    assert service.dial_endpoint(keys["101"]) == f"PJSIP/{web}"
-    assert service.dial_endpoint("101") == f"PJSIP/{web}"
+    # behind them is the browser one, whose WebRTC endpoint rings beside the
+    # plain one.
+    assert service.dial_endpoint(keys["101"]) == f"PJSIP/{web}-webrtc"
+    assert service.dial_endpoints("101") == [f"PJSIP/{web}-webrtc", "PJSIP/101-13025550077"]
     assert service.dial_endpoint(keys["102"]) == "PJSIP/102-13025550077"
+    assert service.dial_endpoints(keys["102"]) == ["PJSIP/102-13025550077"]
 
     service.start_outbound(phone="+13025559999", extension=keys["101"])
-    assert asterisk.outbound_endpoint == f"PJSIP/{web}"
+    assert asterisk.outbound_endpoints == [f"PJSIP/{web}-webrtc", "PJSIP/101-13025550077"]
+    started = store.get(next(c.call_id for c in store.all()))
+    assert started.employee_channel_ids == f"{started.call_id}-employee|{keys['101']},{started.call_id}-employee-1|{keys['101']}"
 
     asterisk.inbound_endpoints.clear()
     service.start_inbound({"id": "channel-browser", "caller": {"number": "+13025550000"}}, number, keys["101"])
-    assert asterisk.inbound_endpoints == [f"PJSIP/{web}"]
+    assert asterisk.inbound_endpoints == [f"PJSIP/{web}-webrtc", "PJSIP/101-13025550077"]
+
+
+def test_the_first_device_to_answer_wins_and_the_other_stays_silent_on_the_line(tmp_path):
+    """Two devices of one extension ring; the loser's cleanup never drops the call.
+
+    A WebRTC extension's browser and plain phone are two legs of one call.
+    Whoever answers first takes it and the other leg is cancelled - and when
+    the cancelled leg's destroy event arrives later, it is bookkeeping: tearing
+    the live call down there used to drop the answered call.
+    """
+    from app.admin import SettingsStore
+
+    service, asterisk, store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "browser-co", "Browser Co")
+    number = "+13025550077"
+    keys = line_setup(settings, number, owner, ("101",))
+    settings.save_extension({"extension": keys["101"], "webrtc_enabled": True}, owner)
+    settings.save_number({"number": number, "provider": "TestCarrier", "inbound_extension": keys["101"],
+                          "owner_user_id": owner, "default_outbound": True, "active": True})
+    web = next(row["sip_username"] for row in settings.list_extensions() if row["digits"] == "101")
+
+    asterisk.live_channels = ["caller-1"]
+    service.start_inbound({"id": "caller-1", "caller": {"number": "+13025550000"}}, number, keys["101"])
+    call = store.get(next(c.call_id for c in store.all()))
+    legs = [leg for leg, _ in service._leg_pairs(call)]
+    web_leg, plain_leg = legs[0], legs[1]
+    asterisk.live_channels += [web_leg, plain_leg]
+
+    # The plain phone answers first; the browser leg stops ringing.
+    service.handle_ari_event({"type": "ChannelStateChange", "channel": {"id": plain_leg, "state": "Up"}})
+    call = store.get(call.call_id)
+    assert call.employee_channel_id == plain_leg
+    assert call.status in {"employee_answered", "answered"}
+    assert web_leg in asterisk.hung_up
+
+    # The cancelled browser leg's destroy is bookkeeping, not a hangup.
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": web_leg}})
+    call = store.get(call.call_id)
+    assert call.status not in {"failed"}
+    assert call.ended_at is None
+
+
+def _bridged_setup(tmp_path: Path):
+    """A call whose employee answered: two other desks still ring."""
+    service, asterisk, store = make_service(tmp_path)
+    call = Call(
+        call_id="cut-1", contact_id=None, member_id=None,
+        extension="main-1", phone="+13025551234", direction="inbound", status="ringing",
+        employee_channel_id="leg-answer",
+        employee_channel_ids="leg-answer|101,leg-two|102,leg-three|103",
+        customer_channel_id="cust-1",
+    )
+    store.create(call)
+    for channel in ("leg-answer", "leg-two", "leg-three", "cust-1"):
+        service._leg_index[channel] = call.call_id
+        asterisk.live_channels.append(channel)
+    return service, asterisk, store, call
+
+
+def test_a_recording_that_cannot_write_never_hangs_up_the_live_call(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+
+    def broken_recording(*args):
+        raise RuntimeError("Unable to open recording file: Permission denied")
+
+    asterisk.start_bridge_recording = broken_recording
+    service._recording_settings = lambda extension: {
+        "enabled": True, "format": "wav", "beep": False,
+        "max_duration": 60, "announcement": False, "announcement_media": "",
+    }
+    service.handle_ari_event({
+        "type": "ChannelStateChange",
+        "channel": {"id": "leg-answer", "state": "Up"},
+        "timestamp": "2026-10-17T10:00:00Z",
+    })
+    updated = store.get(call.call_id)
+    # The bridge stands and the people keep talking; only the recording failed.
+    # The only hangups are the losing sibling desks the answerer beat.
+    assert updated.bridge_id == "bridge-cut-1"
+    assert updated.recording_status == "failed"
+    assert set(asterisk.hung_up) == {"leg-two", "leg-three"}
+    assert "leg-answer" not in asterisk.hung_up
+    assert "cust-1" not in asterisk.hung_up
+
+
+def test_a_bridge_that_cannot_build_takes_down_every_leg_of_the_call(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+
+    def broken_bridge(*args):
+        raise RuntimeError("bridge is gone")
+
+    asterisk.add_channel_to_bridge = broken_bridge
+    service.handle_ari_event({
+        "type": "ChannelStateChange",
+        "channel": {"id": "leg-answer", "state": "Up"},
+        "timestamp": "2026-10-17T10:00:00Z",
+    })
+    # Every leg of the failed call goes down - not just the one that answered.
+    # Leftover ringing legs answer into a void and cut the instant they pick up.
+    assert {"cust-1", "leg-answer", "leg-two", "leg-three"} <= set(asterisk.hung_up)
+    assert store.get(call.call_id).status == "failed"
+
+
+def test_a_call_that_ends_hangs_up_every_leg_that_still_rings(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    service._finalize(call.call_id, "test_over")
+    # A finished call owns nothing: no desk of it may keep ringing. Without
+    # this sweep a call that ends leaves its devices ringing forever, and each
+    # answered leftover cuts the instant somebody picks up.
+    assert {"cust-1", "leg-answer", "leg-two", "leg-three"} <= set(asterisk.hung_up)
+    assert store.get(call.call_id).status in {"completed", "failed"}
+
+
+def test_a_straggler_of_a_finished_call_is_hung_up_not_bridged(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    store.update(call.call_id, status="failed", ended_at="2026-10-17T10:05:00Z")
+    service.handle_ari_event({
+        "type": "ChannelStateChange",
+        "channel": {"id": "leg-two", "state": "Up"},
+        "timestamp": "2026-10-17T10:05:30Z",
+    })
+    updated = store.get(call.call_id)
+    assert asterisk.hung_up == ["leg-two"]          # the straggler goes down
+    assert updated.status == "failed"               # no resurrection of the call
+    assert updated.bridge_id is None                # and no bridge was built
+
+
+def test_the_customer_giving_up_takes_down_every_desk_it_was_ringing(tmp_path: Path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    service.handle_ari_event({
+        "type": "ChannelDestroyed",
+        "channel": {"id": "cust-1", "name": "PJSIP/trunk-00000001"},
+        "timestamp": "2026-10-17T10:01:00Z",
+    })
+    # Every desk of the call goes down - the first leg alone is not enough.
+    assert {"leg-answer", "leg-two", "leg-three"} <= set(asterisk.hung_up)
+
+
+# --------------------------------------------------------------- routing logic
+# The journey of a line - menu, hours, voicemail, forwarding - belongs to the
+# main number; a desk keeps only its no-answer policy. These tests hold that
+# split together: where the steps live, and that the engine runs them.
+
+
+def _routing_setup(tmp_path: Path, extensions=("101", "102")):
+    from app.admin import SettingsStore
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    owner = make_customer(settings, "route-co", "Route Co")
+    number = "+13025559904"
+    keys = line_setup(settings, number, owner, extensions)
+    return settings, owner, number, keys
+
+
+def _seed_legacy_desk_flow(settings, owner, key, nodes):
+    """Write a desk flow the way the old panel did - straight to the table.
+
+    The split between journey and desk policy is enforced on every save now, so
+    rows like these can only come from a deployment that ran the old UI. That
+    is exactly the data the compatibility layer has to keep working.
+    """
+    import json
+    route = json.dumps({"nodes": nodes})
+    with settings._connect() as db:
+        db.execute(
+            "INSERT INTO routing_flows(owner_user_id,target_type,target,name,route_json,active) VALUES(?,?,?,?,?,1) "
+            "ON CONFLICT(owner_user_id,target_type,target) DO UPDATE SET route_json=excluded.route_json",
+            (int(owner), "extension", str(key), "Extension call flow", route),
+        )
+
+
+def test_a_desk_flow_refuses_a_menu(tmp_path: Path):
+    settings, owner, _, keys = _routing_setup(tmp_path)
+    try:
+        settings.save_routing_flow(owner, {
+            "name": "Desk", "route": {"nodes": [settings.default_ivr_node()]}, "active": True,
+        }, target_type="extension", target=keys["101"])
+    except ValueError as error:
+        assert "main number" in str(error)
+    else:
+        raise AssertionError("a menu on a desk must be refused")
+
+
+def test_the_journey_configured_on_the_desk_still_answers_the_line(tmp_path: Path):
+    """Steps the panel put on a desk keep working until they are moved.
+
+    The routing canvas offered menus and hours on every extension, so that is
+    where customers built their line's journey - and then "the IVR does not
+    work", because the engine runs the number's journey. The desk the line
+    answers with fills in whatever the number flow leaves silent.
+    """
+    settings, owner, number, keys = _routing_setup(tmp_path)
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": settings.default_number_route([keys["101"], keys["102"]]),
+    })
+    menu = settings.default_ivr_node()
+    menu["prompt"] = "Welcome to the front desk. Enter an extension."
+    _seed_legacy_desk_flow(settings, owner, keys["101"],
+        [menu, {"type": "voicemail", "mailbox": keys["101"], "configured": True}])
+
+    plan = settings.inbound_plan(number, keys["101"])
+    assert plan["kind"] == "ivr"
+    assert plan["prompt"] == "Welcome to the front desk. Enter an extension."
+    assert plan["voicemail"] == keys["101"]
+
+
+def test_the_journey_on_the_number_wins_over_the_desks(tmp_path: Path):
+    settings, owner, number, keys = _routing_setup(tmp_path)
+    menu = settings.default_ivr_node()
+    menu["prompt"] = "The line's own greeting."
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [menu, {"type": "ring_group", "extensions": [keys["101"]], "timeout": 25, "configured": True}]},
+    })
+    desk_menu = settings.default_ivr_node()
+    desk_menu["prompt"] = "A desk greeting that must not run."
+    _seed_legacy_desk_flow(settings, owner, keys["101"], [desk_menu])
+
+    plan = settings.inbound_plan(number, keys["101"])
+    assert plan["kind"] == "ivr"
+    assert plan["prompt"] == "The line's own greeting."
+
+
+def test_the_desks_mailbox_answers_when_the_journey_is_silent(tmp_path: Path):
+    settings, owner, number, keys = _routing_setup(tmp_path)
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": settings.default_number_route([keys["101"]]),
+    })
+    settings.save_extension({"extension": keys["101"], "voicemail_enabled": True, "voicemail_pin": "2468"}, owner)
+
+    plan = settings.inbound_plan(number, keys["101"])
+    assert plan["voicemail"] == keys["101"]          # a ringed-out desk keeps its messages
+
+
+def test_the_voicemail_step_is_the_decision_to_take_messages(tmp_path: Path):
+    """Answering "Voice Mail" in the journey is itself the switch.
+
+    Before, a mailbox also needed a separate toggle buried in the SIP sheet -
+    without it the step pointed at a mailbox the renderer never wrote, and the
+    call was dropped instead ("the voicemail function is not working").
+    """
+    settings, owner, number, keys = _routing_setup(tmp_path)
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": [keys["101"], keys["102"]], "timeout": 25, "configured": True},
+            {"type": "voicemail", "mailbox": keys["102"], "configured": True},
+        ]},
+    })
+    assert settings.extension_voicemail_enabled(keys["102"]) is False   # the switch stays off
+
+    plan = settings.inbound_plan(number, keys["101"])
+    assert plan["voicemail"] == keys["102"]
+
+
+def test_when_nobody_answers_the_forward_number_is_rung(tmp_path: Path):
+    service, asterisk, store = make_service(tmp_path)
+    from app.admin import SettingsStore
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "fwd-co", "Fwd Co")
+    number = "+13025559905"
+    keys = line_setup(settings, number, owner, ("101",))
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": [keys["101"]], "timeout": 25, "configured": True},
+            {"type": "forward", "phone": "+13025550199", "timeout": 40, "configured": True},
+        ]},
+    })
+    channel = {"id": "chan-inbound-fwd", "caller": {"number": "+13025550000"}}
+    call = service.start_inbound(channel, number, keys["101"])
+    assert call is not None
+    leg = call.employee_channel_id
+
+    # The desk rings out; instead of killing the caller, the journey's forward
+    # number is dialled with the caller still waiting on the line.
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    assert asterisk.forwarded and asterisk.forwarded[0]["phone"] == "+13025550199"
+    assert asterisk.forwarded[0]["timeout"] == 40
+    assert "chan-inbound-fwd" not in asterisk.hung_up
+    updated = store.get(call.call_id)
+    assert updated.status == "forwarding"
+    assert updated.employee_channel_id in updated.employee_channel_ids
+
+    # A forward that dies unanswered ends the call - and never forwards twice.
+    forward_channel = updated.employee_channel_id
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": forward_channel}})
+    assert len(asterisk.forwarded) == 1
+    assert "chan-inbound-fwd" in asterisk.hung_up
+    assert store.get(call.call_id).status in {"completed", "failed"}
+
+
+def test_a_forward_answer_bridges_the_waiting_caller(tmp_path: Path):
+    service, asterisk, store = make_service(tmp_path)
+    from app.admin import SettingsStore
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "fwd2-co", "Fwd2 Co")
+    number = "+13025559906"
+    keys = line_setup(settings, number, owner, ("101",))
+    settings.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": [keys["101"]], "timeout": 25, "configured": True},
+            {"type": "forward", "phone": "+13025550199", "timeout": 25, "configured": True},
+        ]},
+    })
+    channel = {"id": "chan-inbound-fwd2", "caller": {"number": "+13025550000"}}
+    call = service.start_inbound(channel, number, keys["101"])
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": call.employee_channel_id}})
+    forward_channel = store.get(call.call_id).employee_channel_id
+
+    # The outside number picks up: it is bridged to the waiting caller exactly
+    # like a desk that answered.
+    service.handle_ari_event({
+        "type": "ChannelStateChange",
+        "channel": {"id": forward_channel, "state": "Up"},
+        "timestamp": "2026-10-18T10:00:00Z",
+    })
+    updated = store.get(call.call_id)
+    assert updated.bridge_id == f"bridge-{call.call_id}"
+    assert updated.answered is True
+
+
+
+# ------------------------------------------------- voicemail and IVR, working
+# The user's acceptance: these two features must actually run. Every step of
+# each chain is exercised here against the engine, and the renderer pins in
+# test_telephony_config cover the mailbox and dialplan halves.
+
+
+def _ring_flow_service(tmp_path, extensions=("101", "102"), ring=None, extra_nodes=None, desk_flow=None):
+    """A plain ringing main line, one call already waiting on it.
+
+    `extensions` are the desks that exist on the line; `ring` names the ones
+    the journey rings (all of them by default). `extra_nodes` and `desk_flow`
+    receive the line's key map so they can name this line's own extensions the
+    same way the canvas stores them.
+    """
+    service, asterisk, store = make_service(tmp_path)
+    from app.admin import SettingsStore
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "chain-co", "Chain Co")
+    number = "+13025559908"
+    keys = line_setup(settings, number, owner, extensions)
+    rung = list(ring or extensions)
+    nodes = [{"type": "ring_group", "extensions": [keys[e] for e in rung], "timeout": 25, "configured": True}]
+    nodes.extend(extra_nodes(keys) if callable(extra_nodes) else (extra_nodes or []))
+    settings.save_call_route(owner, {"phone_number": number, "name": "Main call flow", "active": True, "route": {"nodes": nodes}})
+    if desk_flow is not None:
+        import json
+        shaped = desk_flow(keys) if callable(desk_flow) else desk_flow
+        with settings._connect() as db:
+            db.execute(
+                "INSERT INTO routing_flows(owner_user_id,target_type,target,name,route_json,active) VALUES(?,?,?,?,?,1) "
+                "ON CONFLICT(owner_user_id,target_type,target) DO UPDATE SET route_json=excluded.route_json",
+                (int(owner), "extension", shaped["target"], "Extension call flow", json.dumps({"nodes": shaped["nodes"]})),
+            )
+    channel = {"id": "chan-inbound-chain", "caller": {"number": "+13025550000"}}
+    call = service.start_inbound(channel, number, keys[rung[0]])
+    return service, asterisk, store, settings, owner, number, keys, call
+
+
+def _all_legs(call):
+    return [call.employee_channel_id] + [
+        token.partition("|")[0] for token in (call.employee_channel_ids or "").split(",") if token
+    ]
+
+
+def test_when_the_desks_ring_out_the_call_lands_in_the_mailbox(tmp_path):
+    """The whole voicemail chain: ring out, then the journey's Voice Mail step."""
+    service, asterisk, store, _, _, _, keys, call = _ring_flow_service(
+        tmp_path,
+        extra_nodes=lambda keys: [{"type": "voicemail", "mailbox": keys["102"], "configured": True}],
+    )
+    for leg in dict.fromkeys(_all_legs(call)):
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    # The caller is not hung up: they are handed to the mailbox by name.
+    mailbox = keys["102"].replace("@", "-").replace("+", "")
+    assert asterisk.continued and asterisk.continued[0][1] == "voicemail-inbound"
+    assert asterisk.continued[0][2] == mailbox
+    assert "chan-inbound-chain" not in asterisk.hung_up
+
+
+def test_a_disabled_voicemail_step_takes_no_messages(tmp_path):
+    service, asterisk, store, _, _, _, keys, call = _ring_flow_service(
+        tmp_path,
+        desk_flow=lambda keys: {"target": keys["101"], "nodes": [
+            {"type": "extension", "extension": keys["101"], "timeout": 25, "configured": True},
+            {"type": "voicemail", "mailbox": keys["101"], "enabled": False, "configured": True},
+        ]},
+    )
+    for leg in dict.fromkeys(_all_legs(call)):
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    assert asterisk.continued == []                       # the switch is off: nothing to hand to
+    assert "chan-inbound-chain" in asterisk.hung_up
+
+
+def test_a_desk_rings_for_the_seconds_its_call_handling_asks(tmp_path):
+    # 101 asks for 15s; 102 keeps the journey's own 25s.
+    service, asterisk, store, settings, owner, number, keys, call = _ring_flow_service(
+        tmp_path,
+        desk_flow=lambda keys: {"target": keys["101"], "nodes": [
+            {"type": "extension", "extension": keys["101"], "timeout": 15, "configured": True},
+        ]},
+    )
+    timed = {item["extension"]: item["timeout"] for item in asterisk.inbound_timeouts}
+    assert timed[keys["101"]] == 15
+    assert timed[keys["102"]] == 25
+
+
+def test_an_unanswered_call_is_handed_to_the_next_desk(tmp_path):
+    """The desk's optional unanswered destination: another desk gets its chance
+    before the journey's ending applies - and only one round is given."""
+    service, asterisk, store, _, _, _, keys, call = _ring_flow_service(
+        tmp_path,
+        extensions=("101", "102"), ring=("101",),
+        desk_flow=lambda keys: {"target": keys["101"], "nodes": [
+            {"type": "extension", "extension": keys["101"], "timeout": 15, "configured": True},
+            {"type": "extension", "extension": keys["102"], "label": "If unanswered: ring 102", "configured": True},
+            {"type": "voicemail", "mailbox": keys["101"], "enabled": True, "configured": True},
+        ]},
+    )
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": call.employee_channel_id}})
+    updated = store.get(call.call_id)
+    assert updated.status == "ringing_fallback"
+    assert any(ext == keys["102"] for (_, ext) in service._leg_pairs(updated))
+    assert "chan-inbound-chain" not in asterisk.hung_up          # the caller keeps waiting
+
+    # The fallback rings out: now - once - the mailbox, never another round.
+    for leg, _ in service._leg_pairs(store.get(call.call_id)):
+        if leg != call.employee_channel_id:
+            service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    assert any(item[1] == "voicemail-inbound" for item in asterisk.continued)
+    fallback_rings = [item for item in asterisk.inbound_legs if item[1] == keys["102"]]
+    assert len(fallback_rings) == 1
+
+
+def test_a_key_mapping_answers_the_menu_the_moment_the_key_is_pressed(tmp_path):
+    service, asterisk, store, settings, owner, number, call = make_menu_service(
+        tmp_path, extensions=("101", "102", "106"),
+    )
+    key_106 = key_on(settings, number, "106")
+    key_102 = key_on(settings, number, "102")
+    route = settings.list_call_routes(owner)[0]
+    menu = route["route"]["nodes"][0]
+    menu["keys"] = [{"key": "1", "target": key_106}, {"key": "2", "target": key_102}]
+    settings.save_call_route(owner, {"phone_number": number, "name": "Main call flow", "active": True, "route": route["route"]})
+
+    # A fresh caller, so the session plan carries the saved mappings.
+    channel = {"id": "chan-inbound-keys", "caller": {"number": "+13025550011"}}
+    call = service.start_inbound(channel, number, key_on(settings, number, "101"))
+    digits(service, "1", channel_id="chan-inbound-keys")
+    assert any(ext == key_106 for (_, ext) in service._leg_pairs(store.get(call.call_id)))
+    assert store.get(call.call_id).extension == key_106
+
+
+def test_an_unmapped_key_is_invalid_input_then_the_fallback(tmp_path):
+    service, asterisk, store, settings, owner, number, call = make_menu_service(
+        tmp_path, extensions=("101", "102"),
+    )
+    key_101 = key_on(settings, number, "101")
+    key_102 = key_on(settings, number, "102")
+    route = settings.list_call_routes(owner)[0]
+    menu = route["route"]["nodes"][0]
+    menu["keys"] = [{"key": "1", "target": key_101}]
+    menu["attempts"] = 2
+    menu["fallback"] = key_102
+    settings.save_call_route(owner, {"phone_number": number, "name": "Main call flow", "active": True, "route": route["route"]})
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": "chan-inbound-1"}})
+
+    channel = {"id": "chan-inbound-badkey", "caller": {"number": "+13025550012"}}
+    call = service.start_inbound(channel, number, key_101)
+
+    digits(service, "9", channel_id="chan-inbound-badkey")     # nothing maps to 9
+    assert service.has_ivr_sessions() is True                  # asked again first
+    digits(service, "9", channel_id="chan-inbound-badkey")     # second failure: the fallback
+    assert service.has_ivr_sessions() is False
+    assert any(ext == key_102 for (_, ext) in service._leg_pairs(store.get(call.call_id)))
+
+
+def test_recording_finish_during_teardown_is_not_overwritten(tmp_path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    name = f"call-{call.call_id}"
+    store.update(call.call_id, status="answered", answered=True,
+                 bridge_id=f"bridge-{call.call_id}", recording_name=name,
+                 recording_status="recording")
+
+    def finish_while_stopping(recording_name):
+        service.handle_ari_event({"type": "RecordingFinished", "recording": {"name": recording_name}})
+
+    asterisk.stop_recording = finish_while_stopping
+    service._finalize(call.call_id, "channel_destroyed")
+    assert store.get(call.call_id).recording_status == "finalized"
+    assert store.get(call.call_id).ended_at
+    # A late teardown cannot downgrade an already-finalized recording either.
+    store.mark_recording_finalizing(call.call_id)
+    assert store.get(call.call_id).recording_status == "finalized"
+
+
+def test_reconcile_recovers_recording_and_finalizing_but_leaves_live_and_unavailable(tmp_path):
+    service, asterisk, store = make_service(tmp_path)
+    for name, status, ended in (
+        ("missed", "recording", True), ("stopped", "finalizing", True),
+        ("live", "recording", False), ("unavailable", "finalizing", True),
+        ("failed", "failed", True), ("deleted", "deleted", True),
+    ):
+        store.create(Call(call_id=name, contact_id=None, member_id=None, extension="101",
+                          phone="+13025551234", recording_name=name, recording_status=status,
+                          ended_at="2026-10-22T10:00:00+00:00" if ended else None))
+    queried = []
+
+    def stored(name):
+        queried.append(name)
+        if name == "unavailable":
+            return None  # Also what the client returns on an ARI outage.
+        return {"name": name, "format": "wav", "filename": f"/recording/{name}.wav"}
+
+    asterisk.get_stored_recording = stored
+    service.reconcile_recordings()
+    for name in ("missed", "stopped"):
+        assert store.get(name).recording_status == "finalized"
+        assert store.get(name).recording_path == f"/recording/{name}.wav"
+        assert store.get(name).recording_format == "wav"
+    assert store.get("live").recording_status == "recording"
+    assert store.get("unavailable").recording_status == "finalizing"
+    assert set(queried) == {"missed", "stopped", "unavailable"}
+    queried.clear()
+    service.reconcile_recordings()
+    assert queried == ["unavailable"]  # Idempotent, no duplicate finish notifications.
+
+
+def test_fast_recording_finish_is_correlated_before_start_returns(tmp_path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    service._recording_settings = lambda extension: {
+        "enabled": True, "format": "wav", "beep": False, "max_duration": 0,
+        "announcement": False,
+    }
+
+    def start(bridge_id, name, *args):
+        service.handle_ari_event({"type": "RecordingFinished", "recording": {"name": name}})
+
+    asterisk.start_bridge_recording = start
+    service._start_bridge(call)
+    assert store.get(call.call_id).recording_status == "finalized"
+
+
+def test_failed_recording_attempt_stays_in_history_without_audio(tmp_path):
+    service, _, store = make_service(tmp_path)
+    for name, status in (("failed", "failed"), ("old", "deleted"), ("ok", "finalized")):
+        store.create(Call(call_id=name, contact_id=None, member_id=None, extension="101",
+                          phone="+13025551234", recording_name=name, recording_status=status))
+    rows, total = store.search(recordings_only=True)
+    assert total == 2
+    assert {row.call_id for row in rows} == {"failed", "ok"}
+
+
+def test_late_ring_leg_events_cannot_transfer_the_voicemail_caller_twice(tmp_path):
+    service, asterisk, store, _, _, _, keys, call = _ring_flow_service(
+        tmp_path, extra_nodes=lambda keys: [
+            {"type": "voicemail", "mailbox": keys["102"], "configured": True},
+        ],
+    )
+    real_continue = asterisk.continue_in_dialplan
+
+    def continue_once(channel, context, mailbox):
+        if asterisk.continued:
+            # ARI rejects continue once the channel has left Stasis for VoiceMail.
+            raise RuntimeError("409 Channel not in a Stasis application")
+        real_continue(channel, context, mailbox)
+
+    asterisk.continue_in_dialplan = continue_once
+    legs = list(dict.fromkeys(_all_legs(call)))
+    for leg in legs:
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    # Late events may refer to the primary leg even after the index is cleared.
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": legs[0]}})
+    assert len(asterisk.continued) == 1
+    assert "chan-inbound-chain" not in asterisk.hung_up
+    assert store.get(call.call_id).ended_at

@@ -30,6 +30,16 @@ touch "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "
 chown asterisk:telephony "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf" "$DYNAMIC_DIR/pjsip.transports.conf"
 chmod 0660 "$DYNAMIC_DIR/pjsip.dynamic.conf" "$DYNAMIC_DIR/extensions.dynamic.conf" "$DYNAMIC_DIR/voicemail.dynamic.conf" "$DYNAMIC_DIR/pjsip.transports.conf"
 
+# The container runs Asterisk as the `asterisk` user, but the runtime
+# directories arrive root-owned (tmpfs mounts and fresh volumes). A queue log
+# or call recording it cannot write surfaces exactly when a call connects -
+# "Unable to create queue log: Permission denied" at boot, "No audio available
+# on Recorder/..." on the call - and a recording failure used to take the live
+# call down with it. Own the whole runtime tree before Asterisk starts.
+mkdir -p /var/spool/asterisk/recording /var/spool/asterisk/voicemail
+chown -R asterisk:telephony /var/log/asterisk /var/run/asterisk /var/spool/asterisk
+chmod 0770 /var/spool/asterisk/recording
+
 # Seed the SIP transports on first boot only. Afterwards the telephony sync
 # renders this file from the admin panel's Service address (service_host),
 # which is the single source of truth; a container restart applies changes.
@@ -64,14 +74,26 @@ if [ "$RTP_START" -ge "$RTP_END" ]; then
     echo "ASTERISK_RTP_START must be lower than ASTERISK_RTP_END" >&2
     exit 1
 fi
+# PJSIP's external_media_address changes SDP c= only. Asterisk's RTP engine
+# otherwise advertises the Docker-only address as its WebRTC ICE candidate.
+# Generate the local/public candidate map in the shared dynamic volume before
+# loading RTP, including after a container recreation changes its bridge IP.
+/configure-ice.sh "$DYNAMIC_DIR"
 cat > "$ASTERISK_CONFIG_DIR/rtp.conf" <<EOF
 [general]
 rtpstart=$RTP_START
 rtpend=$RTP_END
 icesupport=yes
+#include dynamic/rtp.ice.conf
 EOF
-mkdir -p /var/spool/asterisk/voicemail
+# Asterisk creates mailbox subdirectories with 0777 masked by its umask and
+# message files with 0666 masked by its umask. Docker's usual 0022 leaves the
+# shared telephony group unable to create Old/Urgent or move/delete messages.
+# Repair existing named-volume contents, not just the root, without following
+# symlinks. New directories inherit telephony and group write via setgid/umask.
 chown -R asterisk:telephony /var/spool/asterisk/voicemail
+chmod -R g+rwX /var/spool/asterisk/voicemail
+find /var/spool/asterisk/voicemail -type d -exec chmod g+s {} +
 chmod 2770 /var/spool/asterisk/voicemail
 
 cat > "$ASTERISK_CONFIG_DIR/ari.conf" <<EOF
@@ -145,4 +167,26 @@ if [ ! -s "$KEY_DIR/asterisk.key" ] || [ ! -s "$KEY_DIR/asterisk.crt" ]; then
     chmod 0644 "$KEY_DIR/asterisk.crt"
 fi
 
-exec asterisk -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"
+# WebRTC endpoints negotiate DTLS-SRTP, which is provided by res_srtp.so and
+# cannot work without it. An image built before libsrtp2 was added to the build
+# simply has no such module (Asterisk skips what it cannot compile), and every
+# browser call then dies at media setup with "SRTP support module is not loaded".
+# Say so once at startup instead of letting each call fail.
+if [ ! -f /usr/lib/asterisk/modules/res_srtp.so ]; then
+    echo "WARNING: /usr/lib/asterisk/modules/res_srtp.so is missing from this image." >&2
+    echo "         WebRTC (DTLS-SRTP) calls cannot negotiate media. Rebuild the" >&2
+    echo "         asterisk image so the SIP stack is compiled with libsrtp2" >&2
+    echo "         (see asterisk/Dockerfile), then recreate the container." >&2
+fi
+
+# Start Asterisk by absolute path. `core restart` re-executes argv[0]; a bare
+# "asterisk" depends on PATH surviving the setuid to the runtime user, and when
+# it does not the re-exec fails, the process exits 0, and Docker's restart
+# policy makes an ordinary in-place restart look like a crash (the container's
+# RestartCount climbs and every call is dropped).
+ASTERISK_BIN="$(command -v asterisk)"
+export PATH
+# Apply after generating root-owned config files so the asterisk user can read
+# them. The process inherits this for every new voicemail folder and recording.
+umask 0007
+exec "$ASTERISK_BIN" -f -T -C "$ASTERISK_CONFIG_DIR/asterisk.conf"

@@ -9,10 +9,10 @@ class FakeAsterisk:
     def health(self):
         return {"system": "Asterisk Test"}
 
-    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None):
+    def create_outbound_call(self, call_id, extension, phone, provider_endpoint, metadata=None, endpoint=None, index=0):
         return call_id
 
-    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, endpoint=None):
+    def create_inbound_employee_leg(self, call_id, extension, customer_channel_id, index=0, endpoint=None, timeout=30):
         return f"{call_id}-employee"
 
     def continue_in_dialplan(self, channel_id, context, extension):
@@ -444,7 +444,7 @@ def test_known_inbound_did_creates_crm_call_for_only_owner(tmp_path):
         "channel": {"id": "carrier-channel-1", "state": "Up", "caller": {"number": "+919999999999"}},
     })
     inbound = next(call for call in service.store.all() if call.direction == "inbound")
-    assert inbound.extension == "101"
+    assert inbound.extension == "101@+13025550101"  # Shared lines must retain the exact desk identity.
     assert inbound.caller_id_number == "+13025550101"
     assert inbound.customer_channel_id == "carrier-channel-1"
     assert inbound.employee_channel_id.endswith("-employee")
@@ -805,3 +805,141 @@ def test_admin_webhook_test_reports_the_endpoint_answer(tmp_path, monkeypatch):
     assert response.json == {"ok": False, "status_code": 503, "error": "HTTP 503"}
 
     assert client.post("/admin/api/webhooks/999999/test", headers=csrf).status_code == 404
+
+
+def test_email_config_rotation_test_and_secret_redaction(tmp_path, monkeypatch):
+    """Admin saves replace keys, test uses saved replacement, state is public."""
+    client = app_client(tmp_path)
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    headers = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
+    # Legacy cloud-key fields from an older browser are ignored, never re-saved.
+    patch = {"enabled": False, "api_key": " ELASTIC.initial ", "from_email": "verified@example.com",
+             "transcription_enabled": True, "transcription_api_key": "sk.transcription"}
+    assert client.post("/admin/api/email-config", json=patch).status_code == 403
+    saved = client.post("/admin/api/email-config", json=patch, headers=headers)
+    assert saved.status_code == 200
+    assert saved.json["email_config"]["has_api_key"]
+    assert saved.json["email_config"]["transcription_enabled"]
+    assert "has_transcription_api_key" not in saved.json["email_config"]
+    assert not saved.json["email_config"]["enabled"]
+    assert "ELASTIC.initial" not in saved.text and "sk.transcription" not in saved.text
+    # A cached old console cannot switch the transport or erase a saved key.
+    stale = client.post("/admin/api/email-config", json={"provider": "sendgrid", "api_key": ""}, headers=headers)
+    assert stale.status_code == 200 and stale.json["email_config"]["provider"] == "elasticemail"
+    assert client.application.extensions["settings_store"].get_email_config(include_key=True)["api_key"] == "ELASTIC.initial"
+    assert client.post("/admin/api/email-config", json={"api_key": "ELASTIC.replacement"}, headers=headers).status_code == 200
+    calls = []
+    class Accepted:
+        status_code = 200
+        def json(self):
+            return {"success": True}
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or Accepted())
+    assert client.post("/admin/api/email-config/test", json={"email": "invalid"}, headers=headers).status_code == 400
+    assert calls == []
+    result = client.post("/admin/api/email-config/test", json={"email": "recipient@example.com"}, headers=headers)
+    assert result.status_code == 200 and result.json["ok"] is True
+    assert len(calls) == 1 and calls[0][0] == "https://api.elasticemail.com/v2/email/send"
+    assert calls[0][1]["data"]["apikey"] == "ELASTIC.replacement" and "headers" not in calls[0][1]
+    public = client.get("/admin/api/state")
+    assert "ELASTIC.replacement" not in public.text and "sk.transcription" not in public.text
+    assert "_key_enc" not in public.text
+    # Provider failures are actionable but never echo reflected secret bodies.
+    class Rejected:
+        status_code = 403
+        text = "sk.transcription ELASTIC.replacement"
+        def json(self):
+            return {"success": False, "error": "Permission denied ELASTIC.replacement"}
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda *a, **kw: Rejected())
+    failed = client.post("/admin/api/email-config/test", json={"email": "recipient@example.com"}, headers=headers)
+    assert failed.status_code == 502 and "Send HTTP" in failed.json["error"]
+    assert "ELASTIC.replacement" not in failed.text
+
+
+def test_elastic_email_api_saves_and_reports_safe_structured_test_results(tmp_path, monkeypatch):
+    from collections import defaultdict, deque
+    from app import admin as admin_module
+    # The login limiter is process-global; do not consume other tests' quota.
+    monkeypatch.setattr(admin_module, "_LOGIN_BUCKETS", defaultdict(deque))
+    client = app_client(tmp_path)
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    headers = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
+    saved = client.post("/admin/api/email-config", headers=headers, json={
+        "provider": "elasticemail", "api_key": "ELASTIC-secret", "from_email": "verified@example.com",
+        "enabled": False,
+    })
+    assert saved.status_code == 200 and saved.json["email_config"]["provider"] == "elasticemail"
+    assert saved.json["email_config"]["has_api_key"] and "ELASTIC-secret" not in saved.text
+    calls = []
+    class Rejected:
+        status_code = 200
+        def json(self):
+            return {"success": False, "error": "Invalid API key ELASTIC-secret test@example.com <script>"}
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda url, **kw: calls.append((url, kw)) or Rejected())
+    # Legacy clients retain the old 502 behavior.
+    old = client.post("/admin/api/email-config/test", headers=headers, json={"email": "test@example.com"})
+    assert old.status_code == 502 and old.json["ok"] is False
+    # The new console opts into a completed test result, so nginx cannot replace
+    # the detailed JSON failure with its generic 502 HTML page.
+    result = client.post("/admin/api/email-config/test", headers=headers,
+                         json={"email": "test@example.com", "result_only": True})
+    assert result.status_code == 200 and result.json["ok"] is False
+    assert "Elastic Email" in result.json["error"] and "Send HTTP" in result.json["error"]
+    assert "ELASTIC-secret" not in result.text and "test@example.com" not in result.text and "<script>" not in result.text
+    assert len(calls) == 2 and all(url == "https://api.elasticemail.com/v2/email/send" for url, _ in calls)
+    assert calls[0][1]["data"]["apikey"] == "ELASTIC-secret" and "headers" not in calls[0][1]
+    class Accepted:
+        status_code = 200
+        def json(self):
+            return {"success": True, "data": {"messageid": "test"}}
+    monkeypatch.setattr("app.voicemail_email.requests.post", lambda *a, **kw: Accepted())
+    passed = client.post("/admin/api/email-config/test", headers=headers,
+                         json={"email": "test@example.com", "result_only": True})
+    assert passed.status_code == 200 and passed.json == {"ok": True, "error": None}
+    assert "ELASTIC-secret" not in client.get("/admin/api/state").text
+
+
+def test_customer_cannot_read_or_change_email_provider_settings(tmp_path, monkeypatch):
+    client = app_client(tmp_path)
+    store = client.application.extensions["settings_store"]
+    store.save_email_config({"enabled": True, "api_key": "ELASTIC.private", "from_email": "verified@example.com",
+                             "transcription_enabled": True, "transcription_api_key": "sk.private"})
+    store.save_user({"username": "email-customer", "email": "customer@example.com", "password": "long-customer-password",
+                     "role": "user", "active": True})
+    assert client.post("/admin/login", json={"username": "email-customer", "password": "long-customer-password"}).status_code == 200
+    state = client.get("/admin/api/state").json
+    assert state["email_config"] == {} and state["email_deliveries"] == []
+    headers = {"X-CSRF-Token": state["csrf_token"]}
+    assert client.post("/admin/api/email-config", json={"api_key": "ELASTIC.attacker"}, headers=headers).status_code == 403
+    assert client.post("/admin/api/email-config/test", json={"email": "customer@example.com"}, headers=headers).status_code == 403
+    assert store.get_email_config(include_key=True)["api_key"] == "ELASTIC.private"
+
+
+def test_admin_ui_and_state_are_not_cached_across_image_upgrades(tmp_path, monkeypatch):
+    """A stale admin.js must never keep removed API-key fields alive."""
+    from collections import defaultdict, deque
+    from app import admin as admin_module
+    # Login rate limiting is process-global; isolate this focused UI check.
+    monkeypatch.setattr(admin_module, "_LOGIN_BUCKETS", defaultdict(deque))
+    client = app_client(tmp_path)
+    for path in ("/admin/login", "/admin-assets/admin.js", "/admin-assets/admin.css"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Pragma"] == "no-cache"
+    assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
+    for path in ("/admin", "/admin/api/state"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+    # The landing page's unrelated public assets keep their existing policy.
+    assert client.get("/favicon.ico").headers["Cache-Control"] != "no-store"
+
+
+def test_login_rate_limit_remains_enforced_within_each_test(tmp_path):
+    from app import admin as admin_module
+
+    client = app_client(tmp_path)
+    attempts = {"username": "unknown-user", "password": "wrong"}
+    for _ in range(admin_module._LOGIN_LIMIT):
+        assert client.post("/login", json=attempts).status_code == 401
+    assert client.post("/login", json=attempts).status_code == 429

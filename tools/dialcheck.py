@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+import re
 
-from app.admin import SettingsStore
+from app.admin import SettingsStore, browser_username
 from app.telephony_config import TelephonyConfigSync
 
 
@@ -61,6 +62,11 @@ def extensions_in(context: str) -> list[str]:
     )
 
 
+def dial_endpoints(line: str) -> list[str]:
+    """Endpoint names passed to PJSIP_DIAL_CONTACTS() in a rendered Dial()."""
+    return re.findall(r"PJSIP_DIAL_CONTACTS\(([^)]+)\)", line)
+
+
 def local_numbers_in(context: str) -> dict[str, str]:
     """{dialled number: the device it rings} for the numbers that are local here."""
     found: dict[str, str] = {}
@@ -69,8 +75,10 @@ def local_numbers_in(context: str) -> dict[str, str]:
         if "NoOp(EngineerIP local number " not in block:
             continue
         for line in block.splitlines():
-            if "Dial(PJSIP/" in line:
-                found[head] = line.split("Dial(PJSIP/")[1].split(",")[0]
+            names = dial_endpoints(line)
+            if names:
+                plain = [name for name in names if not name.endswith("-webrtc")]
+                found[head] = (plain or names)[-1]
                 break
     return found
 
@@ -105,8 +113,9 @@ def devices_in(context: str) -> dict[str, str]:
         if not head.isdigit():
             continue
         for line in block.splitlines():
-            if "Dial(PJSIP/" in line:
-                found[head] = line.split("Dial(PJSIP/")[1].split(",")[0]
+            names = dial_endpoints(line)
+            if names:
+                found[head] = names[0]
                 break
     return found
 
@@ -226,13 +235,13 @@ def main() -> int:
         ("the desk with no number is not dialable from any line", "901" not in a_dials and "901" not in c_dials),
         # 3. Another customer is out of reach.
         ("Northwind's 102 is not in Meridian's context - only its line's inbound destination is",
-         "Dial(PJSIP/102-13025550011" not in context_a
+         "PJSIP_DIAL_CONTACTS(102-13025550011)" not in context_a
          and "exten => +13025550011*102" not in context_a),
         ("Northwind cannot dial Meridian's extensions",
          set(extensions_in(north_context)) == {"101", "102"} and "104" not in north_dials),
         # 4. A full number of the same customer goes inside, not to the carrier.
         ("dialling +1 302 555 0002 from +1 302 555 0001 reaches its own 101",
-         a_numbers.get("13025550002") == f"101-{line_b[1:]}" and "Dial(PJSIP/" in cross_number),
+         a_numbers.get("13025550002") == f"101-{line_b[1:]}" and "PJSIP_DIAL_CONTACTS(" in cross_number),
         ("and that call never leaves through the carrier trunk", "OUTBOUND_TRUNK" not in cross_number),
         ("the + form of the number works the same way",
          a_numbers.get("+13025550002") == a_numbers.get("13025550002")),
@@ -272,22 +281,24 @@ def main() -> int:
 
     store.save_extension({"extension": f"101@{line_a}", "webrtc_enabled": True}, meridian)
     web_dialplan, web_pjsip = render(store, workdir)
-    browser_username = str(extension_row(f"101@{line_a}")["sip_username"])
-    browser = endpoint_body(web_pjsip, browser_username)
+    plain_identity = str(extension_row(f"101@{line_a}")["sip_username"])
+    browser_identity = browser_username(plain_identity)
+    browser = endpoint_body(web_pjsip, browser_identity)
     checks += [
         ("ticking WebRTC adds the browser endpoint (WSS, DTLS-SRTP, ICE)",
-         "webrtc=yes" in browser and "transport=transport-wss" in browser and browser_username != sip_101_a),
+         "webrtc=yes" in browser and "transport=transport-wss" in browser and browser_identity != sip_101_a),
         ("and does not disable SIP: the hardware phone's endpoint is untouched",
          bool(canonical_sip) and endpoint_body(web_pjsip, sip_101_a) == canonical_sip),
-        ("and nothing is renamed or invented: the same sections, one new endpoint",
-         set(endpoint_names(web_pjsip)) == set(endpoint_names(pjsip))
-         and endpoint_body(pjsip, browser_username) == ""
-         and ", ".join(sorted(set(endpoint_names(web_pjsip)) ^ set(endpoint_names(pjsip)))) == ""),
-        ("an unticked extension gains nothing - the switch alone decides",
-         endpoint_body(web_pjsip, str(extension_row(f"101@{line_b}")["sip_username"])) == ""),
+        ("the switch adds only the browser's own AOR/auth/endpoint",
+         set(endpoint_names(pjsip)) <= set(endpoint_names(web_pjsip))
+         and endpoint_body(pjsip, browser_identity) == ""
+         and endpoint_body(web_pjsip, browser_identity) != ""
+         and f"[auth-{sip_101_a}-webrtc]" in web_pjsip),
+        ("an unticked extension gains no browser endpoint",
+         endpoint_body(web_pjsip, browser_username(str(extension_row(f"101@{line_b}")["sip_username"]))) == ""),
         ("and a call to the ticked extension now rings the browser",
          devices_in(context_of(web_dialplan, TelephonyConfigSync.number_context(line_a))).get("101")
-         == browser_username),
+         == browser_identity),
         ("while every other line still rings the plain endpoint",
          devices_in(context_of(web_dialplan, TelephonyConfigSync.number_context(line_b))).get("101")
          == f"101-{line_b[1:]}"),

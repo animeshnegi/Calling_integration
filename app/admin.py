@@ -78,6 +78,64 @@ def endpoint_name(value: Any) -> str:
     return f"{digits}-{re.sub(r'[^0-9]', '', scope)}"
 
 
+def browser_username(username: Any) -> str:
+    """The SIP identity the browser softphone signs in with.
+
+    A phone's identity is shared by every kind of device only in appearance:
+    Asterisk matches an inbound request to the endpoint named after the From
+    user, so a Zoiper signing in as `AUMPNO_101` would be answered by the
+    WebRTC endpoint that name once pointed at - and every call to it carried
+    DTLS-SRTP the softphone cannot speak. The browser therefore gets its own
+    identity, `AUMPNO_101-webrtc`, on its own endpoint, AOR and auth, and the
+    plain username belongs to plain SIP alone. The password is the same, so a
+    person only ever knows one secret.
+    """
+    text = str(username or "").strip()
+    return f"{text}-webrtc" if text else ""
+
+
+def parse_ice_servers(value: Any) -> list[dict[str, Any]]:
+    """The browser's ICE servers: STUN, plus TURN where the network needs it.
+
+    A softphone behind a router only offers its private address unless a STUN
+    server lets it discover the public one - Asterisk then has nothing to send
+    audio to and the call rings in silence. The shape is the browser's own
+    RTCIceServer list, handed to the softphone with its sign-in:
+    `[{"urls": "stun:host"}, {"urls": ["turn:host"], "username": "u", "credential": "p"}]`.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(
+            'ICE servers must be JSON, e.g. [{"urls": "stun:stun.example.com"}]'
+        ) from exc
+    if not isinstance(parsed, list):
+        raise ValueError("ICE servers must be a JSON list of {urls, username?, credential?} objects")
+    servers: list[dict[str, Any]] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            raise ValueError("Each ICE server must be an object with a urls field")
+        urls = entry.get("urls")
+        urls = [urls] if isinstance(urls, str) else urls
+        schemes = {"stun", "stuns", "turn", "turns"}
+        if (
+            not isinstance(urls, list) or not urls
+            or not all(isinstance(item, str) and item.split(":", 1)[0] in schemes for item in urls)
+        ):
+            raise ValueError("Each ICE server needs urls like stun:host or turn:host (or a list of them)")
+        clean: dict[str, Any] = {"urls": urls[0] if len(urls) == 1 else urls}
+        for field in ("username", "credential"):
+            if entry.get(field) is not None:
+                if not isinstance(entry[field], str):
+                    raise ValueError(f"ICE server {field} must be text")
+                clean[field] = entry[field]
+        servers.append(clean)
+    return servers
+
+
 def extension_mailbox(key: Any) -> str:
     """The voicemail mailbox of an extension: unique, readable, filename-safe.
 
@@ -226,7 +284,10 @@ class SettingsStore:
         if self.database.is_mysql:
             self.database.create_all()
             existing_user_columns = self.database.columns("admin_users")
+            legacy_transcription_key = "transcription_api_key_enc" in self.database.columns("email_config")
             with self._connect() as db:
+                if legacy_transcription_key:
+                    db.execute("UPDATE email_config SET transcription_api_key_enc='' WHERE transcription_api_key_enc<>''")
                 try:
                     db.execute("CREATE UNIQUE INDEX idx_extensions_sip_username ON extensions(sip_username)")
                 except Exception:
@@ -247,6 +308,8 @@ class SettingsStore:
                 if not db.execute("SELECT 1 FROM settings WHERE `key`='recording_policy_v2_initialized'").fetchone():
                     db.execute("INSERT INTO settings(`key`,value) VALUES('recording_enabled','true') ON DUPLICATE KEY UPDATE value='true',updated_at=CURRENT_TIMESTAMP")
                     db.execute("INSERT IGNORE INTO settings(`key`,value) VALUES('recording_policy_v2_initialized','true')")
+                self._migrate_email_to_elastic(db)
+                self._init_voicemail_recipient_cutover(db)
             return
         with self._connect() as db:
             db.executescript("""
@@ -266,6 +329,8 @@ class SettingsStore:
                     sip_password_enc TEXT NOT NULL, webrtc_enabled INTEGER NOT NULL DEFAULT 0,
                     recording_enabled INTEGER NOT NULL DEFAULT 1, voicemail_enabled INTEGER NOT NULL DEFAULT 0,
                     voicemail_pin_enc TEXT NOT NULL DEFAULT '', voicemail_email TEXT NOT NULL DEFAULT '',
+                    voicemail_email_mode TEXT NOT NULL DEFAULT 'auto', voicemail_email_auto_since_ms INTEGER NOT NULL DEFAULT 0,
+                    voicemail_email_resume_since_ms INTEGER NOT NULL DEFAULT 0,
                     active INTEGER NOT NULL DEFAULT 1, owner_user_id INTEGER,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(phone_number_id, extension)
@@ -314,6 +379,24 @@ class SettingsStore:
                     last_error TEXT, delivered_at TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Serialize SQLite column checks/additions across booting workers.
+            db.execute("BEGIN IMMEDIATE")
+            # Additive upgrades for image-only deployments with an existing DB.
+            for table, additions in (
+                ("email_config", (("transcription_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                                  ("provider", "TEXT NOT NULL DEFAULT 'elasticemail'"))),
+                ("voicemail_deliveries", (("transcription_status", "TEXT NOT NULL DEFAULT 'disabled'"),)),
+            ):
+                existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+                for column, definition in additions:
+                    if column not in existing:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            self._migrate_email_to_elastic(db)
+            self._init_voicemail_recipient_cutover(db)
+            # Old hosted-transcription credentials are no longer needed. Keep
+            # the legacy column for safe, additive upgrades, but erase its value.
+            if "transcription_api_key_enc" in {r["name"] for r in db.execute("PRAGMA table_info(email_config)").fetchall()}:
+                db.execute("UPDATE email_config SET transcription_api_key_enc='' WHERE transcription_api_key_enc<>''")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(sip_providers)").fetchall()}
             if "allowed_ips" not in columns:
                 db.execute("ALTER TABLE sip_providers ADD COLUMN allowed_ips TEXT NOT NULL DEFAULT ''")
@@ -379,6 +462,12 @@ class SettingsStore:
                 db.execute("ALTER TABLE extensions ADD COLUMN voicemail_pin_enc TEXT NOT NULL DEFAULT ''")
             if "voicemail_email" not in extension_columns:
                 db.execute("ALTER TABLE extensions ADD COLUMN voicemail_email TEXT NOT NULL DEFAULT ''")
+            if "voicemail_email_mode" not in extension_columns:
+                db.execute("ALTER TABLE extensions ADD COLUMN voicemail_email_mode TEXT NOT NULL DEFAULT 'auto'")
+            if "voicemail_email_auto_since_ms" not in extension_columns:
+                db.execute("ALTER TABLE extensions ADD COLUMN voicemail_email_auto_since_ms INTEGER NOT NULL DEFAULT 0")
+            if "voicemail_email_resume_since_ms" not in extension_columns:
+                db.execute("ALTER TABLE extensions ADD COLUMN voicemail_email_resume_since_ms INTEGER NOT NULL DEFAULT 0")
             # Multi-tenant ownership. NULL means a platform-owned legacy resource.
             for table, definition in (
                 ("extensions", "owner_user_id INTEGER"),
@@ -608,14 +697,11 @@ class SettingsStore:
                         (item["digits"], number_id, item["id"]),
                     )
                     changed += 1
-            # Administrator profiles name an extension the short way: the digits
-            # a person reads.
-            for row in db.execute("SELECT id,extension FROM admin_users").fetchall():
-                key = str(row["extension"] or "").strip()
-                digits = extension_digits(key)
-                if key and key != digits:
-                    db.execute("UPDATE admin_users SET extension=? WHERE id=?", (digits, row["id"]))
-                    changed += 1
+            # Profiles can already carry a number-scoped extension key. Keep it:
+            # stripping the number would make a later profile email change
+            # ambiguous or point at another mailbox with the same three digits.
+            # A legacy digits-only profile remains digits-only until explicitly
+            # reassigned; never infer a missing number during this migration.
             # A device account keeps the key that says which line's extension it
             # signs in as. A bare legacy link becomes that key while one row of
             # that account answers those digits - the line the device names, else
@@ -802,7 +888,9 @@ class SettingsStore:
             where = " WHERE e.owner_user_id=?" if owner_user_id is not None else ""
             rows = db.execute(
                 "SELECT e.id,e.extension,e.phone_number_id,e.display_name,e.sip_username,e.webrtc_enabled,"
-                "e.recording_enabled,e.voicemail_enabled,e.voicemail_email,e.active,e.owner_user_id,n.number AS number "
+                "e.recording_enabled,e.voicemail_enabled,e.voicemail_email,e.voicemail_email_mode,"
+                "e.voicemail_email_auto_since_ms,e.voicemail_email_resume_since_ms,e.active,e.owner_user_id,n.number AS number,"
+                "n.owner_user_id AS number_owner_user_id "
                 "FROM extensions e LEFT JOIN phone_numbers n ON n.id=e.phone_number_id" + where,
                 (int(owner_user_id),) if owner_user_id is not None else (),
             ).fetchall()
@@ -1334,9 +1422,22 @@ class SettingsStore:
             raise ValueError("Voicemail notification email is invalid")
         with self._connect() as db:
             row = db.execute(
-                "SELECT id,sip_username,sip_password_enc,voicemail_enabled,voicemail_pin_enc,owner_user_id,phone_number_id "
+                "SELECT id,sip_username,sip_password_enc,voicemail_enabled,voicemail_pin_enc,voicemail_email,"
+                "voicemail_email_mode,voicemail_email_auto_since_ms,voicemail_email_resume_since_ms,owner_user_id,phone_number_id "
                 "FROM extensions WHERE id=?", (int(existing["id"]),)
             ).fetchone() if existing is not None else None
+            if row is not None and "voicemail_email" not in data:
+                voicemail_email = row["voicemail_email"]
+            if "voicemail_email_mode" in data:
+                voicemail_email_mode = str(data["voicemail_email_mode"] or "").strip().lower()
+                if voicemail_email_mode not in {"auto", "off"}:
+                    raise ValueError("Voicemail email setting must be auto or off")
+            elif "voicemail_email" in data:
+                # Older clients only had an address field: explicitly clearing
+                # it was their way to turn notifications off. Keep that intent.
+                voicemail_email_mode = "auto" if voicemail_email else "off"
+            else:
+                voicemail_email_mode = row["voicemail_email_mode"] if row is not None else "auto"
             created = row is None
             # Who this extension belongs to, and who is being asked to own it. A
             # request that says nothing about the owner keeps the one the row has,
@@ -1373,6 +1474,25 @@ class SettingsStore:
                 ).fetchone() if target_id is not None else None
                 if clash:
                     raise ValueError(f"Extension {digits} is already on that phone number")
+            owner_changed = row is not None and not same_account(row["owner_user_id"], new_owner)
+            if owner_changed and voicemail_email == row["voicemail_email"]:
+                # A retained address belongs to the former customer, not the new
+                # one. An explicitly changed address is a deliberate override.
+                voicemail_email = ""
+            auto_since_ms = int(row["voicemail_email_auto_since_ms"] or 0) if row is not None else 0
+            if voicemail_email_mode == "auto" and not voicemail_email and (
+                row is None or row["voicemail_email_mode"] != "auto" or row["voicemail_email"]
+                or owner_changed or target_id != row["phone_number_id"]
+            ):
+                # Enabling the owner fallback must not email a backlog recorded
+                # before that choice (or before a reassignment).
+                auto_since_ms = int(time.time() * 1000)
+            resume_since_ms = int(row["voicemail_email_resume_since_ms"] or 0) if row is not None else 0
+            if row is not None and ((row["voicemail_email_mode"] == "off" and voicemail_email_mode == "auto")
+                                    or owner_changed or target_id != row["phone_number_id"]):
+                # The opt-out period or a former owner's mailbox must never be
+                # sent to any recipient, even a deliberately supplied override.
+                resume_since_ms = int(time.time() * 1000)
             # Devices authenticate with this name, so it is derived here and never
             # accepted from a caller: the account, the extension and the line it
             # answers on. Editing keeps the identity a registered phone already
@@ -1401,25 +1521,27 @@ class SettingsStore:
             if created:
                 db.execute(
                     "INSERT INTO extensions(extension,phone_number_id,display_name,sip_username,sip_password_enc,"
-                    "webrtc_enabled,recording_enabled,voicemail_enabled,voicemail_pin_enc,voicemail_email,active,owner_user_id) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "webrtc_enabled,recording_enabled,voicemail_enabled,voicemail_pin_enc,voicemail_email,"
+                    "voicemail_email_mode,voicemail_email_auto_since_ms,voicemail_email_resume_since_ms,active,owner_user_id) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         digits, target_id, str(data.get("display_name", "")).strip()[:120], username, encrypted,
                         int(bool(data.get("webrtc_enabled"))), int(bool(data.get("recording_enabled", False))),
-                        int(voicemail_enabled), voicemail_pin_enc, voicemail_email,
-                        int(bool(data.get("active", True))), new_owner,
+                        int(voicemail_enabled), voicemail_pin_enc, voicemail_email, voicemail_email_mode, auto_since_ms,
+                        resume_since_ms, int(bool(data.get("active", True))), new_owner,
                     ),
                 )
             else:
                 db.execute(
                     "UPDATE extensions SET extension=?,phone_number_id=?,display_name=?,sip_username=?,sip_password_enc=?,"
                     "webrtc_enabled=?,recording_enabled=?,voicemail_enabled=?,voicemail_pin_enc=?,voicemail_email=?,"
-                    "active=?,owner_user_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    "voicemail_email_mode=?,voicemail_email_auto_since_ms=?,voicemail_email_resume_since_ms=?,active=?,owner_user_id=?,"
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (
                         digits, target_id, str(data.get("display_name", "")).strip()[:120], username, encrypted,
                         int(bool(data.get("webrtc_enabled"))), int(bool(data.get("recording_enabled", False))),
-                        int(voicemail_enabled), voicemail_pin_enc, voicemail_email,
-                        int(bool(data.get("active", True))), new_owner, row["id"],
+                        int(voicemail_enabled), voicemail_pin_enc, voicemail_email, voicemail_email_mode, auto_since_ms,
+                        resume_since_ms, int(bool(data.get("active", True))), new_owner, row["id"],
                     ),
                 )
         owner = new_owner
@@ -1733,6 +1855,7 @@ class SettingsStore:
         else:
             provider = self.get_provider(next((item["provider"] for item in numbers if item["provider"]), None)) or self.get_provider()
             server = (provider or {}).get("server", "")
+        sip_username = device["sip_username"] if device else (row["sip_username"] or row["key"])
         return {
             "extension": digits,
             "key": row["key"],
@@ -1742,12 +1865,22 @@ class SettingsStore:
             "mailbox": row["mailbox"],
             "display_name": row["display_name"],
             "active": bool(row["active"]),
-            "sip_username": device["sip_username"] if device else (row["sip_username"] or row["key"]),
+            "sip_username": sip_username,
             "sip_password": (device or {}).get("sip_password") or (self.decrypt(row["sip_password_enc"]) if row["sip_password_enc"] else ""),
+            # The browser softphone signs in on its own identity - the plain
+            # one belongs to desk phones and softphones like Zoiper. The sheet
+            # shows both only when the extension answers in the browser, and
+            # the Softphone button exists only then.
+            "webrtc_enabled": bool(row["webrtc_enabled"]),
+            "webrtc_sip_username": browser_username(sip_username) if row["webrtc_enabled"] else "",
             "server": server or "",
             "port": int(service["port"] if service["host"] else ((device or provider or {}).get("port") or 5060)),
             "transport": (device or provider or {}).get("transport") or "udp",
             "registration": "device" if device else "extension",
+            # The browser's ICE servers travel with the sign-in, so the
+            # softphone gathers candidates the platform's network can reach -
+            # blank means the built-in STUN default.
+            "ice_servers": parse_ice_servers(self.get_settings().get("ice_servers") or ""),
             "device_label": (device or {}).get("label", ""),
             "numbers": [item["number"] for item in numbers],
             "answers": [item["number"] for item in answers],
@@ -1977,6 +2110,12 @@ class SettingsStore:
         with self._connect() as db:
             if owner_user_id and not db.execute("SELECT 1 FROM admin_users WHERE id=? AND role='user' AND active=1", (owner_user_id,)).fetchone():
                 raise ValueError("Customer account is not active")
+            existing_number = db.execute("SELECT id,owner_user_id FROM phone_numbers WHERE number=?", (number,)).fetchone()
+            if existing_number and not same_account(existing_number["owner_user_id"], owner_user_id):
+                # Keep recordings made for a former line owner out of future
+                # emails, even if the line is later returned to that owner.
+                db.execute("UPDATE extensions SET voicemail_email_resume_since_ms=? WHERE phone_number_id=?",
+                           (int(time.time() * 1000), existing_number["id"]))
             if data.get("provider") and not db.execute(
                 "SELECT 1 FROM sip_providers WHERE name=? AND active=1", (str(data.get("provider")).strip(),)
             ).fetchone():
@@ -2557,6 +2696,9 @@ class SettingsStore:
         return {
             "type": "ivr", "prompt": self.IVR_DEFAULT_PROMPT, "voice": "platform",
             "input_timeout": 6, "attempts": 2, "fallback": "",
+            # Single-key mappings ("press 1 for the front desk"). Empty means
+            # the classic menu: the caller types the full extension number.
+            "keys": [],
             "label": "Enter an extension", "configured": True,
         }
 
@@ -2565,10 +2707,9 @@ class SettingsStore:
 
         Ring destinations must be extensions the customer owns, and a step that
         names a saved group must belong to that customer with members drawn from
-        the group, so a flow can never ring somebody else's phone. A number's own
-        flow is stricter: 101 means that line's 101, so it may only ring the
-        extensions of that number - which is also what makes the routing canvas
-        show one line's set at a time.
+        the group, so a flow can never ring somebody else's phone. Explicit keys
+        may ring another primary line's desk within this customer; bare digits
+        still resolve on the dialed line. Sharing never changes desk ownership.
         """
         if not isinstance(route, dict) or not isinstance(route.get("nodes"), list) or len(route["nodes"]) > 100:
             raise ValueError("Call route must contain a nodes array with at most 100 nodes")
@@ -2585,23 +2726,55 @@ class SettingsStore:
                 node["label"] = str(node.get("label") or default["label"])[:120]
         if any(not isinstance(node, dict) or node.get("type") not in self.ROUTE_NODE_TYPES for node in route["nodes"]):
             raise ValueError("Call route contains an unsupported node")
+        # A desk's flow is its no-answer policy: ring the desk, then take a
+        # message or forward an unanswered call. Menus and hours belong to the
+        # journey of the number, not to the desk's no-answer policy.
+        if target_type == "extension":
+            desk_kinds = {"extension", "voicemail", "forward"}
+            offenders = sorted({str(node.get("type")) for node in route["nodes"] if str(node.get("type")) not in desk_kinds})
+            if offenders:
+                raise ValueError(
+                    "A desk flow can only ring, take voicemail or forward unanswered calls - "
+                    f"move {', '.join(offenders)} to the main number's journey"
+                )
+        if target_type == "extension":
+            policies = [node for node in route["nodes"] if "no_answer" in node]
+            if policies:
+                policy = policies[0]
+                rest = [node for node in route["nodes"] if node is not policy]
+                action = policy.get("no_answer")
+                if len(policies) != 1 or policy.get("type") != "extension" or policy.get("extension") != target:
+                    raise ValueError("Call handling must start with this extension's device")
+                expected = {"voicemail": "voicemail", "extension": "extension", "forward": "forward"}.get(action)
+                if (action == "hangup" and rest) or (action != "hangup" and (len(rest) != 1 or rest[0].get("type") != expected)):
+                    raise ValueError("Choose exactly one no-answer action")
+                if action == "extension" and rest[0].get("extension") == target:
+                    raise ValueError("An unanswered call cannot forward to the same extension")
+                if action == "voicemail" and (rest[0].get("mailbox") != target or rest[0].get("enabled") is False):
+                    raise ValueError("Desk voicemail must use its own enabled mailbox")
+        for node in route["nodes"]:
+            if not isinstance(node, dict) or node.get("type") != "ivr":
+                continue
+            seen = set()
+            for entry in node.get("keys") or []:
+                if not isinstance(entry, dict):
+                    raise ValueError("An IVR key mapping must be a key and a destination")
+                key = str(entry.get("key") or "").strip()
+                if not key.isdigit() or len(key) != 1 or key in seen:
+                    raise ValueError("IVR keys must be single digits, each used once")
+                seen.add(key)
+                if not str(entry.get("target") or "").strip():
+                    raise ValueError("An IVR key mapping needs a destination")
         owner_id = int(owner_user_id)
-        scope = ""
-        if target_type == "number":
-            scope = next((str(row["number"]) for row in self.list_numbers(owner_id) if str(row["number"]) == str(target)), "")
-        if scope:
-            # The line's own extensions only: three digits are resolved inside the
-            # current phone number, so another line's set is not reachable here.
-            allowed_keys = set(self.scoped_extension_keys(scope, owner_id))
-            owned_extensions = {row["key"] for row in self.list_extensions(owner_id) if row["key"] in allowed_keys}
-        else:
-            owned_extensions = {row["key"] for row in self.list_extensions(owner_id)}
+        # Explicit keys may name any desk of this customer. Bare digits are
+        # still resolved on the dialed line; sharing a desk never renames it.
+        owned_extensions = {row["key"] for row in self.list_extensions(owner_id)}
         owned_groups = {str(row["id"]): set(row["members"]) for row in self.list_groups(owner_id)}
         for node in route["nodes"]:
             node_type = node["type"]
             if node_type in {"simultaneous", "sequential", "ring_group"}:
                 destinations = node.get("extensions")
-                if not isinstance(destinations, list) or not destinations or any(str(ext) not in owned_extensions for ext in destinations):
+                if not isinstance(destinations, list) or (not destinations and node.get("enabled") is not False) or any(str(ext) not in owned_extensions for ext in destinations):
                     raise ValueError("Ring destinations must be extensions owned by this customer")
                 if not 5 <= int(node.get("timeout", 0)) <= 120:
                     raise ValueError("Ring timeout must be between 5 and 120 seconds")
@@ -2611,8 +2784,15 @@ class SettingsStore:
                         raise ValueError("Ring group is not owned by this customer")
                     if any(str(ext) not in owned_groups[group_id] for ext in destinations):
                         raise ValueError("Ring destinations must come from the selected group")
-            elif node_type == "extension" and str(node.get("extension", "")) not in owned_extensions:
-                raise ValueError("Route extension is not owned by this customer")
+            elif node_type == "extension":
+                if str(node.get("extension", "")) not in owned_extensions:
+                    raise ValueError("Route extension is not owned by this customer")
+                if "ring_enabled" in node and not isinstance(node["ring_enabled"], bool):
+                    raise ValueError("Ring device must be yes or no")
+                if "timeout" in node and not 5 <= int(node["timeout"]) <= 120:
+                    raise ValueError("Ring timeout must be between 5 and 120 seconds")
+                if node.get("no_answer") not in (None, "voicemail", "extension", "forward", "hangup"):
+                    raise ValueError("Unknown no-answer action")
             elif node_type == "voicemail" and str(node.get("mailbox", "")) not in owned_extensions:
                 raise ValueError("Voicemail mailbox is not owned by this customer")
             elif node_type == "forward":
@@ -2631,6 +2811,8 @@ class SettingsStore:
                     raise ValueError("IVR input timeout must be between 2 and 30 seconds")
                 if not 1 <= int(node.get("attempts", 0)) <= 5:
                     raise ValueError("IVR attempts must be between 1 and 5")
+                if any(str(entry.get("target") or "") not in owned_extensions for entry in (node.get("keys") or [])):
+                    raise ValueError("IVR destinations must be extensions owned by this customer")
                 fallback = str(node.get("fallback") or "")
                 if fallback and fallback not in owned_extensions:
                     raise ValueError("IVR fallback must be an extension owned by this customer")
@@ -2680,6 +2862,10 @@ class SettingsStore:
             for field in ("extension", "mailbox", "fallback"):
                 if str(node.get(field) or "").strip():
                     node[field] = self._resolve_flow_key(node[field], owner_user_id, number)
+            if isinstance(node.get("keys"), list):
+                for entry in node["keys"]:
+                    if isinstance(entry, dict) and str(entry.get("target") or "").strip():
+                        entry["target"] = self._resolve_flow_key(entry["target"], owner_user_id, number)
 
     def list_groups(self, owner_user_id: int | None = None):
         with self._connect() as db:
@@ -2750,6 +2936,28 @@ class SettingsStore:
             db.execute("DELETE FROM routing_flows WHERE owner_user_id=? AND target_type='group' AND target=?", (row["owner_user_id"], str(group_id)))
             db.execute("DELETE FROM extension_groups WHERE id=?", (int(group_id),))
 
+    def number_flow_anchor(self, number: str) -> str:
+        """An owned PBX context for a shared DID without a primary desk.
+
+        This is not an implicit ring assignment. Only an explicitly saved number
+        journey gets an anchor, and its plan still decides which devices ring.
+        """
+        row = next((row for row in self.list_numbers() if row["number"] == number), None)
+        owner = (row or {}).get("owner_user_id")
+        if owner is None:
+            return ""
+        flow = next((flow for flow in self.list_call_routes(int(owner)) if flow["phone_number"] == number), None)
+        if not flow:
+            return ""
+        allowed = [row["key"] for row in self.list_extensions(int(owner)) if row["active"]]
+        for node in (flow.get("route") or {}).get("nodes") or []:
+            candidates = [*node.get("extensions", []), node.get("extension"), node.get("mailbox")]
+            candidates += [entry.get("target") for entry in (node.get("keys") or [])]
+            for key in candidates:
+                if key in allowed:
+                    return key
+        return allowed[0] if allowed else ""
+
     def inbound_plan(self, number: str, fallback_extension: str = "") -> dict:
         """Decide what rings when a DID is called, and what happens if nobody answers.
 
@@ -2770,20 +2978,147 @@ class SettingsStore:
             # extension it points at. The link holds the dialled digits, which
             # are read against this very number, so 101 means this line's 101.
             key = self.extension_key_for(number, extension, int(owner) if owner is not None else None) if extension else ""
-            mailbox = key if key and any(
-                item["key"] == key and item["voicemail_enabled"] for item in self.list_extensions(int(owner) if owner else None)
-            ) else ""
-            return {"destinations": [key] if key else [], "timeout": 30, "voicemail": mailbox, "forward": "", "outside_hours": False}
+            return self.apply_desk_handling(
+                {"destinations": [key] if key else [], "timeout": 30, "voicemail": "", "forward": "", "outside_hours": False},
+                [key] if key else [], number, owner,
+            )
         nodes = [node for node in ((flow.get("route") or {}).get("nodes") or []) if isinstance(node, dict)]
+        # Journey steps once lived on every desk's flow, and customers put the
+        # line's greeting there - which is why "the IVR and voicemail do not
+        # work": the engine reads the number's journey while the desk held the
+        # steps. Until they are moved to the main line where they belong, the
+        # desk the line answers with fills in the journey its number flow still
+        # leaves silent. A journey configured on the number always wins.
+        journey_kinds = {"ivr", "business_hours", "voicemail", "forward"}
+        if owner is not None and extension and not any(str(node.get("type")) in journey_kinds for node in nodes):
+            desk_flow = next(
+                (item for item in self.list_routing_flows(int(owner), target_type="extension")
+                 if str(item.get("target")) == str(extension)),
+                None,
+            )
+            desk_nodes = ((desk_flow or {}).get("route") or {}).get("nodes") or []
+            legacy_journey = any(isinstance(node, dict) and node.get("type") in {"ivr", "business_hours"} for node in desk_nodes)
+            desk_journey = [node for node in desk_nodes if isinstance(node, dict) and node.get("type") in journey_kinds] if legacy_journey else []
+            if desk_journey:
+                nodes = [*desk_journey, *nodes]
         # A flow that carries a menu asks the caller for an extension instead of
         # ringing anybody; whatever the flow says besides that step is where an
         # unanswered or invalid entry goes.
         ivr_node = next((node for node in nodes if str(node.get("type")) == "ivr"), None)
-        if ivr_node is not None:
+        if ivr_node is not None and not self._plan_nodes(nodes, owner, extension, number).get("outside_hours"):
             answer = self._ivr_answer_plan(ivr_node, owner, extension, nodes, number)
             if answer is not None:
                 return answer
-        return self._plan_nodes(nodes, owner, extension, number)
+        plan = self._plan_nodes(nodes, owner, extension, number)
+        considered = list(plan.get("destinations") or [])
+        return self.apply_desk_handling(plan, considered, number, owner)
+
+    def _voicemail_key(self, number: str, value: str, owner) -> str:
+        """The extension key a voicemail step names on one number.
+
+        The canvas stores keys (`101@+13025550001`), but a plan may also meet
+        bare digits or a mailbox spelling. Whatever the spelling, the mailbox
+        the engine must reach is this line's own - a "101" is never another
+        line's 101 - so digits are resolved against the number before use.
+        """
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        if "@" in value:
+            return value
+        if number:
+            resolved = self.extension_key_for(number, value, int(owner) if owner is not None else None)
+            if resolved:
+                return resolved
+        return value
+
+    def _desk_handling(self, keys: list[str], number: str, owner) -> dict:
+        """What each rung desk asks for beyond the journey: how long it rings,
+        and where an unanswered call is handed if it says so.
+
+        The desk's flow is a small, ordered thing - ring the desk, optionally
+        hand an unanswered call to another desk, then the mailbox - so the
+        chain is read in that order and offered as the call's next step only
+        after everything already rung has died unanswered.
+        """
+        timeouts: dict[str, int] = {}
+        fallbacks: list[str] = []
+        disabled: list[str] = []
+        forward, forward_timeout = "", 25
+        allowed = {
+            item["key"] for item in self.list_extensions(int(owner))
+            if item["active"]
+        } if owner is not None else set()
+        for key in keys:
+            flow = next(
+                (item for item in self.list_routing_flows(int(owner) if owner is not None else None, target_type="extension")
+                 if str(item.get("target")) == str(key)),
+                None,
+            )
+            for node in ((flow or {}).get("route") or {}).get("nodes") or []:
+                if not isinstance(node, dict):
+                    continue
+                kind = str(node.get("type"))
+                if kind == "extension" and str(node.get("extension") or "") == str(key):
+                    if node.get("ring_enabled") is False:
+                        disabled.append(str(key))
+                    if str(node.get("timeout") or "").isdigit():
+                        timeouts[str(key)] = max(5, min(120, int(node["timeout"])))
+                elif kind == "extension":
+                    value = str(node.get("extension") or "")
+                    if value and value in allowed and value not in fallbacks and value not in keys:
+                        fallbacks.append(value)
+                elif kind == "forward" and not forward:
+                    forward = str(node.get("phone") or "")
+                    forward_timeout = int(node.get("timeout") or 25)
+        return {"timeouts": timeouts, "fallbacks": fallbacks, "disabled": disabled,
+                "forward": forward, "forward_timeout": forward_timeout}
+
+    def apply_desk_handling(self, plan: dict, keys: list[str], number: str, owner) -> dict:
+        """A desk's policy follows it onto every explicitly assigned incoming line.
+
+        Number-level fallback wins when configured. When several desks ring,
+        the first selected desk supplies the shared no-answer ending; no
+        recursive forwarding chain is followed.
+        """
+        handling = self._desk_handling(keys, number, owner)
+        plan["destinations"] = [key for key in plan.get("destinations", []) if key not in handling["disabled"]]
+        plan["timeouts"] = {**(plan.get("timeouts") or {}), **handling["timeouts"]}
+        ending = self._desk_handling(keys[:1], number, owner)
+        plan["fallbacks"] = ending["fallbacks"]
+        if not plan.get("voicemail") and not plan.get("forward"):
+            plan["voicemail"] = self._desk_voicemail(number, keys[0], owner) if keys else ""
+            if not plan.get("voicemail"):
+                plan["forward"] = ending["forward"]
+                plan["forward_timeout"] = ending["forward_timeout"]
+        return plan
+
+    def _desk_voicemail(self, number: str, extension: str, owner) -> str:
+        """The mailbox of the desk the line answers with, when the flow is silent.
+
+        A desk's own flow is its no-answer policy - ring the desk, then its
+        voicemail - and its voicemail switch means the same thing. When the
+        number's journey never names a mailbox, that desk's is where a call
+        that rang out dies; without this the call simply evaporates.
+        """
+        if not extension:
+            return ""
+        key = str(extension) if extension_scope(extension) else (self.extension_key_for(number, extension, int(owner) if owner is not None else None) if number else str(extension))
+        if not key:
+            return ""
+        owner_id = int(owner) if owner is not None else None
+        flow = next(
+            (item for item in self.list_routing_flows(owner_id, target_type="extension") if item["target"] == key),
+            None,
+        )
+        nodes = ((flow or {}).get("route") or {}).get("nodes") or []
+        policy = next((node for node in nodes if node.get("type") == "extension" and node.get("extension") == key and "no_answer" in node), None)
+        if policy and policy["no_answer"] != "voicemail":
+            return ""
+        for node in nodes:
+            if isinstance(node, dict) and str(node.get("type")) == "voicemail" and node.get("enabled") is not False:
+                return self._voicemail_key(number, str(node.get("mailbox") or key), owner)
+        return key if self.extension_voicemail_enabled(key) and not policy else ""
 
     def _ivr_answer_plan(self, node: dict, owner, extension: str, nodes: list[dict], number: str = "") -> dict | None:
         """What happens when the caller is asked to enter an extension.
@@ -2796,6 +3131,7 @@ class SettingsStore:
             return None
         voice = self.ivr_voice(str(node.get("voice") or "platform"))
         active = {row["key"] for row in self.list_extensions(int(owner)) if row["active"]}
+        company_keys = set(active)
         if number:
             # A menu on one line asks for that line's extensions, so "104" is
             # this number's 104 rather than a device on another number.
@@ -2811,12 +3147,20 @@ class SettingsStore:
             "voice": voice["id"], "voice_label": voice["label"], "media": f"sound:{voice['media']}",
             "input_timeout": int(node.get("input_timeout") or 6),
             "attempts": int(node.get("attempts") or 2),
-            "fallback": fallback if fallback in allowed else "",
+            "key_map": {
+                str(entry.get("key")): str(entry.get("target"))
+                for entry in (node.get("keys") or [])
+                if isinstance(entry, dict) and str(entry.get("target")) in company_keys
+            },
+            "fallback": fallback if fallback in company_keys else "",
             "fallback_destinations": list(tail.get("destinations") or []),
             "voicemail": tail.get("voicemail") or "",
             "timeout": int(tail.get("timeout") or 30),
             "forward": tail.get("forward") or "",
             "outside_hours": bool(tail.get("outside_hours")),
+            "timeouts": tail.get("timeouts") or {},
+            "fallbacks": list(tail.get("fallbacks") or []),
+            "forward_timeout": int(tail.get("forward_timeout") or 25),
         }
 
     def _plan_nodes(self, nodes: list[dict], owner, extension: str, number: str = "") -> dict:
@@ -2825,16 +3169,17 @@ class SettingsStore:
             item["key"] for item in self.list_extensions(int(owner))
             if item["active"]
         } if owner is not None else set()
-        if owner is not None and number:
-            allowed &= set(self.scoped_extension_keys(number, int(owner)))
         groups = {str(item["id"]): item for item in self.list_groups(int(owner))} if owner is not None else {}
         now = datetime.now()
         open_now, seen_hours = False, False
-        destinations, timeout, voicemail, forward = [], 30, "", ""
+        destinations, timeout, voicemail, forward, forward_timeout = [], 30, "", "", 25
+        timeouts: dict[str, int] = {}
         for node in nodes:
             if not isinstance(node, dict):
                 continue
             kind = str(node.get("type") or "")
+            if node.get("enabled") is False:
+                continue
             if kind == "business_hours" and not seen_hours:
                 seen_hours = True
                 days = [int(day) for day in (node.get("days") or []) if str(day).isdigit()]
@@ -2847,31 +3192,42 @@ class SettingsStore:
                 # Outside business hours only a terminal step applies; ringing
                 # steps are skipped so the caller is not sent to an empty office.
                 if kind == "voicemail" and not voicemail:
-                    voicemail = str(node.get("mailbox") or "")
+                    voicemail = self._voicemail_key(number, str(node.get("mailbox") or ""), owner)
+                elif kind == "forward" and not forward:
+                    forward = str(node.get("phone") or "")
                 continue
             if kind in {"ring_group", "simultaneous", "sequential"}:
                 members = [str(value) for value in (node.get("extensions") or [])]
                 group = groups.get(str(node.get("group_id") or ""))
                 if group and not members:
                     members = [str(value) for value in (group.get("members") or [])]
-                destinations.extend(value for value in members if not allowed or value in allowed)
+                destinations.extend(value for value in members if value in allowed)
                 if str(node.get("timeout") or "").isdigit():
                     timeout = max(5, min(120, int(node["timeout"])))
             elif kind == "extension":
                 value = str(node.get("extension") or "")
-                if value and (not allowed or value in allowed):
+                if value and value in allowed:
                     destinations.append(value)
-            elif kind == "voicemail" and not voicemail:
-                voicemail = str(node.get("mailbox") or "")
+                    # A desk says how long it rings: its own step carries the
+                    # seconds, and the leg is rung for exactly that long.
+                    if str(node.get("timeout") or "").isdigit():
+                        timeouts[value] = max(5, min(120, int(node["timeout"])))
+            elif kind == "voicemail" and not voicemail and node.get("enabled") is not False:
+                voicemail = self._voicemail_key(number, str(node.get("mailbox") or ""), owner)
             elif kind == "forward" and not forward:
                 forward = str(node.get("phone") or "")
+                if str(node.get("timeout") or "").isdigit():
+                    forward_timeout = max(5, min(120, int(node["timeout"])))
         # A ring step may repeat an extension; ring each device once, in order.
         unique = list(dict.fromkeys(destinations))
-        if not unique and not voicemail and not forward and extension:
-            unique = [extension] if not allowed or extension in allowed else []
+        has_ring = any(node.get("type") in {"extension", "simultaneous", "sequential", "ring_group"} for node in nodes)
+        if not unique and not voicemail and not forward and extension and not has_ring and not (seen_hours and not open_now):
+            unique = [extension] if extension in allowed else []
         return {
             "destinations": unique, "timeout": timeout, "voicemail": voicemail,
-            "forward": forward, "outside_hours": bool(seen_hours and not open_now),
+            "forward": forward, "forward_timeout": forward_timeout,
+            "timeouts": {key: timeouts[key] for key in unique if key in timeouts},
+            "outside_hours": bool(seen_hours and not open_now),
         }
 
     @staticmethod
@@ -2901,9 +3257,15 @@ class SettingsStore:
         device even when another line has an extension with the same digits.
         """
         extension = str(extension)
-        nodes = [{"type": "extension", "extension": extension, "label": f"Ring extension {extension_digits(extension)}", "configured": True}]
+        nodes = [{
+            "type": "extension", "extension": extension, "timeout": 25,
+            "label": f"Ring extension {extension_digits(extension)}", "configured": True,
+        }]
         if voicemail:
-            nodes.append({"type": "voicemail", "mailbox": extension, "label": f"Voicemail {extension_digits(extension)}", "configured": True})
+            nodes.append({
+                "type": "voicemail", "mailbox": extension, "enabled": True,
+                "label": f"Voicemail {extension_digits(extension)}", "configured": True,
+            })
         return {"nodes": nodes}
 
     def extension_voicemail_enabled(self, extension: str) -> bool:
@@ -2911,12 +3273,12 @@ class SettingsStore:
         return bool(row and row.get("voicemail_enabled"))
 
     def sync_auto_ivr(self, owner_user_id: int) -> list[str]:
-        """Give every flow a menu once a customer passes five extensions.
+        """Give every main line a menu once a customer passes five extensions.
 
         The operator's rule, in one place: one extension never gets a menu, past
-        five every workflow gets it, and in between it stays the customer's own
-        choice from the palette. Nothing is ever removed - a menu a customer
-        configured is theirs.
+        five every main number's journey gains it, and in between it stays the
+        customer's own choice from the palette. Nothing is ever removed - a menu
+        a customer configured is theirs, and a desk never carries one.
         """
         owner_user_id = int(owner_user_id)
         active = [row for row in self.list_extensions(owner_user_id) if row["active"]]
@@ -2924,24 +3286,18 @@ class SettingsStore:
             return []
         menu = self.default_ivr_node()
         added = []
+        # The menu belongs to the journey that answers the line. A desk's own
+        # flow is its no-answer policy - ring the desk, then its voicemail - so
+        # a menu is never dropped onto a desk or a ring group.
         for flow in self.list_call_routes(owner_user_id):
             nodes = (flow.get("route") or {}).get("nodes") or []
             if any(str(node.get("type")) == "ivr" for node in nodes if isinstance(node, dict)):
                 continue
             self.save_call_route(owner_user_id, {
                 "phone_number": flow["phone_number"], "name": flow.get("name") or "Main call flow",
-                "route": {"nodes": [dict(menu), *nodes]}, "active": bool(flow.get("active", True)),
+                "route": {"nodes": [*[node for node in nodes if node.get("type") == "business_hours"], dict(menu), *[node for node in nodes if node.get("type") != "business_hours"]]}, "active": bool(flow.get("active", True)),
             })
             added.append(f"number {flow['phone_number']}")
-        for flow in self.list_routing_flows(owner_user_id):
-            nodes = (flow.get("route") or {}).get("nodes") or []
-            if any(str(node.get("type")) == "ivr" for node in nodes if isinstance(node, dict)):
-                continue
-            self.save_routing_flow(owner_user_id, {
-                "name": flow.get("name") or "", "route": {"nodes": [dict(menu), *nodes]},
-                "active": bool(flow.get("active", True)),
-            }, target_type=flow["target_type"], target=flow["target"])
-            added.append(f"{flow['target_type']} {flow['target']}")
         return added
 
     def ensure_extension_flow(self, owner_user_id: int, extension: str, voicemail: bool = False) -> bool:
@@ -3077,6 +3433,60 @@ class SettingsStore:
             item = dict(row); item["route"] = json.loads(item.pop("route_json")); result.append(item)
         return result
 
+    def _ring_source_updates(self, owner: int, key: str, sources: Any) -> list[tuple[str, str]]:
+        """Prepare all DID membership edits before one transaction writes them.
+
+        A ring source is a direct ring-stage assignment, not number ownership.
+        Hours, IVR, mailboxes, caller IDs and other desks are left intact.
+        """
+        import copy
+        import json
+        if not isinstance(sources, list) or any(not isinstance(value, str) for value in sources):
+            raise ValueError("Ring sources must be a list of phone numbers")
+        numbers = {row["number"]: row for row in self.list_numbers(owner) if row["active"]}
+        if any(value not in numbers for value in sources):
+            raise ValueError("Ring sources must be active numbers owned by this customer")
+        selected = set(sources)
+        flows = {row["phone_number"]: row for row in self.list_call_routes(owner)}
+        groups = {str(row["id"]): row for row in self.list_groups(owner)}
+        updates = []
+        for number, row in numbers.items():
+            flow = flows.get(number)
+            route = copy.deepcopy(flow["route"] if flow else self.default_number_route([row["inbound_extension"]] if row.get("inbound_extension") else []))
+            nodes = route["nodes"]
+            present = False
+            changed = False
+            for node in nodes:
+                kind = node.get("type")
+                if kind not in {"extension", "ring_group", "simultaneous", "sequential"}:
+                    continue
+                members = ([node.get("extension")] if kind == "extension" else
+                           list(node.get("extensions") or (groups.get(str(node.get("group_id"))) or {}).get("members") or []))
+                if key not in members:
+                    continue
+                if number in selected:
+                    present = present or node.get("enabled") is not False
+                    continue
+                changed = True
+                members = [member for member in members if member != key]
+                if kind == "extension":
+                    node.pop("extension", None)
+                    node["type"] = "simultaneous"
+                node.pop("group_id", None)  # A per-number override, not a global group edit.
+                node.update(extensions=members, enabled=bool(members) and node.get("enabled") is not False, configured=True,
+                            label="Ring assigned desks" if members else "No direct ring destinations")
+            if number in selected and not present:
+                ring = {"type": "simultaneous", "extensions": [key], "timeout": 25,
+                        "configured": True, "label": "Additional desk"}
+                # Insert before a terminal fallback, without moving hours/IVR.
+                index = next((i for i, node in enumerate(nodes) if node.get("type") in {"voicemail", "forward"}), len(nodes))
+                nodes.insert(index, ring)
+                changed = True
+            if changed:
+                self._validate_route_nodes(route, owner, target_type="number", target=number)
+                updates.append((number, json.dumps(route, separators=(",", ":"))))
+        return updates
+
     def save_routing_flow(self, owner_user_id: int, data: dict, target_type: str | None = None, target: str | None = None):
         import json
         owner_user_id = int(owner_user_id)
@@ -3097,10 +3507,17 @@ class SettingsStore:
             target = str(group["id"])
         route = data.get("route")
         self._resolve_flow_nodes(route, owner_user_id)
-        self._validate_route_nodes(route, owner_user_id, target_type=target_type)
+        self._validate_route_nodes(route, owner_user_id, target_type=target_type, target=target)
+        source_updates = self._ring_source_updates(owner_user_id, target, data["ring_sources"]) if target_type == "extension" and "ring_sources" in data else []
         payload = json.dumps(route, separators=(",", ":"))
         default_name = "Extension call flow" if target_type == "extension" else "Group call flow"
         with self._connect() as db:
+            for number, route_payload in source_updates:
+                found = db.execute("SELECT id FROM call_routes WHERE owner_user_id=? AND phone_number=?", (owner_user_id, number)).fetchone()
+                if found:
+                    db.execute("UPDATE call_routes SET route_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (route_payload, found["id"]))
+                else:
+                    db.execute("INSERT INTO call_routes(owner_user_id,phone_number,name,route_json,active) VALUES(?,?,?,?,1)", (owner_user_id, number, "Main call flow", route_payload))
             existing = db.execute(
                 "SELECT id FROM routing_flows WHERE owner_user_id=? AND target_type=? AND target=?", (owner_user_id, target_type, target)
             ).fetchone()
@@ -3435,6 +3852,53 @@ class SettingsStore:
             rows = db.execute("SELECT id,username,email,extension,full_name,company_name,job_role,phone,role,active,created_at,updated_at FROM admin_users ORDER BY username").fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _profile_mailbox(db, extension):
+        """Resolve a profile to exactly one active mailbox, never guess digits."""
+        key = str(extension or "").strip()
+        digits, scope = extension_digits(key), extension_scope(key)
+        if not digits:
+            return None
+        rows = db.execute(
+            "SELECT id,extension,phone_number_id,owner_user_id,voicemail_email,voicemail_email_mode,active "
+            "FROM extensions WHERE extension=?", (digits,),
+        ).fetchall()
+        if scope:
+            line = db.execute("SELECT id FROM phone_numbers WHERE number=?", (scope,)).fetchone()
+            rows = [row for row in rows if line and row["phone_number_id"] == line["id"]]
+        # Include inactive rows in the ambiguity check. A previously assigned,
+        # now-inactive mailbox must not be mistaken for a different active one.
+        return rows[0] if len(rows) == 1 and rows[0]["active"] else None
+
+    @staticmethod
+    def _sync_profile_mailbox_email(db, mailbox, user_id, old_email, email):
+        if not mailbox or mailbox["voicemail_email_mode"] == "off":
+            return
+        owner = mailbox["owner_user_id"]
+        if owner is not None and not same_account(owner, user_id):
+            return
+        current = str(mailbox["voicemail_email"] or "")
+        # Respect a separately configured address. A blank row dynamically uses
+        # its owner or exact profile association, so never turn it into an
+        # explicit override (which would also bypass the new-message cutoff).
+        if not current or current != old_email:
+            return
+        since = int(time.time() * 1000) if not email else 0
+        db.execute(
+            "UPDATE extensions SET voicemail_email=?,voicemail_email_auto_since_ms="
+            "CASE WHEN ?=0 THEN voicemail_email_auto_since_ms ELSE ? END,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (email, since, since, int(mailbox["id"])),
+        )
+
+    @staticmethod
+    def _profile_association_cutover(db, mailbox, old_extension, new_extension):
+        if (mailbox is not None and mailbox["owner_user_id"] is None and not mailbox["voicemail_email"]
+                and mailbox["voicemail_email_mode"] == "auto" and str(old_extension or "") != new_extension):
+            # Explicitly attaching a profile later must not send recordings from
+            # before that user was attached to this ownerless mailbox.
+            db.execute("UPDATE extensions SET voicemail_email_auto_since_ms=? WHERE id=?",
+                       (int(time.time() * 1000), int(mailbox["id"])))
+
     def save_user(self, data, current_user_id: int | None = None):
         username = str(data.get("username", "")).strip().lower()
         email = str(data.get("email", "")).strip().lower()
@@ -3454,30 +3918,14 @@ class SettingsStore:
         if role not in {"admin", "user"}:
             raise ValueError("Role must be admin or user")
         with self._connect() as db:
-            mailbox_row = None
-            if extension:
-                # A profile names an extension the short way - the digits a person
-                # reads - or the key once several lines carry those digits. It is
-                # resolved once here, so every write below lands on one row.
-                key = str(extension).strip()
-                digits, scope = extension_digits(key), extension_scope(key)
-                rows = db.execute(
-                    "SELECT id,extension,phone_number_id FROM extensions WHERE extension=? AND active=1",
-                    (digits,),
-                ).fetchall()
-                if scope:
-                    line = db.execute("SELECT id FROM phone_numbers WHERE number=?", (scope,)).fetchone()
-                    mailbox_row = next(
-                        (item for item in rows if line and item["phone_number_id"] == line["id"]), None
-                    )
-                else:
-                    plain = [item for item in rows if item["phone_number_id"] in (None, "")]
-                    picked = plain or (rows if len(rows) == 1 else [])
-                    mailbox_row = picked[0] if len(picked) == 1 else None
-                if mailbox_row is None:
-                    raise ValueError("User extension must be active")
+            mailbox_row = self._profile_mailbox(db, extension) if extension else None
+            if extension and mailbox_row is None:
+                raise ValueError("User extension must be active and unambiguous")
             user_id = data.get("id")
-            existing = db.execute("SELECT id,password_hash FROM admin_users WHERE id=?", (int(user_id),)).fetchone() if user_id else None
+            existing = db.execute("SELECT id,password_hash,email,extension FROM admin_users WHERE id=?", (int(user_id),)).fetchone() if user_id else None
+            if (role == "user" and mailbox_row is not None and mailbox_row["owner_user_id"] is not None
+                    and not same_account(mailbox_row["owner_user_id"], existing["id"] if existing else None)):
+                raise ValueError("User extension belongs to another customer")
             if not existing and len(password) < 14:
                 raise ValueError("A new user password must be at least 14 characters")
             if password and not 14 <= len(password) <= 256:
@@ -3501,19 +3949,15 @@ class SettingsStore:
             if existing:
                 db.execute("UPDATE admin_users SET username=?,email=?,extension=?,full_name=?,company_name=?,job_role=?,phone=?,role=?,active=?,password_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                            (username, email, extension, full_name, company_name, job_role, phone, role, active, password_hash, existing["id"]))
-                if role == "user" and extension and email and mailbox_row is not None:
-                    db.execute(
-                        "UPDATE extensions SET voicemail_email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                        (email, int(mailbox_row["id"])),
-                    )
+                if role == "user" and extension and email:
+                    self._sync_profile_mailbox_email(db, mailbox_row, existing["id"], existing["email"], email)
+                    self._profile_association_cutover(db, mailbox_row, existing["extension"], extension)
                 return existing["id"]
             user_id = db.execute("INSERT INTO admin_users(username,email,extension,full_name,company_name,job_role,phone,role,active,password_hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
                                  (username, email, extension, full_name, company_name, job_role, phone, role, active, password_hash)).lastrowid
-            if role == "user" and extension and email and mailbox_row is not None:
-                db.execute(
-                    "UPDATE extensions SET voicemail_email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (email, int(mailbox_row["id"])),
-                )
+            if role == "user" and extension and email:
+                self._sync_profile_mailbox_email(db, mailbox_row, user_id, "", email)
+                self._profile_association_cutover(db, mailbox_row, "", extension)
             return user_id
 
     def delete_user(self, user_id: int, current_user_id: int):
@@ -3543,64 +3987,151 @@ class SettingsStore:
         if email and (len(email) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email)):
             raise ValueError("Email is invalid")
         with self._connect() as db:
+            row = db.execute("SELECT email,extension,role FROM admin_users WHERE id=?", (int(user_id),)).fetchone()
             db.execute("UPDATE admin_users SET email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (email, int(user_id)))
-            row = db.execute("SELECT extension FROM admin_users WHERE id=?", (int(user_id),)).fetchone()
-        # The profile names one extension; the mailbox lives on it, so the row is
-        # resolved exactly and a digits-only name that several rows carry changes
-        # nothing rather than every one of them.
-        wanted = self._extension_row(str(row["extension"])) if row and row["extension"] else None
-        if wanted is not None:
-            with self._connect() as db:
-                db.execute(
-                    "UPDATE extensions SET voicemail_email=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (email, wanted["id"]),
-                )
+            if row and row["role"] == "user" and row["extension"]:
+                mailbox = self._profile_mailbox(db, row["extension"])
+                self._sync_profile_mailbox_email(db, mailbox, user_id, row["email"], email)
+
+    def _init_voicemail_recipient_cutover(self, db):
+        """Start automatic account-recipient delivery without emailing old audio.
+
+        A legacy blank address could mean either unconfigured or deliberately
+        blank. The approved upgrade sends only newly recorded messages using the
+        associated account. A durable, atomic marker keeps multiple API/ARI
+        workers and restarts from moving the cutover forward.
+        """
+        insert = "INSERT IGNORE" if self.database.is_mysql else "INSERT OR IGNORE"
+        db.execute(
+            f"{insert} INTO settings(`key`,value) VALUES(?,?)",
+            ("voicemail_associated_email_since_ms", str(int(time.time() * 1000))),
+        )
+
+    @staticmethod
+    def _migrate_email_to_elastic(db):
+        """Upgrade old settings automatically, including keys saved in the old form.
+
+        The key ciphertext, sender and opt-in remain untouched. The one-time
+        marker retries definite SendGrid client rejections such as HTTP 401.
+        Accepted mail and ambiguous network failures are left alone; an old
+        client can never switch the running sender back to SendGrid.
+        """
+        first = db.execute("INSERT OR IGNORE INTO settings(`key`,value) VALUES('elastic_email_only_v1','true')")
+        db.execute("UPDATE email_config SET provider='elasticemail' WHERE provider<>'elasticemail' OR provider IS NULL")
+        if first.rowcount:
+            # HTTP 4xx responses were rejected before acceptance. Do not reset
+            # timeouts or other ambiguous failures: they may have been accepted.
+            db.execute("UPDATE voicemail_deliveries SET attempts=0,last_error=NULL "
+                       "WHERE status='failed' AND last_error LIKE ?", ("SendGrid HTTP 4%",))
 
     def get_email_config(self, include_key: bool = False):
+        from cryptography.fernet import InvalidToken
+
         with self._connect() as db:
-            row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,updated_at FROM email_config WHERE id=1").fetchone()
-        result = {"from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False, "has_api_key": False}
+            row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
+        # There is only one email sender. The name of the encrypted column is
+        # historical; an Elastic key saved in the old UI remains usable.
+        result = {"provider": "elasticemail", "from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False,
+                  "has_api_key": False, "transcription_enabled": False}
         if row:
-            result.update({"from_email": row["from_email"], "from_name": row["from_name"], "enabled": bool(row["enabled"]), "has_api_key": bool(row["sendgrid_api_key_enc"]), "updated_at": row["updated_at"]})
+            result.update({"from_email": row["from_email"], "from_name": row["from_name"],
+                           "enabled": bool(row["enabled"]), "has_api_key": bool(row["sendgrid_api_key_enc"]),
+                           "transcription_enabled": bool(row["transcription_enabled"]),
+                           "updated_at": row["updated_at"]})
             if include_key:
-                result["api_key"] = self.decrypt(row["sendgrid_api_key_enc"]) if row["sendgrid_api_key_enc"] else ""
+                try:
+                    result["api_key"] = self.decrypt(row["sendgrid_api_key_enc"]) if row["sendgrid_api_key_enc"] else ""
+                except InvalidToken:
+                    result["api_key"] = ""
+                    result["api_key_error"] = "Saved email API key cannot be decrypted. Restore the original SECRET_KEY or save a replacement Elastic Email key."
         return result
 
     def save_email_config(self, data):
-        from_email = str(data.get("from_email", "")).strip().lower()
-        from_name = str(data.get("from_name", "EIP Telephony Voicemail")).strip()[:120]
-        enabled = bool(data.get("enabled"))
-        key = str(data.get("api_key") or "")
-        if from_email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", from_email):
-            raise ValueError("From email is invalid")
-        existing = self.get_email_config(include_key=True)
-        key = key or existing.get("api_key", "")
-        if enabled and (not key or not from_email):
-            raise ValueError("SendGrid API key and verified from email are required")
-        encrypted = self.encrypt(key) if key else ""
+        if not isinstance(data, dict):
+            raise ValueError("Email configuration must be an object")
+        # Preserve ciphertext without decrypting: blank retains the existing key,
+        # while replacing a key still works after SECRET_KEY has changed.
         with self._connect() as db:
-            db.execute("INSERT INTO email_config(id,sendgrid_api_key_enc,from_email,from_name,enabled) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,from_email=excluded.from_email,from_name=excluded.from_name,enabled=excluded.enabled,updated_at=CURRENT_TIMESTAMP",
-                       (encrypted, from_email, from_name, int(enabled)))
+            row = db.execute("SELECT provider,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
+            old = dict(row) if row else {}
+            # Older cached pages can still submit provider=sendgrid; ignore it.
+            # No request is allowed to select or send through another provider.
+            provider = "elasticemail"
 
-    def claim_voicemail_delivery(self, fingerprint: str, mailbox: str, recipient: str) -> bool:
-        with self._connect() as db:
-            row = db.execute("SELECT status,attempts FROM voicemail_deliveries WHERE fingerprint=?", (fingerprint,)).fetchone()
-            if row and (row["status"] == "delivered" or row["attempts"] >= 5):
-                return False
-            if row:
-                db.execute("UPDATE voicemail_deliveries SET status='pending',attempts=attempts+1,updated_at=CURRENT_TIMESTAMP WHERE fingerprint=?", (fingerprint,))
-            else:
-                db.execute("INSERT INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts) VALUES(?,?,?,'pending',1)", (fingerprint, mailbox, recipient))
-            return True
+            def flag(name):
+                value = data.get(name, bool(old.get(name, False)))
+                if not isinstance(value, (bool, int)) or value not in (0, 1):
+                    raise ValueError(f"{name} must be true or false")
+                return bool(value)
 
-    def finish_voicemail_delivery(self, fingerprint: str, success: bool, error: str | None = None):
+            enabled = flag("enabled")
+            transcription_enabled = flag("transcription_enabled")
+            from_email = str(data.get("from_email", old.get("from_email", ""))).strip().lower()
+            from_name = str(data.get("from_name", old.get("from_name", "EngineerIP Voicemail"))).strip()[:120]
+            if from_email and (len(from_email) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", from_email)):
+                raise ValueError("From email is invalid")
+            if "\r" in from_name or "\n" in from_name:
+                raise ValueError("Sender name cannot contain line breaks")
+            key = str(data.get("api_key") or "").strip()
+            if len(key) > 512 or re.search(r"\s", key):
+                raise ValueError("Paste the API key only, without Bearer, spaces or line breaks")
+            # A recognizable SendGrid credential must never be forwarded to a
+            # different service. An Elastic key saved under the old UI is kept.
+            if key.upper().startswith("SG."):
+                raise ValueError("This looks like a SendGrid key. Enter an Elastic Email API key instead")
+            encrypted = self.encrypt(key) if key else old.get("sendgrid_api_key_enc", "")
+            if enabled and (not encrypted or not from_email):
+                raise ValueError("Elastic Email API key and verified from email are required")
+            db.execute("INSERT INTO email_config(id,provider,sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled) "
+                       "VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,sendgrid_api_key_enc=excluded.sendgrid_api_key_enc,"
+                       "from_email=excluded.from_email,from_name=excluded.from_name,enabled=excluded.enabled,"
+                       "transcription_enabled=excluded.transcription_enabled,updated_at=CURRENT_TIMESTAMP",
+                       (provider, encrypted, from_email, from_name, int(enabled), int(transcription_enabled)))
+            if (old.get("provider", "elasticemail") != provider or encrypted != old.get("sendgrid_api_key_enc", "")
+                    or from_email != old.get("from_email", "") or (enabled and not old.get("enabled"))):
+                db.execute("UPDATE voicemail_deliveries SET attempts=0 WHERE status='failed'")
+
+    def claim_voicemail_delivery(self, fingerprint: str, mailbox: str, recipient: str, *, legacy_fingerprint: str | None = None, received_at: str | None = None) -> bool:
         with self._connect() as db:
-            db.execute("UPDATE voicemail_deliveries SET status=?,last_error=?,delivered_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE delivered_at END,updated_at=CURRENT_TIMESTAMP WHERE fingerprint=?",
-                       ("delivered" if success else "failed", error, int(success), fingerprint))
+            # Pre-v2 IDs used only mailbox+audio. Keep their accepted history
+            # without letting that hash suppress a later, distinct call with
+            # identical audio. Convert with the DB's clock/timezone convention.
+            if legacy_fingerprint and received_at:
+                epoch = "UNIX_TIMESTAMP(COALESCE(delivered_at,updated_at))" if self.database.is_mysql else "CAST(strftime('%s',COALESCE(delivered_at,updated_at)) AS INTEGER)"
+                legacy = db.execute(f"SELECT {epoch} AS accepted_at FROM voicemail_deliveries WHERE fingerprint=? AND status='delivered'", (legacy_fingerprint,)).fetchone()
+                if legacy and legacy["accepted_at"] is not None:
+                    try:
+                        received = datetime.fromisoformat(received_at)
+                        if received.tzinfo is None:
+                            received = received.replace(tzinfo=timezone.utc)
+                        if received.timestamp() <= float(legacy["accepted_at"]):
+                            return False
+                    except (ValueError, TypeError):
+                        return False  # Unknown legacy identity: do not re-mail.
+
+            inserted = db.execute("INSERT OR IGNORE INTO voicemail_deliveries(fingerprint,mailbox,recipient,status,attempts) VALUES(?,?,?,'pending',1)",
+                                  (fingerprint, mailbox, recipient))
+            if inserted.rowcount:
+                return True
+            # Atomic lease/retry claim, including multiple notifier instances.
+            # Use the DB clock so a host timezone/clock difference cannot expire
+            # another worker's lease. The lease exceeds normal HTTP timeouts.
+            retry_time = "(CURRENT_TIMESTAMP - INTERVAL 60 SECOND)" if self.database.is_mysql else "datetime('now','-60 seconds')"
+            stale_time = "(CURRENT_TIMESTAMP - INTERVAL 10 MINUTE)" if self.database.is_mysql else "datetime('now','-10 minutes')"
+            claimed = db.execute(
+                "UPDATE voicemail_deliveries SET status='pending',recipient=?,attempts=attempts+1,updated_at=CURRENT_TIMESTAMP "
+                f"WHERE fingerprint=? AND attempts<5 AND ((status='failed' AND updated_at<={retry_time}) "
+                f"OR (status='pending' AND updated_at<={stale_time}))", (recipient, fingerprint))
+            return bool(claimed.rowcount)
+
+    def finish_voicemail_delivery(self, fingerprint: str, success: bool, error: str | None = None, transcription_status: str = "disabled"):
+        with self._connect() as db:
+            db.execute("UPDATE voicemail_deliveries SET status=?,last_error=?,transcription_status=?,delivered_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE delivered_at END,updated_at=CURRENT_TIMESTAMP WHERE fingerprint=?",
+                       ("delivered" if success else "failed", error, transcription_status, int(success), fingerprint))
 
     def list_voicemail_deliveries(self, limit: int = 50):
         with self._connect() as db:
-            rows = db.execute("SELECT fingerprint,mailbox,recipient,status,attempts,last_error,delivered_at,updated_at FROM voicemail_deliveries ORDER BY updated_at DESC LIMIT ?", (min(100, max(1, limit)),)).fetchall()
+            rows = db.execute("SELECT fingerprint,mailbox,recipient,status,attempts,last_error,transcription_status,delivered_at,updated_at FROM voicemail_deliveries ORDER BY updated_at DESC LIMIT ?", (min(100, max(1, limit)),)).fetchall()
         return [dict(row) for row in rows]
 
     def recording_platform_enabled(self) -> bool:
@@ -3635,13 +4166,19 @@ class SettingsStore:
             "service_web_host",
             "service_sip_port",
             "sip_auth_digest",
+            "ice_servers",
         }
         for key, value in values.items():
             if key not in allowed:
                 continue
             text = str(value)
-            if len(text) > 2000:
+            if len(text) > (4000 if key == "ice_servers" else 2000):
                 raise ValueError("Setting is too long")
+            if key == "ice_servers":
+                # Blank is the built-in STUN default; anything else must be a
+                # browser RTCIceServer list or the softphone would be handed
+                # config its RTCPeerConnection rejects at call time.
+                parse_ice_servers(text)
             if key == "recording_format" and text not in {"wav", "wav49", "gsm", "slin16"}:
                 raise ValueError("Unsupported recording format")
             if key in {"recording_enabled", "recording_announcement", "recording_beep", "webrtc_enabled"} and text.lower() not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
@@ -3689,6 +4226,8 @@ class SettingsStore:
                     text = "true" if text.strip().lower() in {"true", "1", "yes", "on"} else "false"
                 if key in {"service_host", "service_web_host"}:
                     text = text.strip()
+                if key == "ice_servers":
+                    text = json.dumps(parse_ice_servers(text)) if text.strip() else ""
                 db.execute(
                     "INSERT INTO settings(`key`,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
                     (str(key), text),
@@ -3919,12 +4458,32 @@ def register_admin(app, config, on_telephony_change=None):
     app.extensions["settings_store"] = store
     web_dir = str(Path(app.root_path).parent / "web")
 
-    def apply_change():
+    @app.after_request
+    def no_stale_admin_ui_after_image_upgrade(response):
+        # An old cached admin.js can still reference removed API-key fields and
+        # produce misleading save errors after an image-only deployment. Admin
+        # pages, assets and API state must be fetched from the running image.
+        if (request.path.startswith("/admin") or request.path in {"/login", "/console-check"}):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+    def apply_change() -> str:
+        """Re-render the Asterisk configuration; return why it did not apply.
+
+        A change is saved even when the render fails - a platform that cannot
+        reach Asterisk must not refuse a customer - but the failure is never
+        silent: it is logged, and the route that knows the caller can pass the
+        reason back to the console.
+        """
         if on_telephony_change:
             try:
                 on_telephony_change()
-            except Exception:
+            except Exception as exc:
                 app.logger.exception("Failed to apply telephony configuration change")
+                return str(exc) or exc.__class__.__name__
+        return ""
 
     def login_required(fn):
         @wraps(fn)
@@ -3977,7 +4536,7 @@ def register_admin(app, config, on_telephony_change=None):
     def admin_asset(filename):
         if filename not in {"admin.css", "admin.js"}:
             return jsonify({"error": "not found"}), 404
-        return send_from_directory(web_dir, filename, max_age=3600)
+        return send_from_directory(web_dir, filename, max_age=0)
 
     @app.get("/")
     def landing_page(): return send_from_directory(web_dir, "index.html")
@@ -4875,9 +5434,14 @@ def register_admin(app, config, on_telephony_change=None):
                 "recording_announcement_media", "recording_beep", "recording_max_duration_seconds",
                 "default_extension", "inbound_fallback_extension", "webrtc_enabled",
                 "service_host", "service_web_host", "service_sip_port", "sip_auth_digest",
+                "ice_servers",
             }
             store.set_settings({k: data[k] for k in data if k in allowed})
-            apply_change(); return jsonify({"ok": True})
+            # A saved address that will not render is not a reason to refuse
+            # the save - DNS can come up after it is entered - but the console
+            # is told exactly why the running configuration did not change.
+            warning = apply_change()
+            return jsonify({"ok": True, **({"warning": warning} if warning else {})})
         except (ValueError, TypeError) as exc: return jsonify({"error": str(exc)}), 400
 
     @app.post("/admin/api/groups")
@@ -5040,7 +5604,13 @@ def register_admin(app, config, on_telephony_change=None):
             who = "operator" if session.get("admin_role") == "admin" else "customer"
             kind = "call_route" if target_type == "number" else "routing_flow"
             store.add_activity(owner, int(session["admin_user_id"]), "route.saved", kind, route_id, f"Call flow for {label} updated by the {who}")
-            return jsonify({"ok": True, "route_id": route_id, "auto_ivr": added})
+            # The store is only the plan - the PBX runs the rendered mailboxes
+            # and dialplan. Every sibling mutation (extensions, SIP accounts)
+            # applies here, and flows used to skip it: a saved voicemail box
+            # then existed nowhere Asterisk could see it, so VoiceMail() failed
+            # at ring-out while every store-reading test stayed green.
+            warning = apply_change()
+            return jsonify({"ok": True, "route_id": route_id, "auto_ivr": added, "warning": warning})
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -5168,18 +5738,25 @@ def register_admin(app, config, on_telephony_change=None):
     def admin_email_config():
         try:
             store.save_email_config(request.get_json(silent=True) or {})
-            return jsonify({"ok": True})
+            return jsonify({"ok": True, "email_config": store.get_email_config()})
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
     @app.post("/admin/api/email-config/test")
     @admin_required
     def admin_email_test():
-        email = str((request.get_json(silent=True) or {}).get("email", "")).strip()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Email test must be an object"}), 400
+        email = str(data.get("email", "")).strip()
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             return jsonify({"error": "Valid test email required"}), 400
         success, error = current_app.extensions["voicemail_notifier"].send_test(email)
-        return jsonify({"ok": success, "error": error}), (200 if success else 502)
+        # The console asks for a completed test result rather than an upstream
+        # 502: some reverse proxies replace 5xx JSON with a generic HTML page.
+        # Keep the original 502 contract for older clients that do not opt in.
+        status = 200 if success or data.get("result_only") is True else 502
+        return jsonify({"ok": success, "error": error}), status
 
     @app.post("/admin/api/profile/recording")
     @login_required

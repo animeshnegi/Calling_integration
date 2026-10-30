@@ -538,6 +538,32 @@ def register_routes(app, service):
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 
+    @app.get("/phone-hold.wav")
+    def phone_hold_music():
+        """The same original loop the PBX plays to held plain-SIP phones."""
+        response = send_from_directory(
+            str(Path(app.root_path).parent / "asterisk" / "moh"),
+            "engineerip-hold.wav", mimetype="audio/wav",
+        )
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
+    @app.get("/jssip.min.js")
+    def phone_sip_stack():
+        """The vendored JsSIP browser build the softphone registers with.
+
+        It is served from this origin - not from a CDN - so opening the
+        softphone never depends on a third-party host being reachable. The
+        JavaScript MIME type is explicit: every response carries nosniff, and a
+        script the browser cannot classify is a script the browser refuses to
+        run - "SIP library is not loaded" again.
+        """
+        response = send_from_directory(
+            str(Path(app.root_path).parent / "web"), "jssip.min.js", mimetype="text/javascript"
+        )
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
     @app.get("/manifest.json")
     def phone_manifest():
         response = send_from_directory(str(Path(app.root_path).parent / "web"), "manifest.json")

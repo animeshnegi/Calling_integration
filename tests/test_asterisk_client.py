@@ -195,13 +195,22 @@ def test_event_url_upgrades_to_wss_for_tls_ari():
 def test_outbound_call_originates_employee_first_with_deterministic_channel(monkeypatch):
     captured = capture_request(monkeypatch)
 
-    assert ari_client().create_outbound_call("call-1", "101", "+13025551234", "provider-1", None) == "call-1"
+    # The channel id is deterministic and the method returns it: the second
+    # device of one extension gets its own numbered channel, the same way a
+    # ring group does.
+    assert ari_client().create_outbound_call("call-1", "101", "+13025551234", "provider-1", None) == "call-1-employee"
 
     assert captured["params"]["endpoint"] == "PJSIP/101"
     assert captured["params"]["channelId"] == "call-1-employee"
     assert captured["params"]["timeout"] == 30
     assert captured["params"]["appArgs"] == "employee,call-1,provider-1,+13025551234"
     assert captured["json"]["variables"] == {"EIP_CALL_ID": "call-1"}
+
+    assert ari_client().create_outbound_call(
+        "call-1", "101", "+13025551234", "provider-1", None, endpoint="PJSIP/101-webrtc", index=1,
+    ) == "call-1-employee-1"
+    assert captured["params"]["channelId"] == "call-1-employee-1"
+    assert captured["params"]["endpoint"] == "PJSIP/101-webrtc"
 
 
 def test_outbound_call_variables_omit_absent_metadata(monkeypatch):

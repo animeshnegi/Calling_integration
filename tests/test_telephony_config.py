@@ -1,7 +1,12 @@
+import re
+import socket
 from pathlib import Path
+
+import pytest
 
 from app.admin import SettingsStore
 from app.telephony_config import TelephonyConfigSync
+from dialplan_helpers import dynamic_dial
 
 
 class DummyAMI:
@@ -13,6 +18,20 @@ class DummyAMI:
 
     def reload_voicemail(self):
         return {}
+
+    def restart(self):
+        return {}
+
+
+def fake_dns(monkeypatch, mapping):
+    """Deterministic name resolution: the media address is resolved at render
+    time, and tests must not depend on the sandbox's real DNS."""
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host not in mapping:
+            raise OSError(f"no DNS for {host}")
+        return [(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP, "", (mapping[host], 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", getaddrinfo)
 
 
 def test_provider_allowlist_renders_identify(tmp_path: Path):
@@ -29,11 +48,18 @@ def test_provider_allowlist_renders_identify(tmp_path: Path):
 
 
 def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
-    """A phone signs in as e.g. AUHFZH_101 while the endpoint is named 101.
+    """A phone signs in as e.g. AUHFZH_101 while the canonical endpoint is 101.
 
-    Asterisk identifies endpoints by matching the From-user against the
-    endpoint name, so without auth_username identification and an AOR named
-    after the SIP username every registration dies with InvalidAccountID.
+    Asterisk's username/auth_username identification is a lookup of an
+    endpoint object BY NAME: res_pjsip_endpoint_identifier_user.c takes the
+    From-header username (or the Authorization username) and retrieves an
+    endpoint whose id is exactly that string. It never reads auth objects or
+    AORs to decide identity - so without an endpoint literally named after
+    the SIP username the registration is unidentified (AccountID=<unknown>,
+    ChallengeResponseFailed, ExpectedResponse empty in the security log) and
+    no password is correct. The AOR named after the username is what the
+    registrar binds the contact against; the alias endpoint is what makes the
+    request identified at all.
     """
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
@@ -41,7 +67,6 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     assert username != "101" and username.endswith("_101")   # prefixed credential
 
     text = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_pjsip()
-    # The endpoint can be found through the Authorization header username.
     assert "identify_by=username,auth_username" in text
     # The registrar resolves the To-user against the endpoint's AOR list, so
     # the SIP username must exist as an AOR alongside the extension number -
@@ -49,15 +74,37 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     # with the credential on its sheet and nothing here may take that away.
     assert f"[{username}]\ntype=aor" in text
     assert f"aors=101,{username}" in text
-    # The WebRTC alias endpoint - the “[username] type=endpoint” a browser signs in
-    # with - is rendered only for an extension whose WebRTC switch is on, so
-    # plain SIP is unaffected by it either way.
-    assert f"[{username}]\ntype=endpoint" not in text
-    assert text.count("auth=auth-101") == 1  # the canonical endpoint only
+    # ...and it must exist as an ENDPOINT named after the username, sharing
+    # the plain identity's auth and AORs - the object identification looks
+    # up by name. Its body is the PLAIN body: a request signed with the phone
+    # username is answered with RTP, never DTLS-SRTP.
+    alias = text.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in alias and "webrtc=yes" not in alias
+    assert "auth=auth-101" in alias and f"aors=101,{username}" in alias
+    # The browser endpoint - a separate `[username-webrtc]` identity - is
+    # rendered only for an extension whose WebRTC switch is on, so plain SIP
+    # is unaffected by it either way. The two identities never share a name,
+    # an AOR or an auth object: a request is answered by the endpoint named
+    # after its From user, and one shared name used to answer a Zoiper with
+    # DTLS-SRTP - a call that connected and stayed completely silent.
+    assert f"[{username}-webrtc]\ntype=endpoint" not in text
+    assert "auth=auth-101-webrtc" not in text
+    assert "webrtc=yes" not in text
     store.save_extension({"extension": "101", "webrtc_enabled": True})
     with_webrtc = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_pjsip()
-    assert f"[{username}]\ntype=endpoint" in with_webrtc
-    assert with_webrtc.count("auth=auth-101") == 2  # canonical + WebRTC alias
+    # The phone's alias endpoint stays plain whatever the switch says.
+    alias_on = with_webrtc.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in alias_on and "webrtc=yes" not in alias_on
+    assert f"[{username}-webrtc]\ntype=endpoint" in with_webrtc
+    assert f"[{username}-webrtc]\ntype=aor" in with_webrtc
+    # The browser registers against its own AOR only, and the plain identity's
+    # contact space is never mixed into it (nor the reverse).
+    assert f"[{username}-webrtc]\ntype=endpoint\naors={username}-webrtc\n" in with_webrtc
+    assert f"[auth-101-webrtc]\ntype=auth\nauth_type=userpass\nusername={username}-webrtc" in with_webrtc
+    # One password, two identities: rotating the secret changes both.
+    assert with_webrtc.count("password=secret") == 2
+    # The plain identity still authenticates the phone exactly as before.
+    assert f"[auth-101]\ntype=auth\nauth_type=userpass\nusername={username}\npassword=secret" in with_webrtc
     assert f"aors=101,{username}" in with_webrtc
     # Challenge with plain MD5 digest only: offering SHA-256 (RFC 8760) makes
     # common softphones (Zoiper 5) silently abandon the challenge.
@@ -66,6 +113,88 @@ def test_phones_can_register_with_their_prefixed_sip_username(tmp_path: Path):
     # And the global identifier order must allow auth_username to run at all.
     bootstrap = (Path(__file__).resolve().parents[1] / "asterisk" / "entrypoint.sh").read_text()
     assert "endpoint_identifier_order=ip,username,auth_username,anonymous" in bootstrap
+
+
+@pytest.mark.parametrize(
+    ("service", "media", "expected"),
+    [
+        ("sip.example.com", "203.0.113.10", "sip.example.com"),
+        ("123test.example.com", "203.0.113.10", "123test.example.com"),
+        ("203.0.113.10", "", "203.0.113.10"),
+        ("2001:db8::12", "", "[2001:db8::12]"),
+        ("123abc456def", "203.0.113.10", "203.0.113.10"),
+        ("invalid host", "203.0.113.10", "203.0.113.10"),
+        ("bad\nfrom_domain=evil.example", "", "asterisk"),
+        ("", "", "asterisk"),
+        ("example.123", "", "asterisk"),
+    ],
+)
+def test_browser_from_domain_is_a_valid_sip_host(service, media, expected):
+    """A numeric-leading single-label Docker hostname is not a SIP host."""
+    assert TelephonyConfigSync._browser_sip_domain(service, media) == expected
+
+
+def test_browser_sip_domain_does_not_change_plain_or_carrier_endpoints(tmp_path: Path):
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.set_settings({"service_host": "sip.example.com"})
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret", "webrtc_enabled": True})
+    store.save_provider({
+        "name": "Carrier", "server": "carrier.example.com", "port": 5060,
+        "username": "carrier-user", "password": "secret", "transport": "udp",
+        "codecs": "ulaw,alaw", "allowed_ips": "198.51.100.10/32",
+    })
+    username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+    text = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_pjsip()
+    browser = text.split(f"[{username}-webrtc]\ntype=endpoint", 1)[1].split("\n\n", 1)[0]
+    plain = text.split(f"[{username}]\ntype=endpoint", 1)[1].split("\n\n", 1)[0]
+    provider = text.split("from_domain=carrier.example.com", 1)
+    assert "from_domain=sip.example.com\n" in browser
+    # The browser receives remote hold/unhold re-INVITEs and plays hold music
+    # locally. Plain phones and providers retain Asterisk's normal PBX MOH.
+    assert "moh_passthrough=yes\n" in browser
+    assert "moh_passthrough=" not in plain
+    assert text.count("moh_passthrough=yes") == 1
+    assert "from_domain=" not in plain
+    assert len(provider) == 2  # Existing carrier domain remains unchanged.
+    assert text.count("from_domain=sip.example.com") == 1
+
+
+def test_numeric_leading_service_name_uses_resolved_media_ip_for_browser_domain(tmp_path: Path, monkeypatch):
+    fake_dns(monkeypatch, {"123abc456def": "203.0.113.10"})
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.set_settings({"service_host": "123abc456def"})
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret", "webrtc_enabled": True})
+    path = tmp_path / "pjsip.dynamic.conf"
+    TelephonyConfigSync(store, DummyAMI(), str(path)).apply()
+    assert "from_domain=203.0.113.10\n" in path.read_text()
+    assert "from_domain=123abc456def" not in path.read_text()
+
+
+def test_browser_sip_domain_update_reloads_without_restarting_asterisk(tmp_path: Path, monkeypatch):
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
+
+    class RecordingAMI(DummyAMI):
+        def __init__(self): self.calls = []
+        def restart(self): self.calls.append("restart")
+        def reload_pjsip(self): self.calls.append("pjsip")
+        def reload_voicemail(self): self.calls.append("voicemail")
+        def reload_dialplan(self): self.calls.append("dialplan")
+
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.set_settings({"service_host": "sip.example.com"})
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret", "webrtc_enabled": True})
+    ami = RecordingAMI()
+    path = tmp_path / "pjsip.dynamic.conf"
+    sync = TelephonyConfigSync(store, ami, str(path))
+    sync.apply()
+    assert ami.calls == ["restart"]
+    # Simulate the prior image's file, with the same endpoint sections and
+    # transports but without the browser-specific domain.
+    path.write_text(path.read_text().replace("from_domain=sip.example.com\n", ""))
+    ami.calls.clear()
+    sync.apply()
+    assert "from_domain=sip.example.com\n" in path.read_text()
+    assert ami.calls == ["pjsip", "voicemail", "dialplan"]
 
 
 def test_admin_chooses_the_sip_digest_algorithm(tmp_path: Path):
@@ -98,6 +227,7 @@ def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypa
     """The admin panel's Service address is the single public-address source;
     .env's ASTERISK_EXTERNAL_ADDRESS is only a fallback until it is set."""
     monkeypatch.setenv("ASTERISK_EXTERNAL_ADDRESS", "198.51.100.99")
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
 
@@ -107,10 +237,11 @@ def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypa
     store.set_settings({"service_host": "sip.example.com"})
     text = sync.render_transports()
     assert "[transport-udp]" in text and "[transport-tcp]" in text
-    # Media address on all three transports: the browser's ICE candidates come
-    # from the WSS transport. Signalling stays off it - that leg already came in
-    # through the reverse proxy.
-    assert text.count("external_media_address=sip.example.com") == 3
+    # The SDP connection address is numeric on all three transports. RTP's
+    # ICE candidates require a separate rtp.conf mapping, tested elsewhere.
+    # Signalling stays on the hostname and off the WSS transport - that leg
+    # already came in through the reverse proxy.
+    assert text.count("external_media_address=203.0.113.10") == 3
     assert text.count("external_signaling_address=sip.example.com") == 2
     assert "external_signaling_address=198.51.100.99" not in text
     # Docker and LAN destinations are exempt from NAT rewriting.
@@ -119,6 +250,7 @@ def test_transports_use_the_admin_panel_service_address(tmp_path: Path, monkeypa
     sync.apply()
     rendered = (tmp_path / "pjsip.transports.conf").read_text()
     assert "external_signaling_address=sip.example.com" in rendered
+    assert "external_media_address=203.0.113.10" in rendered
 
 
 def test_voicemail_mailbox_and_routes_are_rendered(tmp_path: Path):
@@ -195,22 +327,22 @@ def test_the_two_101s_present_their_own_number_and_keep_their_own_mailbox(tmp_pa
     context_b = dialplan.split(f"\n[{TelephonyConfigSync.number_context(line_b)}]\n")[1].split("\n\n")[0]
     own_a = context_a.split("exten => 101,1")[1].split("exten => ")[0]
     own_b = context_b.split("exten => 101,1")[1].split("exten => ")[0]
-    assert "Dial(PJSIP/101-13025550098,30)" in own_a
+    assert dynamic_dial("101-13025550098") in own_a
     assert "VoiceMail(101-13025550098@engineerip,u)" in own_a
-    assert "Dial(PJSIP/101-13025550067,30)" in own_b
+    assert dynamic_dial("101-13025550067") in own_b
     assert "VoiceMail(101-13025550067@engineerip,u)" in own_b
     assert "VoiceMailMain(@engineerip)" in context_a and "VoiceMailMain(@engineerip)" in context_b
 
     # The other line's full number still routes internally - the same customer
     # owns it - straight to that number's own 101 and its own box, not the trunk.
     local_b = context_a.split("exten => +13025550067,1")[1].split("exten => ")[0]
-    assert "Dial(PJSIP/101-13025550067,30)" in local_b
+    assert dynamic_dial("101-13025550067") in local_b
     assert "OUTBOUND_TRUNK" not in local_b
 
     # 104 exists on the first line only: the second line's context has no such
     # extension and plays NOT IN SERVICE instead of borrowing it.
     assert "exten => 104,1" in context_a
-    assert "Dial(PJSIP/104-13025550098,30)" in context_a
+    assert dynamic_dial("104-13025550098") in context_a
     assert "exten => 104,1" not in context_b
     # The first line's 104 is reached from the second only by full number - and
     # only because both lines are one customer's; bare 104 stays NOT IN SERVICE.
@@ -282,7 +414,11 @@ def test_webrtc_off_leaves_normal_sip_alone_and_on_adds_the_browser(tmp_path: Pa
     # browser endpoint exists at all.
     off = sync.render_pjsip()
     assert "\n[101-13025550098]\ntype=endpoint" in off
-    assert f"\n[{username}]\ntype=endpoint" not in off
+    # The phone signs in as `username`, so an endpoint of that name exists -
+    # identification is a name lookup and a registration without it is
+    # unidentified and rejected whatever the password is.
+    assert f"\n[{username}]\ntype=endpoint" in off
+    assert f"\n[{username}-webrtc]\ntype=endpoint" not in off
     assert off.count("webrtc=yes") == 0
 
     # Checking it registers the browser identity as a second endpoint over WSS
@@ -291,10 +427,16 @@ def test_webrtc_off_leaves_normal_sip_alone_and_on_adds_the_browser(tmp_path: Pa
     on = sync.render_pjsip()
     sip_before = off.split("[101-13025550098]\ntype=endpoint")[1].split("\n\n")[0]
     sip_after = on.split("[101-13025550098]\ntype=endpoint")[1].split("\n\n")[0]
-    alias = on.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    alias = on.split(f"[{username}-webrtc]\ntype=endpoint")[1].split("\n\n")[0]
     assert sip_before == sip_after                       # normal SIP untouched
     assert "transport=transport-wss" in alias and "webrtc=yes" in alias
     assert "transport=transport-udp" in sip_after        # the phone still registers here
+    # The plain phone keeps its own name even with the switch on: a request
+    # signed `AUMPNO_101` is answered by the endpoint of that name - with the
+    # plain body - and never by the browser's `-webrtc` endpoint. Media mode
+    # follows the endpoint that identified the request.
+    phone_alias = on.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in phone_alias and "webrtc=yes" not in phone_alias
 
 
 def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path):
@@ -322,6 +464,14 @@ def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path)
     assert "exten => _XXXX.,1,NoOp(Outbound" in dialplan
     assert "Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)" in dialplan
 
+    # The "no trunk assigned" guard compares *inside* $[...] so GotoIf is
+    # handed the 0/1 of the comparison. The shape it used to render,
+    # GotoIf($["${OUTBOUND_TRUNK}"]=""]?blocked), never evaluates: the
+    # condition reaches GotoIf as a non-empty string, reads as true, and every
+    # outbound call was sent to the blocked branch - trunk assigned or not.
+    assert 'GotoIf($["${OUTBOUND_TRUNK}"=""]?blocked)' in dialplan
+    assert 'GotoIf($["${OUTBOUND_TRUNK}"]=""]' not in dialplan
+
     # Extension 101's endpoints carry their own DID and carrier trunk as
     # channel variables, so any call it originates dials out as itself...
     assert "set_var=OUTBOUND_CID=+13025550101" in pjsip
@@ -330,6 +480,46 @@ def test_registered_phones_can_dial_out_through_their_own_number(tmp_path: Path)
     assert "set_var=OUTBOUND_CID=\n" in pjsip
     assert "set_var=OUTBOUND_TRUNK=\n" in pjsip
     assert "Playback(ss-noservice)" in dialplan
+
+
+def test_every_dialplan_condition_compares_inside_the_expression(tmp_path: Path):
+    """GotoIf/ExecIf must receive the 0/1 of a $[...] comparison.
+
+    A condition written as $["${X}"]=""] - comparison outside the brackets -
+    never evaluates; the application then receives a non-empty string, reads it
+    as true, and takes its branch unconditionally. That is exactly how every
+    outbound call ended in "No outbound number assigned" while the endpoint
+    carried its trunk in OUTBOUND_TRUNK.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    store.save_provider({
+        "name": "Carrier", "server": "sip.example.com", "username": "user", "password": "secret",
+        "allowed_ips": "198.51.100.10/32", "codecs": "ulaw,alaw",
+    })
+    store.save_number({
+        "number": "+13025550101", "provider": "Carrier", "inbound_extension": "101",
+        "default_outbound": True,
+    })
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    dialplan = sync.render_dialplan()
+
+    # Every application condition must be one comparison of two quoted
+    # strings, closed by ]? before the branch labels - the shape the other
+    # ExecIf lines in this renderer use: $["${X}" = "value"]?...
+    conditions = []
+    for line in dialplan.splitlines():
+        if not re.search(r"\b(?:GotoIf|ExecIf)\(", line):
+            continue
+        head, opened, tail = line.partition("$[")
+        assert opened, line
+        body, closed, _ = tail.partition("]?")
+        assert closed, line
+        conditions.append(body)
+
+    assert conditions
+    for body in conditions:
+        assert re.match(r'^"[^"]*"\s*[=!<>]=?\s*"[^"]*"$', body), body
 
 
 def test_recording_defaults_to_allowed_globally_and_off_per_extension(tmp_path: Path):
@@ -344,16 +534,13 @@ def test_recording_defaults_to_allowed_globally_and_off_per_extension(tmp_path: 
     assert reopened.recording_platform_enabled() is False
 
 def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
-    """Both endpoints of an extension have to be ready for a browser.
+    """The browser signs in on its own identity, and that endpoint is WebRTC.
 
-    The browser signs in with the extension's generated SIP username, so the
-    endpoint named after that username carries the WSS transport, Asterisk's
-    WebRTC switch and mandatory encryption. Calls are placed *towards* an
-    extension through the canonical endpoint - which is therefore
-    WebRTC-capable too, with media_encryption_optimistic so a hardware phone or
-    softphone that only speaks plain RTP still connects. Without that, a call to
-    a phone signed in on the browser rings and then has no audio, because a
-    browser cannot accept an unencrypted media offer."""
+    The browser identity (`<SIP username>-webrtc`) carries the WSS transport,
+    Asterisk's WebRTC switch and mandatory encryption; the plain endpoint keeps
+    plain RTP on its own transport. Media is negotiated by the endpoint a call
+    is placed towards and a browser cannot accept an unencrypted offer - so the
+    two device kinds live on two endpoints and never trade places."""
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret", "webrtc_enabled": True})
     username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
@@ -366,7 +553,7 @@ def test_the_browser_softphone_gets_a_webRTC_endpoint(tmp_path: Path):
     assert transports.count("bind=0.0.0.0:5060") == 2
 
     text = sync.render_pjsip()
-    alias = text.split(f"[{username}]\ntype=endpoint")[1].split("\n\n")[0]
+    alias = text.split(f"[{username}-webrtc]\ntype=endpoint")[1].split("\n\n")[0]
     assert "transport=transport-wss" in alias
     assert "webrtc=yes" in alias
     assert f"allow={TelephonyConfigSync.INTERNAL_CODECS}" in alias
@@ -398,28 +585,322 @@ def test_internal_calls_negotiate_hd_voice_first(tmp_path: Path):
 
     assert TelephonyConfigSync.INTERNAL_CODECS == "g722,ulaw,alaw"
     # disallow=all first, so nothing outside the policy can be negotiated.
-    # The extension, and the device account - whose two sections (its hashed
-    # name and its SIP username) are the same registration contract.
-    assert text.count("disallow=all\nallow=g722,ulaw,alaw") == 3
+    # The extension (canonical + its SIP-username alias), and the device
+    # account - whose two sections (its hashed name and its SIP username) are
+    # the same registration contract.
+    assert text.count("disallow=all\nallow=g722,ulaw,alaw") == 4
     assert "allow=ulaw,alaw" not in text
     # Every codec on the list has to be one Asterisk can actually translate.
     assert TelephonyConfigSync._codecs(TelephonyConfigSync.INTERNAL_CODECS) == TelephonyConfigSync.INTERNAL_CODECS
 
 
-def test_browser_media_advertises_the_public_address(tmp_path: Path):
-    """A WebRTC call's ICE candidates come from the WSS transport, so it needs
-    the admin panel's service address just like the UDP/TCP transports - a
-    browser cannot send audio to the container's private address."""
+def test_browser_media_advertises_the_public_address(tmp_path: Path, monkeypatch):
+    """The WSS transport needs the numeric media address for SDP c=, just
+    like UDP/TCP. ICE candidate mapping is separately tested in RTP config."""
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
     store.set_settings({"service_host": "sip.engineerip.com"})
+    fake_dns(monkeypatch, {"sip.engineerip.com": "203.0.113.20"})
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
 
     wss = sync.render_transports().split("[transport-wss]")[1]
-    assert "external_media_address=sip.engineerip.com" in wss
+    # The SDP c= address must be numeric; the same validated IP is used by
+    # the independently generated ICE host-candidate mapping.
+    assert "external_media_address=203.0.113.20" in wss
+    assert "external_media_address=sip.engineerip.com" not in wss
     assert "local_net=10.0.0.0/8" in wss
     # Signalling continues on the WebSocket the proxy already opened.
     assert "external_signaling_address" not in wss
+
+
+def test_media_address_resolves_hostnames_and_rejects_unresolvable_ones(monkeypatch):
+    """SDP and ICE need a numeric address, in every case.
+
+    A name is resolved at render time; a name that will not resolve is a
+    configuration error and is raised as one. Keeping it would render a media
+    address SDP cannot use - a call that connects and stays completely silent,
+    which is exactly what this function exists to prevent."""
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
+    resolve = TelephonyConfigSync._media_address
+    assert resolve("198.51.100.99") == "198.51.100.99"       # numeric stays
+    assert resolve("sip.example.com") == "203.0.113.10"       # names resolve
+    assert resolve("") == ""                                  # unset stays unset
+
+    import pytest
+    with pytest.raises(ValueError) as refused:
+        resolve("no-dns.example.com")
+    # The error names the cause and the fix - the message has to explain itself.
+    assert "does not resolve" in str(refused.value)
+    assert "public IP" in str(refused.value)
+
+
+def test_media_address_refuses_addresses_the_internet_cannot_reach(monkeypatch):
+    """An address can resolve and still be the wrong machine for call audio.
+
+    SDP and ICE promise the far end that audio has a path. A private address
+    is unreachable for a browser on the internet (split-horizon DNS, a record
+    pointing inside), and Cloudflare's edge is an HTTP proxy that never
+    carries RTP - a proxied record hands out exactly that. Both are refused
+    with the fix spelled out rather than rendered into a silent call."""
+    import pytest
+
+    resolve = TelephonyConfigSync._media_address
+    for broken, explains in (
+        ("192.168.1.10", "public IP"),
+        ("10.0.0.5", "public IP"),
+        ("127.0.0.1", "public IP"),
+        ("224.0.0.1", "multicast"),
+        ("240.0.0.1", "reserved"),
+        ("192.0.0.2", "public IP"),
+        ("192.88.99.1", "public IP"),
+        ("104.16.100.100", "Cloudflare"),
+        ("172.64.1.1", "Cloudflare"),
+        ("2606:4700:4700::1111", "Cloudflare"),
+    ):
+        with pytest.raises(ValueError) as refused:
+            resolve(broken)
+        assert explains in str(refused.value), (broken, refused.value)
+
+    # A name that resolves to one of those is refused the same way...
+    fake_dns(monkeypatch, {"inside.example.com": "192.168.1.10", "edge.example.com": "104.16.100.100"})
+    with pytest.raises(ValueError):
+        resolve("inside.example.com")
+    with pytest.raises(ValueError):
+        resolve("edge.example.com")
+
+    # ...and real public addresses - including the documentation ranges the
+    # tests and examples are written in - still render.
+    assert resolve("198.51.100.99") == "198.51.100.99"
+    assert resolve("203.0.113.20") == "203.0.113.20"
+
+
+class CountingAMI(DummyAMI):
+    """A DummyAMI that counts restart attempts (and can fail the first)."""
+
+    def __init__(self, fail_first=0):
+        self.restarts = 0
+        self.fail_first = fail_first
+
+    def restart(self):
+        self.restarts += 1
+        if self.restarts <= self.fail_first:
+            raise OSError("connection refused")
+
+
+def test_syncing_twice_without_changes_restarts_asterisk_only_once(tmp_path):
+    """A restart is owed for real changes, not for every sync.
+
+    The ARI worker syncs at startup and the console syncs on every save; if
+    each sync invented a reason to restart, every call would eventually be
+    torn down mid-sentence by `core restart`. Transports and section removals
+    are the only restart-worthy changes, and an unchanged render owes
+    nothing."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    ami = CountingAMI()
+    sync = TelephonyConfigSync(store, ami, str(tmp_path / "pjsip.dynamic.conf"))
+    sync.apply()
+    sync.apply()
+    sync.apply()
+    assert ami.restarts == 1
+
+
+def test_a_failed_restart_is_retried_by_the_next_sync(tmp_path):
+    """A restart that never reached Asterisk must not be lost.
+
+    The files are written before the restart (Asterisk reads them at boot), so
+    after a failed attempt the next sync sees an unchanged render and would
+    never try again - leaving a running Asterisk on old transports forever.
+    The marker makes the next sync pick the owed restart back up."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_username": "101", "sip_password": "secret"})
+    failing = CountingAMI(fail_first=1)
+    sync = TelephonyConfigSync(store, failing, str(tmp_path / "pjsip.dynamic.conf"))
+    try:
+        sync.apply()
+    except OSError:
+        pass
+    assert failing.restarts == 1
+    sync.apply()  # same rendered content - the restart is owed, not implied
+    assert failing.restarts == 2
+    sync.apply()  # now it is owed nothing more
+    assert failing.restarts == 2
+
+
+def test_the_media_address_is_stable_when_dns_rotates_records(monkeypatch):
+    """Several A records in rotating order must render the same address.
+
+    A rendered address that flaps between two syncs looks exactly like a
+    transport change and restarts Asterisk on every sync - so the renderer
+    always picks the lowest address of the answer set."""
+    import socket as socket_module
+
+    rotating = [
+        [("203.0.113.20", 0), ("203.0.113.10", 0)],
+        [("203.0.113.10", 0), ("203.0.113.20", 0)],
+    ]
+    calls = {"n": 0}
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        # Both records every time - only their order rotates, as round-robin
+        # DNS does.
+        addrs = rotating[calls["n"] % len(rotating)]
+        calls["n"] += 1
+        return [(socket_module.AF_INET, socket_module.SOCK_DGRAM, socket_module.IPPROTO_UDP, "", addr) for addr in addrs]
+
+    monkeypatch.setattr(socket_module, "getaddrinfo", getaddrinfo)
+    assert TelephonyConfigSync._media_address("sip.example.com") == "203.0.113.10"
+    assert TelephonyConfigSync._media_address("sip.example.com") == "203.0.113.10"
+
+
+def test_an_unresolvable_service_address_stops_the_sync_and_keeps_the_last_good_config(tmp_path: Path, monkeypatch):
+    """A broken Service address must not half-apply.
+
+    The transports file carries the media address every call is advertised on,
+    so a name that will not resolve aborts the render before anything is
+    written: Asterisk keeps running the last configuration that rendered, and
+    the operator gets one self-explaining error instead of a silent phone."""
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    ami = DummyAMI()
+    sync = TelephonyConfigSync(store, ami, str(tmp_path / "pjsip.dynamic.conf"))
+    store.set_settings({"service_host": "sip.example.com"})
+    sync.apply()
+    good_transports = (tmp_path / "pjsip.transports.conf").read_text()
+    assert "external_media_address=203.0.113.10" in good_transports
+
+    store.set_settings({"service_host": "gone.example.com"})
+    import pytest
+    with pytest.raises(ValueError) as refused:
+        sync.apply()
+    assert "does not resolve" in str(refused.value)
+    assert (tmp_path / "pjsip.transports.conf").read_text() == good_transports
+
+
+def test_apply_restarts_asterisk_when_the_transports_change(tmp_path: Path, monkeypatch):
+    """Transports are read at startup only - `pjsip reload` never rebinds them.
+    A Service address set after first boot must therefore reach the running
+    system through a restart, or every call advertises the container's private
+    media address and stays silent."""
+    fake_dns(monkeypatch, {"sip.example.com": "203.0.113.10"})
+    class RecordingAMI(DummyAMI):
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def reload_pjsip(self):
+            self.calls.append("reload_pjsip")
+            return {}
+
+        def reload_voicemail(self):
+            self.calls.append("reload_voicemail")
+            return {}
+
+        def reload_dialplan(self):
+            self.calls.append("reload_dialplan")
+            return {}
+
+        def restart(self):
+            self.calls.append("restart")
+
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    ami = RecordingAMI()
+    sync = TelephonyConfigSync(store, ami, str(tmp_path / "pjsip.dynamic.conf"))
+
+    sync.apply()
+    assert ami.calls == ["restart"]  # first render differs from the empty state
+    ami.calls.clear()
+    sync.apply()
+    assert ami.calls == ["reload_pjsip", "reload_voicemail", "reload_dialplan"]  # nothing changed
+    ami.calls.clear()
+    store.set_settings({"service_host": "sip.example.com"})
+    sync.apply()
+    assert ami.calls == ["restart"]  # transport-affecting change
+
+
+def test_webticked_extension_rings_browser_and_plain_endpoints_separately(tmp_path: Path):
+    """A WebRTC-ticked extension rings both of its identities at once.
+
+    A plain softphone cannot answer the browser endpoint's DTLS-SRTP offer and
+    a browser cannot answer an RTP offer - the wrong offer reaches the phone
+    and the call rejects before it rings. Each device kind therefore lives on
+    its own endpoint, and one Dial rings both in parallel: the browser on
+    `<username>-webrtc`, the phone on the plain identity. Whoever answers
+    first takes the call."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_password": "secret", "webrtc_enabled": True, "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    web_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+
+    block = sync.render_dialplan().split("exten => 101,1,")[1].split("\nexten")[0]
+    # One parallel Dial: browser identity first, then the plain phone's.
+    # Asterisk separates parallel channels with `&` inside the first argument -
+    # a comma separates Dial()'s own arguments, so `Dial(a,b,30)` would ring
+    # only `a` with a garbage timeout and never reach the phone at all.
+    assert dynamic_dial(f"{web_username}-webrtc", "101") in block
+    assert f"PJSIP/{web_username}-webrtc,PJSIP/" not in block
+    assert block.count("Dial(${PJSIP_DIAL_CONTACTS(") == 1
+    # No GotoIf fallback dance: each endpoint rings only its own contacts, so
+    # an unavailable browser can never stand between the caller and the phone.
+    assert "GotoIf" not in block
+    assert "n(plain)" not in block
+
+    # An extension without the WebRTC switch keeps a single, direct ring.
+    store.save_extension({"extension": "102", "sip_password": "secret", "active": True})
+    desk = sync.render_dialplan().split("exten => 102,1,")[1].split("\nexten")[0]
+    assert "same => n(plain)," not in desk
+    assert desk.count("Dial(${PJSIP_DIAL_CONTACTS(") == 1
+    assert dynamic_dial("102") in desk
+
+
+def test_apply_restarts_asterisk_when_an_endpoint_disappears(tmp_path: Path):
+    """A section removed from the file can linger in Asterisk's memory.
+
+    `pjsip reload` is documented to leave removed objects behind, so a WebRTC
+    endpoint that is switched off would keep answering a phone that must never
+    reach it again. `apply()` restarts exactly when the rendered file loses a
+    section - additions and edits still reload without touching live calls."""
+    class RecordingAMI(DummyAMI):
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def reload_pjsip(self):
+            self.calls.append("reload_pjsip")
+            return {}
+
+        def reload_voicemail(self):
+            self.calls.append("reload_voicemail")
+            return {}
+
+        def reload_dialplan(self):
+            self.calls.append("reload_dialplan")
+            return {}
+
+        def restart(self):
+            self.calls.append("restart")
+
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    ami = RecordingAMI()
+    sync = TelephonyConfigSync(store, ami, str(tmp_path / "pjsip.dynamic.conf"))
+    store.save_extension({"extension": "101", "sip_password": "secret", "active": True})
+    sync.apply()
+    ami.calls.clear()
+
+    # Switching WebRTC on only adds sections: a reload picks those up.
+    store.save_extension({"extension": "101", "webrtc_enabled": True})
+    sync.apply()
+    assert ami.calls == ["reload_pjsip", "reload_voicemail", "reload_dialplan"]
+    ami.calls.clear()
+
+    # ...and a settings edit that changes no section set also reloads.
+    store.set_settings({"sip_auth_digest": "md5"})
+    sync.apply()
+    assert "restart" not in ami.calls
+    ami.calls.clear()
+
+    # Switching it off removes the browser endpoint: only a restart drops it.
+    store.save_extension({"extension": "101", "webrtc_enabled": False})
+    sync.apply()
+    assert ami.calls == ["restart"]
 
 
 def test_every_number_has_its_own_extension_set(tmp_path: Path):
@@ -467,10 +948,10 @@ def test_every_number_has_its_own_extension_set(tmp_path: Path):
 
     # This line's own set, dialled on this line's own devices.
     assert f"exten => 101,1,NoOp(EngineerIP extension 101 on {line_a})" in context_a
-    assert f"Dial(PJSIP/101-13025550098,30)" in context_a
+    assert dynamic_dial("101-13025550098") in context_a
     assert "exten => 104,1" in context_a
     assert "exten => 105,1" not in context_a        # 105 is the other line's desk
-    assert "Dial(PJSIP/105-13025550067,30)" in context_b
+    assert dynamic_dial("105-13025550067") in context_b
     # The same digits on the other number are a different device - and a number
     # that has no 104 plays NOT IN SERVICE rather than borrowing one.
     assert "exten => 104,1" not in context_b
@@ -482,7 +963,7 @@ def test_every_number_has_its_own_extension_set(tmp_path: Path):
     # inbound destination on the platform, and its other desks are refused.
     assert "exten => +13025550011,1" in context_a and "exten => _+13025550011*X.,1" in context_a
     assert "exten => +13025550011*101" not in context_a
-    assert f"Dial(PJSIP/101-13025550011,30)" in north_context
+    assert dynamic_dial("101-13025550011") in north_context
     # Northwind reaches meridian's line by its full number, never its desks.
     assert "exten => +13025550098,1" in north_context
     assert "+13025550098*104" not in north_context and "+13025550098*101,1" not in north_context
@@ -623,7 +1104,7 @@ def test_a_customer_dials_its_own_numbers_internally(tmp_path: Path):
     # 105 dials the customer's other number and lands on that number's 117 ...
     route = context_a.split("exten => 13025550067,1,")[1].split("\nexten")[0]
     assert "local number 13025550067 rings extension 117" in route
-    assert "Dial(PJSIP/117-13025550067,30)" in route
+    assert dynamic_dial("117-13025550067") in route
     # ... and the carrier trunk is nowhere in that call.
     assert "OUTBOUND_TRUNK" not in route
     # The + form is what a phone with a country-code dial plan sends.
@@ -631,12 +1112,12 @@ def test_a_customer_dials_its_own_numbers_internally(tmp_path: Path):
     # Its own number is dialable the same way - and it is its own 105, not the
     # other line's 117.
     assert "local number 13025550098 rings extension 105" in context_b
-    assert "Dial(PJSIP/105-13025550098,30)" in context_b
+    assert dynamic_dial("105-13025550098") in context_b
 
     # Another customer's number is dialled by its full number and rings its own
     # inbound destination on the platform - it never leaves through the trunk.
     assert "exten => 13025550011,1,NoOp(EngineerIP local number 13025550011 rings extension 201)" in context_a
-    assert "Dial(PJSIP/201-13025550011,30)" in context_a
+    assert dynamic_dial("201-13025550011") in context_a
     # ...but that customer's other desks are NOT IN SERVICE from here.
     assert "exten => _13025550011*X.,1" in context_a
     assert "exten => 13025550011*201" not in context_a
@@ -708,7 +1189,7 @@ def test_dialling_an_extension_nobody_is_signed_in_as_says_so(tmp_path: Path):
     dialplan = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf")).render_dialplan()
 
     reachable = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
-    assert "Dial(PJSIP/101,30)" in reachable
+    assert dynamic_dial("101") in reachable
     assert 'ExecIf($["${DIALSTATUS}" = "CHANUNAVAIL"]?Playback(ss-noservice))' in reachable
     assert "VoiceMail(101@engineerip,u)" not in reachable
 
@@ -717,37 +1198,46 @@ def test_dialling_an_extension_nobody_is_signed_in_as_says_so(tmp_path: Path):
     assert "CHANUNAVAIL" not in voicemail
 
 
-def test_an_extension_that_answers_in_the_browser_is_dialled_on_its_webRTC_endpoint(tmp_path: Path):
+def test_an_extension_that_answers_in_the_browser_is_dialled_on_both_endpoints(tmp_path: Path):
     """Media is decided by the endpoint a call is placed towards.
 
     A browser cannot answer the plain endpoint's RTP offer (no audio at all),
-    and a hardware phone refuses the WebRTC endpoint's DTLS-SRTP offer. So the
-    extension an operator marked as answering in the browser is dialled on its
-    WebRTC endpoint - and every other extension keeps the plain one, which is
-    what the credentials a customer is given are written for.
+    and a hardware phone refuses the WebRTC endpoint's DTLS-SRTP offer. Each
+    device kind therefore signs in on its own identity and lives on its own
+    endpoint, and a WebRTC-ticked extension is dialled on BOTH - a parallel
+    ring where every device hears the media it speaks. Every other extension
+    keeps the plain one, which is what the credentials a customer is given are
+    written for.
     """
     store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
     store.save_extension({"extension": "101", "sip_password": "secret", "webrtc_enabled": True, "active": True})
     store.save_extension({"extension": "102", "sip_password": "secret", "active": True})
     sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
-    # The platform mints the SIP username an extension signs in with; that name
-    # is the WebRTC endpoint, so the test reads it back rather than assuming it.
+    # The platform mints the SIP username an extension signs in with; the
+    # browser identity is that name with `-webrtc`, so the test reads the
+    # username back rather than assuming it.
     web_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
     desk_username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "102")
     assert web_username != desk_username
 
     dialplan = sync.render_dialplan()
     browser = dialplan.split("exten => 101,1,")[1].split("\nexten")[0]
-    assert f"Dial(PJSIP/{web_username},30)" in browser
-    assert "Dial(PJSIP/101,30)" not in browser
+    assert dynamic_dial(f"{web_username}-webrtc", "101") in browser
     desk = dialplan.split("exten => 102,1,")[1].split("\nexten")[0]
-    assert "Dial(PJSIP/102,30)" in desk
+    assert dynamic_dial("102") in desk
     assert f"PJSIP/{desk_username}" not in desk
 
-    # The WebRTC settings really are on the endpoint that is now dialled.
-    endpoint = sync.render_pjsip().split(f"[{web_username}]\ntype=endpoint")[1].split("\n\n")[0]
+    # The WebRTC settings really are on the endpoint that is dialled for the
+    # browser - and only there: the plain endpoint of the very same extension
+    # stays plain, so a Zoiper signing in as the plain username is answered
+    # with RTP even though the WebRTC switch is on.
+    pjsip = sync.render_pjsip()
+    endpoint = pjsip.split(f"[{web_username}-webrtc]\ntype=endpoint")[1].split("\n\n")[0]
     assert "transport=transport-wss" in endpoint
     assert "webrtc=yes" in endpoint
+    plain_endpoint = pjsip.split("[101]\ntype=endpoint")[1].split("\n\n")[0]
+    assert "transport=transport-udp" in plain_endpoint
+    assert "webrtc=yes" not in plain_endpoint
 
 
 def test_a_full_number_of_any_platform_line_is_dialled_inside_the_platform(tmp_path: Path):
@@ -791,11 +1281,11 @@ def test_a_full_number_of_any_platform_line_is_dialled_inside_the_platform(tmp_p
     # Meridian's own second line: its inbound destination, and its 105 by full number.
     assert "exten => +13025550067,1,NoOp(EngineerIP local number +13025550067 rings extension 101)" in context_a
     assert "exten => +13025550067*105,1" in context_a
-    assert "Dial(PJSIP/105-13025550067,30)" in context_a
+    assert dynamic_dial("105-13025550067") in context_a
 
     # Northwind's line: rings its inbound destination, never its other extensions.
     assert "exten => +13025550011,1,NoOp(EngineerIP local number +13025550011 rings extension 101)" in context_a
-    assert "Dial(PJSIP/101-13025550011,30)" in context_a
+    assert dynamic_dial("101-13025550011") in context_a
     assert "exten => _+13025550011*X.,1" in context_a
     assert "exten => +13025550011*101" not in context_a
     assert "exten => +13025550011*101,1" in north_context          # northwind dials its own 101 by number
@@ -807,3 +1297,125 @@ def test_a_full_number_of_any_platform_line_is_dialled_inside_the_platform(tmp_p
     # The carrier catch-all is only ever reached by numbers the platform does not own.
     assert context_a.index("exten => +13025550011,1") < context_a.index("exten => _+X.,1")
     assert "_+X." in context_a
+
+
+def test_a_voicemail_step_in_a_flow_makes_the_mailbox_live(tmp_path: Path):
+    """Answering "Voice Mail" in the journey is the decision to take messages.
+
+    Before, the renderer wrote mailboxes only for extensions whose separate SIP
+    toggle was on - so a journey that named a mailbox dropped the call at the
+    exact moment it should have taken a message. The flow step itself now
+    defines the mailbox and the dialplan entry behind it.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "TestProvider", "server": "sip.example.com", "port": 5060,
+        "username": "user", "password": "password", "transport": "udp",
+        "codecs": "ulaw,alaw", "allowed_ips": "198.51.100.10/32",
+    })
+    store.save_user({
+        "username": "vm-co", "password": "customer-password-01", "role": "user",
+        "email": "vm@example.com", "full_name": "VM Owner", "company_name": "VM Co",
+    })
+    owner = int(next(row["id"] for row in store.list_users() if row["username"] == "vm-co"))
+    number = "+13025559907"
+    store.save_number({
+        "number": number, "description": "Main line", "provider": "TestProvider",
+        "owner_user_id": owner, "active": True,
+    })
+    row = store.add_extension_to_number(number, owner, {"extension": "101", "display_name": "Desk 101", "active": True})
+    key = str(row["key"])
+    assert store.extension_voicemail_enabled(key) is False
+
+    store.save_call_route(owner, {
+        "phone_number": number, "name": "Main call flow", "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": [key], "timeout": 25, "configured": True},
+            {"type": "voicemail", "mailbox": key, "configured": True},
+        ]},
+    })
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    mailbox = f"101-13025559907"
+
+    voicemail = sync.render_voicemail()
+    assert f"{mailbox} => " in voicemail                       # the mailbox exists
+    dialplan = sync.render_dialplan()
+    assert f"exten => {mailbox},1,VoiceMail({mailbox}@engineerip,u)" in dialplan
+    assert f"VoiceMail({mailbox}@engineerip,u)" in dialplan    # and the ring-out tail reaches it
+
+
+def test_the_call_handling_tab_carries_the_mailbox_settings(tmp_path: Path):
+    """PIN and greeting belong to the desk's Call Handling, where the user
+    asked for them: the pin written on the voicemail step is the pin for the
+    box, and the greeting is recorded by dialing *97 from the desk itself."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_provider({
+        "name": "TestProvider", "server": "sip.example.com", "port": 5060,
+        "username": "user", "password": "password", "transport": "udp",
+        "codecs": "ulaw,alaw", "allowed_ips": "198.51.100.10/32",
+    })
+    store.save_user({
+        "username": "pin-co", "password": "customer-password-01", "role": "user",
+        "email": "pin@example.com", "full_name": "PIN Owner", "company_name": "PIN Co",
+    })
+    owner = int(next(row["id"] for row in store.list_users() if row["username"] == "pin-co"))
+    number = "+13025559909"
+    store.save_number({
+        "number": number, "description": "Main line", "provider": "TestProvider",
+        "owner_user_id": owner, "active": True,
+    })
+    row = store.add_extension_to_number(number, owner, {"extension": "101", "display_name": "Desk 101", "active": True})
+    key = str(row["key"])
+    store.save_routing_flow(owner, {
+        "name": "Call handling", "active": True,
+        "route": {"nodes": [
+            {"type": "extension", "extension": key, "timeout": 15, "configured": True},
+            {"type": "voicemail", "mailbox": key, "enabled": True, "pin": "1234", "configured": True},
+        ]},
+    }, target_type="extension", target=key)
+
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    voicemail = sync.render_voicemail()
+    assert "101-13025559909 => 1234," in voicemail          # the step's pin is the box's pin
+    dialplan = sync.render_dialplan()
+    assert "exten => *97,1,NoOp(EngineerIP voicemail login)" in dialplan
+    assert "VoiceMailMain(@engineerip)" in dialplan          # greetings are recorded here
+
+
+def test_extension_dial_uses_reachable_contacts_not_the_aor_list_as_a_uri(tmp_path):
+    """Regression for the live `invalid URI '102-...,USERNAME'` error.
+
+    Asterisk's PJSIP session creation falls back to `endpoint->aors` as a URI
+    when no contact is reachable. That list can contain a comma, so a plain
+    `Dial(PJSIP/section)` logs an invalid URI. Dialing reachable contacts via
+    PJSIP_DIAL_CONTACTS() keeps one parallel Dial and skips unregistered legs.
+    """
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "102", "sip_password": "secret", "webrtc_enabled": True, "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    dialplan = sync.render_dialplan()
+    assert "PJSIP_DIAL_CONTACTS(" in dialplan
+    assert "Dial(PJSIP/102" not in dialplan
+    assert "Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)" in dialplan  # outbound unchanged
+    for line in dialplan.splitlines():
+        if "Dial(" in line and "PJSIP_DIAL_CONTACTS" in line:
+            first = line.split("Dial(",1)[1].split(",30)",1)[0]
+            assert "," not in first, line
+
+
+def test_plain_contacts_are_qualified_for_calls_back_to_zoiper(tmp_path):
+    """A Zoiper behind NAT must stay reachable after the UDP mapping idles."""
+    store = SettingsStore(str(tmp_path / "settings.db"), "a" * 40)
+    store.save_extension({"extension": "101", "sip_password": "secret", "active": True})
+    sync = TelephonyConfigSync(store, DummyAMI(), str(tmp_path / "pjsip.dynamic.conf"))
+    pjsip = sync.render_pjsip()
+    assert "qualify_frequency=30" in pjsip
+    assert "qualify_timeout=3" in pjsip
+    assert "authenticate_qualify=no" in pjsip
+    assert "remove_unavailable=yes" in pjsip
+    # The browser AOR is kept alive by REGISTER/WSS, not UDP OPTIONS.
+    username = next(row["sip_username"] for row in store.list_extensions() if row["extension"] == "101")
+    alias_aor = pjsip.split(f"[{username}]\ntype=aor\n")[1].split("\n\n")[0]
+    assert "qualify_frequency=30" in alias_aor
+    dialplan = sync.render_dialplan()
+    assert dynamic_dial("101") in dialplan

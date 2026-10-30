@@ -222,56 +222,49 @@
       </section>
 
       <!-- ============================================================ ROUTING -->
-      <section class="page" id="page-routing">
-        <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
-        <div class="flow-toolbar sheen">
-          <div><h2>Call flows</h2><p data-customer-only>Pick a number, then the extension that answers it. Groups keep their own flows, listed below.</p><p data-admin-only>Edit a customer's flows exactly as their callers meet them: choose the customer, then the number, extension or group.</p></div>
-          <div class="tools">
-            <select id="route-extension" aria-label="Extension" data-customer-only></select>
-            <select id="route-target" aria-label="Call flow target" data-admin-only></select>
-            <button class="btn primary" id="save-route" data-state="ready">Save flow</button>
-            <span class="flow-save-hint" id="flow-save-hint" hidden></span>
+      <section class="page routing-studio" id="page-routing" data-flow-mode="number">
+        <div class="routing-heading"><div><span class="routing-eyebrow">CALL EXPERIENCE</span><h2>Manage incoming calls</h2><p>Choose a workflow, select a number or extension, and decide how it answers.</p></div><span class="routing-badge">Incoming calls only</span></div>
+        <div class="routing-modes" role="tablist" aria-label="Routing editor">
+          <button type="button" id="number-flow-tab" role="tab" aria-selected="true" aria-controls="routing-workspace" data-routing-mode="number"><span class="routing-mode-icon">☎</span><span><b>Number Flow</b><small>Hours, IVR, teams &amp; fallback</small></span><span class="routing-mode-count" id="number-flow-count"></span></button>
+          <button type="button" id="extension-flow-tab" role="tab" aria-selected="false" aria-controls="routing-workspace" data-routing-mode="extension"><span class="routing-mode-icon">⌁</span><span><b>Extension Call Handling</b><small>Devices, ring time &amp; no-answer rules</small></span><span class="routing-mode-count" id="extension-flow-count"></span></button>
+        </div>
+        <div id="routing-workspace" role="tabpanel" aria-labelledby="number-flow-tab">
+          <section class="routing-selection" aria-labelledby="routing-choose-title">
+            <div class="routing-selection-head"><div><span class="routing-eyebrow">SELECT A WORKFLOW</span><h3 id="routing-choose-title">Choose a number</h3></div>
+              <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field routing-line-scope" hidden><span>Incoming number</span><select class="customer-number-select" aria-label="Phone number" tabindex="-1"></select></label></div>
+            </div>
+            <div class="routing-search-row"><label class="routing-search"><span aria-hidden="true">⌕</span><input id="routing-workflow-search" type="search" autocomplete="off" aria-label="Search numbers" aria-controls="routing-workflow-options" placeholder="Search by number or label"><kbd aria-hidden="true">Search</kbd></label><span id="routing-workflow-count" role="status" aria-live="polite"></span></div>
+            <div class="routing-workflow-options" id="routing-workflow-options" role="listbox" aria-labelledby="routing-choose-title"></div>
+            <div class="routing-no-results" id="routing-no-results" role="status" hidden></div>
+          </section>
+          <div class="flow-toolbar">
+            <div><span class="routing-eyebrow" id="routing-editor-kicker">NUMBER FLOW</span><h3 id="routing-editor-title">Choose a number</h3><p id="routing-selected-meta" class="routing-selected-meta"></p><p id="routing-editor-description">One clear path from the first ring to the final fallback.</p></div>
+            <div class="tools"><label class="routing-target-label"><span id="routing-target-caption">Editing</span><select id="route-extension" aria-label="Call flow target" tabindex="-1" data-customer-only></select><select id="route-target" aria-label="Call flow target" tabindex="-1" data-admin-only></select></label><button class="btn primary" id="save-route" data-state="ready">Save flow</button></div>
+          </div>
+          <div class="routing-save-status" id="flow-save-hint" role="status" hidden></div>
+          <div class="routing-editor-empty" id="routing-editor-empty" hidden><span aria-hidden="true">⌁</span><h3>No workflow selected</h3><p>Select a number or extension above to configure incoming calls.</p></div>
+          <div class="routing-recipe" id="routing-recipe" aria-label="Number flow stages"><span><i>01</i>Business hours</span><b>→</b><span><i>02</i>IVR</span><b>→</b><span><i>03</i>Department or extension</span><b>→</b><span><i>04</i>Fallback</span></div>
+          <div class="flow-layout">
+            <aside class="panel palette routing-library">
+              <div class="title"><span>BUILD YOUR JOURNEY</span><h3>Add a step</h3><p>Start with your destinations. Add hours or a menu when you need them.</p><p class="palette-hint" id="ivr-palette-hint" hidden></p><p class="palette-hint" id="palette-logic-hint" hidden></p></div>
+              <button type="button" draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>When your team is available</small></span><span class="library-add">+</span></button>
+              <button type="button" draggable="true" data-node-type="ivr"><b class="tile tile-ivr">⌨</b><span class="copy"><b>IVR menu</b><small>Greet &amp; guide callers</small></span><span class="library-add">+</span></button>
+              <button type="button" draggable="true" data-node-type="ring_group"><b class="tile tile-group">◎</b><span class="copy"><b>Department / desks</b><small>Ring one or several extensions</small></span><span class="library-add">+</span></button>
+              <div class="library-divider">IF NOBODY ANSWERS</div>
+              <button type="button" draggable="true" data-node-type="voicemail"><b class="tile tile-vm">✉</b><span class="copy"><b>Voicemail</b><small>Let callers leave a message</small></span><span class="library-add">+</span></button>
+              <button type="button" draggable="true" data-node-type="forward"><b class="tile tile-fwd">↗</b><span class="copy"><b>Forward a call</b><small>Send it to an external number</small></span><span class="library-add">+</span></button>
+              <div class="routing-library-note">Hours and IVR are optional.<br>Without a number fallback, the first selected desk supplies its no-answer policy.</div>
+            </aside>
+            <section class="panel canvas" id="flow-canvas" aria-label="Call flow editor">
+              <div class="canvas-status"><span id="routing-preview-label">FLOW PREVIEW</span><small>Changes apply when you save</small></div>
+              <div class="canvas-empty"><div class="glyph">☎</div><h4>Start with who should answer</h4><p>Add a department or extension, then build the journey around your team.</p></div>
+              <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Choose an incoming number</small></div><span class="step">START</span></div>
+              <div id="flow-nodes"></div>
+              <div class="flow-drop"><span>Add a step from the library to continue the journey</span></div>
+            </section>
           </div>
         </div>
-        <div class="flow-layout">
-          <aside class="panel palette">
-            <div class="title"><span>FLOW BLOCKS</span><h3>Build the caller journey</h3><p>Drag a block onto the canvas, or click to append it.</p>
-              <p class="palette-hint" id="ivr-palette-hint" hidden></p></div>
-            <button draggable="true" data-node-type="ivr"><b class="tile tile-ivr">⌨</b><span class="copy"><b>Phone menu (IVR)</b><small>Ask callers to enter an extension</small></span></button>
-            <button draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>Open and closed schedules</small></span></button>
-            <button draggable="true" data-node-type="simultaneous"><b class="tile tile-ring">⇉</b><span class="copy"><b>Simultaneous ring</b><small>Reach everyone at once</small></span></button>
-            <button draggable="true" data-node-type="sequential"><b class="tile tile-seq">⇢</b><span class="copy"><b>Sequential ring</b><small>Try agents in order</small></span></button>
-            <button draggable="true" data-node-type="ring_group"><b class="tile tile-group">◎</b><span class="copy"><b>Ring group</b><small>Route to a department</small></span></button>
-            <button draggable="true" data-node-type="extension"><b class="tile tile-ext">⌁</b><span class="copy"><b>Extension</b><small>Send to one teammate</small></span></button>
-            <button draggable="true" data-node-type="voicemail"><b class="tile tile-vm">✉</b><span class="copy"><b>Voicemail</b><small>Capture unanswered calls</small></span></button>
-            <button draggable="true" data-node-type="forward"><b class="tile tile-fwd">↗</b><span class="copy"><b>Forward number</b><small>Route outside the system</small></span></button>
-          </aside>
-          <section class="panel canvas" id="flow-canvas">
-            <div class="canvas-orb a"></div><div class="canvas-orb b"></div>
-            <div class="canvas-status"><span><span class="live-dot"></span> LIVE CALL PATH</span><small data-customer-only>Drag nodes to reorder · click to configure</small><small data-admin-only>What the customer's callers hear</small></div>
-            <div class="canvas-empty">
-              <div class="glyph">⌘</div>
-              <h4>Design how this line answers</h4>
-              <p>Pick a block from the palette and drop it on the canvas, or click a block to append it. Each step is configured before the flow can be saved.</p>
-              <p data-admin-only>This is the journey the customer has built for this number. Provision their devices and numbers here; they decide how a call is answered.</p>
-              <ol data-customer-only>
-                <li>Choose a number, extension or group</li>
-                <li>Add routing blocks</li>
-                <li>Configure each step</li>
-                <li>Save the flow</li>
-              </ol>
-            </div>
-            <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Pick a number, then an extension</small></div><span class="step">START</span></div>
-            <div id="flow-nodes"></div>
-            <div class="flow-drop" data-customer-only><b>＋</b><span>Drop the next routing block here</span></div>
-          </section>
-        </div>
-        <aside class="panel palette groups-panel">
-          <div class="title"><span>RING GROUPS</span><h3>Teams and departments</h3>
-            <p>A group rings its members together and can carry its own call flow: choose it as the target above, or as a ring destination inside any flow.</p>
-            <button class="btn primary" data-open="group">＋ Add group</button></div>
-          <div id="group-list" class="rows"></div>
-        </aside>
+        <details class="routing-team-details"><summary><span>Departments &amp; ring groups<small>Manage reusable teams for your number flows</small></span><span aria-hidden="true">+</span></summary><aside class="panel groups-panel routing-departments"><div class="title"><div><span class="routing-eyebrow">YOUR TEAM</span><h3>Departments &amp; ring groups</h3><p>A department can include extensions from any of this customer's numbers.</p></div><button class="btn ghost" data-open="group">+ New department</button></div><div id="group-list" class="rows"></div></aside></details>
       </section>
 
       <!-- ============================================================== CALLS -->
@@ -386,7 +379,7 @@
             </div>
           </form>
           <form class="panel" id="profile-email-form">
-            <div class="panel-head"><div><h2>My voicemail email</h2><p>Messages for your assigned extension are sent here</p></div></div>
+            <div class="panel-head"><div><h2>My account email</h2><p>New voicemail goes here unless an extension has its own address or email delivery is off</p></div></div>
             <div class="panel-body">
               <label class="field">Email address<input id="profile-email" type="email" placeholder="you@example.com"></label>
               <div class="btn-row"><button class="btn primary" type="submit">Save email address</button></div>
@@ -435,22 +428,27 @@
       <!-- ============================================================= EMAIL -->
       <section class="page" id="page-email">
         <form class="panel" id="email-form">
-          <div class="panel-head"><div><h2>SendGrid voicemail delivery</h2><p>The API key is encrypted and can only be configured by an administrator</p></div></div>
+          <div class="panel-head"><div><h2>Elastic Email voicemail delivery</h2><p>The API key is encrypted and can only be configured by an administrator</p></div></div>
           <div class="panel-body">
             <label class="switch"><span class="switch-copy"><b>Enable voicemail email</b><small>Send each new voicemail as an email attachment.</small></span><input id="email-enabled" type="checkbox"><i class="track"></i></label>
             <div class="field-row" style="margin-top:16px">
-              <label class="field">SendGrid API key<input id="sendgrid-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><small id="sendgrid-key-status">No key configured</small></label>
-              <label class="field">Verified sender email<input id="sendgrid-from" type="email" placeholder="voicemail@example.com"></label>
+              <label class="field">Elastic Email API key<input id="email-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing" aria-describedby="email-key-status"><small id="email-key-status">No key configured</small></label>
+              <label class="field">Verified sender email<input id="email-from" type="email" placeholder="voicemail@example.com"></label>
             </div>
             <div class="field-row">
-              <label class="field">Sender name<input id="sendgrid-name" maxlength="120" placeholder="EIP Telephony Voicemail"></label>
-              <label class="field">Test recipient<input id="sendgrid-test" type="email" placeholder="admin@example.com"></label>
+              <label class="field">Sender name<input id="email-name" maxlength="120" placeholder="EIP Telephony Voicemail"></label>
+              <label class="field">Test recipient<input id="email-test" type="email" placeholder="admin@example.com"></label>
             </div>
-            <div class="btn-row"><button class="btn primary" type="submit">Save email configuration</button><button class="btn ghost" type="button" id="test-email">Send test email</button></div>
+            <label class="switch"><span class="switch-copy"><b>Include a voicemail transcript</b><small>Local, offline speech recognition. No transcription API key or usage fee. Disabled by default.</small></span><input id="transcription-enabled" type="checkbox"><i class="track"></i></label>
+            <p class="muted">Audio is converted to text on this server using the bundled PocketSphinx English model. No audio is uploaded to a transcription provider and no model download or GPU is needed. Recognition is best-effort: accents, noise and non-English speech can reduce accuracy. The original audio remains attached. If recognition fails, the audio email is still sent.</p>
+            <p class="muted">Paste your Elastic Email API key without “Bearer”. Leave it blank to keep the saved key. Use a key with Send HTTP permission and a sender verified in Elastic Email. New voicemail uses the associated account email unless the extension has an override or email is turned off.</p>
+            <div class="btn-row"><button class="btn primary" type="submit" id="save-email">Save email configuration</button><button class="btn ghost" type="button" id="test-email">Save &amp; send test email</button></div>
+            <p class="muted">The test saves these settings first and works even when automatic emails are disabled. It tests email only, not transcription. Provider acceptance is not confirmation of inbox delivery; check spam and the provider's activity log.</p>
+            <p id="email-feedback" role="status" aria-live="polite"></p>
           </div>
         </form>
         <article class="panel" style="margin-top:16px">
-          <div class="panel-head"><div><h2>Recent email deliveries</h2><p>Latest SendGrid attempts and errors</p></div></div>
+          <div class="panel-head"><div><h2>Recent email deliveries</h2><p>Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.</p></div></div>
           <div class="panel-body flush"><div id="email-delivery-list" class="table-wrap"></div></div>
         </article>
       </section>
@@ -497,6 +495,10 @@
                   <option value="both">SHA-256 + MD5 — both challenges offered</option>
                 </select>
                 <small>How Asterisk challenges phones at sign-in. Keep MD5 unless every device supports SHA-256 digest (RFC 8760) — some softphones, including Zoiper 5, abandon a challenge that contains SHA-256.</small>
+              </label>
+              <label class="field">Browser media (ICE servers)
+                <input id="service-ice-servers" name="ice_servers" placeholder='[{"urls": "stun:stun.example.com"}]' autocomplete="off" spellcheck="false">
+                <small>How the browser softphone finds a path its audio can travel. Blank uses the built-in public STUN servers — enough for most networks. A phone behind a strict NAT needs your own TURN server here, as JSON (<code>[{"urls": "turn:turn.example.com", "username": "u", "credential": "p"}]</code>), and every softphone opened from the console receives it automatically.</small>
               </label>
               <div class="field-actions">
                 <button class="btn primary" type="submit">Save addresses</button>
@@ -581,6 +583,7 @@
 </div>
 
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="true"></div>
+<!-- Served with no-store so image-only upgrades cannot load an older UI. -->
 <script src="/admin-assets/admin.js" defer></script>
 </body>
 </html>

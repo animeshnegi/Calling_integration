@@ -51,7 +51,14 @@ extensions = Table("extensions", metadata,
     Column("sip_username", String(80), nullable=False), Column("sip_password_enc", Text, nullable=False),
     Column("webrtc_enabled", Integer, nullable=False, server_default="0"), Column("recording_enabled", Integer, nullable=False, server_default="0"),
     Column("voicemail_enabled", Integer, nullable=False, server_default="0"), Column("voicemail_pin_enc", String(2048), nullable=False, server_default=""),
-    Column("voicemail_email", String(254), nullable=False, server_default=""), Column("active", Integer, nullable=False, server_default="1"),
+    Column("voicemail_email", String(254), nullable=False, server_default=""),
+    Column("voicemail_email_mode", String(12), nullable=False, server_default="auto"),
+    # Epoch milliseconds: new owner-fallback notifications start at this time.
+    # Zero on an upgraded row uses the one-time installation cutover instead.
+    Column("voicemail_email_auto_since_ms", BigInteger, nullable=False, server_default="0"),
+    # Applies to every recipient after an opt-out is lifted or a line moves.
+    Column("voicemail_email_resume_since_ms", BigInteger, nullable=False, server_default="0"),
+    Column("active", Integer, nullable=False, server_default="1"),
     Column("owner_user_id", BigInteger), *_timestamps(),
     # One `101` per phone number. Two numbers of the same customer - and two
     # different customers - may each have their own 101; the same number may not
@@ -88,11 +95,16 @@ api_idempotency = Table("api_idempotency", metadata,
     Column("client", String(100), primary_key=True), Column("request_key", String(128), primary_key=True),
     Column("call_id", String(128)), Column("created_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 email_config = Table("email_config", metadata, Column("id", Integer, primary_key=True), Column("sendgrid_api_key_enc", Text, nullable=False),
+    # The legacy key column now stores the Elastic Email API key.
+    Column("provider", String(20), nullable=False, server_default="elasticemail"),
     Column("from_email", String(254), nullable=False, server_default=""), Column("from_name", String(120), nullable=False, server_default="EIP Telephony Voicemail"),
-    Column("enabled", Integer, nullable=False, server_default="0"), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
+    Column("enabled", Integer, nullable=False, server_default="0"),
+    Column("transcription_enabled", Integer, nullable=False, server_default="0"),
+    Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 voicemail_deliveries = Table("voicemail_deliveries", metadata,
     Column("fingerprint", String(128), primary_key=True), Column("mailbox", String(64), nullable=False), Column("recipient", String(254), nullable=False),
     Column("status", String(20), nullable=False, server_default="pending"), Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("transcription_status", String(20), nullable=False, server_default="disabled"),
     Column("last_error", Text), Column("delivered_at", DateTime), Column("updated_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 billing_invoices = Table("billing_invoices", metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True), Column("user_id", BigInteger, nullable=False), Column("number", String(16), nullable=False),
@@ -286,6 +298,20 @@ class CursorAdapter:
         return [_make_row(row.items()) if isinstance(row, dict) else _make_row(zip(names, row)) for row in rows]
 
 
+class SQLiteConnection(sqlite3.Connection):
+    """Commit/rollback like sqlite3, then actually close the file handles.
+
+    sqlite3's default context manager ends a transaction but does not close the
+    connection. A long-running worker can otherwise exhaust file descriptors
+    while waiting for cyclic garbage collection, especially on Python 3.13.
+    """
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 class MySQLConnection:
     def __init__(self, raw):
         self.raw = raw
@@ -411,12 +437,16 @@ class Database:
     def connect(self):
         if self.is_mysql:
             return MySQLConnection(self.engine.raw_connection())
-        conn = sqlite3.connect(self.path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        conn = sqlite3.connect(self.path, timeout=10, factory=SQLiteConnection)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
     def columns(self, table: str) -> set[str]:
         if self.is_mysql:

@@ -14,7 +14,10 @@ from typing import Any
 
 import requests
 
-from .admin import endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox, extension_scope
+from .admin import (
+    browser_username, endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox,
+    extension_scope,
+)
 from .config import Config
 from .models import Call, CallStore
 
@@ -85,15 +88,18 @@ class TelephonyService:
         return collected
 
 
-    def dial_endpoint(self, extension: str, number: str = "") -> str:
-        """The PJSIP endpoint a call to this extension is placed towards.
+    def dial_endpoints(self, extension: str, number: str = "") -> list[str]:
+        """Every PJSIP endpoint one extension's devices live on.
 
-        Media is negotiated by the endpoint a call is dialled on, so this is what
-        decides whether a device can answer with audio: a browser needs the
-        WebRTC endpoint (DTLS-SRTP, ICE, RTCP-mux) and a hardware phone or
+        Media is negotiated by the endpoint a call is dialled on, so this is
+        what decides whether a device can answer with audio: a browser needs
+        the WebRTC endpoint (DTLS-SRTP, ICE, RTCP-mux) and a hardware phone or
         softphone the plain one - a WebRTC offer sent to a hardware phone is
-        refused. An extension the operator marked as answering in the browser is
-        dialled on the WebRTC endpoint; everything else keeps the plain one.
+        refused, and a plain offer sent to a browser the same. The two device
+        kinds therefore live on two endpoints with two SIP identities (see
+        `browser_username`), and an extension marked as answering in the
+        browser rings BOTH: the browser endpoint first, then the plain one, so
+        a Zoiper on a WebRTC-ticked extension is rung with the media it speaks.
 
         `extension` is the stored key (`104@+13025550001`) whenever the caller
         knows which number the call is on, which is what keeps two lines' 104s
@@ -106,7 +112,7 @@ class TelephonyService:
         # the stored key has. The digits alone name nothing here.
         plain = f"PJSIP/{extension_endpoint(extension)}" if digits else ""
         if not self.settings_store or not digits:
-            return plain
+            return [plain] if plain else []
         try:
             row = None
             if extension_scope(extension):
@@ -126,19 +132,25 @@ class TelephonyService:
                 if len(matches) > 1:
                     # A row with no number of its own is named by its digits -
                     # that is its key - so the plain digits are exactly that row.
-                    plain = [item for item in matches if not item.get("number")]
-                    matches = plain
+                    unscoped = [item for item in matches if not item.get("number")]
+                    matches = unscoped
                 row = matches[0] if len(matches) == 1 else None
         except Exception:
-            return plain
+            return [plain] if plain else []
         if row is None:
-            return plain
+            return [plain] if plain else []
+        plain = f"PJSIP/{extension_endpoint(str(row['key']))}"
         username = str(row.get("sip_username") or "")
-        if row.get("active") and row.get("webrtc_enabled") and username and username != extension_endpoint(str(row["key"])):
-            # An extension that answers in the browser is dialled on its WebRTC
-            # alias; its plain endpoint keeps working for every other device.
-            return f"PJSIP/{username}"
-        return f"PJSIP/{extension_endpoint(str(row['key']))}"
+        if row.get("active") and row.get("webrtc_enabled") and username:
+            web = f"PJSIP/{browser_username(username)}"
+            return [web, plain]
+        return [plain]
+
+    def dial_endpoint(self, extension: str, number: str = "") -> str:
+        """The endpoint a single leg rings: the browser's when there is one."""
+        for target in self.dial_endpoints(extension, number):
+            return target
+        return ""
 
     def _provider_endpoint(self, provider_name: str | None) -> tuple[str, str]:
         if not self.settings_store:
@@ -303,18 +315,32 @@ class TelephonyService:
         # event can always be correlated by the ARI worker.
         self.store.create(call)
         self.notify_crm("call.started", call)
-        try:
-            self.asterisk.create_outbound_call(
-                call_id, extension, phone, provider_endpoint,
-                {"contact_id": contact_id, "member_id": member_id},
-                endpoint=self.dial_endpoint(extension, source["number"] if source else ""),
-            )
-        except Exception:
+        # One leg per endpoint the extension's devices live on: the browser of
+        # a WebRTC extension rings on its own endpoint and a desk phone on the
+        # plain one, each with the media it can speak. Whoever answers first
+        # takes the call and the rest are cancelled.
+        legs: list[str] = []
+        failure: Exception | None = None
+        for index, target in enumerate(self.dial_endpoints(extension, source["number"] if source else "")):
+            try:
+                self.asterisk.create_outbound_call(
+                    call_id, extension, phone, provider_endpoint,
+                    {"contact_id": contact_id, "member_id": member_id},
+                    endpoint=target, index=index,
+                )
+            except Exception as exc:
+                failure = failure or exc
+                continue
+            leg = f"{call_id}-employee" if index <= 0 else f"{call_id}-employee-{index}"
+            legs.append(leg)
+            self._leg_index[leg] = call_id
+        if not legs:
             current = self.store.get(call_id)
             if current and current.status not in {"completed", "failed"}:
                 updated = self.store.update(call_id, status="failed", ended_at=iso_now())
                 self.notify_crm("call.failed", updated, {"reason": "asterisk_originate_failed"})
-            raise
+            raise failure or RuntimeError("Asterisk originate failed")
+        self.store.update(call_id, employee_channel_ids=",".join(f"{leg}|{extension}" for leg in legs))
         current = self.store.get(call_id)
         if current and current.status == "initiated":
             current = self.store.update(call_id, status="ringing")
@@ -345,18 +371,58 @@ class TelephonyService:
                 return call
         return self.store.find_by_channel(channel_id)
 
-    def _legs_still_ringing(self, call: Call) -> list[str]:
-        live: set[str] = set()
+    def _live_channel_ids(self) -> set[str]:
         try:
-            live = {str(item.get("id")) for item in self.asterisk.list_channels() if item.get("id")}
+            return {str(item.get("id")) for item in self.asterisk.list_channels() if item.get("id")}
         except Exception:
-            return []
+            return set()
+
+    def _legs_still_ringing(self, call: Call) -> list[str]:
+        live = self._live_channel_ids()
         return [channel for channel, _ in self._leg_pairs(call) if channel in live]
+
+    def _customer_leg_ids(self, call: Call, channel_id: str = "") -> list[str]:
+        """The far-side channels of a call, alive now and other than `channel_id`.
+
+        One extension may be rung on several endpoints (browser and plain), so
+        the customer side of a call can be more than one channel. The first is
+        the historical `{call}-customer`; the rest are numbered beside it.
+        """
+        head = str(call.customer_channel_id or "")
+        prefix = f"{call.call_id}-customer"
+        return [
+            channel for channel in self._live_channel_ids()
+            if channel != channel_id and (channel == head or channel.startswith(prefix))
+        ]
 
     def _cancel_legs(self, channels: list[str], keep: str = "") -> None:
         for channel in channels:
             if channel and channel != keep:
                 self.asterisk.hangup(channel)
+
+    def _hangup_call_channels(self, call: Call, keep: str = "") -> None:
+        """Hang up every live channel this call still owns.
+
+        Not just the first leg: a call may ring several devices, and a call
+        that ends while some of them still ring leaves orphans. Answering an
+        orphan finds the far side long gone and the call cuts the instant it
+        is picked up - while the leftover devices keep ringing forever, which
+        looks like endless incoming calls.
+        """
+        for channel, _ in self._leg_pairs(call):
+            if channel and channel != keep:
+                self._hangup_quietly(channel)
+        head = str(call.customer_channel_id or "")
+        if head and head != keep:
+            self._hangup_quietly(head)
+        for channel in self._customer_leg_ids(call, keep):
+            self._hangup_quietly(channel)
+
+    def _hangup_quietly(self, channel: str) -> None:
+        try:
+            self.asterisk.hangup(channel)
+        except Exception:
+            pass
 
     # Callers being asked for an extension, keyed by the channel they are on:
     # the prompt they are hearing, the digits collected so far and the clock.
@@ -421,7 +487,7 @@ class TelephonyService:
         if current is None:
             self.asterisk.hangup(str(channel.get("id") or ""))
             return None
-        extension = str(current["extension"])
+        extension = str(current["key"])
         # The DID decides which organisation this call belongs to, and it may only
         # ring that organisation's phones. A stale link pointing a number at
         # another customer's extension is refused here as well as in the dialplan,
@@ -435,9 +501,12 @@ class TelephonyService:
             number is not None and current.get("number") not in (None, "")
             and str(current.get("number")) != str(number.get("number"))
         ):
-            # A call on a DID may only ring an extension of that very number.
-            self.asterisk.hangup(str(channel.get("id") or ""))
-            return None
+            # A shared DID with no desk of its own may enter through the
+            # anchor selected from its explicitly saved, same-owner journey.
+            anchor = self.settings_store.number_flow_anchor(str(number["number"]))
+            if str(current.get("key")) != anchor:
+                self.asterisk.hangup(str(channel.get("id") or ""))
+                return None
         if (
             number and number.get("owner_user_id") is not None and current.get("owner_user_id") is not None
             and int(number["owner_user_id"]) != int(current["owner_user_id"])
@@ -461,16 +530,17 @@ class TelephonyService:
              and did.lstrip("+") == row["number"].lstrip("+")),
             None,
         )
+        incoming_number = number
         number = owned["number"] if owned else did
         # The stored flow decides what happens next: a menu asks the caller for
         # an extension, anything else rings the devices it names - one device for
         # an extension's own number, every device for a customer's main line, a
         # whole group when the customer built one.
         plan = self.settings_store.inbound_plan(number, extension)
-        destinations = list(plan.get("destinations") or [extension])
+        destinations = list(plan.get("destinations", [extension]))
         call = Call(
             call_id=call_id, contact_id=None, member_id=None, extension=extension, phone=caller,
-            caller_id_number=number, provider=owned["provider"] if owned else None,
+            caller_id_number=number, provider=(owned or incoming_number or {}).get("provider"),
             direction="inbound", status="ringing", customer_channel_id=channel_id,
             employee_channel_id=f"{call_id}-employee",
         )
@@ -482,22 +552,137 @@ class TelephonyService:
             return self._start_ivr(call, channel, plan)
         self.notify_crm("call.employee_ringing", call)
         legs: list[tuple[str, str]] = []
-        for index, destination in enumerate(destinations):
+        ring_timeout = int(plan.get("timeout") or 30)
+        desk_timeouts = plan.get("timeouts") or {}
+        dial_plan = [
+            (destination, target)
+            for destination in destinations
+            for target in self.dial_endpoints(destination, number)
+        ]
+        for index, (destination, target) in enumerate(dial_plan):
             try:
                 leg = self.asterisk.create_inbound_employee_leg(
-                    call_id, destination, channel_id, index=index, endpoint=self.dial_endpoint(destination, number),
+                    call_id, destination, channel_id, index=index, endpoint=target,
+                    timeout=int(desk_timeouts.get(destination, ring_timeout)),
                 )
             except Exception:
                 continue
             legs.append((str(leg), destination))
             self._leg_index[str(leg)] = call_id
         if not legs:
-            self.asterisk.hangup(channel_id)
-            updated = self.store.update(call_id, status="failed", ended_at=iso_now())
-            self.notify_crm("call.failed", updated, {"reason": "inbound_extension_originate_failed"})
+            self._inbound_no_answer(self.store.get(call_id), plan, "inbound_no_ringing_device")
             return self.store.get(call_id)
         self.store.update(call_id, employee_channel_id=legs[0][0], employee_channel_ids=",".join(f"{leg}|{ext}" for leg, ext in legs))
         return self.store.get(call_id)
+
+    def _inbound_no_answer(self, call: Call, plan: dict, reason: str = "inbound_not_answered") -> None:
+        """One incoming no-answer path, including desks with ringing disabled."""
+        if call.ended_at:
+            return
+        if call.status not in {"forwarding", "ringing_fallback"} and self._ring_fallbacks(call, plan):
+            return
+        mailbox = extension_mailbox(plan.get("voicemail") or "")
+        if mailbox:
+            handed = str(call.customer_channel_id or "")
+            try:
+                self.asterisk.continue_in_dialplan(handed, "voicemail-inbound", mailbox)
+                self.notify_crm("call.voicemail", call, {"reason": reason})
+            except Exception:
+                logger.exception("Voicemail handoff failed for call %s, mailbox %s", call.call_id, mailbox)
+                handed = ""
+                self.asterisk.hangup(call.customer_channel_id)
+            self._finalize(call.call_id, reason, keep=handed)
+            return
+        if call.status != "forwarding" and self._forward_call(call, plan):
+            return
+        self.notify_crm("call.missed", call, {"reason": reason})
+        self.asterisk.hangup(call.customer_channel_id)
+        self._finalize(call.call_id, reason)
+
+    def _forward_call(self, call: Call, plan: dict) -> bool:
+        """Nobody answered the desk: ring the journey's forward number instead.
+
+        The caller is still on the line here - that is why this path hangs them
+        up. Instead, the forward number is dialled as one more leg of the same
+        call: if it answers it is bridged to the caller exactly like a desk that
+        picked up, and when the call finally ends every channel it owns goes
+        down together. A forward that cannot be placed lets the ordinary
+        missed-call ending carry on. One forward per call: a forward leg that
+        dies unanswered never starts another.
+        """
+        phone = str(plan.get("forward") or "").strip()
+        if not phone:
+            return False
+        timeout = int(plan.get("forward_timeout") or 25)
+        try:
+            endpoint, _ = self._provider_endpoint(call.provider or "")
+            forward_channel = self.asterisk.create_forward_leg(
+                call.call_id, phone, endpoint, call.customer_channel_id or "",
+                call.caller_id_number, timeout=timeout, index=1,
+            )
+        except Exception:
+            return False
+        self._leg_index[str(forward_channel)] = call.call_id
+        self.store.update(
+            call.call_id,
+            status="forwarding",
+            employee_channel_id=str(forward_channel),
+            employee_channel_ids=f"{forward_channel}|{call.extension}",
+        )
+        self.notify_crm("call.forwarding", self.store.get(call.call_id), {"phone": phone})
+        return True
+
+    def _ring_fallbacks(self, call: Call, plan: dict) -> bool:
+        """A rung desk may hand an unanswered call to another desk first.
+
+        The desk's call handling names an unanswered destination; once every
+        rung device has died unanswered, that destination is given its own
+        chance to pick up - its own ring timeout, its own handling after - and
+        only then does the journey's ending (voicemail or forward) apply. One
+        round per call: a fallback that rings out never chains again.
+        """
+        fallbacks = [str(value) for value in (plan.get("fallbacks") or []) if str(value)]
+        if not fallbacks:
+            return False
+        next_plan = {**plan, "destinations": fallbacks}
+        if self.settings_store and hasattr(self.settings_store, "apply_desk_handling"):
+            row = self.settings_store.extension_row(fallbacks[0])
+            next_plan = self.settings_store.apply_desk_handling(next_plan, fallbacks, call.caller_id_number or "", row.get("owner_user_id") if row else None)
+        if not next_plan["destinations"]:
+            updated = self.store.update(call.call_id, extension=fallbacks[0], status="ringing_fallback")
+            self._inbound_no_answer(updated, next_plan)
+            return True
+        ring_timeout = int(next_plan.get("timeout") or 30)
+        desk_timeouts = next_plan.get("timeouts") or {}
+        legs: list[tuple[str, str]] = []
+        for destination in next_plan["destinations"]:
+            for index, target in enumerate(self.dial_endpoints(destination, call.caller_id_number or "")):
+                try:
+                    leg = self.asterisk.create_inbound_employee_leg(
+                        call.call_id, destination, call.customer_channel_id or "",
+                        index=10 + len(legs) + index, endpoint=target,
+                        timeout=int(desk_timeouts.get(destination, ring_timeout)),
+                    )
+                except Exception:
+                    continue
+                legs.append((str(leg), destination))
+                self._leg_index[str(leg)] = call.call_id
+        if not legs:
+            updated = self.store.update(call.call_id, extension=fallbacks[0], status="ringing_fallback")
+            self._inbound_no_answer(updated, next_plan)
+            return True
+        prior = [token for token in str(call.employee_channel_ids or "").split(",") if token]
+        pairs = [f"{leg}|{ext}" for leg, ext in legs]
+        for old_leg, _ in self._leg_pairs(call):
+            self._leg_index.pop(old_leg, None)
+        self.store.update(
+            call.call_id,
+            status="ringing_fallback",
+            employee_channel_id=legs[0][0], extension=legs[0][1],
+            employee_channel_ids=",".join([*prior, *pairs]),
+        )
+        self.notify_crm("call.employee_ringing", self.store.get(call.call_id), {"fallbacks": fallbacks})
+        return True
 
     # ---------------------------------------------------------------- the menu
     def _start_ivr(self, call: Call, channel: dict[str, Any], plan: dict[str, Any]) -> Call | None:
@@ -510,6 +695,9 @@ class TelephonyService:
             "extension": call.extension or "", "number": call.caller_id_number or "", "digits": "", "tries": 0,
             "attempts": max(1, int(plan.get("attempts") or 2)),
             "input_timeout": max(2, int(plan.get("input_timeout") or 6)),
+            # Single-key mappings ("press 1 for the front desk") when the menu
+            # has them; without them the caller types the full extension.
+            "key_map": dict(plan.get("key_map") or {}),
             # The digits a caller may type on this line, in order. A menu never
             # hears a key: it hears 104, which is that number's 104.
             "keys": [str(value) for value in (plan.get("extensions") or [])],
@@ -556,6 +744,16 @@ class TelephonyService:
         digits = str(session["digits"])
         if not digits:
             return
+        key_map = dict(session.get("key_map") or {})
+        if key_map:
+            # A key menu resolves the moment the mapped key is pressed; any
+            # key that maps nowhere is invalid input, handled by retry/fallback.
+            if digits in key_map:
+                return self._ivr_dial(session, key_map[digits])
+            if not final and any(str(key).startswith(digits) for key in key_map):
+                session["resolve_after"] = time.monotonic() + self.IVR_INTERDIGIT
+                return
+            return self._ivr_retry(session, digits)
         keys = [str(key) for key in (session.get("keys") or [])]
         if not keys and self.settings_store:
             row = self._extension_row(session["extension"])
@@ -594,18 +792,35 @@ class TelephonyService:
         channel_id = session["channel_id"]
         self._ivr_sessions_map().pop(channel_id, None)
         self.asterisk.stop_playback(f"ivr-{session['call_id']}-{session['tries']}")
-        try:
-            leg = self.asterisk.create_inbound_employee_leg(
-                session["call_id"], extension, channel_id, index=0,
-                endpoint=self.dial_endpoint(extension, session.get("number") or ""),
-            )
-        except Exception:
-            updated = self.store.update(session["call_id"], status="failed", ended_at=iso_now())
-            self.notify_crm("call.failed", updated, {"reason": "ivr_extension_originate_failed"})
-            self.asterisk.hangup(channel_id)
+        call = self.store.get(session["call_id"])
+        plan = dict(session["plan"])
+        plan["destinations"] = [extension]
+        if self.settings_store and hasattr(self.settings_store, "apply_desk_handling"):
+            row = self.settings_store.extension_row(extension)
+            owner = row.get("owner_user_id") if row else None
+            plan = self.settings_store.apply_desk_handling(plan, [extension], session.get("number") or "", owner)
+        self.store.update(call.call_id, extension=extension)
+        if not plan.get("destinations"):
+            self._inbound_no_answer(self.store.get(call.call_id), plan)
             return
-        self._leg_index[str(leg)] = session["call_id"]
-        self.store.update(session["call_id"], extension=extension, employee_channel_id=str(leg), employee_channel_ids=f"{leg}|{extension}")
+        legs: list[str] = []
+        for index, target in enumerate(self.dial_endpoints(extension, session.get("number") or "")):
+            try:
+                leg = self.asterisk.create_inbound_employee_leg(
+                    session["call_id"], extension, channel_id, index=index, endpoint=target,
+                    timeout=int((plan.get("timeouts") or {}).get(extension, plan.get("timeout") or 30)),
+                )
+            except Exception:
+                continue
+            legs.append(str(leg))
+            self._leg_index[str(leg)] = session["call_id"]
+        if not legs:
+            self._inbound_no_answer(self.store.get(session["call_id"]), plan, "ivr_extension_unavailable")
+            return
+        self.store.update(
+            session["call_id"], extension=extension, employee_channel_id=legs[0],
+            employee_channel_ids=",".join(f"{leg}|{extension}" for leg in legs),
+        )
         self.notify_crm("call.ivr_extension_selected", self.store.get(session["call_id"]), {"digits": session["digits"], "extension": extension})
 
     def _ivr_fallback(self, session: dict[str, Any], digits: str) -> None:
@@ -619,13 +834,22 @@ class TelephonyService:
         if fallback:
             return self._ivr_dial({**session, "digits": digits}, fallback)
         destinations = [str(value) for value in (plan.get("fallback_destinations") or [])]
+        if self.settings_store and hasattr(self.settings_store, "apply_desk_handling"):
+            number = session.get("number") or ""
+            owner = next((row.get("owner_user_id") for row in self.settings_store.list_numbers() if row["number"] == number), None)
+            plan = self.settings_store.apply_desk_handling({**plan, "destinations": destinations}, destinations, number, owner)
+            destinations = plan["destinations"]
         if destinations:
             legs: list[tuple[str, str]] = []
-            for index, destination in enumerate(destinations):
+            dial_plan = [
+                (destination, target)
+                for destination in destinations
+                for target in self.dial_endpoints(destination, session.get("number") or "")
+            ]
+            for index, (destination, target) in enumerate(dial_plan):
                 try:
                     leg = self.asterisk.create_inbound_employee_leg(
-                        session["call_id"], destination, channel_id, index=index,
-                        endpoint=self.dial_endpoint(destination, session.get("number") or ""),
+                        session["call_id"], destination, channel_id, index=index, endpoint=target,
                     )
                 except Exception:
                     continue
@@ -639,18 +863,7 @@ class TelephonyService:
                 self.notify_crm("call.ivr_fallback", self.store.get(session["call_id"]), {"digits": digits})
                 return
         call = self.store.get(session["call_id"])
-        mailbox = extension_mailbox(plan.get("voicemail") or "")
-        if mailbox:
-            self.notify_crm("call.voicemail", call, {"reason": "ivr_no_selection"})
-            try:
-                self.asterisk.continue_in_dialplan(channel_id, "voicemail-inbound", mailbox)
-            except Exception:
-                self.asterisk.hangup(channel_id)
-            self._finalize(session["call_id"], "ivr_no_selection")
-            return
-        self.notify_crm("call.missed", call, {"reason": "ivr_no_selection"})
-        self.asterisk.hangup(channel_id)
-        self._finalize(session["call_id"], "ivr_no_selection")
+        self._inbound_no_answer(call, plan, "ivr_no_selection")
 
     def process_ivr_timeouts(self, now: float | None = None) -> int:
         """Called from the worker loop: move every waiting caller along."""
@@ -768,10 +981,18 @@ class TelephonyService:
         self.notify_crm("call.customer_dialing", prepared)
         try:
             if local:
-                self.asterisk.create_local_leg(
-                    call.call_id, local, call.employee_channel_id or "", call.caller_id_number,
-                    endpoint=self.dial_endpoint(local, call.phone),
-                )
+                created = False
+                for index, target in enumerate(self.dial_endpoints(local, call.phone)):
+                    try:
+                        self.asterisk.create_local_leg(
+                            call.call_id, local, call.employee_channel_id or "", call.caller_id_number,
+                            endpoint=target, index=index,
+                        )
+                        created = True
+                    except Exception:
+                        continue
+                if not created:
+                    raise RuntimeError("customer_originate_failed")
             else:
                 endpoint, _ = self._provider_endpoint(call.provider)
                 self.asterisk.create_customer_leg(
@@ -791,14 +1012,33 @@ class TelephonyService:
             self.asterisk.create_bridge(current.call_id)
             self.asterisk.add_channel_to_bridge(bridge_id, current.employee_channel_id)
             self.asterisk.add_channel_to_bridge(bridge_id, current.customer_channel_id)
-            updated = self.store.update(current.call_id, bridge_id=bridge_id, status="bridged")
-            self.notify_crm("call.bridged", updated)
+        except Exception:
+            # The bridge itself could not be built: the call cannot run. Take
+            # down everything it still owns - every ringing leg included - so
+            # nothing keeps ringing a call that no longer exists.
+            try:
+                self.asterisk.destroy_bridge(bridge_id)
+            except Exception:
+                pass
+            self._hangup_call_channels(current)
+            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed")
+            self.notify_crm("call.failed", updated, {"reason": "bridge_setup_failed"})
+            return
+        updated = self.store.update(current.call_id, bridge_id=bridge_id, status="bridged")
+        self.notify_crm("call.bridged", updated)
+        # Everything below is enhancement on top of a live, bridged call. A
+        # failure here - a recorder that cannot write, a notification that
+        # cannot queue - must never hang up the people already talking: the
+        # recording is marked failed and the call carries on.
+        try:
             recording = self._recording_settings(updated.extension)
             if not recording["enabled"]:
                 return
             name = f"call-{updated.call_id}"
-            self.asterisk.start_bridge_recording(bridge_id, name, recording["format"], recording["beep"], recording["max_duration"])
+            # Persist intent first: a fast finish event must already be
+            # correlatable, and a failed start must remain visible in history.
             updated = self.store.update(updated.call_id, recording_name=name, recording_format=recording["format"], recording_status="recording")
+            self.asterisk.start_bridge_recording(bridge_id, name, recording["format"], recording["beep"], recording["max_duration"])
             self.notify_crm("call.recording_started", updated)
             if recording["announcement"] and recording["announcement_media"]:
                 try:
@@ -806,13 +1046,11 @@ class TelephonyService:
                 except Exception:
                     self.notify_crm("call.recording_announcement_failed", updated)
         except Exception:
-            self.asterisk.destroy_bridge(bridge_id)
-            self.asterisk.hangup(current.employee_channel_id or "")
-            self.asterisk.hangup(current.customer_channel_id or "")
-            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed")
-            self.notify_crm("call.failed", updated, {"reason": "bridge_setup_failed"})
+            logger.exception("Recording setup failed for call %s", current.call_id)
+            updated = self.store.update(current.call_id, recording_status="failed")
+            self.notify_crm("call.recording_failed", updated)
 
-    def _finalize(self, call_id: str, reason: str) -> None:
+    def _finalize(self, call_id: str, reason: str, keep: str = "") -> None:
         with self._finalize_lock:
             if call_id in self._finalizing:
                 return
@@ -822,6 +1060,15 @@ class TelephonyService:
             if not call or call.status == "completed":
                 return
             ended = iso_now()
+            # Publish the transition before hangup/stop can emit a finish event.
+            # The SQL guard preserves a finish event that already arrived.
+            if call.recording_name:
+                self.store.mark_recording_finalizing(call_id)
+            # The call is over: nothing it owns may keep ringing. Anything
+            # still up is an orphan of the same call and answers into a void.
+            # `keep` names a channel deliberately handed on - a caller leaving
+            # a voicemail message is still on the line, talking to a mailbox.
+            self._hangup_call_channels(call, keep=keep)
             duration_start = call.answered_at or call.started_at
             try:
                 started = datetime.fromisoformat(duration_start)
@@ -831,11 +1078,10 @@ class TelephonyService:
             recording_status = call.recording_status
             if call.recording_name and recording_status == "recording":
                 self.asterisk.stop_recording(call.recording_name)
-                recording_status = "finalizing"
             if call.bridge_id:
                 self.asterisk.destroy_bridge(call.bridge_id)
             terminal_status = "failed" if call.status == "failed" else ("completed" if call.answered else "failed")
-            updated = self.store.update(call_id, status=terminal_status, ended_at=ended, duration_seconds=duration, recording_status=recording_status)
+            updated = self.store.update(call_id, status=terminal_status, ended_at=ended, duration_seconds=duration)
             if terminal_status == "completed":
                 self.notify_crm("call.completed", updated, {"reason": reason})
             else:
@@ -922,7 +1168,7 @@ class TelephonyService:
             return
 
         if event_type == "StasisStart":
-            if channel_id == call.employee_channel_id:
+            if channel_id == call.employee_channel_id or channel_id in [leg for leg, _ in self._leg_pairs(call)]:
                 current = self.store.get(call.call_id)
                 if current and current.status == "initiated":
                     updated = self.store.update(call.call_id, status="ringing")
@@ -935,9 +1181,16 @@ class TelephonyService:
             current = self.store.get(call.call_id)
             if not current:
                 return
-            if current.direction == "inbound" and channel_id in [leg for leg, _ in self._leg_pairs(current)]:
+            if current.status in {"completed", "failed"}:
+                # A device of a call that already ended picked up. There is
+                # nothing to bridge it to; hang the straggler up instead of
+                # building a bridge to a far side that is long gone.
+                self._hangup_quietly(str(channel_id))
+                return
+            employee_legs = [leg for leg, _ in self._leg_pairs(current)]
+            if current.direction == "inbound" and channel_id in employee_legs:
                 answered_extension = next((ext for leg, ext in self._leg_pairs(current) if leg == channel_id), current.extension)
-                others = [leg for leg, _ in self._leg_pairs(current) if leg != channel_id]
+                others = [leg for leg in employee_legs if leg != channel_id]
                 updated = self.store.update(
                     current.call_id, status="employee_answered", employee_channel_id=channel_id,
                     extension=answered_extension or current.extension,
@@ -950,11 +1203,21 @@ class TelephonyService:
                 if updated and updated.status != "failed" and not updated.answered:
                     updated = self.store.update(updated.call_id, status="answered", answered=True, answered_at=iso_now())
                     self.notify_crm("call.answered", updated)
-            elif channel_id == current.employee_channel_id and not current.customer_channel_id:
-                updated = self.store.update(current.call_id, status="employee_answered")
+            elif (channel_id in employee_legs or channel_id == current.employee_channel_id) and not current.customer_channel_id:
+                # An employee device answered the panel's call: ring the far
+                # side - once - and stop the employee's other devices.
+                others = [leg for leg in employee_legs if leg != channel_id]
+                self._cancel_legs(others)
+                updated = self.store.update(current.call_id, status="employee_answered", employee_channel_id=channel_id)
                 self.notify_crm("call.employee_answered", updated)
                 self._start_customer(updated)
-            elif channel_id == current.customer_channel_id:
+            elif channel_id == current.customer_channel_id or channel_id.startswith(f"{current.call_id}-customer"):
+                # The far side answered. An internal destination rings on every
+                # endpoint of the extension - browser and plain phone - so the
+                # rest are cancelled and the bridge names the one that answered.
+                self._cancel_legs(self._customer_leg_ids(current, channel_id))
+                if channel_id != current.customer_channel_id:
+                    current = self.store.update(current.call_id, customer_channel_id=channel_id) or current
                 self._start_bridge(current)
                 updated = self.store.get(current.call_id)
                 if updated and updated.status != "failed" and not updated.answered:
@@ -963,41 +1226,90 @@ class TelephonyService:
             return
 
         if event_type == "ChannelDestroyed":
+            # All ring legs can disappear before their queued events arrive.
+            # After a handoff the first event has ended our ownership; another
+            # leg must not continue the caller out of VoiceMail a second time
+            # (ARI rejects it, and the transfer-error path would hang them up).
+            if call.ended_at is not None:
+                self._leg_index.pop(str(channel_id), None)
+                return
             # A caller who gives up during the prompt leaves nothing behind.
             self._ivr_sessions_map().pop(str(channel_id), None)
             legs = [leg for leg, _ in self._leg_pairs(call)]
-            if call.direction == "inbound" and channel_id in legs and not call.answered and call.customer_channel_id:
-                remaining = [leg for leg in self._legs_still_ringing(call) if leg != channel_id]
+            employee_leg = channel_id in legs or channel_id == (call.employee_channel_id or "")
+            customer_leg = (not employee_leg) and (
+                channel_id == (call.customer_channel_id or "") or channel_id.startswith(f"{call.call_id}-customer")
+            )
+            # A device that lost the race to answer is cancelled once the call
+            # runs on another channel. Its destroy is bookkeeping, not a hangup -
+            # tearing the live call down here used to drop the call the moment
+            # the other phone stopped ringing.
+            if call.answered and (
+                (employee_leg and channel_id != call.employee_channel_id)
+                or (customer_leg and channel_id != call.customer_channel_id)
+            ):
+                self._leg_index.pop(str(channel_id), None)
+                return
+            if (employee_leg or customer_leg) and not call.answered:
+                remaining = (
+                    [leg for leg in self._legs_still_ringing(call) if leg != channel_id]
+                    if employee_leg else self._customer_leg_ids(call, channel_id)
+                )
                 if remaining:
                     # Other devices are still ringing: the call is not missed yet.
                     self._leg_index.pop(str(channel_id), None)
                     return
                 self._leg_index.pop(str(channel_id), None)
-                # Nobody picked up. Only a flow that ends in voicemail keeps the
-                # caller; the default flow simply ends the call.
-                plan = self.settings_store.inbound_plan(call.caller_id_number or "", call.extension) if self.settings_store else {}
-                mailbox = extension_mailbox(plan.get("voicemail") or "")
-                if mailbox:
-                    self.notify_crm("call.voicemail", call, {"reason": "inbound_not_answered"})
-                    try:
-                        self.asterisk.continue_in_dialplan(call.customer_channel_id, "voicemail-inbound", mailbox)
-                    except Exception:
-                        self.asterisk.hangup(call.customer_channel_id)
-                    self._finalize(call.call_id, "inbound_not_answered")
+                if employee_leg and call.direction == "inbound" and call.customer_channel_id:
+                    # Nobody picked up. A journey that ends in voicemail keeps
+                    # the caller; one that ends in a forward number rings it
+                    # with the caller still waiting; the default flow simply
+                    # ends the call.
+                    plan = self.settings_store.inbound_plan(call.caller_id_number or "", call.extension) if self.settings_store else {}
+                    if (plan.get("kind") == "ivr" or call.status == "ringing_fallback") and self.settings_store:
+                        row = self.settings_store.extension_row(call.extension)
+                        plan = self.settings_store.apply_desk_handling(plan, [call.extension], call.caller_id_number or "", row.get("owner_user_id") if row else None)
+                    self._inbound_no_answer(call, plan)
                     return
-                self.notify_crm("call.missed", call, {"reason": "inbound_not_answered"})
-                self.asterisk.hangup(call.customer_channel_id)
-                self._finalize(call.call_id, "inbound_not_answered")
+                for leg in legs:
+                    self._leg_index.pop(leg, None)
+                self._hangup_call_channels(call, keep=channel_id)
+                self._finalize(call.call_id, "channel_destroyed")
                 return
             for leg in legs:
                 self._leg_index.pop(leg, None)
-            other = call.customer_channel_id if channel_id in legs else call.employee_channel_id
-            if other:
+            other = call.customer_channel_id if employee_leg else call.employee_channel_id
+            if other and other != channel_id:
                 self.asterisk.hangup(other)
             self._finalize(call.call_id, "channel_destroyed")
 
+    def reconcile_recordings(self) -> None:
+        """Recover missed finish events using positive evidence from ARI.
+
+        A missing stored response may mean ARI is down or still flushing; it
+        must not be interpreted as a failed recording or downgrade a live one.
+        """
+        for call in self.store.stale_recordings():
+            if not call.ended_at:
+                continue
+            try:
+                stored = self.asterisk.get_stored_recording(call.recording_name or "")
+            except Exception:
+                continue
+            if stored:
+                updated = self.store.update(
+                    call.call_id, recording_status="finalized",
+                    recording_format=stored.get("format") or call.recording_format,
+                    recording_path=stored.get("filename") or call.recording_path,
+                )
+                self.notify_crm("call.recording_finished", updated, {"reason": "reconciled"})
+
     def recover_incomplete_calls(self) -> None:
         """Reconcile persisted calls with channels that survived an ARI worker restart."""
+        try:
+            self.reconcile_recordings()
+        except Exception:
+            logger.exception("Recording reconciliation during recovery failed")
         try:
             live = {str(channel.get("id")): channel for channel in self.asterisk.list_channels() if channel.get("id")}
         except Exception:

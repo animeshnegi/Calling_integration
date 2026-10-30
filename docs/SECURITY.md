@@ -21,8 +21,8 @@ This project handles SIP credentials, phone numbers and a paid outbound calling 
 - Security response headers are applied.
 - Call recording is globally off by default and new extensions default to opted out. Recording starts only when both the administrator's master switch and the extension preference are enabled. Users can disable their own extension but cannot override a globally disabled policy.
 - Recording and voicemail audio is served only after bearer-token or admin-session authorization. Recording ARI access and the dedicated voicemail volume remain private.
-- Voicemail PINs and the SendGrid API key are encrypted at rest and omitted from responses. PINs are restricted to 4–10 digits and rendered only into the private Asterisk configuration volume.
-- Admin-panel RBAC scopes extension users to their assigned extension's calls, recordings and voicemail. System configuration, user administration, and SendGrid require the Administrator role.
+- Voicemail PINs and the email provider API key are encrypted at rest and omitted from responses. PINs are restricted to 4–10 digits and rendered only into the private Asterisk configuration volume.
+- Admin-panel RBAC scopes extension users to their assigned extension's calls, recordings and voicemail. System configuration, user administration, and email delivery require the Administrator role.
 - The last active administrator cannot be removed, and users cannot disable, demote, or delete their own administrator account.
 - Voicemail email delivery is deduplicated with a persistent audio fingerprint and caps attachments at 20 MiB.
 - Voicemail file operations validate mailbox/folder/message identifiers, reject symlinks and traversal, and preserve Asterisk message numbering.
@@ -32,7 +32,7 @@ These controls address common OWASP API risks including broken authentication, u
 
 ### Asterisk
 
-- ARI port 8088 is private to the Docker network and is not published.
+- Asterisk HTTP/ARI port 8088 is available on the private Docker network and host loopback only. The public nginx snippet exposes only `/ws`, never `/ari`.
 - ARI WebSocket credentials are sent using an HTTP Authorization header rather than query-string credentials.
 - IPComms inbound SIP is matched against the configured provider IP/CIDR allow-list.
 - Local SIP endpoints require authentication.
@@ -62,7 +62,7 @@ OWASP recommends unprivileged container users, capability reduction and careful 
 3. Rotate any credential that has previously been exposed in chat, terminal output, screenshots or logs.
 4. Keep `.env` outside Git and restrict its filesystem permissions.
 5. Keep GCP/UFW rules limited to UDP 5060 and the exact RTP range required by the deployment.
-6. Do not publish Asterisk ARI 8088.
+6. Never publish Asterisk ARI 8088 on public interfaces; keep the host nginx upstream bound to `127.0.0.1`.
 7. Do not expose WSS 8089 directly until a trusted certificate and deliberate reverse-proxy/TLS design are in place.
 8. Put the Flask API behind the private CRM Docker network; if it must become externally reachable, add HTTPS, gateway authentication and centralized rate limiting first.
 9. Run dependency/container vulnerability scans before production release.

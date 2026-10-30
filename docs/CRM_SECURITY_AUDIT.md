@@ -89,14 +89,14 @@ Only the owning extension is originated. Answer, bridge, completion/failure, rec
 
 ## Admin and user panel controls
 
-Administrators manage API keys, webhook URLs/secrets/event filters, SendGrid, users, extensions, DIDs, providers and global settings. Extension users are server-side scoped to their own calls, recordings, voicemail and assigned callback numbers. UI hiding is not relied upon for authorization.
+Administrators manage API keys, webhook URLs/secrets/event filters, email delivery, users, extensions, DIDs, providers and global settings. Extension users are server-side scoped to their own calls, recordings, voicemail and assigned callback numbers. UI hiding is not relied upon for authorization.
 
 Admin sessions use HttpOnly, SameSite=Lax cookies, Secure cookies in production, CSRF tokens on mutations, scrypt password hashes and login rate limits. Disabled users are invalidated on their next request.
 
 ## Data and secret protection
 
 - API key secrets: one-time display; SHA-256 hash at rest.
-- SIP, provider, webhook and SendGrid secrets: Fernet encryption derived from `SECRET_KEY`.
+- SIP, provider, webhook and email provider secrets: Fernet encryption derived from `SECRET_KEY`.
 - Passwords: scrypt hashes.
 - ARI/AMI: private Docker network; no host publication.
 - Recording access: authenticated proxy through private ARI.
@@ -115,7 +115,7 @@ Application controls do not replace infrastructure security:
 4. IP-allowlist the CRM and administrator networks where practical.
 5. Never expose ARI 8088 or AMI 5038.
 6. Restrict SIP/provider IP ranges and RTP firewall ports.
-7. Monitor API 401/403/429, webhook failures, SendGrid errors, disk usage and toll activity.
+7. Monitor API 401/403/429, webhook failures, email provider errors, disk usage and toll activity.
 8. Rotate integration/webhook keys periodically and immediately after exposure.
 9. Back up `telephony_data`, recordings and voicemail volumes.
 10. Test restore, key revocation, duplicate-call handling, webhook replay rejection and carrier callback routing before production.
