@@ -3211,6 +3211,10 @@ class SettingsStore:
                 destinations.extend(value for value in members if value in allowed)
                 if str(node.get("timeout") or "").isdigit():
                     timeout = max(5, min(120, int(node["timeout"])))
+                    if kind == "sequential":
+                        for member in members:
+                            if member in allowed:
+                                timeouts[member] = timeout
             elif kind == "extension":
                 value = str(node.get("extension") or "")
                 if value and value in allowed:
