@@ -307,13 +307,14 @@ def test_overnight_business_hours_are_open_after_midnight_and_before_close(studi
 
     class FakeDateTime:
         clock = "23:00"
+        weekday = 1
 
         @classmethod
         def now(cls):
             return cls()
 
         def isoweekday(self):
-            return 1
+            return type(self).weekday
 
         def strftime(self, _format):
             return type(self).clock
@@ -325,9 +326,14 @@ def test_overnight_business_hours_are_open_after_midnight_and_before_close(studi
     ]}})
 
     FakeDateTime.clock = "23:00"
+    FakeDateTime.weekday = 1  # Monday: selected start day
     assert settings.inbound_plan(general)["outside_hours"] is False
     FakeDateTime.clock = "05:00"
+    FakeDateTime.weekday = 2  # Tuesday morning still belongs to Monday's window
     assert settings.inbound_plan(general)["outside_hours"] is False
+    FakeDateTime.clock = "23:00"
+    FakeDateTime.weekday = 2  # Tuesday evening is not selected
+    assert settings.inbound_plan(general)["outside_hours"] is True
     FakeDateTime.clock = "12:00"
     assert settings.inbound_plan(general)["outside_hours"] is True
 
