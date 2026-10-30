@@ -1126,6 +1126,7 @@ class TelephonyService:
             self.notify_crm("call.recording_failed", updated)
 
     def _finalize(self, call_id: str, reason: str, keep: str = "") -> None:
+        self._sequential_sessions_map().pop(str(call_id), None)
         with self._finalize_lock:
             if call_id in self._finalizing:
                 return
