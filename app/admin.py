@@ -3157,6 +3157,7 @@ class SettingsStore:
             },
             "fallback": fallback if fallback in company_keys else "",
             "fallback_destinations": list(tail.get("destinations") or []),
+            "ring_strategy": tail.get("ring_strategy") or "simultaneous",
             "voicemail": tail.get("voicemail") or "",
             "timeout": int(tail.get("timeout") or 30),
             "forward": tail.get("forward") or "",
