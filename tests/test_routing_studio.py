@@ -358,3 +358,30 @@ def test_inactive_extension_handling_is_not_applied_to_inbound_calls(studio):
     assert [extension for _, extension in asterisk.inbound_legs] == [desk]
     assert call is not None
 
+def test_ivr_fallback_respects_sequential_ring_strategy(studio):
+    service, asterisk, calls, settings, owner, general, _, general_keys, _ = studio
+    first, second = general_keys["101"], general_keys["102"]
+    settings.save_call_route(owner, {"phone_number": general, "route": {"nodes": [
+        settings.default_ivr_node(),
+        {"type": "sequential", "extensions": [first, second], "timeout": 10, "configured": True},
+        {"type": "voicemail", "mailbox": first, "enabled": True, "configured": True},
+    ]}})
+
+    call = service.start_inbound(
+        {"id": "ivr-sequential-fallback", "caller": {"number": "+13025550000"}},
+        general, first,
+    )
+    session = service._ivr_sessions_map()["ivr-sequential-fallback"]
+    service._ivr_fallback(session, "")
+
+    current = calls.get(call.call_id)
+    assert [extension for _, extension in asterisk.inbound_legs] == [first]
+    first_leg = current.employee_channel_id
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": first_leg}})
+
+    current = calls.get(call.call_id)
+    assert [extension for _, extension in asterisk.inbound_legs] == [first, second]
+    assert current.extension == second
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": current.employee_channel_id}})
+    assert asterisk.continued == [("ivr-sequential-fallback", "voicemail-inbound", extension_mailbox(first))]
+
