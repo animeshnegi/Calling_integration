@@ -3190,8 +3190,18 @@ class SettingsStore:
                 start, end = str(node.get("start") or "09:00"), str(node.get("end") or "17:00")
                 weekday = now.isoweekday()
                 clock = now.strftime("%H:%M")
-                within_hours = start <= clock <= end if start <= end else (clock >= start or clock <= end)
-                open_now = (not days or weekday in days) and within_hours
+                if start <= end:
+                    open_now = (not days or weekday in days) and start <= clock <= end
+                elif clock >= start:
+                    # The late-evening part belongs to the current selected day.
+                    open_now = not days or weekday in days
+                elif clock <= end:
+                    # After midnight, an overnight window still belongs to the
+                    # day on which it opened (for example Monday 22:00–Tuesday 06:00).
+                    previous_day = 7 if weekday == 1 else weekday - 1
+                    open_now = not days or previous_day in days
+                else:
+                    open_now = False
                 continue
             if seen_hours and not open_now:
                 # Outside business hours only a terminal step applies; ringing
