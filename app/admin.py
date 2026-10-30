@@ -2946,7 +2946,8 @@ class SettingsStore:
         owner = (row or {}).get("owner_user_id")
         if owner is None:
             return ""
-        flow = next((flow for flow in self.list_call_routes(int(owner)) if flow["phone_number"] == number), None)
+        flow = next((flow for flow in self.list_call_routes(int(owner))
+                     if flow["phone_number"] == number and bool(flow.get("active", True))), None)
         if not flow:
             return ""
         allowed = [row["key"] for row in self.list_extensions(int(owner)) if row["active"]]
@@ -2972,7 +2973,8 @@ class SettingsStore:
         owner = (row or {}).get("owner_user_id")
         flow = None
         if owner is not None:
-            flow = next((item for item in self.list_call_routes(int(owner)) if item["phone_number"] == number), None)
+            flow = next((item for item in self.list_call_routes(int(owner))
+                      if item["phone_number"] == number and bool(item.get("active", True))), None)
         if not flow:
             # The legacy path: no designed flow, so the number rings the
             # extension it points at. The link holds the dialled digits, which
@@ -2993,7 +2995,7 @@ class SettingsStore:
         if owner is not None and extension and not any(str(node.get("type")) in journey_kinds for node in nodes):
             desk_flow = next(
                 (item for item in self.list_routing_flows(int(owner), target_type="extension")
-                 if str(item.get("target")) == str(extension)),
+                 if bool(item.get("active", True)) and str(item.get("target")) == str(extension)),
                 None,
             )
             desk_nodes = ((desk_flow or {}).get("route") or {}).get("nodes") or []
@@ -3052,7 +3054,7 @@ class SettingsStore:
         for key in keys:
             flow = next(
                 (item for item in self.list_routing_flows(int(owner) if owner is not None else None, target_type="extension")
-                 if str(item.get("target")) == str(key)),
+                 if bool(item.get("active", True)) and str(item.get("target")) == str(key)),
                 None,
             )
             for node in ((flow or {}).get("route") or {}).get("nodes") or []:
@@ -3108,7 +3110,8 @@ class SettingsStore:
             return ""
         owner_id = int(owner) if owner is not None else None
         flow = next(
-            (item for item in self.list_routing_flows(owner_id, target_type="extension") if item["target"] == key),
+            (item for item in self.list_routing_flows(owner_id, target_type="extension")
+             if bool(item.get("active", True)) and item["target"] == key),
             None,
         )
         nodes = ((flow or {}).get("route") or {}).get("nodes") or []
@@ -3173,6 +3176,7 @@ class SettingsStore:
         now = datetime.now()
         open_now, seen_hours = False, False
         destinations, timeout, voicemail, forward, forward_timeout = [], 30, "", "", 25
+        ring_strategy = "simultaneous"
         timeouts: dict[str, int] = {}
         for node in nodes:
             if not isinstance(node, dict):
@@ -3186,7 +3190,8 @@ class SettingsStore:
                 start, end = str(node.get("start") or "09:00"), str(node.get("end") or "17:00")
                 weekday = now.isoweekday()
                 clock = now.strftime("%H:%M")
-                open_now = (not days or weekday in days) and start <= clock <= end
+                within_hours = start <= clock <= end if start <= end else (clock >= start or clock <= end)
+                open_now = (not days or weekday in days) and within_hours
                 continue
             if seen_hours and not open_now:
                 # Outside business hours only a terminal step applies; ringing
@@ -3197,6 +3202,8 @@ class SettingsStore:
                     forward = str(node.get("phone") or "")
                 continue
             if kind in {"ring_group", "simultaneous", "sequential"}:
+                if kind == "sequential":
+                    ring_strategy = "sequential"
                 members = [str(value) for value in (node.get("extensions") or [])]
                 group = groups.get(str(node.get("group_id") or ""))
                 if group and not members:
@@ -3224,7 +3231,7 @@ class SettingsStore:
         if not unique and not voicemail and not forward and extension and not has_ring and not (seen_hours and not open_now):
             unique = [extension] if extension in allowed else []
         return {
-            "destinations": unique, "timeout": timeout, "voicemail": voicemail,
+            "destinations": unique, "timeout": timeout, "ring_strategy": ring_strategy, "voicemail": voicemail,
             "forward": forward, "forward_timeout": forward_timeout,
             "timeouts": {key: timeouts[key] for key in unique if key in timeouts},
             "outside_hours": bool(seen_hours and not open_now),
