@@ -914,6 +914,25 @@ class TelephonyService:
             owner = next((row.get("owner_user_id") for row in self.settings_store.list_numbers() if row["number"] == number), None)
             plan = self.settings_store.apply_desk_handling({**plan, "destinations": destinations}, destinations, number, owner)
             destinations = plan["destinations"]
+        if destinations and plan.get("ring_strategy") == "sequential":
+            call = self.store.get(session["call_id"])
+            if call:
+                plan = {**plan, "destinations": destinations}
+                self._sequential_sessions_map()[call.call_id] = {
+                    "destinations": destinations,
+                    "next_index": 0,
+                    "number": str(session.get("number") or ""),
+                    "customer_channel_id": channel_id,
+                    "timeout": int(plan.get("timeout") or 30),
+                    "timeouts": dict(plan.get("timeouts") or {}),
+                }
+                if self._start_next_sequential_destination(call.call_id):
+                    self.notify_crm("call.ivr_fallback", self.store.get(call.call_id), {
+                        "digits": digits, "ring_strategy": "sequential",
+                    })
+                    return
+                self._inbound_no_answer(self.store.get(call.call_id), plan, "ivr_no_ringing_device")
+                return
         if destinations:
             legs: list[tuple[str, str]] = []
             dial_plan = [
