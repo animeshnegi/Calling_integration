@@ -94,4 +94,4 @@ Configured DID routes enter the private ARI application. Telephony creates an in
 
 ## Security
 
-Do not expose this webhook publicly without authentication, TLS, replay protection and rate limiting. Prefer placing the Flask telephony API on the private Docker network and using a narrow internal route between EngineerIP and this service.
+Do not expose this webhook publicly without authentication, TLS, replay protection and rate limiting. Prefer placing the Flask telephony API on the private Docker network and using a narrow internal route between Telephony Control and this service.

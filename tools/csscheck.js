@@ -1,8 +1,9 @@
+const { assetPath } = require('./asset-path');
 /* Stylesheet contract check.
  *
  *   node tools/csscheck.js
  *
- * Parses web/admin.css, then cross-checks it against the markup and the console
+ * Parses app/static/css/tailwind.css, then cross-checks it against the markup and the console
  * script: a class the UI applies must have a rule, a rule that no longer has a
  * user is reported, and the entrance cascade must stay keyed on .page.entering
  * rather than .page.active. Needs postcss.
@@ -11,11 +12,11 @@ const fs = require('fs');
 const path = require('path');
 const postcss = require('postcss');
 
-const WEB = path.join(__dirname, '..', 'web');
-const css = fs.readFileSync(path.join(WEB, 'admin.css'), 'utf8');
-const html = fs.readFileSync(path.join(WEB, 'admin.html'), 'utf8');
-const login = fs.readFileSync(path.join(WEB, 'admin-login.html'), 'utf8');
-const script = fs.readFileSync(path.join(WEB, 'admin.js'), 'utf8');
+
+const css = fs.readFileSync(assetPath('admin.css'), 'utf8');
+const html = fs.readFileSync(assetPath('admin.html'), 'utf8');
+const login = fs.readFileSync(assetPath('admin-login.html'), 'utf8');
+const script = fs.readFileSync(assetPath('admin.js'), 'utf8');
 
 let failures = 0;
 const check = (label, ok, detail) => {
@@ -112,11 +113,10 @@ check('the flow toolbar may fold rather than push the save button out',
   /\.flow-toolbar\s*\{[^}]*flex-wrap:\s*wrap/.test(css)
   && /\.flow-toolbar \.tools\s*\{[^}]*flex-wrap:\s*wrap/.test(css),
   'wraps at narrow widths');
-check('the public pages wear the console light surface',
-  fs.readFileSync(path.join(WEB, 'index.html'), 'utf8').includes('#f4f5fa')
-  && fs.readFileSync(path.join(WEB, 'documentation.html'), 'utf8').includes('--bg:#f4f5fa')
-  && login.includes('theme-light login-body'),
-  'landing, documentation and sign-in');
+check('every page loads the generated Tailwind stylesheet',
+  ['index.html', 'documentation.html', 'console-check.html'].every(name =>
+    fs.readFileSync(assetPath(name), 'utf8').includes('/static/css/tailwind.css')),
+  'landing, documentation and layout check');
 
 /* The "little thing coming from the left" was a sheen: a highlight that started
    off-canvas left and swept across a surface on hover. Every one of them is gone

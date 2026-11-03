@@ -1,3 +1,4 @@
+const { assetPath } = require('./asset-path');
 /* Real Chromium popup autoplay/console-ringer regression. No SIP server needed.
  * npm install --no-save puppeteer-core @sparticuz/chromium
  * CHROMIUM=/path/to/chromium node tools/phone-popup-audiocheck.js
@@ -8,10 +9,10 @@ const http = require('http');
 const path = require('path');
 const puppeteer = require('puppeteer-core');
 const ROOT = path.join(__dirname, '..');
-const WEB = path.join(ROOT, 'web');
+
 
 async function main() {
-  const admin = fs.readFileSync(path.join(WEB, 'admin.js'), 'utf8');
+  const admin = fs.readFileSync(assetPath('admin.js'), 'utf8');
   const start = admin.indexOf('const softphoneWindows = [];');
   const end = admin.indexOf('/* The softphone window is the size', start);
   const relayStart = admin.indexOf('function sendSoftphone(entry)');
@@ -37,7 +38,7 @@ document.getElementById('open').onclick = () => {
     const name = url.pathname === '/phone' ? 'phone.html' : path.basename(url.pathname);
     if (!/^(phone\.html|phone\.js|phone\.css|jssip\.min\.js|sw\.js|manifest\.json)$/.test(name)) { res.writeHead(404).end(); return; }
     const type = name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : name.endsWith('.json') ? 'application/json' : 'text/html';
-    res.writeHead(200, {'Content-Type':type, 'Cache-Control':'no-store'}).end(fs.readFileSync(path.join(WEB,name)));
+    res.writeHead(200, {'Content-Type':type, 'Cache-Control':'no-store'}).end(fs.readFileSync(assetPath(name)));
   });
   await new Promise((resolve,reject)=>server.once('error',reject).listen(0,'127.0.0.1',resolve));
   let browser;

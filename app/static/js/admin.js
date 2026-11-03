@@ -1,5 +1,5 @@
 /* ============================================================================
-   EIP Telephony Control — console application
+   Telephony Control — console application
    One shared bundle serves two deliberately different experiences:
      administrator (dark control room)  and  customer (light business view).
    Role differences come from body.theme-* plus [data-admin-only] /
@@ -1152,7 +1152,7 @@ function renderApiKeys() {
       </div>
     </div>`).join('') || empty(state.is_admin ? 'This customer has no API keys' : 'No API keys',
       state.is_admin ? 'Sign in as the customer to create one; you can revoke what they own here.'
-        : 'Create a scoped key so your own software can call the EIP API.', '⌘', '',
+        : 'Create a scoped key so your own software can call the REST API.', '⌘', '',
       state.is_admin ? '' : emptyAction('Create API key', 'data-open="apikey"', true)));
   markStagger();
 }
@@ -1340,7 +1340,7 @@ function renderBilling() {
   paint('subscription-list', numbers.map(x => `
     <div class="row">
       <span class="row-icon">$</span>
-      <div><h3>${esc(x.number)}</h3><p>${esc(x.description || 'EIP phone number')}</p></div>
+      <div><h3>${esc(x.number)}</h3><p>${esc(x.description || 'Business phone number')}</p></div>
       <div class="tags">
         ${tag(`${money(x.monthly_price_cents ?? 500)}/month`, 'on')}
         ${tag(`Renews day ${x.billing_cycle_day || 1}`)}
@@ -1501,7 +1501,7 @@ function renderEmailSettings() {
   if (!emailSettingsDirty && !emailSettingsBusy) {
     $('email-enabled').checked = !!config.enabled;
     $('email-from').value = config.from_email || '';
-    $('email-name').value = config.from_name || 'EIP Telephony Voicemail';
+    $('email-name').value = config.from_name || 'Telephony Voicemail';
     $('transcription-enabled').checked = !!config.transcription_enabled;
   }
   updateEmailKeyStatus();
@@ -1520,7 +1520,7 @@ function callTable(calls, compact = false) {
   return `<table class="data"><thead><tr>
       <th>Caller / destination</th><th>Direction</th><th>Assigned number</th><th>Extension</th><th>Status</th><th>Started</th><th>Duration</th>${compact ? '' : '<th>Recording / reference</th>'}
     </tr></thead><tbody>${calls.map(x => `<tr>
-      <td class="cell-strong">${esc(x.phone)}<span class="cell-sub">${esc(x.provider || 'EIP network')}</span></td>
+      <td class="cell-strong">${esc(x.phone)}<span class="cell-sub">${esc(x.provider || 'SIP carrier')}</span></td>
       <td>${tag(x.direction || 'outbound', x.direction === 'inbound' ? 'info' : '')}</td>
       <td>${esc(x.caller_id_number || '—')}</td>
       <td>${esc(extensionLabel(x.extension))}<span class="cell-sub">${esc(extensionName(x.extension))}</span></td>
@@ -1622,7 +1622,7 @@ async function loadRecordings() {
                 ? `<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
                    <a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a>`
                 : x.recording_status === 'failed'
-                  ? '<small style="color:var(--danger)">Recording failed. No playable audio is available; check the ARI worker and Asterisk recording logs for this call ID.</small>'
+                  ? '<small style="color:var(--danger)">Recording did not finish. No audio is playable for this call yet; check the ARI worker and Asterisk recording logs for this call ID. Any audio Asterisk saved is recovered automatically on the next worker scan.</small>'
                   : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
             </div>
           </div>`).join('')}</div>
@@ -1705,7 +1705,7 @@ const FLOW_LABELS = { ivr: 'Phone menu', business_hours: 'Business hours', simul
 const flowLabel = type => FLOW_LABELS[type] || String(type || '').replaceAll('_', ' ');
 /* Shown if the server has not sent its own wording yet; the server default is
    the same sentence and stays the one that reaches the caller. */
-const IVR_FALLBACK_PROMPT = 'Welcome to EngineerIP. Please enter the extension you wish to reach.';
+const IVR_FALLBACK_PROMPT = 'Welcome to Telephony Control. Please enter the extension you wish to reach.';
 
 /* ------------------------------------------------- 21a. Flow targets */
 /* Numbers, extensions and groups all get a call flow. Numbers stay in
@@ -2578,7 +2578,7 @@ let credentialSheet = null;   // { extension, credentials, rotating }
 
 /* Where a phone registers, in one value: "sip.example.com:5060 · UDP". */
 function registrationAddress(c) {
-  if (!c.server) return 'Ask EIP for your registration host';
+  if (!c.server) return 'Ask your administrator for the registration host';
   return `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}`;
 }
 
@@ -2589,7 +2589,7 @@ function credentialLines(c) {
     `SIP username: ${c.sip_username}`,
     `SIP password: ${c.sip_password}`,
     ...(c.webrtc_enabled ? [`Browser softphone username: ${c.webrtc_sip_username}`] : []),
-    `Registration server: ${c.server ? `${c.server}:${c.port}` : 'ask EIP for your registration host'}`,
+    `Registration server: ${c.server ? `${c.server}:${c.port}` : 'ask your administrator for the registration host'}`,
     `Transport: ${String(c.transport || 'udp').toUpperCase()}`,
     `Number: ${(c.numbers || []).join(', ') || 'none assigned yet'}`,
   ].join('\n');
@@ -2607,7 +2607,7 @@ function credentialSheetBody({ credentials: c, rotating }) {
     // belongs to desk phones and Zoiper. Shown only when this extension
     // answers in the browser; the softphone fills it in on its own.
     ...(c.webrtc_enabled ? [['Browser softphone username', c.webrtc_sip_username, true]] : []),
-    ['Registration server', c.server ? `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}` : 'Ask EIP for your registration host', true],
+    ['Registration server', c.server ? `${c.server}:${c.port} · ${String(c.transport || 'udp').toUpperCase()}` : 'Ask your administrator for the registration host', true],
     ['Numbers', (c.numbers || []).join(', ') || 'None assigned yet', false],
     ['Answers calls to', (c.answers || []).join(', ') || 'No number rings this yet. Set it as a number\'s incoming extension on the Numbers page.', false],
   ];
@@ -2615,7 +2615,7 @@ function credentialSheetBody({ credentials: c, rotating }) {
     <div class="cred-identity">
       <span class="ws-glyph">${esc(extensionDigitsOf(c.extension))}</span>
       <div><b>${esc(c.display_name || `Extension ${extensionDigitsOf(c.extension)}`)}</b>
-        <small>Register a phone or softphone with these ${rows.filter(row => row[2]).length} values · password from ${esc(source.toLowerCase())}${c.managed_address ? '' : ' — this is the console\'s own address, ask EIP for the public one'}</small></div>
+        <small>Register a phone or softphone with these ${rows.filter(row => row[2]).length} values · password from ${esc(source.toLowerCase())}${c.managed_address ? '' : ' — this is the console\'s own address, ask your administrator for the public one'}</small></div>
       <span class="tag ${c.active ? 'on' : 'off'}">${c.active ? 'Active' : 'Disabled'}</span>
     </div>
     <table class="cred-table">
@@ -3276,7 +3276,7 @@ async function saveModal(event) {
           <div class="grid cols-2">
             <label class="field">Extension<input readonly value="${esc(extensionLabel(result.credentials.extension))}"></label>
             <label class="field">SIP username<input readonly value="${esc(result.credentials.sip_username)}"></label>
-            <label class="field">Registration server<input readonly value="${esc(result.credentials.server || 'Ask EIP for your registration host')}"></label>
+            <label class="field">Registration server<input readonly value="${esc(result.credentials.server || 'Ask your administrator for the registration host')}"></label>
             <label class="field">Port · transport<input readonly value="${esc(`${result.credentials.port} · ${String(result.credentials.transport).toUpperCase()}`)}"></label>
           </div>
           <label class="field">SIP password<div class="secret"><input id="created-api-key" readonly><button class="btn primary" type="button" data-copy-secret>Copy</button></div></label>
@@ -3948,7 +3948,7 @@ function wsIntegrations() {
   return `<section class="ws-section">
     <div class="notice secure"><span class="glyph">◇</span><div><b>Customer-owned integrations</b>These keys and endpoints belong to this customer. Signing secrets and key material are never displayed here after creation.</div></div>
 
-    <div class="ws-section-head"><div><h3>API keys</h3><p>Scoped credentials this customer's software uses to call the EIP API.</p></div></div>
+    <div class="ws-section-head"><div><h3>API keys</h3><p>Scoped credentials this customer's software uses to call the REST API.</p></div></div>
     <div class="ws-cards">${keys.map(x => `
       <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">⌘</span>
         <div><small>API key</small><h4>${esc(x.name)}</h4><p><code>${esc(x.prefix)}…</code> · created ${esc(fmtDay(x.created_at))}</p></div>
@@ -4008,7 +4008,7 @@ document.addEventListener('click', event => {
       fields.querySelector('[name=sip_username]').value = credentials.sip_username;
       fields.querySelector('[name=sip_password]').value = credentials.sip_password;
       fields.querySelector('[name=sip_password]').type = 'text';
-      notify(`Credentials revealed · register at ${credentials.server || 'your EIP host'}:${credentials.port}`);
+      notify(`Credentials revealed · register at ${credentials.server || 'your registration host'}:${credentials.port}`);
     }).catch(error => notify(error.message, true));
   }
 });

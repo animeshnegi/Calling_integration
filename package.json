@@ -1,0 +1,13 @@
+{
+  "name": "telephony-control-ui",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Builds the offline Tailwind stylesheet shipped in app/static/css/tailwind.css",
+  "scripts": {
+    "css": "tailwindcss -i src/tailwind.css -o app/static/css/tailwind.css --minify",
+    "css:watch": "tailwindcss -i src/tailwind.css -o app/static/css/tailwind.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

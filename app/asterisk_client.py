@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -15,6 +16,9 @@ from .config import Config
 
 class AsteriskError(RuntimeError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 def endpoint_name(extension: Any) -> str:
@@ -51,7 +55,16 @@ class AsteriskClient:
             **kwargs,
         )
         if not response.ok:
-            raise AsteriskError(f"Asterisk API {response.status_code}")
+            # A bare status code is not diagnosable: ARI explains *why* a
+            # recording was refused (422 unknown format, 409 name already
+            # exists, 500 failed to create the Recorder channel). Keep that
+            # reason in the exception so the ARI worker log identifies the
+            # cause instead of only "Asterisk API 422". Never log credentials.
+            detail = " ".join(str(getattr(response, "text", "") or "").split())[:300]
+            raise AsteriskError(
+                f"Asterisk API {response.status_code}: {detail}"
+                if detail else f"Asterisk API {response.status_code}"
+            )
         if not response.content:
             return None
         return response.json()
@@ -195,7 +208,7 @@ class AsteriskClient:
         self._request(
             "POST",
             "/bridges",
-            params={"type": "mixing", "bridgeId": bridge_id, "name": f"EngineerIP {call_id}"},
+            params={"type": "mixing", "bridgeId": bridge_id, "name": f"Telephony {call_id}"},
         )
         return bridge_id
 
@@ -223,11 +236,23 @@ class AsteriskClient:
             raise ValueError("Announcement media must use sound: or recording:")
         return self._request("POST", f"/bridges/{bridge_id}/play", params={"media": media})
 
-    def stop_recording(self, name: str) -> None:
+    def stop_recording(self, name: str) -> bool:
+        """Finish a live recording while its bridge still has audio feeding it.
+
+        Returns False when ARI could not stop it (most often because the
+        recorder channel was already torn down). Swallowing that silently is
+        what turns a missing recording into an unexplained "no playable audio"
+        row, so the reason is logged with the recording/call name.
+        """
         try:
             self._request("POST", f"/recordings/live/{name}/stop")
-        except AsteriskError:
-            pass
+            return True
+        except AsteriskError as exc:
+            logger.warning("Could not stop live recording %s: %s", name, exc)
+            return False
+        except Exception as exc:
+            logger.warning("Could not stop live recording %s: %s", name, exc)
+            return False
 
     def get_stored_recording(self, name: str) -> dict[str, Any] | None:
         if not name or len(name) > 128 or any(char in name for char in "/\\\r\n"):

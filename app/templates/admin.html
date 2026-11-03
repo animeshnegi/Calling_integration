@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark light">
-  <title>EIP Telephony Control</title>
-  <link rel="icon" type="image/png" href="https://engineerip.com/static/img/logo.png">
-  <link rel="apple-touch-icon" href="https://engineerip.com/static/img/logo.png">
-  <link rel="stylesheet" href="/admin-assets/admin.css">
+  <title>Telephony Control</title>
+  <link rel="icon" type="image/svg+xml" href="/static/images/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/images/favicon.svg">
+  <link rel="stylesheet" href="/static/css/tailwind.css">
 </head>
-<body class="theme-loading">
+<body class="theme-loading antialiased">
   <script>
     /* Applies the remembered skin before the first paint so a reload never
        flashes the other theme. The role decides the default on a first visit,
@@ -25,11 +25,11 @@
 <!-- Ambient gradient field; purely decorative. -->
 <div class="aurora" aria-hidden="true"><b></b><b></b><b></b></div>
 
-<div class="shell">
-  <aside class="sidebar" id="sidebar">
+<div class="shell min-h-screen">
+  <aside class="sidebar shadow-sm" id="sidebar">
     <div class="brand">
       <span class="brand-mark">E</span>
-      <div class="brand-copy"><strong>EIP Telephony</strong><small>Control</small></div>
+      <div class="brand-copy"><strong>Telephony Control</strong><small>Control</small></div>
     </div>
 
     <nav class="nav" id="nav" aria-label="Primary">
@@ -84,7 +84,7 @@
       </div>
     </header>
 
-    <div class="content">
+    <div class="content space-y-4">
       <!-- ============================================================ OVERVIEW -->
       <section class="page active" id="page-dashboard">
         <section class="system-board" id="system-board" data-admin-only aria-label="Live platform activity"></section>
@@ -117,7 +117,7 @@
         <section class="hero sheen" data-customer-only style="margin-top:16px" id="journey-hero">
           <button class="hero-dismiss" id="journey-dismiss" type="button" aria-label="Hide the setup journey" title="Hide the setup journey"></button>
           <h2>Your setup journey</h2>
-          <p>Complete each step to get your phone system fully live. Progress is saved automatically.</p>
+          <p class="sr-only" title="Complete each step to get your phone system fully live. Progress is saved automatically." aria-label="Complete each step to get your phone system fully live. Progress is saved automatically.">Complete each step to get your phone system fully live. Progress is saved automatically.</p>
           <div class="journey" id="customer-journey"></div>
           <div class="hero-actions"><button class="btn primary" id="request-number">Request a number</button></div>
         </section>
@@ -166,7 +166,7 @@
           <button class="btn primary" data-open="user">＋ Add customer</button>
         </div>
         <article class="panel">
-          <div class="panel-head"><div><h2>Customer accounts</h2><p>Open a customer to manage their numbers, devices, routing, calls, billing and integrations in one place</p></div><span class="count" id="customer-count">0 customers</span></div>
+          <div class="panel-head"><div><h2>Customer accounts</h2><p class="sr-only" title="Open a customer to manage their numbers, devices, routing, calls, billing and integrations in one place" aria-label="Open a customer to manage their numbers, devices, routing, calls, billing and integrations in one place">Open a customer to manage their numbers, devices, routing, calls, billing and integrations in one place</p></div><span class="count" id="customer-count">0 customers</span></div>
           <div class="panel-body flush"><div id="user-list" class="cards"></div></div>
         </article>
         <article class="panel" style="margin-top:16px">
@@ -179,7 +179,7 @@
       <section class="page" id="page-extensions">
         <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <article class="panel">
-          <div class="panel-head"><div><h2>Extensions</h2><p>Destinations on the chosen number. Every number starts its own set at 101.</p></div>
+          <div class="panel-head"><div><h2>Extensions</h2><p class="sr-only" title="Destinations on the chosen number. Every number starts its own set at 101." aria-label="Destinations on the chosen number. Every number starts its own set at 101.">Destinations on the chosen number. Every number starts its own set at 101.</p></div>
             <div class="head-tools"><div class="search" data-admin-only><span>⌕</span><input id="extension-search" placeholder="Search extension or employee"></div>
               <span class="count" id="extension-count">0 extensions</span>
               <button class="btn primary sm" data-open="extension">＋ Add extension</button></div></div>
@@ -206,7 +206,7 @@
       <section class="page" id="page-sipaccounts">
         <div class="customer-number-context scope-bar" data-scope="number"><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <article class="panel">
-          <div class="panel-head"><div><h2 id="device-extension-title">Extension credentials</h2><p id="device-extension-sub">Each extension registers with the username and password below. Share them only with the person using that device.</p></div>
+          <div class="panel-head"><div><h2 id="device-extension-title">Extension credentials</h2><p id="device-extension-sub" class="sr-only" title="Each extension registers with the username and password below. Share them only with the person using that device." aria-label="Each extension registers with the username and password below. Share them only with the person using that device.">Each extension registers with the username and password below. Share them only with the person using that device.</p></div>
             <div class="head-tools"><div class="search" data-admin-only><span>⌕</span><input id="sip-search" placeholder="Search device, extension or number"></div>
               <span class="count" id="extension-credential-count">0 extensions</span></div></div>
           <div class="panel-body flush"><div id="extension-credential-list" class="rows"></div></div>
@@ -223,7 +223,7 @@
 
       <!-- ============================================================ ROUTING -->
       <section class="page routing-studio" id="page-routing" data-flow-mode="number">
-        <div class="routing-heading"><div><span class="routing-eyebrow">CALL EXPERIENCE</span><h2>Manage incoming calls</h2><p>Choose a workflow, select a number or extension, and decide how it answers.</p></div><span class="routing-badge">Incoming calls only</span></div>
+        <div class="routing-heading"><div><span class="routing-eyebrow">CALL EXPERIENCE</span><h2>Manage incoming calls</h2><p class="sr-only" title="Choose a workflow, select a number or extension, and decide how it answers." aria-label="Choose a workflow, select a number or extension, and decide how it answers.">Choose a workflow, select a number or extension, and decide how it answers.</p></div><span class="routing-badge">Incoming calls only</span></div>
         <div class="routing-modes" role="tablist" aria-label="Routing editor">
           <button type="button" id="number-flow-tab" role="tab" aria-selected="true" aria-controls="routing-workspace" data-routing-mode="number"><span class="routing-mode-icon">☎</span><span><b>Number Flow</b><small>Hours, IVR, teams &amp; fallback</small></span><span class="routing-mode-count" id="number-flow-count"></span></button>
           <button type="button" id="extension-flow-tab" role="tab" aria-selected="false" aria-controls="routing-workspace" data-routing-mode="extension"><span class="routing-mode-icon">⌁</span><span><b>Extension Call Handling</b><small>Devices, ring time &amp; no-answer rules</small></span><span class="routing-mode-count" id="extension-flow-count"></span></button>
@@ -242,11 +242,11 @@
             <div class="tools"><label class="routing-target-label"><span id="routing-target-caption">Editing</span><select id="route-extension" aria-label="Call flow target" tabindex="-1" data-customer-only></select><select id="route-target" aria-label="Call flow target" tabindex="-1" data-admin-only></select></label><button class="btn primary" id="save-route" data-state="ready">Save flow</button></div>
           </div>
           <div class="routing-save-status" id="flow-save-hint" role="status" hidden></div>
-          <div class="routing-editor-empty" id="routing-editor-empty" hidden><span aria-hidden="true">⌁</span><h3>No workflow selected</h3><p>Select a number or extension above to configure incoming calls.</p></div>
+          <div class="routing-editor-empty" id="routing-editor-empty" hidden><span aria-hidden="true">⌁</span><h3>No workflow selected</h3><p class="sr-only" title="Select a number or extension above to configure incoming calls." aria-label="Select a number or extension above to configure incoming calls.">Select a number or extension above to configure incoming calls.</p></div>
           <div class="routing-recipe" id="routing-recipe" aria-label="Number flow stages"><span><i>01</i>Business hours</span><b>→</b><span><i>02</i>IVR</span><b>→</b><span><i>03</i>Department or extension</span><b>→</b><span><i>04</i>Fallback</span></div>
           <div class="flow-layout">
             <aside class="panel palette routing-library">
-              <div class="title"><span>BUILD YOUR JOURNEY</span><h3>Add a step</h3><p>Start with your destinations. Add hours or a menu when you need them.</p><p class="palette-hint" id="ivr-palette-hint" hidden></p><p class="palette-hint" id="palette-logic-hint" hidden></p></div>
+              <div class="title"><span>BUILD YOUR JOURNEY</span><h3>Add a step</h3><p class="sr-only" title="Start with your destinations. Add hours or a menu when you need them." aria-label="Start with your destinations. Add hours or a menu when you need them.">Start with your destinations. Add hours or a menu when you need them.</p><p class="palette-hint" id="ivr-palette-hint" hidden></p><p class="palette-hint" id="palette-logic-hint" hidden></p></div>
               <button type="button" draggable="true" data-node-type="business_hours"><b class="tile tile-hours">◷</b><span class="copy"><b>Business hours</b><small>When your team is available</small></span><span class="library-add">+</span></button>
               <button type="button" draggable="true" data-node-type="ivr"><b class="tile tile-ivr">⌨</b><span class="copy"><b>IVR menu</b><small>Greet &amp; guide callers</small></span><span class="library-add">+</span></button>
               <button type="button" draggable="true" data-node-type="ring_group"><b class="tile tile-group">◎</b><span class="copy"><b>Department / desks</b><small>Ring one or several extensions</small></span><span class="library-add">+</span></button>
@@ -257,14 +257,14 @@
             </aside>
             <section class="panel canvas" id="flow-canvas" aria-label="Call flow editor">
               <div class="canvas-status"><span id="routing-preview-label">FLOW PREVIEW</span><small>Changes apply when you save</small></div>
-              <div class="canvas-empty"><div class="glyph">☎</div><h4>Start with who should answer</h4><p>Add a department or extension, then build the journey around your team.</p></div>
+              <div class="canvas-empty"><div class="glyph">☎</div><h4>Start with who should answer</h4><p class="sr-only" title="Add a department or extension, then build the journey around your team." aria-label="Add a department or extension, then build the journey around your team.">Add a department or extension, then build the journey around your team.</p></div>
               <div class="flow-node incoming"><div class="icon">☎</div><div class="copy"><b>Incoming call</b><small id="flow-entry-number">Choose an incoming number</small></div><span class="step">START</span></div>
               <div id="flow-nodes"></div>
               <div class="flow-drop"><span>Add a step from the library to continue the journey</span></div>
             </section>
           </div>
         </div>
-        <details class="routing-team-details"><summary><span>Departments &amp; ring groups<small>Manage reusable teams for your number flows</small></span><span aria-hidden="true">+</span></summary><aside class="panel groups-panel routing-departments"><div class="title"><div><span class="routing-eyebrow">YOUR TEAM</span><h3>Departments &amp; ring groups</h3><p>A department can include extensions from any of this customer's numbers.</p></div><button class="btn ghost" data-open="group">+ New department</button></div><div id="group-list" class="rows"></div></aside></details>
+        <details class="routing-team-details"><summary><span>Departments &amp; ring groups<small>Manage reusable teams for your number flows</small></span><span aria-hidden="true">+</span></summary><aside class="panel groups-panel routing-departments"><div class="title"><div><span class="routing-eyebrow">YOUR TEAM</span><h3>Departments &amp; ring groups</h3><p class="sr-only" title="A department can include extensions from any of this customer&#x27;s numbers." aria-label="A department can include extensions from any of this customer&#x27;s numbers.">A department can include extensions from any of this customer's numbers.</p></div><button class="btn ghost" data-open="group">+ New department</button></div><div id="group-list" class="rows"></div></aside></details>
       </section>
 
       <!-- ============================================================== CALLS -->
@@ -327,7 +327,7 @@
             <b>API base</b> <code id="integration-api-base">—</code></span>
           <a class="btn ghost sm" href="/documentation" target="_blank" rel="noopener">Documentation ↗</a>
         </div>
-        <article class="notice secure"><span class="glyph">◇</span><div><b>Integrations</b><span data-customer-only>API keys authenticate your own software against the EIP API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own.</span><span data-admin-only>Choose a customer to inspect the keys and webhooks their software uses. These credentials belong to them, so creating one is their action, not the platform's.</span></div></article>
+        <article class="notice secure"><span class="glyph">◇</span><div><b>Integrations</b><span data-customer-only class="sr-only" title="API keys authenticate your own software against the REST API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own." aria-label="API keys authenticate your own software against the REST API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own.">API keys authenticate your own software against the REST API. Webhooks push call lifecycle events to your CRM. Both are scoped to the resources you own.</span><span data-admin-only class="sr-only" title="Choose a customer to inspect the keys and webhooks their software uses. These credentials belong to them, so creating one is their action, not the platform&#x27;s." aria-label="Choose a customer to inspect the keys and webhooks their software uses. These credentials belong to them, so creating one is their action, not the platform&#x27;s.">Choose a customer to inspect the keys and webhooks their software uses. These credentials belong to them, so creating one is their action, not the platform's.</span></div></article>
 
         <div class="grid cols-2">
           <article class="panel">
@@ -351,7 +351,7 @@
         <div class="customer-number-context scope-bar" data-scope="number" data-scope-all><label class="scope-field" data-admin-only><span>Customer</span><select class="scope-customer-select" aria-label="Customer"></select></label><label class="scope-field"><span>Phone number</span><select class="customer-number-select" aria-label="Phone number"></select></label></div>
         <div class="notice"><span class="glyph">▣</span><div><b>$5 per number / month</b>Every assigned number includes extensions, calls, voicemail, recordings, API keys and CRM webhooks. Payments are collected externally; invoices are recorded here.</div></div>
         <article class="panel">
-          <div class="panel-head"><div><h2>Subscriptions</h2><p>Monthly number billing, renewal cycles and scheduled discontinuation</p></div></div>
+          <div class="panel-head"><div><h2>Subscriptions</h2><p class="sr-only" title="Monthly number billing, renewal cycles and scheduled discontinuation" aria-label="Monthly number billing, renewal cycles and scheduled discontinuation">Monthly number billing, renewal cycles and scheduled discontinuation</p></div></div>
           <div class="panel-body flush"><div id="subscription-list" class="rows"></div></div>
         </article>
         <article class="panel" style="margin-top:16px">
@@ -363,7 +363,7 @@
       <!-- ====================================================== NOTIFICATIONS -->
       <section class="page" id="page-notifications">
         <article class="panel">
-          <div class="panel-head"><div><h2>Notifications</h2><p>Assignments, devices, missed calls, billing and integration alerts</p></div><button class="btn ghost sm" id="read-all-notifications">Mark all read</button></div>
+          <div class="panel-head"><div><h2>Notifications</h2><p class="sr-only" title="Assignments, devices, missed calls, billing and integration alerts" aria-label="Assignments, devices, missed calls, billing and integration alerts">Assignments, devices, missed calls, billing and integration alerts</p></div><button class="btn ghost sm" id="read-all-notifications">Mark all read</button></div>
           <div class="panel-body flush"><div id="notification-list" class="rows"></div></div>
         </article>
       </section>
@@ -372,14 +372,14 @@
       <section class="page" id="page-security">
         <div class="grid cols-2">
           <form class="panel" id="profile-recording-form">
-            <div class="panel-head"><div><h2>My call recording</h2><p>Applies only while the administrator's global recording switch is enabled</p></div></div>
+            <div class="panel-head"><div><h2>My call recording</h2><p class="sr-only" title="Applies only while the administrator&#x27;s global recording switch is enabled" aria-label="Applies only while the administrator&#x27;s global recording switch is enabled">Applies only while the administrator's global recording switch is enabled</p></div></div>
             <div class="panel-body">
               <label class="switch"><span class="switch-copy"><b>Allow recording for my extension</b><small id="profile-recording-help">Recording is off by default.</small></span><input id="profile-recording" type="checkbox"><i class="track"></i></label>
               <div class="btn-row" style="margin-top:14px"><button class="btn primary" type="submit">Save preference</button></div>
             </div>
           </form>
           <form class="panel" id="profile-email-form">
-            <div class="panel-head"><div><h2>My account email</h2><p>New voicemail goes here unless an extension has its own address or email delivery is off</p></div></div>
+            <div class="panel-head"><div><h2>My account email</h2><p class="sr-only" title="New voicemail goes here unless an extension has its own address or email delivery is off" aria-label="New voicemail goes here unless an extension has its own address or email delivery is off">New voicemail goes here unless an extension has its own address or email delivery is off</p></div></div>
             <div class="panel-body">
               <label class="field">Email address<input id="profile-email" type="email" placeholder="you@example.com"></label>
               <div class="btn-row"><button class="btn primary" type="submit">Save email address</button></div>
@@ -410,7 +410,7 @@
       <!-- =========================================================== ACTIVITY -->
       <section class="page" id="page-activity">
         <article class="panel">
-          <div class="panel-head"><div><h2>Platform activity</h2><p>Number assignments, SIP changes, extensions, access and API generation</p></div></div>
+          <div class="panel-head"><div><h2>Platform activity</h2><p class="sr-only" title="Number assignments, SIP changes, extensions, access and API generation" aria-label="Number assignments, SIP changes, extensions, access and API generation">Number assignments, SIP changes, extensions, access and API generation</p></div></div>
           <div class="panel-body"><div id="activity-list" class="timeline"></div></div>
         </article>
       </section>
@@ -428,7 +428,7 @@
       <!-- ============================================================= EMAIL -->
       <section class="page" id="page-email">
         <form class="panel" id="email-form">
-          <div class="panel-head"><div><h2>Elastic Email voicemail delivery</h2><p>The API key is encrypted and can only be configured by an administrator</p></div></div>
+          <div class="panel-head"><div><h2>Elastic Email voicemail delivery</h2><p class="sr-only" title="The API key is encrypted and can only be configured by an administrator" aria-label="The API key is encrypted and can only be configured by an administrator">The API key is encrypted and can only be configured by an administrator</p></div></div>
           <div class="panel-body">
             <label class="switch"><span class="switch-copy"><b>Enable voicemail email</b><small>Send each new voicemail as an email attachment.</small></span><input id="email-enabled" type="checkbox"><i class="track"></i></label>
             <div class="field-row" style="margin-top:16px">
@@ -436,19 +436,19 @@
               <label class="field">Verified sender email<input id="email-from" type="email" placeholder="voicemail@example.com"></label>
             </div>
             <div class="field-row">
-              <label class="field">Sender name<input id="email-name" maxlength="120" placeholder="EIP Telephony Voicemail"></label>
+              <label class="field">Sender name<input id="email-name" maxlength="120" placeholder="Telephony Control Voicemail"></label>
               <label class="field">Test recipient<input id="email-test" type="email" placeholder="admin@example.com"></label>
             </div>
-            <label class="switch"><span class="switch-copy"><b>Include a voicemail transcript</b><small>Local, offline speech recognition. No transcription API key or usage fee. Disabled by default.</small></span><input id="transcription-enabled" type="checkbox"><i class="track"></i></label>
-            <p class="muted">Audio is converted to text on this server using the bundled PocketSphinx English model. No audio is uploaded to a transcription provider and no model download or GPU is needed. Recognition is best-effort: accents, noise and non-English speech can reduce accuracy. The original audio remains attached. If recognition fails, the audio email is still sent.</p>
-            <p class="muted">Paste your Elastic Email API key without “Bearer”. Leave it blank to keep the saved key. Use a key with Send HTTP permission and a sender verified in Elastic Email. New voicemail uses the associated account email unless the extension has an override or email is turned off.</p>
+            <label class="switch"><span class="switch-copy"><b>Include a voicemail transcript</b><small class="sr-only" title="Local, offline speech recognition. No transcription API key or usage fee. Disabled by default." aria-label="Local, offline speech recognition. No transcription API key or usage fee. Disabled by default.">Local, offline speech recognition. No transcription API key or usage fee. Disabled by default.</small></span><input id="transcription-enabled" type="checkbox"><i class="track"></i></label>
+            <p class="muted sr-only" title="Audio is converted to text on this server using the bundled PocketSphinx English model. No audio is uploaded to a transcription provider and no model download or GPU is needed. Recognition is best-effort: accents, noise and non-English speech can reduce accuracy. The original audio remains attached. If recognition fails, the audio email is still sent." aria-label="Audio is converted to text on this server using the bundled PocketSphinx English model. No audio is uploaded to a transcription provider and no model download or GPU is needed. Recognition is best-effort: accents, noise and non-English speech can reduce accuracy. The original audio remains attached. If recognition fails, the audio email is still sent.">Audio is converted to text on this server using the bundled PocketSphinx English model. No audio is uploaded to a transcription provider and no model download or GPU is needed. Recognition is best-effort: accents, noise and non-English speech can reduce accuracy. The original audio remains attached. If recognition fails, the audio email is still sent.</p>
+            <p class="muted sr-only" title="Paste your Elastic Email API key without “Bearer”. Leave it blank to keep the saved key. Use a key with Send HTTP permission and a sender verified in Elastic Email. New voicemail uses the associated account email unless the extension has an override or email is turned off." aria-label="Paste your Elastic Email API key without “Bearer”. Leave it blank to keep the saved key. Use a key with Send HTTP permission and a sender verified in Elastic Email. New voicemail uses the associated account email unless the extension has an override or email is turned off.">Paste your Elastic Email API key without “Bearer”. Leave it blank to keep the saved key. Use a key with Send HTTP permission and a sender verified in Elastic Email. New voicemail uses the associated account email unless the extension has an override or email is turned off.</p>
             <div class="btn-row"><button class="btn primary" type="submit" id="save-email">Save email configuration</button><button class="btn ghost" type="button" id="test-email">Save &amp; send test email</button></div>
-            <p class="muted">The test saves these settings first and works even when automatic emails are disabled. It tests email only, not transcription. Provider acceptance is not confirmation of inbox delivery; check spam and the provider's activity log.</p>
+            <p class="muted sr-only" title="The test saves these settings first and works even when automatic emails are disabled. It tests email only, not transcription. Provider acceptance is not confirmation of inbox delivery; check spam and the provider&#x27;s activity log." aria-label="The test saves these settings first and works even when automatic emails are disabled. It tests email only, not transcription. Provider acceptance is not confirmation of inbox delivery; check spam and the provider&#x27;s activity log.">The test saves these settings first and works even when automatic emails are disabled. It tests email only, not transcription. Provider acceptance is not confirmation of inbox delivery; check spam and the provider's activity log.</p>
             <p id="email-feedback" role="status" aria-live="polite"></p>
           </div>
         </form>
         <article class="panel" style="margin-top:16px">
-          <div class="panel-head"><div><h2>Recent email deliveries</h2><p>Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.</p></div></div>
+          <div class="panel-head"><div><h2>Recent email deliveries</h2><p class="sr-only" title="Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox." aria-label="Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.">Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.</p></div></div>
           <div class="panel-body flush"><div id="email-delivery-list" class="table-wrap"></div></div>
         </article>
       </section>
@@ -458,7 +458,7 @@
         <article class="notice"><span class="glyph">⚙</span><div><b>Nothing to configure here any more</b>Call routing defaults and recording are decisions the customer makes for their own lines: call defaults on their Numbers page, recording per extension. This page keeps only the platform's own switches below.</div></article>
         <article class="panel" data-admin-only>
           <div class="panel-head">
-            <div><h2>Call recording</h2><p>The platform switch: off stops recording everywhere, whatever a customer set</p></div>
+            <div><h2>Call recording</h2><p class="sr-only" title="The platform switch: off stops recording everywhere, whatever a customer set" aria-label="The platform switch: off stops recording everywhere, whatever a customer set">The platform switch: off stops recording everywhere, whatever a customer set</p></div>
             <span class="tag" id="recording-platform-state">Off</span>
           </div>
           <div class="panel-body">
@@ -471,7 +471,7 @@
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><h2>Server addresses</h2><p>Two addresses, two paths: phones register straight at the SIP address, while the consoles, API and webhooks live on the web domain behind your proxy</p></div>
+            <div><h2>Server addresses</h2><p class="sr-only" title="Two addresses, two paths: phones register straight at the SIP address, while the consoles, API and webhooks live on the web domain behind your proxy" aria-label="Two addresses, two paths: phones register straight at the SIP address, while the consoles, API and webhooks live on the web domain behind your proxy">Two addresses, two paths: phones register straight at the SIP address, while the consoles, API and webhooks live on the web domain behind your proxy</p></div>
             <span class="tag info" id="service-address-state">Not set</span>
           </div>
           <div class="panel-body">
@@ -482,11 +482,11 @@
               </label>
               <label class="field">SIP port
                 <input id="service-sip-port" name="service_sip_port" type="number" min="1" max="65535" placeholder="5060">
-                <small>Usually 5060. Change it only if your SIP listener runs elsewhere.</small>
+                <small class="sr-only" title="Usually 5060. Change it only if your SIP listener runs elsewhere." aria-label="Usually 5060. Change it only if your SIP listener runs elsewhere.">Usually 5060. Change it only if your SIP listener runs elsewhere.</small>
               </label>
               <label class="field">Web &amp; API domain (consoles, API, webhooks)
                 <input id="service-web-host" name="service_web_host" placeholder="tel.your-domain.com" autocomplete="off" spellcheck="false">
-                <small>The domain this console, the REST API and every webhook example are served from — usually behind your reverse proxy. Leave empty to reuse the SIP address.</small>
+                <small class="sr-only" title="The domain this console, the REST API and every webhook example are served from — usually behind your reverse proxy. Leave empty to reuse the SIP address." aria-label="The domain this console, the REST API and every webhook example are served from — usually behind your reverse proxy. Leave empty to reuse the SIP address.">The domain this console, the REST API and every webhook example are served from — usually behind your reverse proxy. Leave empty to reuse the SIP address.</small>
               </label>
               <label class="field">SIP digest authentication
                 <select id="service-sip-digest" name="sip_auth_digest">
@@ -494,7 +494,7 @@
                   <option value="sha256">SHA-256 only — modern clients only</option>
                   <option value="both">SHA-256 + MD5 — both challenges offered</option>
                 </select>
-                <small>How Asterisk challenges phones at sign-in. Keep MD5 unless every device supports SHA-256 digest (RFC 8760) — some softphones, including Zoiper 5, abandon a challenge that contains SHA-256.</small>
+                <small class="sr-only" title="How Asterisk challenges phones at sign-in. Keep MD5 unless every device supports SHA-256 digest (RFC 8760) — some softphones, including Zoiper 5, abandon a challenge that contains SHA-256." aria-label="How Asterisk challenges phones at sign-in. Keep MD5 unless every device supports SHA-256 digest (RFC 8760) — some softphones, including Zoiper 5, abandon a challenge that contains SHA-256.">How Asterisk challenges phones at sign-in. Keep MD5 unless every device supports SHA-256 digest (RFC 8760) — some softphones, including Zoiper 5, abandon a challenge that contains SHA-256.</small>
               </label>
               <label class="field">Browser media (ICE servers)
                 <input id="service-ice-servers" name="ice_servers" placeholder='[{"urls": "stun:stun.example.com"}]' autocomplete="off" spellcheck="false">
@@ -584,6 +584,6 @@
 
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="true"></div>
 <!-- Served with no-store so image-only upgrades cannot load an older UI. -->
-<script src="/admin-assets/admin.js" defer></script>
+<script src="/static/js/admin.js" defer></script>
 </body>
 </html>

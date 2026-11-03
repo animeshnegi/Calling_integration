@@ -1,8 +1,9 @@
+const { assetPath } = require('./asset-path');
 /* What the console actually shows, from the live server.
  *
  *   node tools/livepages.js   (the administrator, then customer meridian)
  *
- * Boots the real web/admin.js in jsdom but sends every API call to the running
+ * Boots the real app/static/js/admin.js in jsdom but sends every API call to the running
  * preview (tools/devpreview.py) with a real session and CSRF token, then prints
  * the visible text of each page. This is the "did it really change?" check: it
  * reads the same payloads a browser would, so stale fixtures cannot flatter it.
@@ -11,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
-const WEB = path.join(__dirname, '..', 'web');
+
 const BASE = process.env.PREVIEW || 'http://127.0.0.1:5000';
 const args = Object.fromEntries(process.argv.slice(2).map(x => {
   const [k, v] = x.replace(/^--/, '').split('=');
@@ -43,7 +44,7 @@ function api(pathname, method = 'GET', body = null, csrf = '') {
 }
 
 function boot(html = 'admin.html') {
-  const page = fs.readFileSync(path.join(WEB, html), 'utf8').replace(/<script[^>]*admin\.js[^>]*>\s*<\/script>/i, '');
+  const page = fs.readFileSync(assetPath(html), 'utf8').replace(/<script[^>]*admin\.js[^>]*>\s*<\/script>/i, '');
   const errors = [];
   const vc = new VirtualConsole();
   vc.on('jsdomError', error => errors.push(error.message));
@@ -68,7 +69,7 @@ function boot(html = 'admin.html') {
     },
   });
   const script = dom.window.document.createElement('script');
-  script.textContent = fs.readFileSync(path.join(WEB, 'admin.js'), 'utf8');
+  script.textContent = fs.readFileSync(assetPath('admin.js'), 'utf8');
   dom.window.document.body.appendChild(script);
   return { w: dom.window, d: dom.window.document, errors };
 }

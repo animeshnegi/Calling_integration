@@ -8,9 +8,11 @@ import pytest
 from app import create_app
 from app.config import Config
 
-WEB = Path(__file__).resolve().parent.parent / "web"
-LOGO = "https://engineerip.com/static/img/logo.png"
-PAGES = sorted(WEB.glob("*.html"))
+ROOT = Path(__file__).resolve().parent.parent
+TEMPLATES = ROOT / "app" / "templates"
+STATIC = ROOT / "app" / "static"
+LOGO = "/static/images/favicon.svg"
+PAGES = sorted(TEMPLATES.glob("*.html"))
 
 
 def page_client(tmp_path: Path, config_class=Config):
@@ -30,9 +32,9 @@ def page_client(tmp_path: Path, config_class=Config):
 
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda page: page.name)
-def test_every_page_declares_the_engineerip_logo_as_its_favicon(page: Path):
+def test_every_page_declares_the_bundled_icon_as_its_favicon(page: Path):
     html = page.read_text(encoding="utf-8")
-    assert f'<link rel="icon" type="image/png" href="{LOGO}">' in html
+    assert f'<link rel="icon" type="image/svg+xml" href="{LOGO}">' in html
     assert f'<link rel="apple-touch-icon" href="{LOGO}">' in html
 
 
@@ -61,7 +63,7 @@ def test_the_softphone_surface_is_served(tmp_path: Path):
     client = page_client(tmp_path)
     phone = client.get("/phone")
     assert phone.status_code == 200
-    assert "EngineerIP Phone" in phone.get_data(as_text=True)
+    assert "Telephony Phone" in phone.get_data(as_text=True)
     assert "/phone.js" in phone.get_data(as_text=True)
 
     manifest = client.get("/manifest.json")
@@ -135,7 +137,7 @@ def test_the_softphone_button_only_shows_for_a_browser_extension():
     administrator - a visible button that can only fail is worse than none.
     Both consoles share this renderer, so one gate covers both roles.
     """
-    admin_js = (Path(__file__).resolve().parents[1] / "web" / "admin.js").read_text()
+    admin_js = (STATIC / "js" / "admin.js").read_text()
     assert '${x.webrtc_enabled ? `<button class="btn primary sm" data-softphone=' in admin_js
     assert '${c.webrtc_enabled ? `<button class="btn primary sm" type="button" data-softphone=' in admin_js
     for line in admin_js.splitlines():
@@ -147,9 +149,8 @@ def test_the_softphone_button_only_shows_for_a_browser_extension():
 
 
 def test_phone_shell_is_versioned_and_the_service_worker_precaches_that_version():
-    root = Path(__file__).resolve().parents[1] / "web"
-    html = (root / "phone.html").read_text()
-    sw = (root / "sw.js").read_text()
+    html = (TEMPLATES / "phone.html").read_text()
+    sw = (STATIC / "js" / "sw.js").read_text()
     match = re.search(r'<meta name="eip-phone-version" content="(\d+)">', html)
     assert match, "phone.html needs an asset version"
     version = match.group(1)
@@ -161,9 +162,8 @@ def test_phone_shell_is_versioned_and_the_service_worker_precaches_that_version(
 
 
 def test_premium_softphone_media_and_ivr_controls_are_shipped():
-    root = Path(__file__).resolve().parents[1] / "web"
-    html = (root / "phone.html").read_text()
-    js = (root / "phone.js").read_text()
+    html = (TEMPLATES / "phone.html").read_text()
+    js = (STATIC / "js" / "phone.js").read_text()
     for element in ("enable-audio-btn", "dtmf-btn", "dtmf-panel"):
         assert f'id="{element}"' in html
     assert "session_timers:true" in js
@@ -174,9 +174,8 @@ def test_premium_softphone_media_and_ivr_controls_are_shipped():
 
 
 def test_premium_call_screen_keeps_end_call_visible_with_dtmf_open():
-    root = Path(__file__).resolve().parents[1] / "web"
-    html = (root / "phone.html").read_text()
-    css = (root / "phone.css").read_text()
+    html = (TEMPLATES / "phone.html").read_text()
+    css = (STATIC / "css" / "phone.css").read_text()
     assert 'class="call-shell"' in html and 'class="call-footer"' in html
     assert 'id="hangup-btn"' in html and 'aria-label="End call"' in html
     assert html.index('class="call-footer"') < html.index('id="hangup-btn"')

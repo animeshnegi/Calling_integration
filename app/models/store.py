@@ -1,46 +1,13 @@
+"""Persistence for call records (MySQL in production, SQLite locally)."""
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from .database import Database
-
-
-@dataclass
-class Call:
-    call_id: str
-    contact_id: str | None
-    member_id: str | None
-    extension: str
-    phone: str
-    caller_id_number: str | None = None
-    provider: str | None = None
-    direction: str = "outbound"
-    status: str = "initiated"
-    answered: bool = False
-    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    answered_at: str | None = None
-    ended_at: str | None = None
-    duration_seconds: int = 0
-    employee_channel_id: str | None = None
-    # Every leg rung for this call, comma separated. A primary number rings the
-    # customer's devices together, so more than one exists until somebody answers.
-    employee_channel_ids: str = ""
-    customer_channel_id: str | None = None
-    bridge_id: str | None = None
-    recording_name: str | None = None
-    recording_format: str | None = None
-    recording_status: str | None = None
-    recording_path: str | None = None
-    disposition: str | None = None
-    notes: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+from ..database import Database
+from .call import Call
 
 
 _COLUMNS = (
@@ -49,6 +16,8 @@ _COLUMNS = (
     "employee_channel_ids", "customer_channel_id", "bridge_id", "recording_name", "recording_format", "recording_status",
     "recording_path", "disposition", "notes",
 )
+
+
 
 
 class CallStore:
@@ -167,15 +136,19 @@ class CallStore:
             )
 
     def stale_recordings(self) -> list[Call]:
-        """Calls whose recording started but never reported finished.
+        """Calls whose recording never reached a playable 'finalized' state.
 
         The RecordingFinished event can be missed when the ARI worker restarts
         at the wrong second; Asterisk may have stored the file while the row
-        stays 'recording' or 'finalizing' until something reconciles it.
+        stays 'recording' or 'finalizing' until something reconciles it. A
+        'failed' row is included because a failure event can arrive after the
+        audio was written: reconciliation uses the stored file as positive
+        evidence and leaves genuinely empty attempts failed.
         """
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM calls WHERE recording_name IS NOT NULL AND recording_status IN ('recording','finalizing')"
+                "SELECT * FROM calls WHERE recording_name IS NOT NULL "
+                "AND recording_status IN ('recording','finalizing','failed')"
             ).fetchall()
         return [self._from_row(row) for row in rows if row is not None]
 
@@ -245,3 +218,5 @@ class CallStore:
                 FROM calls{where}
             """, values).fetchone()
         return {key: int(row[key] or 0) for key in ("total", "answered", "failed", "recordings")}
+
+__all__ = ["CallStore"]

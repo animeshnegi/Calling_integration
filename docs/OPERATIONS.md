@@ -125,7 +125,7 @@ chmod +x scripts/*.sh
 ./scripts/import-start-images.sh engineerip-telephony-v1.tar.gz v1
 ```
 
-The script verifies the checksum, loads both images, creates `crm-network` if necessary, and runs `docker compose up -d --no-build`. It accepts both Windows `.tar`
+The script verifies the checksum, loads both images, and runs `docker compose up -d --no-build`. It accepts both Windows `.tar`
 and compressed `.tar.gz` image exports. `--no-build` is important on a low-resource
 VM. Import/start is a planned release operation and may recreate Asterisk, dropping
 active calls; use a maintenance window. **Do not import/restart containers just to
@@ -289,9 +289,45 @@ Confirm the admin panel's Service address (or the `ASTERISK_EXTERNAL_ADDRESS` fa
 
 Inspect API logs for AMI reload failures and ensure both API and Asterisk mount `asterisk_dynamic_config` with group ID 2000 as defined by the images.
 
-### Recording does not play
+### Recording does not play / "Recording failed"
 
-Only finalized recordings can play. Check the call's recording status, ARI logs, browser network response, and free space in the recording volume.
+Only `finalized` recordings can play. A row in the Recordings page with status
+`failed` means Asterisk did not leave a stored file the worker could find; it is
+not a statement about whether audio was ever written.
+
+Correlate the call ID with the worker and Asterisk logs:
+
+```bash
+docker compose logs --since=2h telephony-ari | grep '<call-id>'
+docker compose logs --since=2h asterisk | grep -Ei 'Recorder|writestream|recording'
+docker compose exec asterisk asterisk -rx 'module show like format_'
+```
+
+The worker now logs the actual ARI reason, so a recording setup failure reads
+`Recording call-<id> for call <id> could not start: Asterisk API 422: ...`
+instead of a bare status code. Common causes:
+
+- `422 ... specified format is unknown on this system` — the saved recording
+  format is not a file extension Asterisk has (`wav`, `wav49`, `gsm`, `sln16`).
+  The old `slin16` spelling is a codec name and is normalised on save.
+- `409 ... Recording ... already exists` — a worker restart retried a recording
+  whose file already exists. The worker recovers the stored file automatically.
+- `500 ... Failed to create recording channel` — `res_stasis_recording.so` is
+  missing from the Asterisk image; rebuild/import the Asterisk image.
+- `Error creating writestream` / `No audio available on Recorder/...` — the
+  recording volume is not writable by the `asterisk` user, or the bridge was
+  torn down before the recorder was stopped. Check volume ownership, free
+  space, and that both `telephony-api` and `telephony-ari` were recreated with
+  the current image (the recorder is stopped *before* the callers are hung up).
+
+A late `RecordingFailed` event logs Asterisk's `cause` together with the call
+ID, e.g. `Asterisk recording call-<id> for call <id> failed: Failed to answer
+channel`. If Asterisk did write a WAV, the worker finalises the row from that
+positive evidence rather than claiming there is no audio. Existing `failed`
+rows from a previous release are retried on the 30-second scan for 30 days
+after the call ended; a row with no stored file stays `failed`. Genuinely lost
+audio cannot be reconstructed - fix the cause above and place a fresh test
+call.
 
 ### Webhook test fails
 

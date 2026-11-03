@@ -29,7 +29,7 @@ For remote devices, use TLS/SRTP or a VPN; do not expose a plain SIP endpoint un
 
 The sample `101-web` endpoint enables Asterisk WebRTC mode and a WSS transport. Production deployment should terminate trusted TLS with a certificate whose hostname matches the browser URL. The Asterisk documentation recommends trusted certificates such as Let's Encrypt because browsers generally reject self-signed certificates for this use case.
 
-The sample web page is intentionally a **reference/diagnostic UI**. A production EngineerIP integration should provision per-member WebRTC credentials server-side and pass only short-lived/capability credentials to the browser.
+The sample web page is intentionally a **reference/diagnostic UI**. A production Telephony Control integration should provision per-member WebRTC credentials server-side and pass only short-lived/capability credentials to the browser.
 
 ## RTP
 

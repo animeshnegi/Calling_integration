@@ -1,8 +1,9 @@
+const { assetPath } = require('./asset-path');
 /* Console regression harness.
  *
  *   node tools/uicheck.js
  *
- * Boots the real web/admin.js in jsdom against captured fixtures
+ * Boots the real app/static/js/admin.js in jsdom against captured fixtures
  * (tools/fixtures/*.json) and asserts the behaviour the console promises:
  * background refreshes stay invisible, only customers dial, the builder is
  * scoped to one customer, and provisioning surfaces its credentials.
@@ -13,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
-const WEB = path.join(__dirname, '..', 'web');
+
 const FIXTURES = path.join(__dirname, 'fixtures');
 const load = name => JSON.parse(fs.readFileSync(path.join(FIXTURES, name), 'utf8'));
 
@@ -45,7 +46,7 @@ function json(payload) {
 /* A console wired to fixtures, with the network replaced by a router so every
    request is explicit. `isAdmin` decides which state payload answers. */
 function boot({ isAdmin = true, state = null, routes = {}, html = 'admin.html' } = {}) {
-  const page = fs.readFileSync(path.join(WEB, html), 'utf8').replace(/<script[^>]*admin\.js[^>]*>\s*<\/script>/i, '');
+  const page = fs.readFileSync(assetPath(html), 'utf8').replace(/<script[^>]*admin\.js[^>]*>\s*<\/script>/i, '');
   const errors = [];
   const vc = new VirtualConsole();
   vc.on('jsdomError', error => errors.push(error.message));
@@ -77,7 +78,7 @@ function boot({ isAdmin = true, state = null, routes = {}, html = 'admin.html' }
     },
   });
   const script = dom.window.document.createElement('script');
-  script.textContent = fs.readFileSync(path.join(WEB, 'admin.js'), 'utf8');
+  script.textContent = fs.readFileSync(assetPath('admin.js'), 'utf8');
   dom.window.document.body.appendChild(script);
   return { dom, w: dom.window, d: dom.window.document, errors, seen };
 }
@@ -1110,7 +1111,7 @@ async function main() {
   {
     // The page measures real geometry, which jsdom cannot do, so this only proves
     // it boots, reaches its measurement code and reports rather than throwing.
-    const html = fs.readFileSync(path.join(WEB, 'console-check.html'), 'utf8');
+    const html = fs.readFileSync(assetPath('console-check.html'), 'utf8');
     const dom = new JSDOM(html, { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/console-check' });
     await settle(500);
     const d2 = dom.window.document;

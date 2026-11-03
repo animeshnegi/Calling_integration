@@ -1,3 +1,8 @@
+# Standalone Telephony Control. No external CRM/1Panel networks are required:
+# the API is published on loopback for a reverse proxy, and other systems
+# integrate over HTTPS through the bearer-authenticated REST API or signed
+# webhooks. A MySQL server is reachable by its own hostname/IP in DATABASE_URI.
+#
 # Bound Docker logs prevent SIP noise, health checks, or application errors from
 # filling the VM disk. Limits apply per container and require container recreation.
 x-logging: &bounded-logging
@@ -41,9 +46,8 @@ services:
       telephony-ari:
         condition: service_started
     networks:
-      - crm-network
       - telephony-internal
-      - mysql-network
+      - data-network
     # Expose the Flask admin/API only on the local host.
     # Use a reverse proxy for remote access instead of publishing it publicly.
     ports:
@@ -91,9 +95,8 @@ services:
       asterisk:
         condition: service_healthy
     networks:
-      - crm-network
       - telephony-internal
-      - mysql-network
+      - data-network
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
@@ -158,16 +161,14 @@ services:
       start_period: 20s
 
 networks:
-  crm-network:
-    external: true
-    name: crm-network
-
+  # Both networks are local bridges. Nothing here depends on a CRM container,
+  # a hosting panel, or any pre-existing Docker network.
   telephony-internal:
     driver: bridge
-    name: engineerip-telephony-internal
-  mysql-network:
-    external: true
-    name: 1panel-network
+    name: telephony-internal
+  data-network:
+    driver: bridge
+    name: telephony-data
 
 
 volumes:

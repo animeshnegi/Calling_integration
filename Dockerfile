@@ -18,8 +18,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && python -c "from pocketsphinx import Decoder; Decoder(loglevel='FATAL')"
 
+# app/ now contains templates/ and static/ (css, js, images).
 COPY --chown=appuser:appuser app ./app
-COPY --chown=appuser:appuser web ./web
 # The browser and Asterisk use the same original instrumental hold loop.
 COPY --chown=appuser:appuser asterisk/moh ./asterisk/moh
 COPY --chown=appuser:appuser wsgi.py ./wsgi.py

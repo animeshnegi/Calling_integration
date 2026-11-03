@@ -3,115 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EIP Telephony — API &amp; webhook documentation</title>
-  <meta name="description" content="REST API, signed webhooks, device setup and the browser softphone for EIP Telephony.">
-  <link rel="icon" type="image/png" href="https://engineerip.com/static/img/logo.png">
-  <link rel="apple-touch-icon" href="https://engineerip.com/static/img/logo.png">
-<style>
-  :root{
-    color-scheme: light;
-    --bg:#f4f5fa; --bg-2:#eef0f8; --surface:#ffffff; --surface-2:#f7f8fd; --line:#10182812; --line-strong:#10182824;
-    --text:#141b2d; --text-2:#4c5878; --text-3:#555f79;
-    --acc-1:#4f46e5; --acc-2:#7c3aed; --acc-3:#0e7490; --ok:#15803d; --warn:#b45309; --bad:#be123c;
-    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
-  }
-  *{box-sizing:border-box}
-  body{
-    margin:0;background:
-      radial-gradient(circle at 6% 0%,#e5ecff 0,transparent 38%),
-      radial-gradient(circle at 96% 4%,#f2e6ff 0,transparent 34%),
-      radial-gradient(circle at 70% 100%,#e2fbf4 0,transparent 36%),
-      var(--bg);
-    background-attachment:fixed;
-    color:var(--text);font:15px/1.62 system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
-    -webkit-font-smoothing:antialiased;min-height:100vh;
-  }
-  a{color:#4338ca;text-decoration:none}
-  a:hover{text-decoration:underline}
-  code{font-family:var(--mono);font-size:.88em;background:#eef0f7;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:#312e81}
-  .wrap{max-width:1080px;margin:0 auto;padding:34px 22px 90px}
-  header.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:26px}
-  .brand{display:flex;align-items:center;gap:12px;color:inherit}
-  .brand:hover{text-decoration:none}
-  .brand .mark{
-    width:40px;height:40px;border-radius:13px;display:grid;place-items:center;font-weight:800;color:#fff;
-    background:linear-gradient(140deg,var(--acc-1),var(--acc-2));box-shadow:0 12px 26px #4f46e52e;
-  }
-  .brand b{display:block;font-size:15px;letter-spacing:-.02em}
-  .brand small{display:block;font-size:11.5px;color:var(--text-3)}
-  .top .spacer{flex:1}
-  .btn{
-    display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:11px;font-size:12.5px;font-weight:650;
-    border:1px solid var(--line-strong);background:#fff;color:var(--text);cursor:pointer;box-shadow:0 1px 3px #1018280f;
-  }
-  .btn.primary{border-color:transparent;color:#fff;background:linear-gradient(140deg,var(--acc-1),var(--acc-2));box-shadow:0 10px 26px #4f46e52e}
-  .btn:hover{transform:translateY(-1px);text-decoration:none}
-  :focus-visible{outline:2px solid var(--acc-1);outline-offset:2px}
-  .lede{font-size:14.5px;color:var(--text-2);max-width:78ch;margin:0 0 22px}
-  nav.toc{
-    display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin:0 0 30px;padding:16px;
-    border-radius:18px;border:1px solid var(--line);background:#ffffffb8;backdrop-filter:blur(10px);box-shadow:0 1px 3px #1018280f;
-  }
-  nav.toc a{font-size:12.5px;font-weight:600;color:var(--text-2)}
-  nav.toc a:hover{color:var(--text)}
-  section{margin:0 0 34px;scroll-margin-top:20px}
-  h2{font-size:19px;letter-spacing:-.025em;margin:0 0 6px}
-  h2 .step{
-    display:inline-grid;place-items:center;width:24px;height:24px;margin-right:9px;border-radius:8px;font-size:12px;
-    background:#8b93a826;border:1px solid var(--line);color:var(--text-2);vertical-align:2px;
-  }
-  h3{font-size:14.5px;letter-spacing:-.015em;margin:20px 0 6px}
-  p{margin:8px 0;color:var(--text-2)}
-  ul,ol{margin:8px 0;padding-left:20px;color:var(--text-2)}
-  li{margin:4px 0}
-  .card{border:1px solid var(--line);border-radius:16px;background:#ffffffd9;overflow:hidden}
-  pre{
-    margin:12px 0;padding:14px 16px;border-radius:13px;border:1px solid var(--line);background:#f7f8fd;
-    font-family:var(--mono);font-size:12.5px;line-height:1.6;overflow-x:auto;color:#1f2937;
-  }
-  pre .c{color:#5b6478}
-  pre .k{color:#6d28d9}
-  pre .s{color:#047857}
-  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;border:1px solid var(--line);border-radius:13px;overflow:hidden}
-  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
-  tr:last-child td{border-bottom:0}
-  th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);background:#f2f4fb}
-  td code{white-space:nowrap}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
-  .box{border:1px solid var(--line);border-radius:14px;padding:14px 16px;background:#ffffffd9}
-  .box.deploy{display:grid;gap:4px;margin:18px 0 0;background:linear-gradient(140deg,#4f46e514,transparent 70%)}
-  .box.deploy b{font-size:13px}
-  .box.deploy small{color:var(--text-2);font-size:12px}
-  .box.deploy code{color:#312e81}
-  .box b{display:block;font-size:13px;margin-bottom:4px}
-  .box small{color:var(--text-3);font-size:12px}
-  .note{border-left:3px solid var(--acc-1);padding:10px 14px;border-radius:0 12px 12px 0;background:#4f46e50f;color:var(--text-2);font-size:13px}
-  .warn{border-left-color:var(--warn);background:#b4530914}
-  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid var(--line);background:#eef0f8}
-  .pill.get{color:#0c4a6e;border-color:#0284c74d}
-  .pill.post{color:#14532d;border-color:#16a34a4d}
-  .pill.del{color:#881337;border-color:#e11d484d}
-  .phone-cta{
-    display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin:14px 0 4px;padding:18px 20px;border-radius:18px;
-    border:1px solid #4f46e53d;background:linear-gradient(135deg,#4f46e514,#0e74901a);
-  }
-  .phone-cta .dial{
-    width:52px;height:52px;border-radius:50%;display:grid;place-items:center;font-size:22px;color:#fff;flex:none;
-    background:linear-gradient(140deg,#15803d,#0e7490);box-shadow:0 10px 24px #15803d33;
-  }
-  .phone-cta div{flex:1;min-width:220px}
-  .phone-cta b{display:block;font-size:14.5px}
-  .phone-cta small{color:var(--text-2);font-size:12.5px}
-  footer{margin-top:44px;padding-top:20px;border-top:1px solid var(--line);color:var(--text-3);font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
-  @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
-</style>
+<title>Telephony Control — API &amp; webhook documentation</title>
+  <meta name="description" content="REST API, signed webhooks, device setup and the browser softphone for Telephony Control.">
+  <link rel="icon" type="image/svg+xml" href="/static/images/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/images/favicon.svg">
+  <link rel="stylesheet" href="/static/css/tailwind.css">
 </head>
 <body>
 <div class="wrap">
   <header class="top">
     <a class="brand" href="/">
       <span class="mark">◈</span>
-      <span><b>EIP Telephony — API &amp; webhook documentation</b><small>Connect a CRM, send signed webhooks, or set up a phone</small></span>
+      <span><b>Telephony Control — API &amp; webhook documentation</b><small>Connect a CRM, send signed webhooks, or set up a phone</small></span>
     </a>
     <span class="spacer"></span>
     <a class="btn" href="/phone">Softphone</a>
@@ -120,7 +23,7 @@
   </header>
 
   <p class="lede">
-    This is the reference for connecting your own software to EIP Telephony. It covers the REST API, the signed
+    This is the reference for connecting your own software to Telephony Control. It covers the REST API, the signed
     webhooks we send back, device setup, and the browser softphone. Every example is checked against the running
     server, so an endpoint, event or header listed here is one you can call today.
   </p>
@@ -310,11 +213,11 @@ curl -sS -X POST {{API_BASE}}/api/v1/calls \
     </p>
     <pre>POST /your-endpoint HTTP/1.1
 Content-Type: application/json
-User-Agent: EngineerIP-Telephony/1.0
+User-Agent: Telephony-Telephony/1.0
 Authorization: Bearer &lt;your webhook secret&gt;
-X-EngineerIP-Delivery: 8f1c…-unique-id
-X-EngineerIP-Timestamp: 1758554400
-X-EngineerIP-Signature: sha256=&lt;hex&gt;
+X-Telephony-Delivery: 8f1c…-unique-id
+X-Telephony-Timestamp: 1758554400
+X-Telephony-Signature: sha256=&lt;hex&gt;
 
 {"event":"call.completed","call":{ … },"reason":"hangup_requested"}</pre>
     <p>Verify it like this — with the raw body, before any JSON parsing:</p>
@@ -329,11 +232,11 @@ const ok = expected.length === received.length &amp;&amp;
   crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received));
 
 <span class="c"># Python</span>
-received = headers[<span class="s">"X-EngineerIP-Signature"</span>].removeprefix(<span class="s">"sha256="</span>)
+received = headers[<span class="s">"X-Telephony-Signature"</span>].removeprefix(<span class="s">"sha256="</span>)
 expected = hmac.new(secret.encode(), timestamp.encode() + b<span class="s">"."</span> + raw_body, hashlib.sha256).hexdigest()
 ok = hmac.compare_digest(expected, received)</pre>
     <ul>
-      <li>Reject a timestamp older than five minutes, and treat <code>X-EngineerIP-Delivery</code> as a unique idempotency key.</li>
+      <li>Reject a timestamp older than five minutes, and treat <code>X-Telephony-Delivery</code> as a unique idempotency key.</li>
       <li>Answer <code>2xx</code> within 5 seconds, and only once the event is stored durably. Any other answer, or a timeout, is retried.</li>
       <li>Retries back off: the next attempt waits 60 seconds after the first failure, then 30 seconds longer each time, to at most five minutes. After five failed attempts the delivery is no longer retried and is marked failed.</li>
       <li>The <b>Webhook delivery history</b> table in the console shows attempts, the last error and the final state, so a failing endpoint is visible rather than silent.</li>
@@ -463,7 +366,7 @@ ok = hmac.compare_digest(expected, received)</pre>
   </section>
 
   <footer>
-    <span>EIP Telephony — API &amp; webhook documentation</span>
+    <span>Telephony Control — API &amp; webhook documentation</span>
     <a href="/">Home</a>
     <a href="/phone">Softphone</a>
     <a href="/admin">Open the console</a>

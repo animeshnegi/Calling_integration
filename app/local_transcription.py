@@ -3,7 +3,7 @@
 The parent stays small. PocketSphinx and its bundled English model are loaded
 only in a disposable, low-priority subprocess, never in the ARI event handler.
 This file is also a standalone worker so Python does not import app/__init__.py
-(and the entire web/telephony stack) in the speech-recognition subprocess.
+(and the entire Flask/telephony stack) in the speech-recognition subprocess.
 """
 from __future__ import annotations
 

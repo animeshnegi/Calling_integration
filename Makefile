@@ -1,3 +1,6 @@
+css:
+	npm install && npm run css
+
 test:
 	python -m pytest -q
 

@@ -43,8 +43,8 @@ def test_the_documented_proxy_route_matches_the_one_the_softphone_dials():
     assert "Upgrade" in deployment and "websocket" in deployment.lower()
     assert "wss://<the host this page is served from>/ws" in deployment
 
-    phone = (ROOT / "web" / "phone.js").read_text(encoding="utf-8")
-    admin = (ROOT / "web" / "admin.js").read_text(encoding="utf-8")
+    phone = (ROOT / "app" / "static" / "js" / "phone.js").read_text(encoding="utf-8")
+    admin = (ROOT / "app" / "static" / "js" / "admin.js").read_text(encoding="utf-8")
     # Never derive the WebSocket from the SIP domain or the Service address.
     assert 'location.host+"/ws"' in phone
     assert "credentials.server}/ws" not in admin
@@ -99,8 +99,8 @@ def test_the_routing_canvas_puts_the_journey_on_the_main_number():
     voicemail do not work": everything was configured where the engine never
     looks, and the one flow it does look at could not be edited.
     """
-    js = Path("web/admin.js").read_text()
-    html = Path("web/admin.html").read_text()
+    js = Path("app/static/js/admin.js").read_text()
+    html = Path("app/templates/admin.html").read_text()
     assert "A number has no workflow of its own" not in js
     assert "Main numbers" in js                       # the journey is a first-class target
     assert "incoming journey" in js

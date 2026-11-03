@@ -14,3 +14,4 @@ venv/
 *.tar.gz.sha256
 asterisk/keys/*
 !asterisk/keys/.gitkeep
+node_modules/

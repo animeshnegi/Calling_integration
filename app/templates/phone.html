@@ -4,23 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f6fa">
-  <meta name="description" content="EngineerIP Phone — secure SIP calling, recents, contacts and messages.">
+  <meta name="description" content="Telephony Phone — secure SIP calling, recents, contacts and messages.">
   <meta name="eip-phone-version" content="13">
   <link rel="manifest" href="/manifest.json">
-  <link rel="icon" type="image/png" href="https://engineerip.com/static/img/logo.png">
-  <link rel="apple-touch-icon" href="https://engineerip.com/static/img/logo.png">
+  <link rel="icon" type="image/svg+xml" href="/static/images/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/images/favicon.svg">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
+  <link rel="stylesheet" href="/static/css/tailwind.css">
   <link rel="stylesheet" href="/phone.css?v=13">
-  <title>EngineerIP Phone</title>
+  <title>Telephony Phone</title>
 </head>
 <body>
   <main class="phone-shell">
-    <section id="login-screen" class="login-screen" aria-label="EngineerIP SIP login">
+    <section id="login-screen" class="login-screen" aria-label="Telephony SIP login">
       <div class="login-card">
         <div class="login-brand">
-          <img src="https://engineerip.com/static/img/preloder1.png" alt="EngineerIP" class="login-logo">
+          <img src="/static/images/favicon.svg" alt="Telephony" class="login-logo">
           <div>
-            <strong>EngineerIP</strong>
+            <strong>Telephony</strong>
             <span>Secure SIP Phone</span>
           </div>
         </div>
@@ -37,10 +38,10 @@
             <input id="login-password" required type="password" autocomplete="current-password" placeholder="SIP password">
           </label>
           <label>SIP domain
-            <input id="login-domain" required autocomplete="url" placeholder="sip.engineerip.com" spellcheck="false">
+            <input id="login-domain" required autocomplete="url" placeholder="sip.example.com" spellcheck="false">
           </label>
           <label class="advanced-field">WebSocket server
-            <input id="login-wss" autocomplete="url" placeholder="wss://sip.engineerip.com/ws" spellcheck="false">
+            <input id="login-wss" autocomplete="url" placeholder="wss://sip.example.com/ws" spellcheck="false">
             <small>Leave blank to use <b>wss://domain/ws</b>.</small>
           </label>
           <button id="login-btn" class="login-btn" type="submit">Connect &amp; Sign In</button>
@@ -48,24 +49,24 @@
         </form>
         <div class="login-security">
           <span>●</span>
-          <div><strong>SIP authentication</strong><small>Your password is kept in this browser session and is not sent to the EngineerIP Flask API.</small></div>
+          <div><strong>SIP authentication</strong><small>Your password is kept in this browser session and is not sent to the Telephony Flask API.</small></div>
         </div>
       </div>
     </section>
 
     <section id="console-screen" class="console-screen hidden" aria-live="polite" aria-label="Softphone sign-in">
-      <img src="https://engineerip.com/static/img/preloder1.png" alt="EngineerIP" class="console-logo">
+      <img src="/static/images/favicon.svg" alt="Telephony" class="console-logo">
       <span class="console-label">SOFTPHONE</span>
       <h1 id="console-title" class="console-title">Softphone</h1>
-      <p id="console-status" class="console-status">Waiting for the EngineerIP console to sign this window in…</p>
+      <p id="console-status" class="console-status">Waiting for the Telephony console to sign this window in…</p>
       <div class="spinner" aria-hidden="true"></div>
     </section>
 
-    <section id="phone-app" class="phone-app hidden" aria-label="EngineerIP Phone">
+    <section id="phone-app" class="phone-app hidden" aria-label="Telephony Phone">
       <div class="status-bar" aria-hidden="true"><span id="sb-time">--:--</span><span class="sb-icons"><i class="sb-signal"></i><b>5G</b><i class="sb-battery"><i></i></i></span></div>
       <header class="topbar">
         <div class="brand">
-          <img src="https://engineerip.com/static/img/preloder1.png" alt="EngineerIP" class="brand-logo">
+          <img src="/static/images/favicon.svg" alt="Telephony" class="brand-logo">
           <div>
             <strong id="brand-title">Phone</strong>
             <span id="connection-state" class="state offline"><i></i> Offline</span>
@@ -131,7 +132,7 @@
         <div class="call-shell">
           <div class="call-ambient" aria-hidden="true"></div>
           <header class="call-head">
-            <div class="call-secure"><span></span> EngineerIP secure browser call</div>
+            <div class="call-secure"><span></span> Telephony secure browser call</div>
             <div class="call-avatar-wrap"><div class="active-avatar" id="call-avatar">E</div></div>
             <div id="active-label" class="active-label">Calling</div>
             <h2 id="active-number">—</h2>
@@ -183,8 +184,8 @@
       <p class="settings-note">The SIP login credentials are established on the login screen. Passwords are kept in session storage and are cleared when the browser session ends. For offices with symmetric NAT or blocked STUN, configure a TURN server in the platform's ICE settings; STUN alone may leave a connected call silent.</p>
       <label>Extension<input id="sip-extension" placeholder="101" autocomplete="username"></label>
       <label>SIP username<input id="sip-username" placeholder="MERIDIAN_101_13025550001-webrtc" autocomplete="username"></label>
-      <label>SIP domain<input id="sip-domain" placeholder="sip.engineerip.com"></label>
-      <label>WSS server<input id="sip-wss" placeholder="wss://sip.engineerip.com/ws"></label>
+      <label>SIP domain<input id="sip-domain" placeholder="sip.example.com"></label>
+      <label>WSS server<input id="sip-wss" placeholder="wss://sip.example.com/ws"></label>
       <label>API token <span class="optional">(optional, for server call history)</span><input id="api-token" type="password" placeholder="Bearer token" autocomplete="off"></label>
       <div class="settings-actions"><button type="button" id="logout-btn" class="danger-btn">Log out</button><button type="button" id="connect-btn" class="primary-btn">Reconnect</button><button value="cancel" class="secondary-btn">Close</button></div>
       <div id="settings-status" class="settings-status"></div>

@@ -1,6 +1,6 @@
 # Customer tenancy, provisioning, and billing
 
-EIP Telephony Control separates platform administration from customer self-service.
+Telephony Control separates platform administration from customer self-service.
 
 ## Signup and provisioning
 
@@ -36,7 +36,7 @@ Each customer can create scoped API keys; the administrator can read, test and r
 
 ## Number billing
 
-The default price is **USD $5.00 per phone number per month**. Administrators may set a different price for an individual number. Billing is invoice-only in this release; payment occurs outside EIP Telephony Control.
+The default price is **USD $5.00 per phone number per month**. Administrators may set a different price for an individual number. Billing is invoice-only in this release; payment occurs outside Telephony Control.
 
 The system creates one invoice record per active customer number and billing period. Invoices include the number, period, amount, status, and due date. Duplicate invoices for the same number and period are prevented. A customer can request discontinuation from **Billing & invoices**; the system schedules it for the next monthly renewal date rather than cutting off a paid period immediately. Administrators can also set a specific date. A scheduled discontinuation automatically makes a number inactive on or after that date, preventing inbound/outbound use after configuration synchronization.
 
@@ -51,7 +51,7 @@ Deleting a customer is blocked while the account still owns numbers or extension
 - Customer extension edits cannot claim an extension owned by another customer.
 - A number cannot be assigned to another customer's extension.
 
-## Provision the EngineerIP customer on a deployed VM
+## Provision the Telephony Control customer on a deployed VM
 
 Run the interactive command inside the API container so it uses the deployed encrypted settings database and `SECRET_KEY`:
 

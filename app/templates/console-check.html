@@ -4,61 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Console layout check — EIP Telephony</title>
-  <link rel="icon" type="image/png" href="https://engineerip.com/static/img/logo.png">
-  <link rel="apple-touch-icon" href="https://engineerip.com/static/img/logo.png">
-<style>
-  :root{
-    --bg:#070b14;--surface:#0f1626;--surface-2:#151d31;--line:#ffffff1f;--line-strong:#ffffff33;
-    --text:#eef2ff;--text-2:#b6c0d9;--text-3:#8b93a8;--ok:#22c55e;--bad:#f43f5e;--warn:#f59e0b;
-    --acc:#6366f1;--acc-2:#a855f7;
-    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-  }
-  *{box-sizing:border-box}
-  body{
-    margin:0;padding:28px 22px 60px;background:
-      radial-gradient(1200px 600px at 12% -10%,#6366f12b,transparent 60%),
-      radial-gradient(900px 500px at 90% 0%,#a855f726,transparent 55%),var(--bg);
-    color:var(--text);font:14px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-    min-height:100vh;
-  }
-  .wrap{max-width:1020px;margin:0 auto}
-  header h1{font-size:21px;letter-spacing:-.02em;margin:0 0 6px}
-  header p{margin:0;color:var(--text-2);max-width:70ch}
-  .bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:20px 0 14px}
-  .pill{
-    display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border-radius:999px;
-    border:1px solid var(--line);background:#ffffff0d;font-size:12.5px;font-weight:600;
-  }
-  .pill.ok{border-color:#22c55e59;background:#22c55e1a;color:#86efac}
-  .pill.bad{border-color:#f43f5e59;background:#f43f5e1a;color:#fda4af}
-  .pill.busy{border-color:#6366f159;background:#6366f11a;color:#c7d2fe}
-  button{
-    font:inherit;font-weight:650;color:var(--text);background:#ffffff14;border:1px solid var(--line-strong);
-    padding:8px 15px;border-radius:10px;cursor:pointer;transition:transform .15s ease,border-color .15s ease
-  }
-  button:hover{transform:translateY(-1px);border-color:var(--acc)}
-  button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
-  table{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden}
-  th,td{padding:9px 13px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
-  tr:last-child th,tr:last-child td{border-bottom:0}
-  th{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);font-weight:700}
-  td.result{white-space:nowrap;font-weight:700}
-  td.result.ok{color:#86efac}
-  td.result.bad{color:#fda4af}
-  td.result.info{color:#c7d2fe}
-  td.measured{font-family:var(--mono);font-size:12px;color:var(--text-2)}
-  pre{
-    margin:16px 0 0;padding:14px 16px;background:#00000059;border:1px solid var(--line);border-radius:12px;
-    font-family:var(--mono);font-size:12px;color:var(--text-2);white-space:pre-wrap;max-height:260px;overflow:auto
-  }
-  iframe{
-    width:100%;height:820px;margin-top:18px;border:1px solid var(--line-strong);border-radius:14px;
-    background:#070b14;display:block
-  }
-  .fine{color:var(--text-3);font-size:12px;margin-top:8px}
-  @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
-</style>
+<title>Console layout check — Telephony Control</title>
+  <link rel="icon" type="image/svg+xml" href="/static/images/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/images/favicon.svg">
+  <link rel="stylesheet" href="/static/css/tailwind.css">
 </head>
 <body>
 <div class="wrap">

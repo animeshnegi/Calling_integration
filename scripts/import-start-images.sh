@@ -15,7 +15,7 @@ fi
 # docker load accepts both the native Windows .tar and compressed .tar.gz.
 docker image load --input "$ARCHIVE"
 export IMAGE_TAG="$TAG"
-docker network inspect crm-network >/dev/null 2>&1 || docker network create crm-network
+# Compose creates its own local bridges; no external CRM network is needed.
 docker compose up -d --no-build
 docker compose ps
 

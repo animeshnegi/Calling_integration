@@ -1,3 +1,4 @@
+const { assetPath } = require('./asset-path');
 #!/usr/bin/env node
 /*
  * Optional real-PBX loopback regression. It creates an isolated Asterisk
@@ -28,7 +29,7 @@ const path = require('path');
 const puppeteer = require('puppeteer-core');
 
 const ROOT = path.resolve(__dirname, '..');
-const WEB = path.join(ROOT, 'web');
+
 const ASTERISK = process.env.ASTERISK_BIN;
 const MODULES = process.env.ASTERISK_MODULES;
 const PJSUA = process.env.PJSUA_BIN;
@@ -85,7 +86,7 @@ function staticServer() {
     const type = name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css'
       : name.endsWith('.json') ? 'application/json' : 'text/html';
     res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
-    res.end(fs.readFileSync(path.join(WEB, name)));
+    res.end(fs.readFileSync(assetPath(name)));
   });
 }
 async function capture(page) {

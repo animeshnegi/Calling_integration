@@ -1,3 +1,4 @@
+const { assetPath } = require('./asset-path');
 /* Cascade regression check.
  *
  *   node tools/cascadecheck.js
@@ -18,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const postcss = require('postcss');
 
-const CSS = path.join(__dirname, '..', 'web', 'admin.css');
+const CSS = assetPath('admin.css');
 const root = postcss.parse(fs.readFileSync(CSS, 'utf8'));
 
 /* ------------------------------------------------------------- matching --- */

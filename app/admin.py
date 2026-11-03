@@ -370,7 +370,7 @@ class SettingsStore:
                 );
                 CREATE TABLE IF NOT EXISTS email_config (
                     id INTEGER PRIMARY KEY CHECK(id=1), sendgrid_api_key_enc TEXT NOT NULL DEFAULT '',
-                    from_email TEXT NOT NULL DEFAULT '', from_name TEXT NOT NULL DEFAULT 'EngineerIP Voicemail',
+                    from_email TEXT NOT NULL DEFAULT '', from_name TEXT NOT NULL DEFAULT 'Telephony Voicemail',
                     enabled INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS voicemail_deliveries (
@@ -2670,7 +2670,7 @@ class SettingsStore:
     # a recorded prompt set: the media below must exist on the deployment (or be
     # produced by whatever text-to-speech engine it runs), and the console shows
     # the operator's own text beside it whatever the audio was made from.
-    IVR_DEFAULT_PROMPT = "Welcome to EngineerIP. Please enter the extension you wish to reach."
+    IVR_DEFAULT_PROMPT = "Welcome to Telephony Control. Please enter the extension you wish to reach."
     IVR_VOICES = (
         {"id": "platform", "label": "English (US) - platform voice", "media": "custom/ivr-welcome"},
         {"id": "en-gb", "label": "English (UK)", "media": "custom/ivr-welcome-en-gb"},
@@ -4031,7 +4031,7 @@ class SettingsStore:
             row = db.execute("SELECT sendgrid_api_key_enc,from_email,from_name,enabled,transcription_enabled,updated_at FROM email_config WHERE id=1").fetchone()
         # There is only one email sender. The name of the encrypted column is
         # historical; an Elastic key saved in the old UI remains usable.
-        result = {"provider": "elasticemail", "from_email": "", "from_name": "EngineerIP Voicemail", "enabled": False,
+        result = {"provider": "elasticemail", "from_email": "", "from_name": "Telephony Voicemail", "enabled": False,
                   "has_api_key": False, "transcription_enabled": False}
         if row:
             result.update({"from_email": row["from_email"], "from_name": row["from_name"],
@@ -4067,7 +4067,7 @@ class SettingsStore:
             enabled = flag("enabled")
             transcription_enabled = flag("transcription_enabled")
             from_email = str(data.get("from_email", old.get("from_email", ""))).strip().lower()
-            from_name = str(data.get("from_name", old.get("from_name", "EngineerIP Voicemail"))).strip()[:120]
+            from_name = str(data.get("from_name", old.get("from_name", "Telephony Voicemail"))).strip()[:120]
             if from_email and (len(from_email) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", from_email)):
                 raise ValueError("From email is invalid")
             if "\r" in from_name or "\n" in from_name:
@@ -4179,8 +4179,16 @@ class SettingsStore:
                 # browser RTCIceServer list or the softphone would be handed
                 # config its RTCPeerConnection rejects at call time.
                 parse_ice_servers(text)
-            if key == "recording_format" and text not in {"wav", "wav49", "gsm", "slin16"}:
-                raise ValueError("Unsupported recording format")
+            if key == "recording_format":
+                text = text.strip().lower()
+                # `slin16` is a codec name, not a file extension. Asterisk's
+                # ARI record endpoint resolves the value with
+                # ast_get_format_for_file_ext() and rejects `slin16` with 422,
+                # so accept the legacy spelling but store the real one.
+                if text == "slin16":
+                    text = "sln16"
+                if text not in {"wav", "wav49", "gsm", "sln16"}:
+                    raise ValueError("Unsupported recording format")
             if key in {"recording_enabled", "recording_announcement", "recording_beep", "webrtc_enabled"} and text.lower() not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
                 raise ValueError(f"Invalid value for {key}")
             if key in {"recording_retention_days", "recording_max_duration_seconds"}:
@@ -4224,6 +4232,10 @@ class SettingsStore:
                 text = str(value)
                 if key in {"recording_enabled", "recording_announcement", "recording_beep", "webrtc_enabled"}:
                     text = "true" if text.strip().lower() in {"true", "1", "yes", "on"} else "false"
+                if key == "recording_format":
+                    text = text.strip().lower()
+                    if text == "slin16":
+                        text = "sln16"
                 if key in {"service_host", "service_web_host"}:
                     text = text.strip()
                 if key == "ice_servers":
@@ -4456,7 +4468,9 @@ def register_admin(app, config, on_telephony_change=None):
     store.ensure_bootstrap_admin(config.ADMIN_USERNAME, config.ADMIN_PASSWORD)
     store.bootstrap_telephony(config)
     app.extensions["settings_store"] = store
-    web_dir = str(Path(app.root_path).parent / "web")
+    # HTML lives in app/templates; CSS/JS/images in app/static.
+    template_dir = str(Path(app.root_path) / "templates")
+    static_dir = Path(app.root_path) / "static"
 
     @app.after_request
     def no_stale_admin_ui_after_image_upgrade(response):
@@ -4534,12 +4548,26 @@ def register_admin(app, config, on_telephony_change=None):
 
     @app.get("/admin-assets/<path:filename>")
     def admin_asset(filename):
-        if filename not in {"admin.css", "admin.js"}:
+        """Legacy flat-layout URLs -> the organised static/ tree.
+
+        Old bookmarks and cached pages ask for /admin-assets/admin.css and
+        /admin-assets/admin.js. Both still resolve, from their new homes.
+        """
+        name = Path(filename).name
+        if name.endswith(".css"):
+            folder, target = static_dir / "css", "tailwind.css"
+        elif name.endswith(".js"):
+            folder, target = static_dir / "js", name
+        elif name.endswith((".svg", ".png", ".ico", ".webp", ".jpg")):
+            folder, target = static_dir / "images", name
+        else:
+            folder, target = static_dir, name
+        if not (folder / target).is_file():
             return jsonify({"error": "not found"}), 404
-        return send_from_directory(web_dir, filename, max_age=0)
+        return send_from_directory(str(folder), target, max_age=0)
 
     @app.get("/")
-    def landing_page(): return send_from_directory(web_dir, "index.html")
+    def landing_page(): return send_from_directory(template_dir, "index.html")
 
     @app.post("/signup")
     def public_signup():
@@ -4554,14 +4582,14 @@ def register_admin(app, config, on_telephony_change=None):
             data.update({"role": "user", "extension": "", "active": True})
             user_id = store.save_user(data)
             store.add_activity(user_id, user_id, "customer.signup", "customer", user_id, f"{data['company_name']} account created")
-            store.add_notification(user_id, "welcome", "Welcome to EIP Telephony", "Request a phone number to begin configuring your telephony environment.")
+            store.add_notification(user_id, "welcome", "Welcome to Telephony Control", "Request a phone number to begin configuring your telephony environment.")
             return jsonify({"ok": True, "user_id": user_id, "message": "Account created. Sign in to continue."}), 201
         except INPUT_DB_ERRORS as exc:
             return jsonify({"error": str(exc)}), 400
 
     @app.get("/login")
     @app.get("/admin/login")
-    def admin_login_page(): return send_from_directory(web_dir, "admin-login.html")
+    def admin_login_page(): return send_from_directory(template_dir, "admin-login.html")
 
     @app.get("/console-check")
     @login_required
@@ -4573,7 +4601,7 @@ def register_admin(app, config, on_telephony_change=None):
         scrolls, what pins - can only be measured where it is really rendered.
         The page reads positions and sizes and shows nothing about any customer.
         """
-        return send_from_directory(web_dir, "console-check.html")
+        return send_from_directory(template_dir, "console-check.html")
 
     @app.get("/documentation")
     def documentation_page():
@@ -4585,7 +4613,7 @@ def register_admin(app, config, on_telephony_change=None):
         configured, which a device needs to register anyway, so every example
         names this deployment rather than a placeholder.
         """
-        page_file = Path(web_dir) / "documentation.html"
+        page_file = Path(template_dir) / "documentation.html"
         page = page_file.read_text(encoding="utf-8")
         service = store.service_address(request.host.split(":")[0] if request.host else "")
         api_base = service["api_base"] or str(request.host_url).rstrip("/")
@@ -4626,7 +4654,7 @@ def register_admin(app, config, on_telephony_change=None):
 
     @app.get("/admin")
     @login_required
-    def admin_page(): return send_from_directory(web_dir, "admin.html")
+    def admin_page(): return send_from_directory(template_dir, "admin.html")
 
     @app.get("/admin/api/state")
     @login_required

@@ -58,6 +58,59 @@ class TelephonyService:
         except OSError:
             return False
 
+    def _notify_crm_safely(self, event: str, call: Call | None, extra: dict[str, Any] | None = None) -> None:
+        """A CRM/webhook hiccup is not a telephony failure.
+
+        Recording setup shares a thread with call events. If enqueueing a
+        webhook raises, the recorder must not be marked failed while it is
+        still writing audio.
+        """
+        if call is None:
+            return
+        try:
+            self.notify_crm(event, call, extra)
+        except Exception:
+            logger.exception("CRM notification %s failed for call %s", event, call.call_id)
+
+    def _stored_recording(self, name: str) -> dict[str, Any] | None:
+        """Positive evidence that Asterisk actually has playable audio.
+
+        A missing answer is ambiguous (ARI down, file still flushing, or no
+        file at all), so callers must never treat it as proof of failure.
+        """
+        if not name:
+            return None
+        try:
+            return self.asterisk.get_stored_recording(name)
+        except Exception:
+            logger.warning("Could not query stored recording %s from Asterisk", name, exc_info=True)
+            return None
+
+    def _mark_recording_available(
+        self, call: Call, stored: dict[str, Any], event_format: str = "", reason: str = "asterisk_finished",
+    ) -> Call | None:
+        """Only a stored file makes a recording playable, whatever ARI said."""
+        changes: dict[str, Any] = {"recording_status": "finalized"}
+        if stored.get("filename"):
+            changes["recording_path"] = str(stored["filename"])
+        fmt = str(stored.get("format") or event_format or "").strip()
+        if fmt and not call.recording_format:
+            changes["recording_format"] = fmt
+        updated = self.store.update(call.call_id, **changes)
+        self._notify_crm_safely("call.recording_finished", updated, {"reason": reason})
+        return updated
+
+    @staticmethod
+    def _recently_ended(call: Call, days: int = 30) -> bool:
+        """Bound how long a failed attempt is retried against ARI."""
+        try:
+            ended = datetime.fromisoformat(str(call.ended_at))
+            if ended.tzinfo is None:
+                ended = ended.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return False
+        return (datetime.now(timezone.utc) - ended).total_seconds() <= days * 86400
+
     # How long an answer from Asterisk about registered endpoints is reused.
     # Every console refresh asks, and Asterisk should not be asked twice for the
     # same state.
@@ -164,7 +217,13 @@ class TelephonyService:
     def _recording_settings(self, extension: str | None = None) -> dict[str, Any]:
         settings = self.settings_store.get_settings() if self.settings_store else {}
         fmt = str(settings.get("recording_format", "wav")).lower().strip()
-        if fmt not in {"wav", "wav49", "gsm", "slin16"}:
+        # Asterisk resolves `format` with ast_get_format_for_file_ext(). The
+        # 16 kHz linear file extension is `sln16`; the old `slin16` spelling is
+        # a codec name, not a file extension, and makes ARI answer 422
+        # "specified format is unknown on this system" on every recording.
+        if fmt == "slin16":
+            fmt = "sln16"
+        if fmt not in {"wav", "wav49", "gsm", "sln16"}:
             fmt = "wav"
         try:
             max_duration = max(0, int(settings.get("recording_max_duration_seconds", "0")))
@@ -1021,34 +1080,72 @@ class TelephonyService:
             except Exception:
                 pass
             self._hangup_call_channels(current)
-            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed")
+            # The bridge never existed, so no recorder was ever started. Marking
+            # the recording "failed" here invented a "Recording failed / no
+            # playable audio" row for calls that never attempted one; the call
+            # itself is already marked failed.
+            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None)
             self.notify_crm("call.failed", updated, {"reason": "bridge_setup_failed"})
             return
         updated = self.store.update(current.call_id, bridge_id=bridge_id, status="bridged")
         self.notify_crm("call.bridged", updated)
-        # Everything below is enhancement on top of a live, bridged call. A
-        # failure here - a recorder that cannot write, a notification that
-        # cannot queue - must never hang up the people already talking: the
-        # recording is marked failed and the call carries on.
+        # A recording is an enhancement on top of a live, bridged call. Neither
+        # a recorder that cannot write nor a CRM/webhook hiccup may hang up the
+        # people already talking - and a hiccup after a successful start must
+        # not label a healthy recorder as failed.
         try:
             recording = self._recording_settings(updated.extension)
-            if not recording["enabled"]:
-                return
-            name = f"call-{updated.call_id}"
-            # Persist intent first: a fast finish event must already be
-            # correlatable, and a failed start must remain visible in history.
-            updated = self.store.update(updated.call_id, recording_name=name, recording_format=recording["format"], recording_status="recording")
-            self.asterisk.start_bridge_recording(bridge_id, name, recording["format"], recording["beep"], recording["max_duration"])
-            self.notify_crm("call.recording_started", updated)
-            if recording["announcement"] and recording["announcement_media"]:
-                try:
-                    self.asterisk.play_bridge_media(bridge_id, recording["announcement_media"])
-                except Exception:
-                    self.notify_crm("call.recording_announcement_failed", updated)
         except Exception:
-            logger.exception("Recording setup failed for call %s", current.call_id)
-            updated = self.store.update(current.call_id, recording_status="failed")
-            self.notify_crm("call.recording_failed", updated)
+            logger.exception("Recording settings could not be read for call %s", current.call_id)
+            return
+        if not recording["enabled"]:
+            return
+        name = f"call-{updated.call_id}"
+        # Persist intent first: a fast finish event must already be
+        # correlatable, and a failed start must remain visible in history.
+        try:
+            updated = self.store.update(
+                updated.call_id, recording_name=name,
+                recording_format=recording["format"], recording_status="recording",
+            )
+        except Exception:
+            logger.exception("Could not persist recording intent for call %s", current.call_id)
+            return
+        try:
+            self.asterisk.start_bridge_recording(
+                bridge_id, name, recording["format"], recording["beep"], recording["max_duration"],
+            )
+        except Exception as exc:
+            # A 409 (name already exists after a worker restart), a lost HTTP
+            # response, or a 422 (unknown format) does not prove audio is lost.
+            # If Asterisk has the file, it is a recording, not a failure.
+            stored = self._stored_recording(name)
+            if stored:
+                logger.warning(
+                    "Recording %s for call %s has stored audio despite a failed start (%s); recovering it",
+                    name, current.call_id, exc,
+                )
+                self._mark_recording_available(updated, stored, reason="recovered_after_start_failure")
+                return
+            logger.error(
+                "Recording %s for call %s could not start: %s", name, current.call_id, exc,
+                exc_info=True,
+            )
+            failed = self.store.update(current.call_id, recording_status="failed")
+            self._notify_crm_safely(
+                "call.recording_failed", failed, {"reason": f"start_failed: {exc}"},
+            )
+            return
+        # Everything after a successful start is housekeeping. A webhook or an
+        # announcement failure must not downgrade a recorder that is running.
+        current_state = self.store.get(updated.call_id)
+        if current_state and current_state.recording_status != "finalized":
+            self._notify_crm_safely("call.recording_started", current_state)
+        if recording["announcement"] and recording["announcement_media"]:
+            try:
+                self.asterisk.play_bridge_media(bridge_id, recording["announcement_media"])
+            except Exception:
+                self._notify_crm_safely("call.recording_announcement_failed", updated)
 
     def _finalize(self, call_id: str, reason: str, keep: str = "") -> None:
         with self._finalize_lock:
@@ -1060,10 +1157,27 @@ class TelephonyService:
             if not call or call.status == "completed":
                 return
             ended = iso_now()
-            # Publish the transition before hangup/stop can emit a finish event.
+            # Publish the transition before stop/hangup can emit a finish event.
             # The SQL guard preserves a finish event that already arrived.
             if call.recording_name:
                 self.store.mark_recording_finalizing(call_id)
+            # Stop the recorder WHILE both parties are still in the bridge.
+            # ARI bridge recording writes through an internal "Recorder"
+            # channel; hanging the callers up first leaves that channel with no
+            # audio source ("No audio available on Recorder/..."), so the file
+            # is cut short or empty and the later stop call arrives after the
+            # recorder is already gone (404). Stopping first guarantees a clean
+            # RecordingFinished with all of the conversation in the file.
+            recording_status = call.recording_status
+            # A failed start may still have left a live recorder behind; try to
+            # stop it too. stop_recording logs a 404 instead of hiding it.
+            if call.recording_name and recording_status in {"recording", "failed"}:
+                try:
+                    self.asterisk.stop_recording(call.recording_name)
+                except Exception:
+                    logger.exception(
+                        "Could not stop recording %s for call %s", call.recording_name, call_id,
+                    )
             # The call is over: nothing it owns may keep ringing. Anything
             # still up is an orphan of the same call and answers into a void.
             # `keep` names a channel deliberately handed on - a caller leaving
@@ -1075,9 +1189,6 @@ class TelephonyService:
                 duration = max(0, int((datetime.fromisoformat(ended) - started).total_seconds()))
             except (ValueError, TypeError):
                 duration = 0
-            recording_status = call.recording_status
-            if call.recording_name and recording_status == "recording":
-                self.asterisk.stop_recording(call.recording_name)
             if call.bridge_id:
                 self.asterisk.destroy_bridge(call.bridge_id)
             terminal_status = "failed" if call.status == "failed" else ("completed" if call.answered else "failed")
@@ -1131,22 +1242,45 @@ class TelephonyService:
             recording = event.get("recording") or {}
             name = str(recording.get("name") or "")
             call = self.store.find_by_recording(name) if name else None
-            if call:
-                changes: dict[str, Any] = {
-                    "recording_status": "finalized" if event_type == "RecordingFinished" else "failed"
-                }
-                if recording.get("format") and not call.recording_format:
-                    changes["recording_format"] = str(recording["format"])
-                if event_type == "RecordingFinished":
-                    stored = self.asterisk.get_stored_recording(name) if name else None
-                    if stored:
-                        filename = stored.get("filename")
-                        if filename:
-                            changes["recording_path"] = str(filename)
-                        if stored.get("format") and not call.recording_format:
-                            changes["recording_format"] = str(stored["format"])
-                updated = self.store.update(call.call_id, **changes)
-                self.notify_crm(f"call.recording_{'finished' if event_type == 'RecordingFinished' else 'failed'}", updated)
+            if not call:
+                return
+            # A late failure event must never undo audio that is already being
+            # served, or resurrect a recording the retention policy deleted.
+            if call.recording_status in {"finalized", "available", "deleted"}:
+                return
+            cause = str(recording.get("cause") or "").strip()
+            if event_type == "RecordingFailed":
+                logger.error(
+                    "Asterisk recording %s for call %s failed: %s",
+                    name, call.call_id, cause or "no cause reported by Asterisk",
+                )
+            # Only a stored file is proof of playable audio. Asterisk can
+            # report a transient failure at teardown (or fail the HTTP start)
+            # after the WAV was already written; claiming "no playable audio"
+            # in that case discards a good recording.
+            stored = self._stored_recording(name)
+            if stored:
+                self._mark_recording_available(
+                    call, stored,
+                    event_format=str(recording.get("format") or ""),
+                    reason="recovered_after_failure" if event_type == "RecordingFailed" else "asterisk_finished",
+                )
+                return
+            if event_type == "RecordingFailed":
+                failed = self.store.update(call.call_id, recording_status="failed")
+                self._notify_crm_safely(
+                    "call.recording_failed", failed,
+                    {"reason": cause or "asterisk_recording_failed"},
+                )
+                return
+            # Finished but no stored file yet: ARI may still be flushing, or
+            # Asterisk failed to open the writestream. Keep it finalizing so
+            # reconciliation keeps looking instead of offering a dead player.
+            logger.warning(
+                "Asterisk reported recording %s for call %s finished, but no stored audio is available yet",
+                name, call.call_id,
+            )
+            self.store.mark_recording_finalizing(call.call_id)
             return
 
         channel = event.get("channel") or {}
@@ -1288,21 +1422,23 @@ class TelephonyService:
 
         A missing stored response may mean ARI is down or still flushing; it
         must not be interpreted as a failed recording or downgrade a live one.
+        Failed attempts are retried too: a deployment that hit the old teardown
+        order often has a perfectly good WAV behind a "failed" row. Only a
+        stored file upgrades the row, and the retry window is bounded so a call
+        that genuinely has no audio is not polled forever.
         """
         for call in self.store.stale_recordings():
             if not call.ended_at:
                 continue
-            try:
-                stored = self.asterisk.get_stored_recording(call.recording_name or "")
-            except Exception:
+            if call.recording_status == "failed" and not self._recently_ended(call):
                 continue
-            if stored:
-                updated = self.store.update(
-                    call.call_id, recording_status="finalized",
-                    recording_format=stored.get("format") or call.recording_format,
-                    recording_path=stored.get("filename") or call.recording_path,
-                )
-                self.notify_crm("call.recording_finished", updated, {"reason": "reconciled"})
+            stored = self._stored_recording(call.recording_name or "")
+            if not stored:
+                continue
+            self._mark_recording_available(
+                call, stored,
+                reason="recovered_after_failure" if call.recording_status == "failed" else "reconciled",
+            )
 
     def recover_incomplete_calls(self) -> None:
         """Reconcile persisted calls with channels that survived an ARI worker restart."""

@@ -1,6 +1,6 @@
 # MySQL database configuration
 
-EIP Telephony Control uses the single `DATABASE_URI` connection for customer accounts, extensions, numbers, providers, calls, recordings metadata, API keys, webhooks, billing, and invoices. Recording and voicemail audio remain in their dedicated Docker volumes.
+Telephony Control uses the single `DATABASE_URI` connection for customer accounts, extensions, numbers, providers, calls, recordings metadata, API keys, webhooks, billing, and invoices. Recording and voicemail audio remain in their dedicated Docker volumes.
 
 Production startup requires MySQL. SQLite remains available only as a local test/development fallback when `DATABASE_URI` is empty.
 

@@ -1,3 +1,4 @@
+const { assetPath } = require('./asset-path');
 /* Real-browser WebRTC/JsSIP regression (no live PBX required).
  *
  * Install puppeteer-core and ws, and provide a Chrome/Chromium executable as
@@ -25,7 +26,7 @@ const assert = require('assert/strict');
 const puppeteer = require('puppeteer-core');
 const { WebSocketServer, WebSocket } = require('ws');
 
-const root = path.join(__dirname, '..', 'web');
+const root = path.join(__dirname, '..', 'app');
 const records = [], contacts = new Map(), dialogs = new Map(), challenges = new Set();
 let privateConnectionLine = false, rewrittenConnectionLines = 0, challengeNextInvite = false;
 const header = (message, name) => {

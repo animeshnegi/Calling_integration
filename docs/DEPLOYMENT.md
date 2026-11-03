@@ -4,15 +4,12 @@
 
 For building the images on a personal computer, exporting them, and importing them on a low-resource Google VM without rebuilding, follow [`OPERATIONS.md`](OPERATIONS.md) first. This guide covers telephony configuration and live verification.
 
-## 1. Create/connect the private Docker network
+## 1. No shared network is required
 
-If EngineerIP already creates a Docker network named `crm-network`, use it. Otherwise create it once:
-
-```bash
-docker network create crm-network
-```
-
-The telephony API joins that network, allowing the CRM container to reach it by its Docker DNS name.
+Telephony Control is standalone. Compose creates its own local bridges, and the
+API is published on `127.0.0.1:5000` for a reverse proxy. Other systems reach
+it over HTTPS with a scoped API key or receive signed webhooks; no CRM
+container needs to join a Docker network.
 
 ## 2. Configure secrets and IPComms
 
@@ -70,9 +67,8 @@ The database is never bundled in production compose: the app connects to
 whatever `DATABASE_URI` in `.env` points at, so any MySQL works - a Docker
 container, a host-installed server, or a managed cloud database.
 
-The base `docker-compose.yml` attaches to two production-only external
-networks (`crm-network` and the 1panel MySQL network), which do not exist on
-a laptop or a plain test box. For local runs add the override file:
+The base `docker-compose.yml` uses only local bridges. For a throwaway MySQL on
+a laptop or a plain test box, add the override file:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
@@ -172,21 +168,15 @@ curl http://127.0.0.1:5000/health
 
 The API health endpoint should return HTTP 200 only when Asterisk is reachable and the ARI worker readiness file is fresh.
 
-## 9. Connect EngineerIP CRM
+## 9. Connect your own systems
 
-Attach EngineerIP's CRM container to `crm-network` if it is not already attached:
-
-```bash
-docker network connect crm-network engineerip-crm
-```
-
-Then set the CRM integration base URL to:
-
-```text
-http://engineerip-telephony-api:5000
-```
-
-Use `POST /api/v1/calls` from server-side CRM code. Keep `TELEPHONY_TOKEN` server-side.
+Put the API behind an HTTPS reverse proxy and use its public base URL, e.g.
+`https://telephony.example.com`. Create a scoped API key in the console and
+call `POST /api/v1/calls` from server-side code, or register a signed webhook
+endpoint to receive call lifecycle events. Keep tokens server-side; never put
+the master token in a browser. Any CRM, helpdesk or internal tool can
+integrate - this service is not tied to a particular vendor's product or
+network. See [CRM_INTEGRATION.md](CRM_INTEGRATION.md) and [WEBHOOKS.md](WEBHOOKS.md).
 
 ## 10. Outbound click-to-call verification
 

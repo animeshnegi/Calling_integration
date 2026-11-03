@@ -1,3 +1,4 @@
+const { assetPath } = require('./asset-path');
 /* Legibility audit for the two console skins.
  *
  *   node tools/contrastcheck.js
@@ -11,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const CSS = fs.readFileSync(path.join(__dirname, '..', 'web', 'admin.css'), 'utf8');
+const CSS = fs.readFileSync(assetPath('admin.css'), 'utf8');
 
 /* ---------------------------------------------------------------- parsing */
 function parse(css) {

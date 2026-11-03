@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Telephony Control — business calling, your way</title>
+  <meta name="description" content="A standalone telephony platform: business numbers, extensions, voicemail, recordings, a browser softphone, and a REST API with signed webhooks.">
+  <link rel="icon" type="image/svg+xml" href="/static/images/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/images/favicon.svg">
+  <link rel="stylesheet" href="/static/css/tailwind.css">
+</head>
+<body class="bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+<nav class="wrap mx-auto flex h-20 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
+  <a class="flex items-center gap-3 font-semibold" href="/" aria-label="Telephony Control home">
+    <img src="/static/images/logo.svg" alt="Telephony Control" class="h-9 w-9 rounded-xl" width="36" height="36">
+    <span>Telephony Control</span>
+  </a>
+  <div class="flex items-center gap-1 sm:gap-3 text-sm">
+    <a class="btn primary sm hidden sm:inline-flex" href="/phone" title="Open the browser softphone">Softphone</a>
+    <a class="btn ghost sm hidden md:inline-flex" href="#features" title="Platform features">Features</a>
+    <a class="btn ghost sm hidden md:inline-flex" href="/documentation" title="REST API and signed webhook reference">API docs</a>
+    <a class="btn ghost sm" href="/login" title="Sign in to your workspace">Log in</a>
+    <a class="btn primary sm" href="#signup" title="Create a workspace">Get started</a>
+  </div>
+</nav>
+
+<main>
+  <section class="wrap mx-auto max-w-6xl px-4 py-16 sm:px-6 sm:py-24">
+    <div class="grid items-center gap-10 lg:grid-cols-2">
+      <div>
+        <p class="text-xs font-bold uppercase tracking-[.2em] text-brand-600">Standalone cloud telephony</p>
+        <h1 class="mt-4 text-4xl font-bold leading-[1.05] tracking-tight sm:text-6xl">Business calling,<br><span class="bg-gradient-to-r from-brand-600 to-sky-500 bg-clip-text text-transparent">on your terms.</span></h1>
+        <p class="mt-5 max-w-lg text-base leading-relaxed text-slate-600 dark:text-slate-300">Numbers, extensions, voicemail, recordings and a browser phone. Connect your own CRM through the REST API or signed webhooks.</p>
+        <div class="mt-8 flex flex-wrap gap-3">
+          <a class="btn primary" href="#signup" title="Create a workspace">Create account</a>
+          <a class="btn" href="/login" title="Sign in to an existing workspace">Log in</a>
+        </div>
+        <ul class="mt-8 flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-500 dark:text-slate-400" aria-label="Highlights">
+          <li title="Bring your own SIP carrier">Your carrier</li>
+          <li title="Per-number monthly invoices">Invoice billing</li>
+          <li title="Discontinue a number at any time">No lock-in</li>
+        </ul>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-panel dark:border-slate-800 dark:bg-slate-900" role="img" aria-label="Preview of the telephony dashboard with numbers, extensions and recent calls">
+        <div class="flex items-center justify-between border-b border-slate-100 pb-3 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+          <strong class="text-sm text-slate-800 dark:text-slate-100">Overview</strong>
+          <span class="inline-flex items-center gap-1.5"><i class="h-2 w-2 rounded-full bg-emerald-500"></i>Operational</span>
+        </div>
+        <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div class="rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60"><small class="block text-xs text-slate-500">Numbers</small><b class="mt-1 block text-2xl">3</b></div>
+          <div class="rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60"><small class="block text-xs text-slate-500">Answered</small><b class="mt-1 block text-2xl">92%</b></div>
+          <div class="rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60"><small class="block text-xs text-slate-500">Extensions</small><b class="mt-1 block text-2xl">8</b></div>
+          <div class="rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60"><small class="block text-xs text-slate-500">Voicemail</small><b class="mt-1 block text-2xl">2</b></div>
+        </div>
+        <div class="mt-3 flex items-center justify-between rounded-xl bg-slate-50 p-3 text-sm dark:bg-slate-800/60">
+          <span>Recent call <small class="block text-xs text-slate-500">+1 302 555 0198</small></span>
+          <span class="text-emerald-600 dark:text-emerald-400">Completed</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap mx-auto max-w-6xl px-4 py-14 sm:px-6" id="features">
+    <h2 class="text-center text-3xl font-bold tracking-tight">Everything included</h2>
+    <p class="mx-auto mt-3 max-w-xl text-center text-sm text-slate-500 dark:text-slate-400" title="A self-hosted telephony platform: you own the carrier relationship, the data and the deployment.">Self-hosted, with no external platform dependency.</p>
+    <div class="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <article class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900" title="Assign each number to an extension and choose the outbound caller ID per device.">
+        <span class="text-xl text-brand-600" aria-hidden="true">☎</span><h3 class="mt-3 text-sm font-semibold">Numbers &amp; routing</h3>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Multiple numbers, per-line call flows.</p>
+      </article>
+      <article class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900" title="SIP credentials are generated and encrypted per extension, with an optional WebRTC identity.">
+        <span class="text-xl text-brand-600" aria-hidden="true">⌁</span><h3 class="mt-3 text-sm font-semibold">Team extensions</h3>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Desk phones and browser devices.</p>
+      </article>
+      <article class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900" title="Scoped API keys, HMAC-signed webhook deliveries, call lifecycle events and idempotency keys.">
+        <span class="text-xl text-brand-600" aria-hidden="true">◇</span><h3 class="mt-3 text-sm font-semibold">API &amp; webhooks</h3>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Integrate any CRM over HTTPS.</p>
+      </article>
+      <article class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900" title="Private mailboxes, browser playback, optional email delivery with offline transcription.">
+        <span class="text-xl text-brand-600" aria-hidden="true">✉</span><h3 class="mt-3 text-sm font-semibold">Voicemail</h3>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Private mailboxes and playback.</p>
+      </article>
+      <article class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900" title="Recording is off by default: a platform veto plus a per-extension opt-in must both be enabled.">
+        <span class="text-xl text-brand-600" aria-hidden="true">◉</span><h3 class="mt-3 text-sm font-semibold">Optional recording</h3>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Per-device opt-in, secure playback.</p>
+      </article>
+      <article class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900" title="Monthly per-number invoices, renewal cycles and number discontinuation requests.">
+        <span class="text-xl text-brand-600" aria-hidden="true">▣</span><h3 class="mt-3 text-sm font-semibold">Clear billing</h3>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Invoices and number lifecycle.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="wrap mx-auto max-w-6xl px-4 py-14 sm:px-6" id="softphone">
+    <div class="grid items-center gap-10 lg:grid-cols-2">
+      <div class="mx-auto w-full max-w-xs rounded-[2.5rem] bg-slate-900 p-5 shadow-2xl" role="img" aria-label="Browser softphone with a keypad and an active call">
+        <div class="rounded-3xl bg-slate-100 p-4 text-center dark:bg-slate-800">
+          <small class="block text-[11px] font-bold uppercase tracking-widest text-slate-500">On a call · 02:14</small>
+          <b class="my-3 block text-xl tabular-nums">+1 302 555 0198</b>
+          <div class="grid grid-cols-3 gap-2" aria-hidden="true">
+            <span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">1</span><span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">2</span><span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">3</span>
+            <span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">4</span><span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">5</span><span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">6</span>
+            <span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">7</span><span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">8</span><span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">9</span>
+            <span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">*</span><span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">0</span><span class="grid h-9 place-items-center rounded-full bg-white text-sm font-semibold shadow-sm">#</span>
+          </div>
+          <div class="mt-3 grid h-11 place-items-center rounded-full bg-emerald-600 text-lg text-white" aria-hidden="true">☎</div>
+        </div>
+      </div>
+      <div>
+        <p class="text-xs font-bold uppercase tracking-[.2em] text-brand-600">Browser softphone</p>
+        <h2 class="mt-3 text-3xl font-bold tracking-tight">A phone in your tab.</h2>
+        <p class="mt-3 text-sm text-slate-500 dark:text-slate-400" title="HD (G.722) audio when both ends support it; keypad, recents, contacts, mute, speaker, hold and DTMF.">Nothing to install.</p>
+        <ol class="mt-6 space-y-3">
+          <li class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><b class="text-sm">Sign in</b><p class="mt-1 text-xs text-slate-500 dark:text-slate-400" title="Opening the softphone from the console signs in as that extension automatically.">Use your extension credentials.</p></li>
+          <li class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><b class="text-sm">Dial</b><p class="mt-1 text-xs text-slate-500 dark:text-slate-400" title="Type or paste a number, press a contact, or dial a three-digit extension on your own number.">Type, paste or pick a contact.</p></li>
+          <li class="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><b class="text-sm">In a call</b><p class="mt-1 text-xs text-slate-500 dark:text-slate-400" title="Mute, speaker, hold, answer/decline incoming calls, and Esc to hang up.">Mute, hold and hang up.</p></li>
+        </ol>
+        <div class="mt-6 flex flex-wrap gap-3">
+          <a class="btn primary" href="/phone" title="Open the browser softphone">Open softphone</a>
+          <a class="btn" href="/documentation#softphone" title="Read the softphone setup guide">Setup guide</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap mx-auto max-w-6xl px-4 py-14 sm:px-6" id="pricing">
+    <div class="mx-auto max-w-xl rounded-2xl border border-brand-200 bg-white p-8 text-center shadow-panel dark:border-brand-500/30 dark:bg-slate-900">
+      <p class="text-xs font-bold uppercase tracking-[.2em] text-brand-600">US number</p>
+      <p class="mt-3 text-5xl font-bold tracking-tight">$5<small class="ml-2 text-sm font-medium text-slate-500">/ number / month</small></p>
+      <ul class="mx-auto mt-6 grid gap-2 text-left text-sm sm:grid-cols-2" aria-label="Included features">
+        <li>US phone number</li><li>Multiple extensions</li><li>Inbound &amp; outbound</li><li>Voicemail</li><li>Optional recordings</li><li>API keys &amp; webhooks</li>
+      </ul>
+      <a class="btn primary mt-7 w-full" href="#signup" title="Create a workspace">Create account</a>
+    </div>
+  </section>
+
+  <section class="wrap mx-auto max-w-6xl px-4 py-14 sm:px-6" id="signup">
+    <div class="grid items-center gap-10 rounded-2xl border border-slate-200 bg-white p-7 shadow-panel dark:border-slate-800 dark:bg-slate-900 lg:grid-cols-2 lg:p-10">
+      <div>
+        <p class="text-xs font-bold uppercase tracking-[.2em] text-brand-600">Create account</p>
+        <h2 class="mt-3 text-3xl font-bold tracking-tight">Your workspace.</h2>
+        <p class="mt-3 text-sm text-slate-500 dark:text-slate-400" title="An administrator assigns a number and SIP service after the account is created; the account holds no carrier credentials.">Start with an empty workspace.</p>
+      </div>
+      <form class="grid gap-3" id="signup-form">
+        <input name="full_name" maxlength="120" placeholder="Your name" aria-label="Your name" title="Full name" required>
+        <input name="company_name" maxlength="160" placeholder="Company name" aria-label="Company name" title="Company name" required>
+        <input name="job_role" maxlength="120" placeholder="Your role" aria-label="Your role" title="Owner, IT, Operations…" required>
+        <input name="phone" type="tel" maxlength="30" placeholder="Phone number" aria-label="Phone number" title="Contact phone number" required>
+        <input name="username" minlength="3" maxlength="80" pattern="[a-zA-Z0-9._-]+" placeholder="Username" aria-label="Username" title="Letters, numbers, dot, dash or underscore" required>
+        <input name="email" type="email" placeholder="Business email" aria-label="Business email" title="Business email" required>
+        <input name="password" type="password" minlength="14" maxlength="256" placeholder="Password (14+ characters)" aria-label="Password" title="Minimum 14 characters" required>
+        <button class="btn primary" type="submit">Create account</button>
+        <div class="min-h-5 text-sm text-emerald-600" id="signup-message" role="status"></div>
+        <small class="text-xs text-slate-500">Already registered? <a class="font-semibold text-brand-600" href="/login">Log in</a>.</small>
+      </form>
+    </div>
+  </section>
+</main>
+
+<footer class="border-t border-slate-200 py-7 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+  <div class="wrap mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 sm:px-6">
+    <span>© 2026 Telephony Control</span>
+    <span><a class="hover:text-brand-600" href="/phone">Softphone</a> · <a class="hover:text-brand-600" href="/documentation">API</a> · <a class="hover:text-brand-600" href="/login">Sign in</a></span>
+  </div>
+</footer>
+<script>document.querySelector('#signup-form').addEventListener('submit',async event=>{event.preventDefault();const button=event.target.querySelector('button'),message=document.querySelector('#signup-message');button.disabled=true;message.className='min-h-5 text-sm text-emerald-600';message.textContent='Creating account…';try{const response=await fetch('/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(event.target)))}),data=await response.json();if(!response.ok)throw Error(data.error||'Signup failed');message.textContent='Account created. Redirecting to login…';setTimeout(()=>location='/login',900)}catch(error){message.className='min-h-5 text-sm text-rose-600';message.textContent=error.message;button.disabled=false}});</script>
+</body></html>

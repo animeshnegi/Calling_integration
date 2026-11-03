@@ -8,9 +8,9 @@ from typing import Any, Callable
 
 from flask import Response, g, jsonify, redirect, request, send_file, send_from_directory, stream_with_context
 
-from .admin import extension_digits, extension_mailbox, extension_scope
-from .config import Config
-from .voicemail import mailbox_name
+from ..admin import extension_digits, extension_mailbox, extension_scope
+from ..config import Config
+from ..voicemail import mailbox_name
 
 E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 CALL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -506,7 +506,7 @@ def register_routes(app, service):
     def index():
         if not service.config.ENABLE_DIAGNOSTIC_UI:
             return jsonify({"error": "not found"}), 404
-        return send_from_directory(str(Path(app.root_path).parent / "web"), "index.html")
+        return send_from_directory(str(Path(app.root_path) / "templates"), "index.html")
 
 
     @app.get("/favicon.ico")
@@ -515,8 +515,7 @@ def register_routes(app, service):
 
         Browsers, crawlers and shortcut tools ask for /favicon.ico even when a
         page declares an icon, so this answers with the same image the pages
-        link instead of a 404. It is a redirect, not a copy: the brand lives on
-        the EngineerIP web property and stays the single source of truth.
+        link instead of a 404. The icon ships with this standalone app.
         """
         response = redirect(service.config.FAVICON_URL, code=302)
         response.headers["Cache-Control"] = "public, max-age=86400"
@@ -524,17 +523,17 @@ def register_routes(app, service):
 
     @app.get("/phone")
     def phone():
-        return send_from_directory(str(Path(app.root_path).parent / "web"), "phone.html")
+        return send_from_directory(str(Path(app.root_path) / "templates"), "phone.html")
 
     @app.get("/phone.css")
     def phone_css():
-        response = send_from_directory(str(Path(app.root_path).parent / "web"), "phone.css")
+        response = send_from_directory(str(Path(app.root_path) / "static" / "css"), "phone.css")
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 
     @app.get("/phone.js")
     def phone_js():
-        response = send_from_directory(str(Path(app.root_path).parent / "web"), "phone.js")
+        response = send_from_directory(str(Path(app.root_path) / "static" / "js"), "phone.js")
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 
@@ -559,20 +558,20 @@ def register_routes(app, service):
         run - "SIP library is not loaded" again.
         """
         response = send_from_directory(
-            str(Path(app.root_path).parent / "web"), "jssip.min.js", mimetype="text/javascript"
+            str(Path(app.root_path) / "static" / "js"), "jssip.min.js", mimetype="text/javascript"
         )
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 
     @app.get("/manifest.json")
     def phone_manifest():
-        response = send_from_directory(str(Path(app.root_path).parent / "web"), "manifest.json")
+        response = send_from_directory(str(Path(app.root_path) / "static"), "manifest.json")
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 
     @app.get("/sw.js")
     def phone_service_worker():
-        response = send_from_directory(str(Path(app.root_path).parent / "web"), "sw.js")
+        response = send_from_directory(str(Path(app.root_path) / "static" / "js"), "sw.js")
         response.headers["Cache-Control"] = "no-cache"
         response.headers["Service-Worker-Allowed"] = "/"
         return response

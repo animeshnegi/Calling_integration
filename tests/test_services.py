@@ -895,6 +895,9 @@ def test_a_recording_that_cannot_write_never_hangs_up_the_live_call(tmp_path: Pa
         raise RuntimeError("Unable to open recording file: Permission denied")
 
     asterisk.start_bridge_recording = broken_recording
+    # A recorder that cannot open its writestream leaves no stored file, so
+    # there is no positive evidence of audio to recover.
+    asterisk.get_stored_recording = lambda name: None
     service._recording_settings = lambda extension: {
         "enabled": True, "format": "wav", "beep": False,
         "max_duration": 60, "announcement": False, "announcement_media": "",
@@ -1352,13 +1355,15 @@ def test_reconcile_recovers_recording_and_finalizing_but_leaves_live_and_unavail
 
     asterisk.get_stored_recording = stored
     service.reconcile_recordings()
-    for name in ("missed", "stopped"):
+    for name in ("missed", "stopped", "failed"):
         assert store.get(name).recording_status == "finalized"
         assert store.get(name).recording_path == f"/recording/{name}.wav"
         assert store.get(name).recording_format == "wav"
     assert store.get("live").recording_status == "recording"
     assert store.get("unavailable").recording_status == "finalizing"
-    assert set(queried) == {"missed", "stopped", "unavailable"}
+    # A failed attempt is retried too: audio Asterisk wrote is recovered
+    # instead of being written off as "no playable audio".
+    assert set(queried) == {"missed", "stopped", "unavailable", "failed"}
     queried.clear()
     service.reconcile_recordings()
     assert queried == ["unavailable"]  # Idempotent, no duplicate finish notifications.

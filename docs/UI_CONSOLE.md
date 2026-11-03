@@ -1,17 +1,20 @@
 # Admin & customer console UI
 
-The consoles are one static single-page app served by Flask; there is no server-side
-rendering and no build step.
+The consoles are one static single-page app served by Flask; there is no
+server-side rendering. HTML lives in `app/templates/`, CSS/JS/images in
+`app/static/`, and the Tailwind stylesheet is built once with `npm run css`
+before deployment (no Node on the host).
 
 | File | Role |
 | --- | --- |
-| `web/admin.html` | Shell: sidebar, topbar, the 18 `.page` sections, the customer workspace overlay, the modal and the toast host. |
-| `web/admin.css` | All styling. Theme tokens, glass surfaces, components, animations, responsive rules. |
-| `web/admin.js` | All behaviour. Talks to the existing `/admin/api/*` JSON endpoints only. |
-| `web/admin-login.html` | Standalone sign-in screen. Shares `admin.css`, so it is served from `/admin-assets/admin.css`. |
+| `app/templates/admin.html` | Shell: sidebar, topbar, the 18 `.page` sections, the customer workspace overlay, the modal and the toast host. |
+| `app/static/css/tailwind.css` | Generated Tailwind stylesheet: preflight, utilities and a small `@apply` component layer for the console's semantic class names. |
+| `app/static/js/admin.js` | All behaviour. Talks to the existing `/admin/api/*` JSON endpoints only. |
+| `app/templates/admin-login.html` | Standalone sign-in screen. Shares the generated Tailwind stylesheet. |
 
-Flask only serves these files (`/admin`, `/login`, `/admin-assets/<file>`; 
-`/admin/login` is kept as an alias for the sign-in route), so a change to the
+Flask serves these files (`/admin`, `/login`, `/static/<file>`, plus the legacy
+`/admin-assets/<file>` aliases; `/admin/login` is kept as an alias for the
+sign-in route), so a change to the
 interface cannot change the API, the database or the permission model.
 
 Sign-in lives at **`/login`**. `login_required` redirects there, the sign-in screen
@@ -240,7 +243,7 @@ while the platform switch is off. Boolean settings are stored as the canonical t
 `true`/`false` whatever a caller sends, because the generated Asterisk configuration
 compares them as text.
 
-`GET /documentation` (any signed-in account) serves `web/documentation.html`: the
+`GET /documentation` (any signed-in account) serves `app/templates/documentation.html`: the
 setup, REST API and webhook reference for this deployment, linked from the top of
 APIs & Webhooks (which also prints the API base) and from the sidebar. It reads no
 customer data - the only thing rendered into it is the service address, substituted
@@ -333,7 +336,7 @@ against the customer's own devices and dials it:
 
 The step is usable the moment it is dropped in (`flowStepDefaults()` fills it, and the
 store fills it again on save): the platform wording
-(`IVR_DEFAULT_PROMPT` = "Welcome to EngineerIP. Please enter the extension you wish to
+(`IVR_DEFAULT_PROMPT` = "Welcome to Telephony Control. Please enter the extension you wish to
 reach."), the `platform` voice, a six-second input timeout and two attempts. **Click the
 step** to edit any of it - the text (a 400-character textarea), the voice, the input
 timeout (2-30s), the attempts (1-5) and a fallback extension. The voice list comes from
@@ -524,21 +527,21 @@ timeline of `state.requests`; it is gone, and only the number-request button and
 journey's request step remain on the customer side. The administrator's Requests page
 (`#page-requests`, `request-list`) is untouched.
 
-Public surface: `web/index.html` (landing), `web/documentation.html` and
-`web/admin-login.html` all wear the console's light skin - `--bg:#f4f5fa` with the same
+Public surface: `app/templates/index.html` (landing), `app/templates/documentation.html` and
+`app/templates/admin-login.html` all wear the console's light skin - `--bg:#f4f5fa` with the same
 three soft radials the light theme paints - so the marketing pages, the reference and
 the door into the console read as one product rather than three. `csscheck` asserts the
 three files still carry it.
 
 ## Adding a page
 
-1. Add an entry to `pageMeta` in `web/admin.js` (`title`, `subtitle`).
-2. Add `<section class="page" id="page-<key>">` to `web/admin.html`.
+1. Add an entry to `pageMeta` in `app/static/js/admin.js` (`title`, `subtitle`).
+2. Add `<section class="page" id="page-<key>">` to `app/templates/admin.html`.
 3. Add a nav button with `data-page="<key>"` (plus `data-admin-only` if privileged).
 4. Link the favicon the way every other page does - `<link rel="icon" type="image/png">`
-   and `<link rel="apple-touch-icon">` pointing at the EngineerIP logo - so the tab and
+   and `<link rel="apple-touch-icon">` pointing at the bundled icon - so the tab and
    the home-screen shortcut never fall back to a blank icon. `tests/test_pages.py` sweeps
-   `web/*.html` for exactly this and fails on a page that forgets it (or that points at a
+   `app/templates/*.html` for exactly this and fails on a page that forgets it (or that points at a
    `/favicon.ico` the app only redirects from).
 
 `showPage()` and `loadState()` do the rest. The page key is also the URL hash, so
@@ -587,7 +590,7 @@ pages are linkable.
   credential sheet shows every value once with the platform's own registration
   address, the setup journey's bar and icons follow the data, administrators offer no
   delete action, and provisioning reveals credentials.
-* `GET /console-check` (any signed-in account) serves `web/console-check.html`: the
+* `GET /console-check` (any signed-in account) serves `app/templates/console-check.html`: the
   same drawer geometry measured in the browser that actually renders it, because jsdom
   has no layout engine. It opens the console in a frame, opens a customer workspace,
   and reports what stays still, what scrolls, what pins and how much room the tab

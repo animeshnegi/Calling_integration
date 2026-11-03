@@ -5,7 +5,7 @@ Asterisk WebRTC support uses PJSIP with a WSS transport. Modern browsers normall
 ## Production topology
 
 ```text
-EngineerIP CRM page
+the hosting application's page
       |
       | authenticated short-lived browser capability
       v
@@ -26,7 +26,7 @@ The ARI management API stays on the Docker network and is not exposed to the bro
 
 Store WebRTC usernames/passwords against the CRM member/extension on the server side. Do not return the ARI master password or provider password to JavaScript.
 
-A production browser session should obtain an expiring token or a narrowly scoped SIP credential from EngineerIP after normal CRM authentication. Revoke/rotate credentials when an employee is disabled.
+A production browser session should obtain an expiring token or a narrowly scoped SIP credential from Telephony Control after normal CRM authentication. Revoke/rotate credentials when an employee is disabled.
 
 ## ICE / NAT
 
@@ -37,7 +37,7 @@ For remote clients behind NAT, configure STUN/TURN appropriate to your deploymen
 Microphone permission, HTTPS, firewall rules, NAT behavior, and SIP provider compatibility cannot be validated from a Git-only environment. These must be tested on the actual deployed hostname/network with a real SIP account.
 
 
-## EngineerIP Phone PWA
+## Telephony Control Phone PWA
 
 The `feature/softphone-pwa` branch adds `/phone`, a responsive phone-style PWA using JsSIP. It provides a keypad, direct paste, recent calls, contacts, a Messages area, active-call controls, and an install button when the browser exposes the PWA install prompt.
 
@@ -154,7 +154,7 @@ https://<your-service-host>/phone
 The page is installable: it ships a manifest, a versioned service worker that
 keeps the shell available offline and answers for the phone's own URLs only (it
 never touches the console or the API), and it links the
-EngineerIP logo as its favicon and iOS home-screen icon. Every other page (landing, sign-in,
+bundled icon as its favicon and iOS home-screen icon. Every other page (landing, sign-in,
 console, documentation) links the same logo, and `/favicon.ico` answers with it
 too, so no page ever falls back to a blank tab icon. Point a deployment at a
 different image with `FAVICON_URL` if the brand moves.
@@ -351,7 +351,7 @@ browser blocked autoplay, or ICE advertised an unreachable media address. The
 softphone now fixes the first two in code and reports the third instead of
 leaving the call screen silent:
 
-* `web/phone.js` binds the remote track handler both to `session.connection` and
+* `app/static/js/phone.js` binds the remote track handler both to `session.connection` and
   to the `peerconnection` event. JsSIP creates the peer connection and emits
   that event **synchronously inside `ua.call()`**, before `attachSession()` can
   subscribe; subscribing only to the event left outbound calls with no remote

@@ -655,7 +655,7 @@ async function connectSip(s){
       const probe=await fetch("/jssip.min.js",{method:"HEAD"});
       why=probe.ok?"/jssip.min.js loaded but did not start":"/jssip.min.js answered HTTP "+probe.status+" - the server is running an image without the phone's SIP stack";
     }catch{}
-    throw new Error("SIP library is not loaded: "+why+". Reload the page; if this persists, rebuild the telephony-api image - it must contain web/jssip.min.js.");
+    throw new Error("SIP library is not loaded: "+why+". Reload the page; if this persists, rebuild the telephony-api image - it must contain app/static/js/jssip.min.js.");
   }
   if(!s.username||!s.password||!s.domain||!s.wss)throw new Error("Enter SIP username, password and domain.");
   return new Promise((resolve,reject)=>{
@@ -849,7 +849,7 @@ if(!fromConsole&&saved.username&&saved.domain&&saved.password){
    never does, the sign-in form is offered instead of a spinner that never stops. */
 let consoleHandoffSeen=false;
 if(fromConsole){
-  showConsoleScreen("Softphone","Waiting for the EngineerIP console to sign this window in…");
+  showConsoleScreen("Softphone","Waiting for the console to sign this window in…");
   window.addEventListener("message",event=>{
     if(event.source!==window.opener||event.origin!==location.origin)return;
     const m=event.data||{};

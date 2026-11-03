@@ -1,8 +1,9 @@
+const { assetPath } = require('./asset-path');
 /* Softphone regression harness.
  *
  *   npm install jsdom && node tools/phonecheck.js
  *
- * Boots the real web/phone.js in jsdom with a stub JsSIP in place of the
+ * Boots the real app/static/js/phone.js in jsdom with a stub JsSIP in place of the
  * vendored build and a fake SIP session in place of the WebRTC stack, then
  * walks the contract the phone promises: SIP sign-in and auto-reconnect, the
  * keypad and paste, outbound calls (progress, answer, end), incoming
@@ -18,10 +19,10 @@ const path = require('path');
 const vm = require('vm');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
-const WEB = path.join(__dirname, '..', 'web');
+
 const LOGO = 'https://engineerip.com/static/img/logo.png';
 const assetVersion = () => {
-  const code = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
+  const code = fs.readFileSync(assetPath('sw.js'), 'utf8');
   const match = code.match(/const VERSION = "(\d+)"/);
   return match ? match[1] : '';
 };
@@ -198,7 +199,7 @@ function makeFakeSip() {
    cache, a fake network that records what it was asked for, and the ability to
    take the network down. */
 function shellWorker({ offline = false } = {}) {
-  const code = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
+  const code = fs.readFileSync(assetPath('sw.js'), 'utf8');
   const handlers = {};
   /* Named caches, the way a browser keeps them: a release installs into its
      own cache and activation deletes the older ones. */
@@ -276,7 +277,7 @@ function shellWorker({ offline = false } = {}) {
 function boot({ settings = null, recents = null, contacts = null, password = null,
                 clipboard = '', prompts = [], fetchImpl = null, search = '', opener = null,
                 ringAudio = null, holdPlayback = 'running' } = {}) {
-  const page = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8')
+  const page = fs.readFileSync(assetPath('phone.html'), 'utf8')
     .replace(/<script[^>]*jssip[^>]*><\/script>/i, '');
   const errors = [];
   const virtualConsole = new VirtualConsole();
@@ -344,7 +345,7 @@ function boot({ settings = null, recents = null, contacts = null, password = nul
   if (recents) w.localStorage.setItem('eip-phone-recents', JSON.stringify(recents));
   if (contacts) w.localStorage.setItem('eip-phone-contacts', JSON.stringify(contacts));
   const script = d.createElement('script');
-  script.textContent = fs.readFileSync(path.join(WEB, 'phone.js'), 'utf8');
+  script.textContent = fs.readFileSync(assetPath('phone.js'), 'utf8');
   d.body.appendChild(script);
   return { dom, w, d, errors, sip, dialog, ringStats, holdStats };
 }
@@ -414,7 +415,7 @@ async function main() {
       (env.d.querySelector('link[rel="apple-touch-icon"]') || {}).href === LOGO,
       (env.d.querySelector('link[rel="apple-touch-icon"]') || {}).href);
     check('the installable-app manifest is linked', /\/manifest\.json/.test(html));
-    const shippedPage = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8');
+    const shippedPage = fs.readFileSync(assetPath('phone.html'), 'utf8');
     check('the SIP stack is loaded from the vendored same-origin build',
       /<script src="\/jssip\.min\.js">/.test(shippedPage));
     check('and falls back to the pinned upstream build if that fails',
@@ -425,7 +426,7 @@ async function main() {
     check('the page requests versioned CSS/JS so a stale cached build cannot answer a new page',
       shippedPage.includes(`href="/phone.css?v=${VERSION}"`)
       && shippedPage.includes(`src="/phone.js?v=${VERSION}"`), VERSION);
-    const swSource = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
+    const swSource = fs.readFileSync(assetPath('sw.js'), 'utf8');
     check('the service worker precaches the same versioned assets',
       swSource.includes(`const VERSION = "${VERSION}"`)
       && swSource.includes('`/phone.js?v=${VERSION}`')
@@ -1260,9 +1261,9 @@ async function main() {
   /* ------------------------------------------- the phone's layout contract */
   section('The layout contract, phone and browser');
   {
-    const css = fs.readFileSync(path.join(WEB, 'phone.css'), 'utf8');
-    const html = fs.readFileSync(path.join(WEB, 'phone.html'), 'utf8');
-    const script = fs.readFileSync(path.join(WEB, 'phone.js'), 'utf8');
+    const css = fs.readFileSync(assetPath('phone.css'), 'utf8');
+    const html = fs.readFileSync(assetPath('phone.html'), 'utf8');
+    const script = fs.readFileSync(assetPath('phone.js'), 'utf8');
     const used = new Set();
     [...html.matchAll(/class="([^"]+)"/g)].forEach(m => m[1].split(/\s+/).forEach(name => used.add(name)));
     [...script.matchAll(/classList\.(?:toggle|add|remove)\("([^"]+)"/g)].forEach(m => used.add(m[1]));
@@ -1537,7 +1538,7 @@ async function main() {
     const offlineAsset = await offlineWorker.fetch(`https://phone.example.com${VERSIONED_JS}`);
     check('offline assets still use the shell fallback', !!offlineAsset);
 
-    const shipped = fs.readFileSync(path.join(WEB, 'sw.js'), 'utf8');
+    const shipped = fs.readFileSync(assetPath('sw.js'), 'utf8');
     check('a release can replace the shell by bumping the cache name',
       /const CACHE = "eip-phone-v\d+";/.test(shipped));
 

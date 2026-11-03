@@ -19,11 +19,12 @@ from app.services import TelephonyService
 from tests.test_provisioning import customer_client, make_app
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB = ROOT / "web"
-DOC = (WEB / "documentation.html").read_text(encoding="utf-8")
-LANDING = (WEB / "index.html").read_text(encoding="utf-8")
-PICKER_SOURCE = (WEB / "admin.js").read_text(encoding="utf-8")
-LOGO = "https://engineerip.com/static/img/logo.png"
+TEMPLATES = ROOT / "app" / "templates"
+STATIC = ROOT / "app" / "static"
+DOC = (TEMPLATES / "documentation.html").read_text(encoding="utf-8")
+LANDING = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+PICKER_SOURCE = (STATIC / "js" / "admin.js").read_text(encoding="utf-8")
+LOGO = "/static/images/favicon.svg"
 
 PILL_RE = re.compile(r'<span class="pill (?:get|post|del)">(GET|POST|DELETE)</span>\s*<code>(/api/v1/[^<]+)</code>')
 # Routes that are not part of the public API: a private engine hook, off by default.
@@ -68,12 +69,13 @@ def test_every_public_api_route_is_documented(tmp_path):
 
 def _emitted_events() -> set[str]:
     names: set[str] = set()
-    for source in ("app/services.py", "app/routes.py"):
+    for source in ("app/services.py", "app/routes/api.py"):
         text = (ROOT / source).read_text(encoding="utf-8")
-        names |= set(re.findall(r'notify_crm\(\s*"(call\.[a-z_]+)"', text))
-        if "notify_crm(f\"call.recording_{'finished'" in text:
-            # The recording lifecycle is one f-string that yields finished or failed.
-            names |= {"call.recording_finished", "call.recording_failed"}
+        # Recording events go through the non-fatal wrapper: a CRM hiccup must
+        # not change the recorder's state, but the event is still emitted.
+        names |= set(re.findall(
+            r'(?:notify_crm|_notify_crm_safely)\(\s*"(call\.[a-z_]+)"', text
+        ))
     return names
 
 
@@ -147,7 +149,7 @@ def test_the_documentation_page_is_public_and_names_this_deployment(tmp_path):
 def test_landing_page_nav_links_softphone_and_api_docs(tmp_path):
     app = make_app(tmp_path)
     page = app.test_client().get("/").data.decode()
-    nav = re.search(r'<nav class="wrap">(.*?)</nav>', page, re.S).group(1)
+    nav = re.search(r'<nav class="wrap[^"]*">(.*?)</nav>', page, re.S).group(1)
     assert 'href="/phone"' in nav and "Softphone" in nav
     assert 'href="/documentation"' in nav and "API" in nav
     # The softphone is explained on the landing page, not only linked.
@@ -159,4 +161,4 @@ def test_landing_page_nav_links_softphone_and_api_docs(tmp_path):
 
 @pytest.mark.parametrize("name", ["index.html", "documentation.html", "phone.html", "admin-login.html", "admin.html"])
 def test_every_page_has_the_brand_favicon(name):
-    assert f'rel="icon" type="image/png" href="{LOGO}"' in (WEB / name).read_text(encoding="utf-8"), name
+    assert f'rel="icon" type="image/svg+xml" href="{LOGO}"' in (TEMPLATES / name).read_text(encoding="utf-8"), name

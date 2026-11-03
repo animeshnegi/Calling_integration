@@ -75,7 +75,7 @@ class VoicemailEmailNotifier:
         markup += f"<p>{html.escape(AUTOMATED_NOTICE)}</p>"
         body: dict[str, Any] = {
             "to": recipient, "from_email": config["from_email"],
-            "from_name": config.get("from_name") or "EngineerIP Voicemail",
+            "from_name": config.get("from_name") or "Telephony Voicemail",
             "subject": subject, "text": text, "html": markup,
         }
         if audio:
@@ -312,12 +312,12 @@ class VoicemailEmailNotifier:
             return False, config.get("api_key_error") or "Save an Elastic Email API key before sending a test."
         if not config.get("from_email"):
             return False, "Save a verified Elastic Email sender email before sending a test."
-        message = {"mailbox": "test", "caller_id": "EngineerIP test", "received_at": "now", "duration_seconds": 0, "message": "test"}
+        message = {"mailbox": "test", "caller_id": "Telephony test", "received_at": "now", "duration_seconds": 0, "message": "test"}
         payload = self._payload(config, recipient, message, None)
-        payload["subject"] = "EngineerIP email delivery test"
-        payload["text"] = ("Your EngineerIP email configuration is working. This test contains no voicemail audio "
+        payload["subject"] = "Telephony email delivery test"
+        payload["text"] = ("Your Telephony email configuration is working. This test contains no voicemail audio "
                            f"and does not test transcription.\n\n{AUTOMATED_NOTICE}")
-        payload["html"] = ("<p>Your EngineerIP email configuration is working.</p>"
+        payload["html"] = ("<p>Your Telephony email configuration is working.</p>"
                            "<p>This test contains no voicemail audio and does not test transcription.</p>"
                            f"<p>{html.escape(AUTOMATED_NOTICE)}</p>")
         return self._send(config, payload)

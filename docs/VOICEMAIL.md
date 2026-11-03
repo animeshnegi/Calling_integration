@@ -1,6 +1,6 @@
 # Voicemail Management
 
-EngineerIP uses Asterisk `app_voicemail` with one mailbox per enabled extension. Mailbox definitions, PINs, message-waiting indicators, unanswered-call routing, browser playback, and CRM-facing APIs are integrated with the administration system.
+Telephony Control uses Asterisk `app_voicemail` with one mailbox per enabled extension. Mailbox definitions, PINs, message-waiting indicators, unanswered-call routing, browser playback, and CRM-facing APIs are integrated with the administration system.
 
 ## Mailbox names
 

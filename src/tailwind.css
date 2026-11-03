@@ -1,0 +1,295 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ base
+   Tailwind's preflight already normalises margins, boxes and typography. The
+   few rules below keep the app's light/dark skins working with one stylesheet. */
+@layer base {
+  html { @apply h-full scroll-smooth; }
+  body {
+    @apply m-0 min-h-full bg-slate-50 font-sans text-slate-900 antialiased;
+    @apply dark:bg-slate-950 dark:text-slate-100;
+  }
+  h1, h2, h3, h4 { @apply font-semibold tracking-tight; }
+  a { @apply no-underline; }
+  button { @apply cursor-pointer; }
+  :focus-visible { @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-white dark:ring-offset-slate-950; }
+  input, select, textarea {
+    @apply rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm;
+    @apply placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100;
+  }
+}
+
+/* ------------------------------------------------------------- components
+   One small, Tailwind-composed design system. These are the semantic class
+   names the existing console JavaScript renders; every rule is built from
+   Tailwind utilities, so there is no separate hand-written CSS to maintain. */
+@layer components {
+  /* ------------------------------------------------------------- layout */
+  .shell { @apply flex min-h-screen; }
+  .sidebar {
+    @apply fixed inset-y-0 left-0 z-30 flex w-64 flex-col border-r border-slate-200 bg-white px-3 py-4;
+    @apply dark:border-slate-800 dark:bg-slate-900;
+  }
+  .main { @apply flex min-w-0 flex-1 flex-col md:ml-64; }
+  .topbar {
+    @apply sticky top-0 z-20 flex items-center gap-3 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur;
+    @apply dark:border-slate-800 dark:bg-slate-900/90;
+  }
+  .content { @apply mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8; }
+  .page { @apply hidden; }
+  .page.active { @apply block animate-[fade_.18s_ease-out]; }
+  .page-head { @apply min-w-0 flex-1; }
+  .page-head h1 { @apply text-lg font-semibold leading-tight sm:text-xl; }
+  .page-head p { @apply mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400; }
+  .topbar-tools { @apply ml-auto flex items-center gap-2; }
+  .aurora { @apply pointer-events-none fixed inset-0 -z-10 hidden; }
+  .scrim { @apply fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-sm; }
+
+  /* ------------------------------------------------------------- sidebar */
+  .brand { @apply flex items-center gap-3 px-2 py-2; }
+  .brand-mark {
+    @apply grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-sm font-bold text-white shadow-panel;
+  }
+  .brand-copy { @apply flex flex-col leading-tight; }
+  .brand-copy strong { @apply text-sm font-semibold; }
+  .brand-copy small { @apply text-xs text-slate-500 dark:text-slate-400; }
+  .nav { @apply mt-4 flex flex-1 flex-col gap-0.5 overflow-y-auto pb-4; }
+  .nav-group { @apply mb-1 mt-4 px-3 text-[10px] font-bold uppercase tracking-widest text-slate-400; }
+  .nav-item {
+    @apply flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-600 transition-colors;
+    @apply hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white;
+  }
+  .nav-item.active { @apply bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-200; }
+  .nav-badge { @apply ml-auto rounded-full bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white; }
+  .glyph { @apply inline-block w-5 shrink-0 text-center text-base leading-none; }
+  .sidebar-foot { @apply mt-auto border-t border-slate-200 pt-3 dark:border-slate-800; }
+  .who { @apply flex items-center gap-2 rounded-lg px-2 py-2; }
+  .who-copy { @apply flex min-w-0 flex-1 flex-col leading-tight; }
+  .who-copy strong { @apply truncate text-sm font-semibold; }
+  .who-copy small { @apply truncate text-xs text-slate-500 dark:text-slate-400; }
+  .avatar { @apply grid h-8 w-8 shrink-0 place-items-center rounded-full bg-brand-100 text-xs font-bold text-brand-700 dark:bg-brand-500/20 dark:text-brand-200; }
+
+  /* ------------------------------------------------------------ controls */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition;
+    @apply hover:border-slate-300 hover:bg-slate-50 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-50;
+    @apply dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700;
+  }
+  .btn.primary { @apply border-transparent bg-brand-600 text-white shadow-panel hover:border-transparent hover:bg-brand-700 dark:bg-brand-600 dark:hover:bg-brand-500; }
+  .btn.ghost { @apply border-transparent bg-transparent shadow-none hover:bg-slate-100 dark:bg-transparent dark:hover:bg-slate-800; }
+  .btn.danger { @apply border-transparent bg-rose-600 text-white hover:bg-rose-700; }
+  .btn.sm { @apply px-2.5 py-1.5 text-xs; }
+  .btn-row { @apply flex flex-wrap items-center gap-2; }
+  .icon-btn {
+    @apply inline-grid h-9 w-9 shrink-0 place-items-center rounded-lg text-base text-slate-500 transition hover:bg-slate-100 hover:text-slate-900;
+    @apply dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white;
+  }
+  .menu-btn { @apply md:hidden; }
+  .theme-toggle { @apply inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200; }
+  .theme-toggle .knob { @apply h-4 w-4 rounded-full bg-brand-500; }
+  .theme-toggle .label { @apply hidden sm:inline; }
+  .health { @apply hidden items-center gap-2 rounded-full bg-slate-100 px-3 py-1.5 text-xs text-slate-600 lg:inline-flex dark:bg-slate-800 dark:text-slate-300; }
+  .health i, .live-dot { @apply inline-block h-2 w-2 rounded-full bg-emerald-500; }
+
+  /* ------------------------------------------------------- panels/cards */
+  .panel, .glass-card, .card, .handling-card, .ws-card {
+    @apply rounded-xl border border-slate-200 bg-white p-4 shadow-panel dark:border-slate-800 dark:bg-slate-900;
+  }
+  .panel-head, .glass-card-head, .ws-card-head {
+    @apply mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800;
+  }
+  .panel-head h3, .glass-card-head h3 { @apply text-sm font-semibold; }
+  .panel-body { @apply text-sm text-slate-600 dark:text-slate-300; }
+  .cards, .stat-grid, .board-tiles, .ws-cards { @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-4; }
+  .stat, .tile, .board-tile, .ws-metric {
+    @apply rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900;
+  }
+  .stat-label, .stat-note, .cell-sub { @apply text-xs text-slate-500 dark:text-slate-400; }
+  .stat-value { @apply mt-1 block text-2xl font-bold tracking-tight; }
+  .stat-icon, .row-icon { @apply grid h-9 w-9 place-items-center rounded-lg bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300; }
+  .row {
+    @apply flex flex-wrap items-center gap-3 rounded-lg border border-slate-100 px-3 py-2.5 text-sm transition hover:border-slate-200 hover:bg-slate-50;
+    @apply dark:border-slate-800 dark:hover:bg-slate-800/50;
+  }
+  .row h3 { @apply text-sm font-medium; }
+  .row p { @apply text-xs text-slate-500 dark:text-slate-400; }
+  .row-actions { @apply ml-auto flex flex-wrap items-center gap-2; }
+  .cell-strong { @apply font-semibold; }
+  .table-wrap { @apply overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800; }
+  .acc-item { @apply rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900; }
+  .acc-head { @apply flex items-center gap-3 p-3; }
+  .acc-body { @apply border-t border-slate-100 dark:border-slate-800; }
+  .chev { @apply ml-auto text-lg text-slate-400 transition-transform; }
+  .acc-item.open .chev { @apply rotate-90; }
+  .empty { @apply flex flex-col items-center gap-2 rounded-xl border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400; }
+  .empty-icon { @apply text-3xl; }
+  .skeleton, .load-bar { @apply animate-pulse rounded-lg bg-slate-100 dark:bg-slate-800; }
+  .pager { @apply mt-4 flex items-center justify-end gap-2; }
+
+  /* --------------------------------------------------------------- forms */
+  .toolbar { @apply mb-4 flex flex-wrap items-center gap-2; }
+  .search { @apply min-w-0 flex-1 sm:max-w-xs; }
+  .field { @apply flex flex-col gap-1.5; }
+  .field > label, .switch-line > label { @apply text-xs font-semibold text-slate-600 dark:text-slate-300; }
+  .field-row { @apply grid gap-3 sm:grid-cols-2; }
+  .field-hint, .routing-field-note, .scope-note, .palette-hint, .routing-library-note {
+    @apply text-xs leading-relaxed text-slate-500 dark:text-slate-400;
+  }
+  .field-actions { @apply flex flex-wrap items-center gap-2; }
+  .switch { @apply relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-slate-300 transition dark:bg-slate-700; }
+  .switch.on { @apply bg-brand-600; }
+  .switch::after { content: ''; @apply absolute left-0.5 h-4 w-4 rounded-full bg-white transition-transform; }
+  .switch.on::after { @apply translate-x-4; }
+  .switch-line { @apply flex items-center justify-between gap-3 py-2; }
+  .switch-copy { @apply flex flex-col; }
+  .scope-bar { @apply mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900; }
+  .scope-field { @apply flex items-center gap-2 text-xs; }
+  .kv, .kv-2 { @apply grid gap-3 sm:grid-cols-2; }
+  .kv-item { @apply rounded-lg bg-slate-50 p-3 dark:bg-slate-800/60; }
+  .kv-item small { @apply block text-xs text-slate-500 dark:text-slate-400; }
+  .kv-item strong { @apply mt-1 block text-sm font-semibold; }
+
+  /* -------------------------------------------------------------- status */
+  .status, .tag, .tone-bad, .tone-ok, .tone-info, .tone-violet {
+    @apply inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold;
+  }
+  .status, .tag { @apply bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300; }
+  .status.finalized, .status.completed, .status.online, .status.ok, .tone-ok { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300; }
+  .status.failed, .status.offline, .status.danger, .tone-bad { @apply bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300; }
+  .status.recording, .status.ringing, .tone-info { @apply bg-sky-50 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300; }
+  .status.finalizing, .tone-violet { @apply bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300; }
+  .status.changed { @apply ring-2 ring-brand-300; }
+  .tag.danger { @apply bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300; }
+  .notice, .routing-save-status { @apply rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300; }
+  .toasts { @apply fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-2; }
+  .toasts > * { @apply rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-panel dark:border-slate-700 dark:bg-slate-900; }
+
+  /* -------------------------------------------------------------- modals */
+  .modal { @apply fixed inset-0 z-50 grid place-items-center p-4; }
+  .modal-card { @apply w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900; }
+  .modal-head { @apply flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800; }
+  .modal-head h3 { @apply text-base font-semibold; }
+  .modal-body { @apply max-h-[70vh] overflow-y-auto px-5 py-4 text-sm; }
+  .modal-foot { @apply flex justify-end gap-2 border-t border-slate-100 px-5 py-3 dark:border-slate-800; }
+
+  /* ------------------------------------------- routing studio / workspace
+     The many family-prefixed nodes are layout hints only; one shared rule
+     keeps them readable while the page's Tailwind utilities set the rhythm. */
+  .routing-studio, .routing-editor, .ws-flow, .journey, .canvas, .desk-editor {
+    @apply rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900;
+  }
+  .routing-heading { @apply text-sm font-semibold; }
+  .routing-eyebrow { @apply text-[10px] font-bold uppercase tracking-widest text-brand-600; }
+  .routing-search-row, .flow-toolbar, .journey-head, .ws-head, .board-head, .head-tools, .tools {
+    @apply mb-3 flex flex-wrap items-center gap-2;
+  }
+  .flow-node, .journey-step, .handling-step, .ws-flow-node, .routing-recipe, .workflow-choice-copy {
+    @apply rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm dark:border-slate-700 dark:bg-slate-800/60;
+  }
+  .flow-node.selected, .selected { @apply border-brand-400 ring-2 ring-brand-100 dark:ring-brand-500/20; }
+  .routing-blank, .routing-editor-empty, .canvas-empty, .ws-empty { @apply rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400; }
+  .routing-inline-note, .ring-source-footnote, .routing-selection-head, .credential-note { @apply text-xs text-slate-500 dark:text-slate-400; }
+  .ws-scroll { @apply max-h-[70vh] overflow-y-auto; }
+  .ws-tabs { @apply flex gap-1 border-b border-slate-200 dark:border-slate-800; }
+  .ws-tab { @apply rounded-t-lg px-3 py-2 text-xs font-semibold text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white; }
+  .ws-tab.active { @apply border-b-2 border-brand-600 text-brand-700 dark:text-brand-300; }
+  .ws-chip, .routing-badge { @apply inline-flex rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-semibold text-brand-700 dark:bg-brand-500/15 dark:text-brand-300; }
+  .ws-avatar { @apply grid h-8 w-8 place-items-center rounded-full bg-slate-100 text-xs font-bold dark:bg-slate-800; }
+  .ws-close, .ws-quick { @apply rounded-lg px-2 py-1 text-xs hover:bg-slate-100 dark:hover:bg-slate-800; }
+  .timeline { @apply space-y-3; }
+  .tl-item { @apply flex gap-3 text-sm; }
+  .chart, .split-analytics, .groups-panel, .groups, .map-rows, .rows, .ring-source-list, .metric-rows {
+    @apply grid gap-3;
+  }
+  .chart-day { @apply flex items-end gap-1; }
+  .wave { @apply inline-flex h-8 items-end gap-0.5; }
+  .wave i { @apply inline-block w-1 rounded-sm bg-brand-400/70; }
+  .cols-2 { @apply grid gap-3 sm:grid-cols-2; }
+  .spacer { @apply flex-1; }
+  .muted { @apply text-slate-500 dark:text-slate-400; }
+  .info { @apply text-sky-700 dark:text-sky-300; }
+  .warn { @apply text-amber-700 dark:text-amber-300; }
+  .danger { @apply text-rose-700 dark:text-rose-300; }
+  .ok { @apply text-emerald-700 dark:text-emerald-300; }
+  .title { @apply text-base font-semibold; }
+  .plain { @apply font-normal; }
+  .secret { @apply font-mono text-xs tracking-wide; }
+  .doc-link { @apply text-brand-600 underline dark:text-brand-300; }
+}
+
+/* ------------------------------------------- docs / login / layout-check
+   These three pages keep their semantic hooks; the styling is Tailwind. */
+@layer components {
+  .wrap { @apply mx-auto w-full max-w-5xl px-4 sm:px-6; }
+  header.top { @apply flex flex-wrap items-center gap-3 border-b border-slate-200 py-4 dark:border-slate-800; }
+  .brand b { @apply text-sm font-semibold; }
+  .brand small { @apply block text-xs text-slate-500 dark:text-slate-400; }
+  .brand .mark { @apply grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-sm font-bold text-white; }
+  .lede { @apply my-4 max-w-2xl text-base leading-relaxed text-slate-600 dark:text-slate-300; }
+  nav.toc { @apply flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-white p-3 text-sm dark:border-slate-800 dark:bg-slate-900; }
+  nav.toc a { @apply rounded-lg px-2 py-1 text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-500/10; }
+  section { @apply scroll-mt-6 py-6; }
+  section h2 { @apply mb-3 border-b border-slate-200 pb-2 text-xl dark:border-slate-800; }
+  section h3 { @apply mb-2 mt-5 text-base; }
+  .step { @apply mr-2 inline-grid h-6 w-6 place-items-center rounded-full bg-brand-100 text-xs font-bold text-brand-700 dark:bg-brand-500/20 dark:text-brand-300; }
+  p, li { @apply text-sm leading-relaxed text-slate-600 dark:text-slate-300; }
+  ul, ol { @apply my-3 list-inside list-disc space-y-1 pl-2; }
+  code { @apply rounded bg-slate-100 px-1 py-0.5 font-mono text-xs text-slate-800 dark:bg-slate-800 dark:text-slate-100; }
+  pre { @apply my-3 overflow-x-auto rounded-xl bg-slate-900 p-4 text-xs leading-relaxed text-slate-100; }
+  pre code { @apply bg-transparent p-0 text-inherit; }
+  pre .c { @apply text-slate-400; }
+  pre .k { @apply text-sky-300; }
+  pre .s { @apply text-emerald-300; }
+  table { @apply my-3 w-full border-collapse text-left text-sm; }
+  th, td { @apply border-b border-slate-200 px-3 py-2 align-top dark:border-slate-800; }
+  th { @apply text-xs font-semibold uppercase tracking-wide text-slate-500; }
+  td code { @apply whitespace-nowrap; }
+  .grid { display: grid; gap: .75rem; }
+  @media (min-width: 640px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .box { @apply rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900; }
+  .box b { @apply block text-sm font-semibold; }
+  .box small { @apply mt-1 block text-xs text-slate-500 dark:text-slate-400; }
+  .box.deploy { @apply border-brand-200 bg-brand-50 dark:border-brand-500/30 dark:bg-brand-500/10; }
+  .note { @apply my-3 rounded-lg border-l-4 border-brand-400 bg-brand-50 p-3 text-sm dark:bg-brand-500/10; }
+  .warn { @apply my-3 rounded-lg border-l-4 border-amber-400 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-500/10 dark:text-amber-200; }
+  .pill { @apply mr-2 inline-block rounded px-1.5 py-0.5 font-mono text-[11px] font-bold uppercase; }
+  .pill.get { @apply bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-300; }
+  .pill.post { @apply bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300; }
+  .pill.del { @apply bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300; }
+  .phone-cta { @apply my-4 flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900; }
+  .phone-cta b { @apply block text-sm font-semibold; }
+  .phone-cta small { @apply text-xs text-slate-500 dark:text-slate-400; }
+  .phone-cta .dial { @apply rounded-lg bg-brand-600 px-3 py-2 text-sm font-semibold text-white; }
+  footer { @apply border-t border-slate-200 py-6 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400; }
+  .result { @apply rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-800; }
+  .result.fine { @apply border-emerald-300 bg-emerald-50 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-200; }
+  .result.busy { @apply border-amber-300 bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200; }
+  .bar { @apply h-2 rounded-full bg-slate-200 dark:bg-slate-700; }
+  .measured { @apply font-mono text-xs; }
+
+  /* sign-in */
+  .login-shell { @apply grid min-h-screen place-items-center p-4 lg:grid-cols-2; }
+  .login-aside { @apply hidden flex-col justify-center gap-6 p-10 lg:flex; }
+  .login-lede { @apply max-w-md text-lg leading-relaxed text-slate-600 dark:text-slate-300; }
+  .login-points { @apply flex flex-col gap-3 text-sm text-slate-600 dark:text-slate-300; }
+  .login-body { @apply flex items-center justify-center; }
+  .login-card { @apply w-full max-w-md rounded-2xl border border-slate-200 bg-white p-7 shadow-panel dark:border-slate-800 dark:bg-slate-900; }
+  .login-copy { @apply mb-5 text-sm text-slate-500 dark:text-slate-400; }
+  .login-foot { @apply mt-5 border-t border-slate-100 pt-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400; }
+  .login-error { @apply mt-3 text-sm text-rose-600 dark:text-rose-400; }
+  .block { display: block; }
+}
+
+/* --------------------------------------------------------------- extras
+   Small rules Tailwind utilities cannot express. Passed through verbatim. */
+@keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.card-enter { animation: fade .18s ease-out; }
+.theme-loading { visibility: hidden; }
+
+/* Softphone layout: the call footer must never scroll out of reach. */
+.call-shell{display:flex;flex-direction:column;height:100%;min-height:0}
+.call-body{flex:1 1 auto;min-height:0;overflow-y:auto}
+.call-footer{flex:0 0 auto;position:relative;z-index:1;display:flex;align-items:center;justify-content:center;gap:1rem;padding:1rem}
+.hangup-icon{display:inline-block;transform:rotate(135deg)}

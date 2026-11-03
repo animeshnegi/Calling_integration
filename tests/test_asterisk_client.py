@@ -254,7 +254,7 @@ def test_create_bridge_uses_mixing_type_and_deterministic_id(monkeypatch):
     assert captured["params"] == {
         "type": "mixing",
         "bridgeId": "bridge-call-1",
-        "name": "EngineerIP call-1",
+        "name": "Telephony call-1",
     }
 
 

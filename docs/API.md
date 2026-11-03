@@ -1,6 +1,6 @@
-# EIP Telephony Control API
+# Telephony Control API
 
-The Flask telephony service is reachable from EngineerIP over the private Docker network. Port `5000` is not published publicly.
+The Flask telephony service is reachable from Telephony Control over the private Docker network. Port `5000` is not published publicly.
 
 ## Authentication
 

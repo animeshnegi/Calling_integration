@@ -132,8 +132,8 @@ def test_deployment_bundles_offline_model_and_no_cloud_transcription_endpoint():
     assert "check-voicemail-transcription.py" in dockerfile
     assert "goforward-8k.wav" in dockerfile
     assert "Copyright (c) 1999-2016 Carnegie Mellon University" in (ROOT / "deploy/THIRD_PARTY_NOTICES.md").read_text()
-    for filename in ("app/voicemail_email.py", "app/local_transcription.py", "web/admin.html", "web/admin.js"):
+    for filename in ("app/voicemail_email.py", "app/local_transcription.py", "app/templates/admin.html", "app/static/js/admin.js"):
         source = (ROOT / filename).read_text()
         assert "api.openai.com" not in source and "whisper-1" not in source
-    page = (ROOT / "web/admin.html").read_text()
+    page = (ROOT / "app" / "templates" / "admin.html").read_text()
     assert 'id="transcription-key"' not in page and "PocketSphinx English model" in page

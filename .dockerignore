@@ -14,3 +14,10 @@ venv
 tests
 
 docs
+
+# UI build inputs - only the generated app/static/css/tailwind.css ships.
+node_modules
+src
+package.json
+package-lock.json
+tailwind.config.js
