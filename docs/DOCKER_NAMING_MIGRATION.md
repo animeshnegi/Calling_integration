@@ -16,20 +16,30 @@ The export/finish helpers resolve the effective image through Compose.
 
 ## Existing production server: retain the current names first
 
-**Do not replace a running deployment's names just to upgrade the UI.** Before
-using the new base Compose file, copy `docker-compose.legacy-names.yml` onto the
-server and add it to `COMPOSE_FILE` in `.env`. For your existing Docker MySQL:
+**Do not replace a running deployment's names just to upgrade the UI.** Before upgrading, retain the old image and container names in the server's
+`.env` file. No separate legacy override is needed. For an existing Docker MySQL,
+keep the following setting too:
 
 ```dotenv
 MYSQL_DOCKER_NETWORK=1panel-network
-COMPOSE_FILE=docker-compose.yml:docker-compose.legacy-names.yml:docker-compose.mysql-network.yml
+TELEPHONY_API_IMAGE=engineerip/telephony-api
+TELEPHONY_ASTERISK_IMAGE=engineerip/asterisk
+TELEPHONY_API_CONTAINER=engineerip-telephony-api
+TELEPHONY_ARI_CONTAINER=engineerip-telephony-ari
+TELEPHONY_ASTERISK_CONTAINER=engineerip-asterisk
+```
+
+Use both Compose files together for that deployment:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml config --quiet
 ```
 
 Keep the existing database URI, credentials, `IMAGE_TAG`, Compose project name,
 working directory and volume names. Preserve any additional overrides already
 in `COMPOSE_FILE`. On Windows Compose uses `;` instead of `:` as the file
-separator. Explicit `-f` options supersede `COMPOSE_FILE`; include all required
-overrides if you use them.
+separator. When `MYSQL_DOCKER_NETWORK` is set, keep using both `-f` arguments
+shown above for all Compose commands.
 
 Build the workstation images with the same legacy override enabled, or tag the
 new image IDs with the old repository names before export. `build-export-images.sh`
@@ -69,11 +79,12 @@ maintenance window: Asterisk replacement ends active calls.
    Retain that exact project name (`-p` if needed) and deployment directory.
 2. Build/load the neutral image tags at the intended `IMAGE_TAG`; verify they
    exist locally before changing Compose. Do not rely on pulling public images.
-3. Stop the old services using the **old configuration including the legacy
-   override**, without deleting volumes: `docker compose stop`. Never use
+3. Stop the old services using the existing Compose configuration, without deleting
+   volumes: `docker compose stop`. Never use
    `down -v`, volume prune, or database recreation for a naming migration.
-4. Remove only `docker-compose.legacy-names.yml` from `COMPOSE_FILE`. Keep the
-   MySQL override and other topology settings. Validate `docker compose config --quiet`.
+4. To migrate to neutral names later, remove the legacy `TELEPHONY_*_IMAGE` and
+   `TELEPHONY_*_CONTAINER` overrides from `.env`. Retain `MYSQL_DOCKER_NETWORK`
+   and both Compose file arguments if using Docker MySQL. Validate the config.
 5. Run `docker compose up -d --no-build` with the same project. Review Compose's
    recreation plan and verify that the original volume names are reused.
 6. If nginx uses `engineerip-asterisk:8088`, review the proxy installer dry run
@@ -82,8 +93,8 @@ maintenance window: Asterisk replacement ends active calls.
 7. Check API health, database records, `/ws`, registration, inbound/outbound
    calls, voicemail and recording playback before accepting traffic.
 
-Rollback: stop the new stack (no volume deletion), restore the legacy override
-and old `IMAGE_TAG`, recreate with the same project and verify the proxy's old
+Rollback: stop the new stack (no volume deletion), restore the legacy image/container
+overrides and old `IMAGE_TAG`, recreate with the same project and verify the proxy's old
 upstream. Restoring a database backup is a separate operation, not automatically
 required for a naming-only rollback.
 
