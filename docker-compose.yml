@@ -175,7 +175,7 @@ networks:
     name: telephony-data
   mysql-panel-network:
     external: true
-    name: ${MYSQL_DOCKER_NETWORK:?Set MYSQL_DOCKER_NETWORK when using existing Docker MySQL}
+    name: ${MYSQL_DOCKER_NETWORK:-telephony-mysql-network}
 
 
 volumes:
