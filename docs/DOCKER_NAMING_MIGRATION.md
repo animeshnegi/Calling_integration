@@ -22,6 +22,7 @@ keep the following setting too:
 
 ```dotenv
 MYSQL_DOCKER_NETWORK=1panel-network
+COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml
 TELEPHONY_API_IMAGE=engineerip/telephony-api
 TELEPHONY_ASTERISK_IMAGE=engineerip/asterisk
 TELEPHONY_API_CONTAINER=engineerip-telephony-api
@@ -29,17 +30,16 @@ TELEPHONY_ARI_CONTAINER=engineerip-telephony-ari
 TELEPHONY_ASTERISK_CONTAINER=engineerip-asterisk
 ```
 
-Use both Compose files together for that deployment:
+The `COMPOSE_FILE` value in `.env` automatically selects both Compose files. Validate with:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml config --quiet
+docker compose config --quiet
 ```
 
 Keep the existing database URI, credentials, `IMAGE_TAG`, Compose project name,
 working directory and volume names. Preserve any additional overrides already
 in `COMPOSE_FILE`. On Windows Compose uses `;` instead of `:` as the file
-separator. When `MYSQL_DOCKER_NETWORK` is set, keep using both `-f` arguments
-shown above for all Compose commands.
+separator. When `COMPOSE_FILE` is set in `.env`, every `docker compose` command automatically uses both files. Do not add a third override file.
 
 Build the workstation images with the same legacy override enabled, or tag the
 new image IDs with the old repository names before export. `build-export-images.sh`
