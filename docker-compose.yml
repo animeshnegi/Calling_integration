@@ -50,6 +50,7 @@ services:
     networks:
       - telephony-internal
       - data-network
+      - mysql-existing-network
     # Optional extra network for an existing MySQL container is configured
     # by attaching this service in docker-compose.local.yml.
 
