@@ -25,37 +25,35 @@ If MySQL is on `1panel-network`, set this value in `.env`:
 MYSQL_DOCKER_NETWORK=1panel-network
 ```
 
-Use the two Compose files together for the deployment command:
+The override file is selected through `COMPOSE_FILE` in the production
+`.env`:
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml config --quiet
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --no-build --no-deps telephony-ari telephony-api
+```dotenv
+MYSQL_DOCKER_NETWORK=1panel-network
+COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml
 ```
 
-The `.local.yml` file adds the external network only to the API and ARI worker.
-Asterisk stays on its private telephony network. For XAMPP/host MySQL or managed
-MySQL, leave `MYSQL_DOCKER_NETWORK` blank and use `docker-compose.yml` alone.
-
-Keep `DATABASE_URI`, its password and its database name unchanged. Do not
-use the container's temporary IP as a permanent database hostname.
+For local XAMPP on Windows, leave both variables blank or unset and use the
+base file only. For 1Panel, Compose automatically loads both files through
+`COMPOSE_FILE`. The override attaches only `telephony-api` and
+`telephony-ari` to the external MySQL network. Asterisk remains isolated.
 
 Validate and recreate only the two database clients (brief application/worker
 interruption; schedule around active calls):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml config --quiet
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --no-build --no-deps telephony-ari telephony-api
-docker compose -f docker-compose.yml -f docker-compose.local.yml logs --tail=50 telephony-api telephony-ari
+docker compose config --quiet
+docker compose up -d --no-build --no-deps telephony-ari telephony-api
+docker compose logs --tail=50 telephony-api telephony-ari
 curl -fsS http://127.0.0.1:5000/health
 ```
 
-Use both Compose files for subsequent commands while this external-network mode
-is enabled. Asterisk is not attached to the database network and is not
-recreated by the scoped command. No database recreation, volume deletion, CRM
-connection or proxy installer is required.
+Keep `DATABASE_URI`, its password and its database name unchanged. Do not use
+the container's temporary IP as a permanent database hostname. Use both
+Compose files for subsequent commands while `COMPOSE_FILE` is configured.
 
 For immediate recovery before recreating the two clients, attach both existing
-containers only if they are not already on that network:
+containers only if they are not already on the network:
 
 ```bash
 docker network connect 1panel-network telephony-api
@@ -63,8 +61,9 @@ docker network connect 1panel-network telephony-ari
 docker compose restart telephony-ari telephony-api
 ```
 
-These live attachments survive restarts, but not container replacement. Use the
-two-file configuration for a durable fix. Never run `docker compose down -v` to fix DNS.
+These live attachments survive restarts, but not container replacement. The
+`COMPOSE_FILE` setting makes the external network attachment persistent.
+Never run `docker compose down -v` to fix DNS.
 
 ## 1. Create the database and restricted user
 
