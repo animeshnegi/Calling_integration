@@ -261,10 +261,12 @@ indexes are created automatically. See [`docs/MYSQL.md`](docs/MYSQL.md) and
 
 ## Deployment
 
-**Existing installations:** Docker defaults use `telephony-control/*` images and
-neutral container names. To retain older EngineerIP image/container names, set
-the `TELEPHONY_*_IMAGE` and `TELEPHONY_*_CONTAINER` values in `.env`; no third
-Compose file is needed. See [the naming migration guide](docs/DOCKER_NAMING_MIGRATION.md).
+**Docker defaults:** Compose uses `engineerip/telephony-api` and
+`engineerip/asterisk`, with containers named `engineerip-telephony-api`,
+`engineerip-telephony-ari` and `engineerip-asterisk`. These defaults match the
+existing production images, so these five `TELEPHONY_*` variables do not need
+to be added to `.env`. Override them only when intentionally choosing different
+names. See [the naming guide](docs/DOCKER_NAMING_MIGRATION.md).
 
 
 ```bash
