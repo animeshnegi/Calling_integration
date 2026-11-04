@@ -175,22 +175,89 @@ finalised recordings are streamed through private ARI to authenticated
 clients. Retention is enforced by the ARI worker from the persisted call end
 time. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the failure-runbook.
 
-## Database
+## Database and environment: local development vs production
+
+The application uses MySQL in both environments. The difference is **where MySQL
+runs and whether Docker must join an existing network**. Keep separate `.env`
+files for your Windows development machine and the production VM. Never copy
+production passwords into the local file or commit either `.env`.
+
+### Local development: Windows + XAMPP MySQL
+
+When MySQL runs directly on the Windows host through XAMPP, Docker containers
+reach it through `host.docker.internal`. Use the base Compose file only:
 
 ```dotenv
-DATABASE_URI=mysql+pymysql://eip_app:URL_ENCODED_PASSWORD@mysql.example.internal:3306/eip_telephony?charset=utf8mb4
+DATABASE_URI=mysql+pymysql://USER:URL_ENCODED_PASSWORD@host.docker.internal:3306/eip_telephony?charset=utf8mb4
+# MYSQL_DOCKER_NETWORK: leave unset
+# COMPOSE_FILE: leave unset
 ```
 
-The database and a restricted MySQL user must exist; tables and indexes are
-created automatically. See [`docs/MYSQL.md`](docs/MYSQL.md).
+Do not set `COMPOSE_FILE` or `MYSQL_DOCKER_NETWORK` for this mode. Docker
+Compose uses `docker-compose.yml` by default, and the API/ARI containers use
+the host-gateway mapping to reach XAMPP. No external Docker network is needed.
 
-**Existing Docker MySQL / 1Panel upgrades:** a hostname such as
-`1Panel-mysql-H8JJ` only resolves on the MySQL container's Docker network. Set
-`MYSQL_DOCKER_NETWORK=1panel-network` and
-`COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml` in `.env`. Compose
-then loads the optional override automatically. It connects only the API and
-ARI worker to MySQL; Asterisk stays isolated. For XAMPP on Windows or remote
-MySQL, leave both variables unset and use the base Compose file alone.
+### Production: Google Cloud VM + 1Panel MySQL container
+
+When MySQL runs as the 1Panel-managed Docker container, its container hostname
+(`1Panel-mysql-H8JJ`) is resolvable only by containers attached to its Docker
+network. Configure the production VM's `/opt/Calling_integration/.env` with:
+
+```dotenv
+DATABASE_URI=mysql+pymysql://engineerip:URL_ENCODED_PASSWORD@1Panel-mysql-H8JJ:3306/eip_telephony?charset=utf8mb4
+MYSQL_DOCKER_NETWORK=1panel-network
+COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml
+```
+
+Here, `COMPOSE_FILE` tells Docker Compose to load **both** files: the standard
+service definitions in `docker-compose.yml`, plus the optional network
+override in `docker-compose.local.yml`. The override attaches only
+`telephony-api` and `telephony-ari` to the existing `1panel-network`, so
+they can connect to MySQL. Asterisk remains on its private
+`telephony-internal` network and is not attached to the MySQL network.
+
+The override is not a second application stack and does not start another
+database. It only adds the external network to the two database clients.
+`MYSQL_DOCKER_NETWORK` supplies the actual existing Docker network name.
+
+### Quick comparison
+
+| Setting | Windows / XAMPP local | Production / 1Panel |
+| --- | --- | --- |
+| MySQL location | Windows host | Existing MySQL container |
+| `DATABASE_URI` host | `host.docker.internal` | `1Panel-mysql-H8JJ` |
+| `MYSQL_DOCKER_NETWORK` | Unset | `1panel-network` |
+| `COMPOSE_FILE` | Unset | `docker-compose.yml:docker-compose.local.yml` |
+| Compose files loaded | Base file only | Base + local network override |
+| API + ARI join MySQL network | No | Yes |
+| Asterisk joins MySQL network | No | No |
+
+### Validate before starting or recreating services
+
+Run these commands from the repository directory, using the `.env` for the
+environment you are operating:
+
+```bash
+docker compose config -q
+docker compose ps
+```
+
+For a production database-network-only change, validate first and recreate
+only the API and ARI worker:
+
+```bash
+docker compose up -d --no-build --no-deps telephony-ari telephony-api
+docker compose logs --tail=100 telephony-api telephony-ari
+```
+
+Do not run `docker compose down -v`, do not remove the existing MySQL network,
+and do not recreate Asterisk for a database-network-only change. Keep the
+production database password URL-encoded (for example, `@` becomes `%40`,
+`#` becomes `%23`, and `/` becomes `%2F`).
+
+The database and a restricted MySQL user must exist; application tables and
+indexes are created automatically. See [`docs/MYSQL.md`](docs/MYSQL.md) and
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Deployment
 
