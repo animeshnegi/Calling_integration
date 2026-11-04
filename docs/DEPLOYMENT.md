@@ -1,4 +1,4 @@
-> Existing EngineerIP-named containers: read [the Docker naming migration](DOCKER_NAMING_MIGRATION.md) before applying these neutral-name examples. Preserve the existing image/container names through the `TELEPHONY_*` values in the server `.env`.
+> Docker image and container defaults use the established EngineerIP names. No `TELEPHONY_*` naming overrides are required unless you intentionally choose different names. See [the Docker naming guide](DOCKER_NAMING_MIGRATION.md) for details.
 
 # Deployment
 
