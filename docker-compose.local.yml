@@ -15,9 +15,26 @@
 #   DATABASE_URI=mysql+pymysql://root:PASSWORD@host.docker.internal:3306/telephony?charset=utf8mb4
 #
 # For a managed/remote MySQL, point DATABASE_URI at that host directly.
+#
+# Existing Docker MySQL (e.g. 1Panel): use this same optional override with
+# MYSQL_DOCKER_NETWORK=1panel-network in .env. This attaches API + ARI only;
+# the Asterisk container stays isolated. Do not set MYSQL_DOCKER_NETWORK for
+# XAMPP/host MySQL or managed MySQL.
 # Never use the bundled database in production.
 
 services:
+  telephony-api:
+    networks:
+      - telephony-internal
+      - data-network
+      - mysql-existing-network
+
+  telephony-ari:
+    networks:
+      - telephony-internal
+      - data-network
+      - mysql-existing-network
+
   mysql:
     image: mysql:8.4
     container_name: telephony-local-mysql
@@ -38,6 +55,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+
+networks:
+  mysql-existing-network:
+    external: true
+    name: ${MYSQL_DOCKER_NETWORK:?Set MYSQL_DOCKER_NETWORK when using an existing Docker MySQL network}
 
 volumes:
   mysql_local_data:
