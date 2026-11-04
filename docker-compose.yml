@@ -50,6 +50,8 @@ services:
     networks:
       - telephony-internal
       - data-network
+    # Optional extra network for an existing MySQL container is configured
+    # by attaching this service in docker-compose.local.yml.
 
     # Expose the Flask admin/API only on the local host.
     # Use a reverse proxy for remote access instead of publishing it publicly.
@@ -172,10 +174,6 @@ networks:
   data-network:
     driver: bridge
     name: telephony-data
-  mysql-panel-network:
-    external: true
-    name: ${MYSQL_DOCKER_NETWORK:-telephony-mysql-network}
-
 
 volumes:
   telephony_data:
