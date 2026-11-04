@@ -5,9 +5,11 @@
 # The base file is already standalone (all networks are local bridges), so this
 # override only adds a throwaway MySQL for machines that have no database:
 #
+# Set DATABASE_URI in .env BEFORE running Compose (base-file validation requires it):
+#   DATABASE_URI=mysql+pymysql://eip:eip-local-password@mysql:3306/telephony?charset=utf8mb4
+# Then run:
 #   docker compose -f docker-compose.yml -f docker-compose.local.yml \
 #       --profile bundled-db up --build
-#   DATABASE_URI=mysql+pymysql://eip:eip-local-password@mysql:3306/telephony?charset=utf8mb4
 #
 # For an existing MySQL on this machine, host-gateway resolves it from Docker:
 #   DATABASE_URI=mysql+pymysql://root:PASSWORD@host.docker.internal:3306/telephony?charset=utf8mb4

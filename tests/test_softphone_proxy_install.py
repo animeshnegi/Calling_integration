@@ -70,7 +70,7 @@ def docker_calls(monkeypatch):
         calls.append(args)
         if args[:3] == ("docker", "inspect", "--format"):
             assert args[-1] == "engineerip-asterisk"
-            return json.dumps({"engineerip-telephony-internal": {"IPAddress": "172.22.0.4"}})
+            return json.dumps({"telephony-internal": {"IPAddress": "172.22.0.4"}})
         return ""
 
     monkeypatch.setattr(installer, "command", command)
@@ -140,12 +140,12 @@ def test_bridge_network_never_uses_the_proxy_containers_loopback(tmp_path, docke
     assert proxy.path.read_text() == HOST_CONFIG
     assert not any("network" in c for c in docker_calls)
     installer.apply_plan(proxy, plan, connect_network=True)
-    assert ("docker", "network", "connect", "engineerip-telephony-internal", proxy.name) in docker_calls
+    assert ("docker", "network", "connect", "telephony-internal", proxy.name) in docker_calls
     assert not any("disconnect" in c for c in docker_calls)
 
 
 def test_existing_shared_network_is_reused_without_adding_one(tmp_path, docker_calls):
-    proxy = Proxy(tmp_path, mode="bridge", networks={"engineerip-telephony-internal": {}})
+    proxy = Proxy(tmp_path, mode="bridge", networks={"telephony-internal": {}})
     assert not installer.make_plan(proxy, DOMAIN).attach
 
 
@@ -157,7 +157,7 @@ def test_rejection_restores_original_file_and_rolls_back_new_network(tmp_path, d
     with pytest.raises(installer.InstallError, match="original vhost restored"):
         installer.apply_plan(proxy, plan, connect_network=True)
     assert proxy.path.read_text() == HOST_CONFIG
-    assert ("docker", "network", "disconnect", "engineerip-telephony-internal", proxy.name) in docker_calls
+    assert ("docker", "network", "disconnect", "telephony-internal", proxy.name) in docker_calls
     assert proxy.commands[-2:] == [("-t",), ("-s", "reload")]
 
 
@@ -317,3 +317,18 @@ http {{
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
+
+
+def test_network_default_matches_current_compose_and_legacy_is_explicit(tmp_path, docker_calls, monkeypatch):
+    proxy = Proxy(tmp_path, mode="bridge", networks={})
+    plan = installer.make_plan(proxy, DOMAIN)
+    assert plan.network == "telephony-internal"
+    assert plan.attach
+
+    def legacy_command(*args):
+        return json.dumps({"engineerip-telephony-internal": {"IPAddress": "172.22.0.4"}})
+
+    monkeypatch.setattr(installer, "command", legacy_command)
+    legacy = installer.make_plan(proxy, DOMAIN, network="engineerip-telephony-internal")
+    assert legacy.network == "engineerip-telephony-internal"
+    assert legacy.attach

@@ -80,7 +80,7 @@ RUN sed -i 's/\r$//' /entrypoint.sh /configure-ice.sh \
     && chown asterisk:telephony /etc/asterisk/dynamic \
     && chmod 0770 /etc/asterisk/dynamic
 
-EXPOSE 5060/udp 5060/tcp 8089/tcp 10000-10100/udp
+EXPOSE 5060/udp 5060/tcp 8088/tcp 8089/tcp 10000-10100/udp
 VOLUME ["/var/lib/asterisk", "/var/spool/asterisk", "/etc/asterisk/keys"]
 
 ENTRYPOINT ["/entrypoint.sh"]

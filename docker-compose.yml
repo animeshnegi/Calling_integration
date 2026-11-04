@@ -108,7 +108,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
-    command: ["python", "-m", "app.ari_worker"]
+    command: ["python", "-m", "app.asterisk.worker"]
 
   asterisk:
     image: engineerip/asterisk:${IMAGE_TAG:-latest}

@@ -41,5 +41,10 @@ RUN python -c "from pathlib import Path; ext={'.sh','.py','.conf','.md'}; [(p.wr
 
 USER appuser
 
+# Fail the workstation build, rather than the server deployment, if a refactor
+# omitted a Python package or the precompiled offline stylesheet/page assets.
+# Imports do not create an app, connect to MySQL, or start the ARI event worker.
+RUN python -c "from pathlib import Path; from app.models.settings import SettingsStore; from app.routes.admin import register_admin; from app.asterisk.client import AsteriskClient; from app.asterisk.worker import main; root=Path('/app/app'); pages=list((root/'templates').glob('*.html')); assert len(pages) >= 6, 'Missing HTML templates'; assets=['css/tailwind.css', 'css/phone.css', 'js/admin.js', 'js/phone.js', 'js/jssip-fallback.js', 'js/console-theme.js', 'js/login.js', 'js/signup.js', 'js/console-check.js', 'images/favicon.svg']; assert all((root/'static'/p).is_file() and (root/'static'/p).stat().st_size for p in assets), 'Missing bundled UI asset'"
+
 EXPOSE 5000
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "60", "--access-logfile", "-", "--error-logfile", "-", "wsgi:app"]

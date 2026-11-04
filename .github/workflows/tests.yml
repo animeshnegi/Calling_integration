@@ -6,6 +6,18 @@ on:
   pull_request:
 
 jobs:
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production and local Compose definitions
+        # Placeholder values only; do not start services or contact a database.
+        run: |
+          cp .env.example .env
+          trap 'rm -f .env' EXIT
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.local.yml --profile bundled-db config --quiet
+
   pytest:
     runs-on: ubuntu-latest
     steps:

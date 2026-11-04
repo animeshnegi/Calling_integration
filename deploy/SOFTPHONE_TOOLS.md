@@ -150,7 +150,7 @@ and use its actual filename in option A.
 
 A host-networked proxy uses host loopback and needs no extra network. A bridged
 proxy uses Docker DNS `engineerip-asterisk:8088`. If the installer attaches that
-proxy to `engineerip-telephony-internal`, persist it as an external network in
+proxy to `telephony-internal`, persist it as an external network in
 1Panel's proxy Compose configuration, preserving all existing networks. For example
 (use the actual proxy service name):
 
@@ -159,11 +159,11 @@ services:
   openresty:
     networks:
       # Keep this service's existing networks too.
-      - engineerip-telephony-internal
+      - telephony-internal
 networks:
-  engineerip-telephony-internal:
+  telephony-internal:
     external: true
-    name: engineerip-telephony-internal
+    name: telephony-internal
 ```
 
 Do not add `networks` to a proxy using `network_mode: host`. A live network
@@ -171,3 +171,20 @@ attachment survives restarts but not replacement/recreation, and a panel may
 regenerate the vhost after UI edits. Re-check `/ws` after those operations. The
 installer does not rewrite the panel's Compose file or expose Asterisk's ARI
 HTTP server publicly.
+
+### Private network name on upgrade
+
+The current Compose file creates `telephony-internal`; the installer now uses
+that same default. For a deployment still using the old private bridge, pass
+`--network engineerip-telephony-internal` explicitly. This is a proxy-to-Asterisk
+connection, not a CRM integration. Preserve the shared network in the proxy's
+Compose configuration before recreating that proxy.
+
+For an ordinary image update with a working `/ws` route, check it first:
+
+```bash
+python3 scripts/check-softphone-websocket.py wss://YOUR_WEB_DOMAIN/ws
+```
+
+A PASS does not require reapplying the installer. The image contains the static
+UI files, but loading an image cannot modify the host's proxy configuration.

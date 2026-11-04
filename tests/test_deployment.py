@@ -126,3 +126,33 @@ def test_docs_distinguish_panel_container_network_from_host_loopback():
     assert "--connect-network" in docs
     assert "host network mode" in docs
     assert "not replacement/recreation" in docs
+
+
+def test_compose_starts_the_canonical_worker_and_preserves_existing_storage():
+    compose = (ROOT / "docker-compose.yml").read_text()
+    assert 'command: ["python", "-m", "app.asterisk.worker"]' in compose
+    for mount in (
+        'telephony_data:/app/instance',
+        'asterisk_dynamic_config:/app/asterisk-config',
+        'asterisk_recordings:/var/spool/asterisk/recording',
+        'asterisk_voicemail:/var/spool/asterisk/voicemail',
+    ):
+        assert mount in compose
+    assert 'external: true' not in compose
+    assert 'name: telephony-internal' in compose
+
+
+def test_api_image_checks_refactored_modules_and_offline_assets():
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert 'COPY --chown=appuser:appuser app ./app' in dockerfile
+    for module in ('app.models.settings', 'app.routes.admin', 'app.asterisk.client', 'app.asterisk.worker'):
+        assert f'from {module} import ' in dockerfile
+    assert 'css/tailwind.css' in dockerfile
+    assert 'js/jssip-fallback.js' in dockerfile
+    assert dockerfile.index('USER appuser') < dockerfile.index('Missing bundled UI asset')
+
+
+def test_asterisk_image_declares_both_websocket_listeners():
+    dockerfile = (ROOT / "asterisk/Dockerfile").read_text()
+    expose = next(line for line in dockerfile.splitlines() if line.startswith('EXPOSE '))
+    assert '8088/tcp' in expose and '8089/tcp' in expose
