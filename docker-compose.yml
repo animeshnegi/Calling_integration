@@ -173,11 +173,8 @@ networks:
   data-network:
     driver: bridge
     name: telephony-data
-  # Optional external network for an existing MySQL container. When unset, the
-  # API/ARI containers join an unused external network and use host/remote MySQL
-  # as configured by DATABASE_URI. Set MYSQL_DOCKER_NETWORK for 1Panel MySQL.
   mysql-existing-network:
-    external: true
+    driver: bridge
     name: ${MYSQL_DOCKER_NETWORK:-telephony-mysql-network}
 
 
