@@ -156,3 +156,20 @@ def test_asterisk_image_declares_both_websocket_listeners():
     dockerfile = (ROOT / "asterisk/Dockerfile").read_text()
     expose = next(line for line in dockerfile.splitlines() if line.startswith('EXPOSE '))
     assert '8088/tcp' in expose and '8089/tcp' in expose
+
+
+def test_existing_mysql_network_is_optional_and_only_attaches_database_clients():
+    override = (ROOT / 'docker-compose.mysql-network.yml').read_text()
+    base = (ROOT / 'docker-compose.yml').read_text()
+    services = override.split('services:', 1)[1].split('\nnetworks:', 1)[0]
+    assert '  telephony-api:' in services
+    assert '  telephony-ari:' in services
+    assert '  asterisk:' not in services
+    assert services.count('- mysql-existing-network') == 2
+    assert 'external: true' in override
+    assert '${MYSQL_DOCKER_NETWORK:?' in override
+    assert 'mysql-existing-network' not in base
+    assert 'crm-network' not in base
+    example = (ROOT / '.env.example').read_text()
+    assert '# COMPOSE_FILE=docker-compose.yml:docker-compose.mysql-network.yml' in example
+    assert '# MYSQL_DOCKER_NETWORK=1panel-network' in example

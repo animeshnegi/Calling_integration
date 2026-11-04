@@ -1,7 +1,9 @@
 # Standalone Telephony Control. No external CRM/1Panel networks are required:
 # the API is published on loopback for a reverse proxy, and other systems
 # integrate over HTTPS through the bearer-authenticated REST API or signed
-# webhooks. A MySQL server is reachable by its own hostname/IP in DATABASE_URI.
+# webhooks. Remote/host MySQL is reached through DATABASE_URI. If that URI uses
+# another container's Docker hostname, enable docker-compose.mysql-network.yml
+# to join the existing database network; Docker DNS is network-scoped.
 #
 # Bound Docker logs prevent SIP noise, health checks, or application errors from
 # filling the VM disk. Limits apply per container and require container recreation.

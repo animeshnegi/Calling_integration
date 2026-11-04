@@ -184,6 +184,13 @@ DATABASE_URI=mysql+pymysql://eip:URL_ENCODED_PASSWORD@mysql.example.internal:330
 The database and a restricted MySQL user must exist; tables and indexes are
 created automatically. See [`docs/MYSQL.md`](docs/MYSQL.md).
 
+**Existing Docker MySQL / 1Panel upgrades:** a hostname such as
+`1Panel-mysql-H8JJ` only resolves on the MySQL container's Docker network.
+Enable the optional `docker-compose.mysql-network.yml` override with
+`MYSQL_DOCKER_NETWORK` and `COMPOSE_FILE` in `.env` as described in the MySQL
+guide. This connects the API/worker to the database, not to a CRM, and keeps the
+base deployment standalone.
+
 ## Deployment
 
 ```bash

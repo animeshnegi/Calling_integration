@@ -1,0 +1,22 @@
+# OPTIONAL: use an existing MySQL container by its Docker DNS hostname.
+# This connects only the API and event worker to the database's network.
+# It does NOT connect Asterisk or require any CRM service/network.
+#
+# In .env (Linux server):
+#   MYSQL_DOCKER_NETWORK=1panel-network
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.mysql-network.yml
+# Keep DATABASE_URI pointing at your existing MySQL hostname/database.
+# Then: docker compose up -d --no-build --no-deps telephony-ari telephony-api
+# Do not combine with an existing COMPOSE_FILE list without preserving its files.
+services:
+  telephony-api:
+    networks:
+      - mysql-existing-network
+  telephony-ari:
+    networks:
+      - mysql-existing-network
+
+networks:
+  mysql-existing-network:
+    external: true
+    name: ${MYSQL_DOCKER_NETWORK:?Set MYSQL_DOCKER_NETWORK to the existing MySQL Docker network}

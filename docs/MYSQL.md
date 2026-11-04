@@ -4,6 +4,64 @@ Telephony Control uses the single `DATABASE_URI` connection for customer account
 
 Production startup requires MySQL. SQLite remains available only as a local test/development fallback when `DATABASE_URI` is empty.
 
+## Existing Docker MySQL: network migration and DNS failures
+
+An error like `Can't connect to MySQL server on '1Panel-mysql-H8JJ'
+([Errno -2] Name or service not known)` means Docker DNS cannot resolve the
+hostname. It does not by itself indicate a bad password or missing database.
+Container hostnames resolve only on a shared user-defined Docker network.
+The standalone base Compose file no longer implicitly joins a panel's network;
+existing deployments that use a database container hostname must opt in.
+
+Inspect only the network metadata (do not dump environment variables/secrets):
+
+```bash
+docker inspect 1Panel-mysql-H8JJ --format '{{json .NetworkSettings.Networks}}'
+```
+
+If MySQL is on `1panel-network`, copy `docker-compose.mysql-network.yml` from
+this repository into the deployment folder and set these values in `.env`:
+
+```dotenv
+MYSQL_DOCKER_NETWORK=1panel-network
+COMPOSE_FILE=docker-compose.yml:docker-compose.mysql-network.yml
+```
+
+The colon is the Compose file separator on Linux. If `COMPOSE_FILE` already
+lists other overrides, keep those entries and append the MySQL override.
+Leave `DATABASE_URI`, its password and its database name unchanged. Do not use
+the container's temporary IP as a permanent database hostname.
+
+Validate and recreate only the two database clients (brief application/worker
+interruption; schedule around active calls):
+
+```bash
+docker compose config --quiet
+docker compose up -d --no-build --no-deps telephony-ari telephony-api
+docker compose logs --tail=50 telephony-api telephony-ari
+curl -I http://127.0.0.1:5000/
+```
+
+`COMPOSE_FILE` makes future plain `docker compose` commands and the deployment
+helpers retain this attachment. Explicit `-f` flags take precedence: when using
+those, include the database override too. Asterisk is not attached to the database
+network, recreated or restarted by the command above. No image build, database
+recreation, volume deletion, CRM connection or proxy installer is required.
+The API/worker will regain connectivity only after DNS, authentication and
+schema access all succeed; inspect the next error if startup still fails.
+
+For immediate recovery **before** installing the persistent override, attach
+both existing containers, only if they are not already on that network:
+
+```bash
+docker network connect 1panel-network engineerip-telephony-api
+docker network connect 1panel-network engineerip-telephony-ari
+docker compose restart telephony-ari telephony-api
+```
+
+These live attachments survive restarts, but not container replacement. Install
+the override for a durable fix. Never run `docker compose down -v` to fix DNS.
+
 ## 1. Create the database and restricted user
 
 Run as a MySQL administrator, changing the host restriction and password:
