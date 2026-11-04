@@ -18,7 +18,7 @@ services:
   telephony-api:
     image: ${TELEPHONY_API_IMAGE:-telephony-control/api}:${IMAGE_TAG:-latest}
     build: .
-    container_name: telephony-api
+    container_name: ${TELEPHONY_API_CONTAINER:-telephony-api}
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env
@@ -70,7 +70,7 @@ services:
   telephony-ari:
     image: ${TELEPHONY_API_IMAGE:-telephony-control/api}:${IMAGE_TAG:-latest}
     build: .
-    container_name: telephony-ari
+    container_name: ${TELEPHONY_ARI_CONTAINER:-telephony-ari}
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env
@@ -117,7 +117,7 @@ services:
   asterisk:
     image: ${TELEPHONY_ASTERISK_IMAGE:-telephony-control/asterisk}:${IMAGE_TAG:-latest}
     build: ./asterisk
-    container_name: telephony-asterisk
+    container_name: ${TELEPHONY_ASTERISK_CONTAINER:-telephony-asterisk}
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env
