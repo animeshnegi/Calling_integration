@@ -51,7 +51,25 @@ class AsteriskClient:
             **kwargs,
         )
         if not response.ok:
-            raise AsteriskError(f"Asterisk API {response.status_code}")
+            # ARI's JSON error body often contains the actionable cause (for
+            # example, an unsupported recording format or an unwritable
+            # recording directory). Preserve a short, sanitized excerpt so the
+            # ARI worker log tells operators what failed instead of only giving
+            # them an HTTP status code.
+            detail = ""
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    detail = str(payload.get("message") or payload.get("error") or "")
+            except (AttributeError, ValueError, TypeError):
+                detail = ""
+            if not detail:
+                detail = str(getattr(response, "text", "") or "")
+            detail = " ".join(detail.split())[:400]
+            message = f"Asterisk API {response.status_code}"
+            if detail:
+                message += f": {detail}"
+            raise AsteriskError(message)
         if not response.content:
             return None
         return response.json()

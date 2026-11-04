@@ -291,14 +291,14 @@
         <div class="toolbar">
           <div class="search" data-admin-only><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div>
           <select id="recording-extension"><option value="">All extensions</option></select>
-          <input id="recording-from" type="date" title="From date" style="width:auto">
-          <input id="recording-to" type="date" title="To date" style="width:auto">
+          <input id="recording-from" class="media-date-filter" type="date" aria-label="Recordings from date" title="From date">
+          <input id="recording-to" class="media-date-filter" type="date" aria-label="Recordings to date" title="To date">
           <span class="spacer"></span>
           <button class="btn ghost sm" id="refresh-recordings">Refresh</button>
           <a class="btn ghost sm" href="/admin/api/calls/export.csv?recordings=true" download>Export CSV</a>
         </div>
         <article class="panel">
-          <div class="panel-head"><div><h2>Recordings by extension</h2><p>Secure playback grouped by employee extension</p></div><span class="count" id="recording-count">0 recordings</span></div>
+          <div class="panel-head"><div><h2>Call recordings</h2><p>Browse, play and download recordings, organised by extension</p></div><span class="count" id="recording-count">0 recordings</span></div>
           <div class="panel-body flush"><div id="recording-list" class="rows"></div><div class="pager" id="recording-pager"></div></div>
         </article>
       </section>
@@ -314,7 +314,7 @@
           <button class="btn ghost sm" id="refresh-voicemails">Refresh</button>
         </div>
         <article class="panel">
-          <div class="panel-head"><div><h2>Voicemail</h2><p>Listen to messages, mark them read, or delete them</p></div><span class="count" id="voicemail-count">0 messages</span></div>
+          <div class="panel-head"><div><h2>Voicemail inbox</h2><p>Listen to messages, keep track of new calls, and clear messages you no longer need</p></div><span class="count" id="voicemail-count">0 messages</span></div>
           <div class="panel-body flush"><div id="voicemail-list" class="rows"></div></div>
         </article>
       </section>

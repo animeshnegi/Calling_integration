@@ -109,6 +109,20 @@ def capture_request(monkeypatch):
     return captured
 
 
+def test_request_includes_actionable_ari_error_details(monkeypatch):
+    class ErrorResponse:
+        ok = False
+        status_code = 500
+        text = ""
+
+        def json(self):
+            return {"message": "Unable to open recording file: Permission denied"}
+
+    monkeypatch.setattr("app.asterisk_client.requests.request", lambda *args, **kwargs: ErrorResponse())
+    with pytest.raises(AsteriskError, match="500: Unable to open recording file: Permission denied"):
+        ari_client().start_bridge_recording("bridge-1", "call-1", "wav", False)
+
+
 def test_request_always_sends_ari_basic_auth_and_timeout(monkeypatch):
     captured = capture_request(monkeypatch)
 

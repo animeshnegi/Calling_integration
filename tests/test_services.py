@@ -1364,6 +1364,57 @@ def test_reconcile_recovers_recording_and_finalizing_but_leaves_live_and_unavail
     assert queried == ["unavailable"]  # Idempotent, no duplicate finish notifications.
 
 
+def test_recording_finish_waits_for_stored_file_before_advertising_playback(tmp_path):
+    service, asterisk, store = make_service(tmp_path)
+    call = Call(
+        call_id="finish-race", contact_id=None, member_id=None, extension="101",
+        phone="+13025551234", ended_at="2026-10-22T10:00:00+00:00",
+        recording_name="call-finish-race", recording_status="recording",
+    )
+    store.create(call)
+    asterisk.get_stored_recording = lambda name: None
+
+    service.handle_ari_event({
+        "type": "RecordingFinished",
+        "recording": {"name": call.recording_name, "format": "wav"},
+    })
+
+    # A transient ARI lookup miss must be retried, not rendered as available
+    # (404) or as a terminal recording failure.
+    assert store.get(call.call_id).recording_status == "finalizing"
+
+    asterisk.get_stored_recording = lambda name: {
+        "name": name, "format": "wav", "filename": f"/recording/{name}.wav",
+    }
+    service.reconcile_recordings()
+    recovered = store.get(call.call_id)
+    assert recovered.recording_status == "finalized"
+    assert recovered.recording_path == "/recording/call-finish-race.wav"
+
+
+def test_recording_failed_event_keeps_a_stored_partial_audio_file(tmp_path, caplog):
+    service, asterisk, store = make_service(tmp_path)
+    call = Call(
+        call_id="failed-but-stored", contact_id=None, member_id=None, extension="101",
+        phone="+13025551234", recording_name="call-failed-but-stored",
+        recording_status="recording",
+    )
+    store.create(call)
+    asterisk.get_stored_recording = lambda name: {
+        "name": name, "format": "wav", "filename": f"/recording/{name}.wav",
+    }
+
+    service.handle_ari_event({
+        "type": "RecordingFailed",
+        "recording": {"name": call.recording_name, "cause_txt": "maximum duration reached"},
+    })
+
+    recovered = store.get(call.call_id)
+    assert recovered.recording_status == "finalized"
+    assert recovered.recording_path == "/recording/call-failed-but-stored.wav"
+    assert "but a stored file exists" in caplog.text
+
+
 def test_fast_recording_finish_is_correlated_before_start_returns(tmp_path):
     service, asterisk, store, call = _bridged_setup(tmp_path)
     service._recording_settings = lambda extension: {

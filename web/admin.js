@@ -1577,10 +1577,6 @@ function renderPager(id, total, offset, callback) {
 }
 
 /* ------------------------------------------------------- 19. Recordings */
-function waveform() {
-  return `<span class="wave">${Array.from({ length: 30 }, (_, i) => `<i style="height:${7 + (i * 11) % 24}px"></i>`).join('')}</span>`;
-}
-
 async function loadRecordings() {
   const params = new URLSearchParams({ limit: '50', offset: String(recordingOffset), recordings: 'true' });
   if (val('recording-extension')) params.set('extension', val('recording-extension'));
@@ -1605,28 +1601,39 @@ async function loadRecordings() {
     $('recording-count').textContent = `${calls.length} recording${calls.length === 1 ? '' : 's'}`;
     const groups = groupBy(calls, x => x.extension);
     paint('recording-list', Object.entries(groups).map(([ext, items]) => `
-      <div class="acc-item open">
-        <div class="acc-head">
-          <span class="row-icon">◉</span>
-          <div><h3 style="font-size:13px">Extension ${esc(ext)} · ${esc(extensionName(ext))}</h3>
-            <p style="font-size:11px;color:var(--text-3)">${items.length} recording${items.length === 1 ? '' : 's'}</p></div>
-          <span class="chev">›</span>
-        </div>
-        <div class="acc-body" style="padding:0 18px 16px">${items.map(x => `
-          <div class="row rec-row" style="grid-template-columns:minmax(150px,1fr) minmax(140px,auto) minmax(240px,1.4fr)">
-            <div><h3>${esc(x.phone)}</h3><p>${esc(fmtDate(x.started_at))} · ${fmtDuration(x.duration_seconds)}</p></div>
-            <div>${statusPill(x.recording_status, `rec-${x.call_id}`)}<span class="cell-sub">Call ${esc(x.call_id)}</span></div>
-            <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap">
-              ${waveform()}
-              ${x.recording_status === 'finalized'
-                ? `<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
-                   <a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a>`
-                : x.recording_status === 'failed'
-                  ? '<small style="color:var(--danger)">Recording failed. No playable audio is available; check the ARI worker and Asterisk recording logs for this call ID.</small>'
-                  : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
+      <section class="media-group">
+        <header class="media-group-head">
+          <span class="media-group-icon recording-icon" aria-hidden="true">◉</span>
+          <div class="media-group-copy">
+            <h3>${esc(extensionName(ext))}</h3>
+            <p>Extension ${esc(extensionLabel(ext))}</p>
+          </div>
+          <span class="media-count">${items.length} <small>${items.length === 1 ? 'recording' : 'recordings'}</small></span>
+        </header>
+        <div class="media-group-items">${items.map(x => `
+          <article class="media-item recording-item">
+            <div class="media-main">
+              <span class="media-item-icon" aria-hidden="true">◉</span>
+              <div class="media-copy">
+                <h4>${esc(x.phone)}</h4>
+                <p>${esc(fmtDate(x.started_at))}<span aria-hidden="true"> · </span>${fmtDuration(x.duration_seconds)}</p>
+                <small>Call ${esc(x.call_id)}</small>
+              </div>
             </div>
-          </div>`).join('')}</div>
-      </div>`).join('') || empty('No recordings found', 'Try another extension, or complete a recorded call.', '◉'));
+            <div class="media-playback">
+              ${x.recording_status === 'finalized'
+                ? `<audio controls preload="none" aria-label="Recording of ${esc(x.phone)}" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>`
+                : x.recording_status === 'failed'
+                  ? '<p class="media-note is-error">Recording failed. No playable audio is available; check the ARI worker and Asterisk recording logs for this call ID.</p>'
+                  : '<p class="media-note">Audio is being finalized and will appear here when ready.</p>'}
+            </div>
+            <div class="media-item-actions">
+              ${statusPill(x.recording_status, `rec-${x.call_id}`)}
+              ${x.recording_status === 'finalized'
+                ? `<a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a>` : ''}
+            </div>
+          </article>`).join('')}</div>
+      </section>`).join('') || empty('No recordings found', 'Try another extension, or complete a recorded call.', '◉'));
     renderPager('recording-pager', data.total, recordingOffset, value => { recordingOffset = value; loadRecordings(); });
     markStagger();
   } catch (error) {
@@ -1656,27 +1663,41 @@ async function loadVoicemails() {
       `${x.caller_id} ${x.message} ${x.mailbox}`.toLowerCase().includes(query));
     $('voicemail-count').textContent = `${messages.length} message${messages.length === 1 ? '' : 's'}`;
     const groups = groupBy(messages, x => x.mailbox);
-    paint('voicemail-list', Object.entries(groups).map(([mailbox, items]) => `
-      <div class="acc-item open">
-        <div class="acc-head">
-          <span class="row-icon">✉</span>
-          <div><h3 style="font-size:13px">Mailbox ${esc(extensionLabel(extensionKeyOfMailbox(mailbox)))} · ${esc(extensionName(extensionKeyOfMailbox(mailbox)))}</h3>
-            <p style="font-size:11px;color:var(--text-3)">${items.filter(x => x.folder === 'inbox').length} new of ${items.length}</p></div>
-          <span class="chev">›</span>
-        </div>
-        <div class="acc-body" style="padding:0 18px 16px">${items.map(x => `
-          <div class="row" style="grid-template-columns:minmax(150px,1fr) minmax(220px,1.3fr) auto">
-            <div><h3>${esc(x.caller_id)}</h3><p>${esc(fmtDate(x.received_at))} · ${fmtDuration(x.duration_seconds)}</p></div>
-            <div style="display:flex;align-items:center;gap:10px">
-              ${tag(x.folder, x.folder === 'inbox' ? 'warn' : x.folder === 'urgent' ? 'off' : '')}
-              <audio controls preload="none" src="/admin/api/voicemails/${esc(x.mailbox)}/${esc(x.folder)}/${esc(x.message)}/file"></audio>
+    paint('voicemail-list', Object.entries(groups).map(([mailbox, items]) => {
+      const extension = extensionKeyOfMailbox(mailbox);
+      const fresh = items.filter(x => x.folder === 'inbox').length;
+      return `
+      <section class="media-group">
+        <header class="media-group-head">
+          <span class="media-group-icon voicemail-icon" aria-hidden="true">✉</span>
+          <div class="media-group-copy">
+            <h3>${esc(extensionName(extension))}</h3>
+            <p>Mailbox ${esc(extensionLabel(extension))}</p>
+          </div>
+          <span class="media-count">${items.length} <small>${items.length === 1 ? 'message' : 'messages'}</small></span>
+          ${fresh ? `<span class="new-count">${fresh} new</span>` : ''}
+        </header>
+        <div class="media-group-items">${items.map(x => `
+          <article class="media-item">
+            <div class="media-main">
+              <span class="media-item-icon voicemail-item-icon" aria-hidden="true">${x.folder === 'urgent' ? '!' : '♪'}</span>
+              <div class="media-copy">
+                <h4>${esc(x.caller_id || 'Unknown caller')}</h4>
+                <p>${esc(fmtDate(x.received_at))}<span aria-hidden="true"> · </span>${fmtDuration(x.duration_seconds)}</p>
+                <small>${esc(x.mailbox)}</small>
+              </div>
             </div>
-            <div class="row-actions">
+            <div class="media-playback">
+              <audio controls preload="none" aria-label="Voicemail from ${esc(x.caller_id || 'unknown caller')}" src="/admin/api/voicemails/${esc(x.mailbox)}/${esc(x.folder)}/${esc(x.message)}/file"></audio>
+            </div>
+            <div class="media-item-actions">
+              ${tag(x.folder, x.folder === 'inbox' ? 'warn' : x.folder === 'urgent' ? 'off' : '')}
               ${x.folder === 'inbox' ? `<button class="btn ghost sm" data-read-voicemail="${esc(x.mailbox)}:${esc(x.folder)}:${esc(x.message)}">Mark read</button>` : ''}
               <button class="btn danger sm" data-delete-voicemail="${esc(x.mailbox)}:${esc(x.folder)}:${esc(x.message)}">Delete</button>
             </div>
-          </div>`).join('')}</div>
-      </div>`).join('') || empty('No voicemail messages', 'Enable voicemail on an extension and unanswered callers can leave a message.', '✉'));
+          </article>`).join('')}</div>
+      </section>`;
+    }).join('') || empty('No voicemail messages', 'Enable voicemail on an extension and unanswered callers can leave a message.', '✉'));
     markStagger();
   } catch (error) {
     paint('voicemail-list', errorState('Voicemail could not be loaded', error.message, 'voicemails'));
@@ -3884,7 +3905,7 @@ function wsRecordingsTab() {
           ${statusPill(x.recording_status)}
         </div>
         ${x.recording_status === 'finalized' ? `<div style="margin-top:13px;display:flex;align-items:center;gap:11px;flex-wrap:wrap">
-          ${waveform()}<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
+          <audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
           <a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a></div>`
         : '<p style="margin-top:11px;color:var(--text-3);font-size:11.5px">Audio becomes available after finalisation.</p>'}
       </article>`).join('') || wsEmpty('No recordings', 'Recording is off by default; enable it globally and per extension.', '◉')}</div>
@@ -4013,11 +4034,6 @@ document.addEventListener('click', event => {
   }
 });
 document.addEventListener('click', async event => {
-  // Grouped lists (extensions by customer, recordings/voicemails by extension)
-  // collapse from their header, so long lists stay scannable.
-  const head = event.target.closest('.acc-head');
-  if (head) { head.closest('.acc-item')?.classList.toggle('open'); return; }
-
   const button = event.target.closest('button');
   if (!button || button.disabled) return;
   const d = button.dataset;

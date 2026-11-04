@@ -1132,21 +1132,51 @@ class TelephonyService:
             name = str(recording.get("name") or "")
             call = self.store.find_by_recording(name) if name else None
             if call:
-                changes: dict[str, Any] = {
-                    "recording_status": "finalized" if event_type == "RecordingFinished" else "failed"
-                }
-                if recording.get("format") and not call.recording_format:
-                    changes["recording_format"] = str(recording["format"])
-                if event_type == "RecordingFinished":
+                # A RecordingFinished event can race ARI's stored-recording
+                # endpoint (or that endpoint can briefly fail while the file is
+                # being flushed). Do not advertise a file as playable until
+                # ARI confirms it exists: `finalizing` is retried by the normal
+                # reconciliation loop. Conversely, a failure event may still
+                # leave a valid partial recording, so check positive evidence
+                # before marking it permanently failed.
+                try:
                     stored = self.asterisk.get_stored_recording(name) if name else None
+                except Exception:
+                    stored = None
+                    logger.exception(
+                        "Could not verify Asterisk recording %s for call %s after %s",
+                        name, call.call_id, event_type,
+                    )
+
+                if event_type == "RecordingFailed":
+                    cause = recording.get("cause_txt") or recording.get("cause") or event.get("cause_txt") or event.get("cause")
                     if stored:
-                        filename = stored.get("filename")
-                        if filename:
-                            changes["recording_path"] = str(filename)
-                        if stored.get("format") and not call.recording_format:
-                            changes["recording_format"] = str(stored["format"])
+                        logger.warning(
+                            "Asterisk reported recording failure for call %s (%s), but a stored file exists; preserving it",
+                            call.call_id, cause or "no cause provided",
+                        )
+                    else:
+                        logger.error(
+                            "Asterisk recording failed for call %s (recording %s): %s",
+                            call.call_id, name, cause or "Asterisk supplied no failure cause",
+                        )
+
+                finalized = bool(stored)
+                changes: dict[str, Any] = {
+                    "recording_status": "finalized" if finalized else (
+                        "finalizing" if event_type == "RecordingFinished" else "failed"
+                    )
+                }
+                filename = stored.get("filename") if stored else None
+                if filename:
+                    changes["recording_path"] = str(filename)
+                fmt = (stored or {}).get("format") or recording.get("format")
+                if fmt and not call.recording_format:
+                    changes["recording_format"] = str(fmt)
                 updated = self.store.update(call.call_id, **changes)
-                self.notify_crm(f"call.recording_{'finished' if event_type == 'RecordingFinished' else 'failed'}", updated)
+                lifecycle = "finished" if finalized else ("failed" if event_type == "RecordingFailed" else None)
+                if lifecycle:
+                    self.notify_crm(f"call.recording_{lifecycle}", updated)
             return
 
         channel = event.get("channel") or {}
