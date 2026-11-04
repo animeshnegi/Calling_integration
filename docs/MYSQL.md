@@ -39,7 +39,7 @@ interruption; schedule around active calls):
 docker compose config --quiet
 docker compose up -d --no-build --no-deps telephony-ari telephony-api
 docker compose logs --tail=50 telephony-api telephony-ari
-curl -I http://127.0.0.1:5000/
+curl -fsS http://127.0.0.1:5000/health
 ```
 
 `COMPOSE_FILE` makes future plain `docker compose` commands and the deployment
@@ -155,12 +155,17 @@ The database itself and database user must already exist. The application intent
 
 ## 5. Verify connectivity
 
-After importing the new image:
+For an existing production deployment, validate the resolved Compose model and
+recreate only the API and ARI worker after enabling the database network
+override. Do not use an unscoped `docker compose up --force-recreate` for this
+network-only repair: it can recreate Asterisk and interrupt active calls.
 
 ```bash
-docker compose config >/dev/null
-docker compose up -d --force-recreate
+docker compose config --quiet
+docker compose up -d --no-build --no-deps telephony-ari telephony-api
+docker compose ps
 docker compose logs --tail=100 telephony-api telephony-ari
+curl -fsS http://127.0.0.1:5000/health
 ```
 
 Verify from the API container without printing the URI:
