@@ -19,13 +19,22 @@ Inspect only the network metadata (do not dump environment variables/secrets):
 docker inspect 1Panel-mysql-H8JJ --format '{{json .NetworkSettings.Networks}}'
 ```
 
-If MySQL is on `1panel-network`, copy `docker-compose.mysql-network.yml` from
-this repository into the deployment folder and set these values in `.env`:
+If MySQL is on `1panel-network`, set this value in `.env`:
 
 ```dotenv
 MYSQL_DOCKER_NETWORK=1panel-network
-COMPOSE_FILE=docker-compose.yml:docker-compose.mysql-network.yml
 ```
+
+Use the two Compose files together for the deployment command:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --no-build --no-deps telephony-ari telephony-api
+```
+
+The `.local.yml` file adds the external network only to the API and ARI worker.
+Asterisk stays on its private telephony network. For XAMPP/host MySQL or managed
+MySQL, leave `MYSQL_DOCKER_NETWORK` blank and use `docker-compose.yml` alone.
 
 The colon is the Compose file separator on Linux. If `COMPOSE_FILE` already
 lists other overrides, keep those entries and append the MySQL override.
@@ -42,15 +51,14 @@ docker compose logs --tail=50 telephony-api telephony-ari
 curl -fsS http://127.0.0.1:5000/health
 ```
 
-`COMPOSE_FILE` makes future plain `docker compose` commands and the deployment
-helpers retain this attachment. Explicit `-f` flags take precedence: when using
-those, include the database override too. Asterisk is not attached to the database
-network, recreated or restarted by the command above. No image build, database
+Use the same two `-f` arguments for subsequent Compose commands while this
+external-network mode is enabled. Asterisk is not attached to the database
+network, recreated or restarted by the scoped command above. No database
 recreation, volume deletion, CRM connection or proxy installer is required.
 The API/worker will regain connectivity only after DNS, authentication and
 schema access all succeed; inspect the next error if startup still fails.
 
-For immediate recovery **before** installing the persistent override, attach
+For immediate recovery **before** applying the two-file Compose configuration, attach
 both existing containers, only if they are not already on that network:
 
 ```bash
@@ -59,8 +67,8 @@ docker network connect 1panel-network telephony-ari
 docker compose restart telephony-ari telephony-api
 ```
 
-These live attachments survive restarts, but not container replacement. Install
-the override for a durable fix. Never run `docker compose down -v` to fix DNS.
+These live attachments survive restarts, but not container replacement. Use the
+two-file configuration for a durable fix. Never run `docker compose down -v` to fix DNS.
 
 ## 1. Create the database and restricted user
 
