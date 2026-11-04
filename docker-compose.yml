@@ -50,7 +50,8 @@ services:
     networks:
       - telephony-internal
       - data-network
-      - mysql-existing-network
+      - mysql-local-network
+      - mysql-panel-network
     # Expose the Flask admin/API only on the local host.
     # Use a reverse proxy for remote access instead of publishing it publicly.
     ports:
@@ -100,7 +101,8 @@ services:
     networks:
       - telephony-internal
       - data-network
-      - mysql-existing-network
+      - mysql-local-network
+      - mysql-panel-network
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
@@ -173,9 +175,14 @@ networks:
   data-network:
     driver: bridge
     name: telephony-data
-  mysql-existing-network:
+  mysql-local-network:
+    name: telephony-mysql-network
     driver: bridge
-    name: ${MYSQL_DOCKER_NETWORK:-telephony-mysql-network}
+    profiles: ["local-mysql"]
+  mysql-panel-network:
+    external: true
+    name: ${MYSQL_DOCKER_NETWORK:?Set MYSQL_DOCKER_NETWORK for the external MySQL network}
+    profiles: ["panel-mysql"]
 
 
 volumes:
