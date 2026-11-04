@@ -185,19 +185,18 @@ The database and a restricted MySQL user must exist; tables and indexes are
 created automatically. See [`docs/MYSQL.md`](docs/MYSQL.md).
 
 **Existing Docker MySQL / 1Panel upgrades:** a hostname such as
-`1Panel-mysql-H8JJ` only resolves on the MySQL container's Docker network.
-Enable the optional `docker-compose.mysql-network.yml` override with
-`MYSQL_DOCKER_NETWORK` and `COMPOSE_FILE` in `.env` as described in the MySQL
-guide. This connects the API/worker to the database, not to a CRM, and keeps the
-base deployment standalone.
+`1Panel-mysql-H8JJ` only resolves on the MySQL container's Docker network. Set
+`MYSQL_DOCKER_NETWORK=1panel-network` in `.env` and use both Compose files with
+`docker compose -f docker-compose.yml -f docker-compose.local.yml ...`. The
+optional override connects only the API/worker to MySQL; Asterisk stays isolated.
+For XAMPP or remote MySQL, leave `MYSQL_DOCKER_NETWORK` unset.
 
 ## Deployment
 
-**Existing installations:** Docker defaults now use `telephony-control/*` images
-and neutral container names. Before upgrading a production Compose file, read
-[`docs/DOCKER_NAMING_MIGRATION.md`](docs/DOCKER_NAMING_MIGRATION.md) and enable the
-legacy-names override to retain your current images/containers. Do not rename
-Asterisk during a UI-only update. Retain the MySQL-network override if required.
+**Existing installations:** Docker defaults use `telephony-control/*` images and
+neutral container names. To retain older EngineerIP image/container names, set
+the `TELEPHONY_*_IMAGE` and `TELEPHONY_*_CONTAINER` values in `.env`; no third
+Compose file is needed. See [the naming migration guide](docs/DOCKER_NAMING_MIGRATION.md).
 
 
 ```bash
