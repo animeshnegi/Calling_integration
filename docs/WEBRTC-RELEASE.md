@@ -26,11 +26,11 @@ git fetch origin
 git checkout arena/24f0d1a3-calling-integration
 git pull --ff-only origin arena/24f0d1a3-calling-integration
 $Tag = "calling-voicemail-20261029"
-docker build --platform linux/amd64 -t "engineerip/telephony-api:$Tag" .
+docker build --platform linux/amd64 -t "telephony-control/api:$Tag" .
 if ($LASTEXITCODE -ne 0) { throw "API image build failed" }
-docker build --platform linux/amd64 -t "engineerip/asterisk:$Tag" ./asterisk
+docker build --platform linux/amd64 -t "telephony-control/asterisk:$Tag" ./asterisk
 if ($LASTEXITCODE -ne 0) { throw "Asterisk image build failed" }
-docker save -o "calling-$Tag.tar" "engineerip/telephony-api:$Tag" "engineerip/asterisk:$Tag"
+docker save -o "calling-$Tag.tar" "telephony-control/api:$Tag" "telephony-control/asterisk:$Tag"
 if ($LASTEXITCODE -ne 0) { throw "Image export failed" }
 (Get-FileHash "calling-$Tag.tar" -Algorithm SHA256).Hash
 scp "calling-$Tag.tar" engineerip7@ipseekers:/tmp/
@@ -54,7 +54,7 @@ set -eu
 TAG=calling-voicemail-20261029
 sha256sum "/tmp/calling-$TAG.tar"
 docker load -i "/tmp/calling-$TAG.tar"
-docker image inspect "engineerip/telephony-api:$TAG" "engineerip/asterisk:$TAG" >/dev/null
+docker image inspect "telephony-control/api:$TAG" "telephony-control/asterisk:$TAG" >/dev/null
 cd /opt/Calling_integration
 IMAGE_TAG="$TAG" docker compose up -d --no-build --no-deps --force-recreate asterisk telephony-ari telephony-api
 docker compose ps
@@ -71,9 +71,9 @@ API image includes its own deploy kit if proxy assistance is needed.
 Verify the loaded PBX can see the packaged music and module:
 
 ```bash
-docker exec engineerip-asterisk asterisk -rx 'module show like res_musiconhold'
-docker exec engineerip-asterisk asterisk -rx 'module show like format_wav'
-docker exec engineerip-asterisk asterisk -rx 'moh show classes'
+docker exec telephony-asterisk asterisk -rx 'module show like res_musiconhold'
+docker exec telephony-asterisk asterisk -rx 'module show like format_wav'
+docker exec telephony-asterisk asterisk -rx 'moh show classes'
 ```
 
 The `default` class should point at `/usr/share/asterisk/engineerip-moh`. If the site uses
@@ -106,7 +106,7 @@ The image contains an offline speech self-test; no host script or network is
 needed. Run it using the same loaded tag (it prints only a public sample):
 
 ```bash
-docker run --rm --network none "engineerip/telephony-api:$TAG" \
+docker run --rm --network none "telephony-control/api:$TAG" \
   python /app/deploy-kit/scripts/check-voicemail-transcription.py
 ```
 

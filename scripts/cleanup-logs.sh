@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTAINERS=(engineerip-telephony-api engineerip-telephony-ari engineerip-asterisk)
+ASTERISK_CONTAINER="${ASTERISK_CONTAINER:-telephony-asterisk}"
+CONTAINERS=("${API_CONTAINER:-telephony-api}" "${ARI_CONTAINER:-telephony-ari}" "$ASTERISK_CONTAINER")
 APPLY=false
 [[ "${1:-}" == "--apply" ]] && APPLY=true
 
@@ -54,8 +55,8 @@ done
 
 # Older Asterisk images may also write messages/security logs inside the
 # container layer. Clear only files under Asterisk's own log directory.
-if docker inspect engineerip-asterisk >/dev/null 2>&1; then
-  docker exec --user root engineerip-asterisk sh -c \
+if docker inspect "$ASTERISK_CONTAINER" >/dev/null 2>&1; then
+  docker exec --user root "$ASTERISK_CONTAINER" sh -c \
     'find /var/log/asterisk -type f -exec truncate -s 0 {} \;' 2>/dev/null || \
     echo "Could not clear internal Asterisk logs (container may be stopped)."
 fi

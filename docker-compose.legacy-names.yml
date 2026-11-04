@@ -1,0 +1,13 @@
+# Existing installations ONLY: retain old names and image tags while upgrading.
+# Include this override BEFORE the MySQL-network override (if needed) in COMPOSE_FILE.
+# This does not restore a CRM network or change SIP/dialplan/voicemail identifiers.
+services:
+  telephony-api:
+    image: engineerip/telephony-api:${IMAGE_TAG:-latest}
+    container_name: engineerip-telephony-api
+  telephony-ari:
+    image: engineerip/telephony-api:${IMAGE_TAG:-latest}
+    container_name: engineerip-telephony-ari
+  asterisk:
+    image: engineerip/asterisk:${IMAGE_TAG:-latest}
+    container_name: engineerip-asterisk

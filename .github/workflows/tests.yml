@@ -16,6 +16,7 @@ jobs:
           cp .env.example .env
           trap 'rm -f .env' EXIT
           docker compose config --quiet
+          MYSQL_DOCKER_NETWORK=existing-mysql docker compose -f docker-compose.yml -f docker-compose.legacy-names.yml -f docker-compose.mysql-network.yml config --quiet
           MYSQL_DOCKER_NETWORK=existing-mysql docker compose -f docker-compose.yml -f docker-compose.mysql-network.yml config --quiet
           docker compose -f docker-compose.yml -f docker-compose.local.yml --profile bundled-db config --quiet
 

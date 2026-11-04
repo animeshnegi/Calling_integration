@@ -97,6 +97,7 @@ import json, os, pathlib, shutil, sys
 args=sys.argv[1:]
 with open(os.environ['DOCKER_CALLS'],'a') as f:f.write(json.dumps(args)+'\\n')
 if args[:2]==['compose','build']:print('built images')
+elif args[:3]==['compose','config','--images']:print(os.environ.get('FAKE_API_IMAGE','telephony-control/api:'+os.environ['IMAGE_TAG']) if args[-1]=='telephony-api' else os.environ.get('FAKE_ASTERISK_IMAGE','telephony-control/asterisk:'+os.environ['IMAGE_TAG']))
 elif args[:2]==['image','save']:sys.stdout.buffer.write(b'saved Docker image stream')
 elif args[0]=='create':print('1234567890abcdef')
 elif args[0]=='cp':
@@ -123,10 +124,10 @@ def test_image_export_also_exports_tools_and_never_starts_a_container(tmp_path):
     env, calls_path = fake_docker(tmp_path, root)
     result = subprocess.run(["bash", str(ROOT / "scripts/build-export-images.sh"), "kit-test"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert gzip.decompress((tmp_path / "engineerip-telephony-kit-test.tar.gz").read_bytes()) == b"saved Docker image stream"
-    with tarfile.open(tmp_path / "engineerip-softphone-tools-kit-test.tar.gz") as kit:
+    assert gzip.decompress((tmp_path / "telephony-control-kit-test.tar.gz").read_bytes()) == b"saved Docker image stream"
+    with tarfile.open(tmp_path / "telephony-softphone-tools-kit-test.tar.gz") as kit:
         assert set(kit.getnames()) == set(packager.FILES)
-    for name in ("engineerip-telephony-kit-test.tar.gz", "engineerip-softphone-tools-kit-test.tar.gz"):
+    for name in ("telephony-control-kit-test.tar.gz", "telephony-softphone-tools-kit-test.tar.gz"):
         assert (tmp_path / f"{name}.sha256").read_text().startswith(hashlib.sha256((tmp_path / name).read_bytes()).hexdigest())
     calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
     assert ["rm", "1234567890abcdef"] in calls
@@ -177,3 +178,16 @@ def test_import_bad_checksum_stops_before_docker_load(tmp_path):
     result = subprocess.run(["bash", str(ROOT / "scripts/import-start-images.sh"), "bad.tar", "local-build"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=5)
     assert result.returncode != 0
     assert not calls_path.exists()
+
+
+def test_image_export_uses_effective_legacy_repositories(tmp_path):
+    root = kit_sources(tmp_path)
+    env, calls_path = fake_docker(tmp_path, root)
+    env.update(FAKE_API_IMAGE='engineerip/telephony-api:legacy-test',
+               FAKE_ASTERISK_IMAGE='engineerip/asterisk:legacy-test')
+    result = subprocess.run(['bash', str(ROOT / 'scripts/build-export-images.sh'), 'legacy-test'],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    assert ['image', 'save', env['FAKE_API_IMAGE'], env['FAKE_ASTERISK_IMAGE']] in calls
+    assert ['create', env['FAKE_API_IMAGE']] in calls

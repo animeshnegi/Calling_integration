@@ -323,8 +323,8 @@ After deploying both images, inspect the generated mapping without printing
 credentials:
 
 ```bash
-docker exec engineerip-asterisk sh -c 'cat /etc/asterisk/dynamic/rtp.ice.conf'
-docker exec engineerip-asterisk asterisk -rx 'rtp show settings'
+docker exec telephony-asterisk sh -c 'cat /etc/asterisk/dynamic/rtp.ice.conf'
+docker exec telephony-asterisk asterisk -rx 'rtp show settings'
 docker compose logs --tail=80 telephony-ari asterisk
 ```
 

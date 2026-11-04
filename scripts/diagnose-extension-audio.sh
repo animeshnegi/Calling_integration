@@ -3,7 +3,7 @@
 # changes codecs, enables debug logging, or prints Docker environments/.env.
 # Existing Docker logs can contain SIP traces: review/redact before sharing.
 set -euo pipefail
-CONTAINER="${1:-engineerip-asterisk}"
+CONTAINER="${1:-telephony-asterisk}"
 SINCE="${2:-2h}"
 command -v docker >/dev/null || { echo 'Docker is required on the PBX host.' >&2; exit 1; }
 docker inspect "$CONTAINER" >/dev/null 2>&1 || { echo 'Cannot inspect the Asterisk container; check its name and Docker access.' >&2; exit 1; }

@@ -234,7 +234,7 @@ class Plan:
     upstream: str
 
 
-def make_plan(proxy, domain, asterisk="engineerip-asterisk", network="telephony-internal"):
+def make_plan(proxy, domain, asterisk="telephony-asterisk", network="telephony-internal"):
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", domain) or "." not in domain:
         raise InstallError("Use a DNS hostname only (no scheme, port, path or shell characters)")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", asterisk):
@@ -333,7 +333,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--domain", required=True)
     parser.add_argument("--proxy-container", help="auto-detect only when exactly one nginx/OpenResty container is running")
-    parser.add_argument("--asterisk-container", default="engineerip-asterisk")
+    parser.add_argument("--asterisk-container", default="telephony-asterisk")
     parser.add_argument("--network", default="telephony-internal",
                         help="Asterisk private Docker network (default: telephony-internal); use --network engineerip-telephony-internal for legacy deployments")
     parser.add_argument("--apply", action="store_true", help="back up, edit, validate and reload the proxy; otherwise dry-run only")

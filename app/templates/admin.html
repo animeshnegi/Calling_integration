@@ -11,57 +11,55 @@
 </head>
 <body class="theme-loading antialiased formal-console">
   <script src="/static/js/console-theme.js"></script>
-<!-- Ambient gradient field; purely decorative. -->
-<div class="aurora" aria-hidden="true"><b></b><b></b><b></b></div>
 
 <div class="shell min-h-screen">
   <aside class="sidebar shadow-sm" id="sidebar">
     <div class="brand">
       <span class="brand-mark">T</span>
-      <div class="brand-copy"><strong>Telephony Control</strong><small>Control</small></div>
+      <div class="brand-copy"><strong>Telephony Control</strong><small>Operations console</small></div>
     </div>
 
     <nav class="nav" id="nav" aria-label="Primary">
       <p class="nav-group" data-admin-only>Workspace</p>
-      <button class="nav-item active" data-page="users" data-admin-only><span class="glyph">◍</span>Customers</button>
-      <button class="nav-item" data-page="dashboard"><span class="glyph">◎</span>Overview</button>
+      <button class="nav-item active" data-page="users" data-admin-only><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#users"></use></svg>Customers</button>
+      <button class="nav-item" data-page="dashboard"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#dashboard"></use></svg>Overview</button>
 
       <p class="nav-group">Telephony</p>
-      <button class="nav-item" data-page="numbers"><span class="glyph">☎</span>Numbers</button>
-      <button class="nav-item" data-page="sipaccounts"><span class="glyph">◈</span>Devices &amp; SIP</button>
-      <button class="nav-item" data-page="extensions"><span class="glyph">⌁</span>Extensions</button>
-      <button class="nav-item" data-page="routing"><span class="glyph">⌘</span>Call Routing</button>
-      <button class="nav-item" data-page="calls"><span class="glyph">◷</span>Calls</button>
-      <button class="nav-item" data-page="recordings"><span class="glyph">◉</span>Recordings</button>
-      <button class="nav-item" data-page="voicemails"><span class="glyph">✉</span>Voicemail</button>
+      <button class="nav-item" data-page="numbers"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#numbers"></use></svg>Numbers</button>
+      <button class="nav-item" data-page="sipaccounts"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#sipaccounts"></use></svg>Devices &amp; SIP</button>
+      <button class="nav-item" data-page="extensions"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#extensions"></use></svg>Extensions</button>
+      <button class="nav-item" data-page="routing"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#routing"></use></svg>Call Routing</button>
+      <button class="nav-item" data-page="calls"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#calls"></use></svg>Calls</button>
+      <button class="nav-item" data-page="recordings"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#recordings"></use></svg>Recordings</button>
+      <button class="nav-item" data-page="voicemails"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#voicemails"></use></svg>Voicemail</button>
 
       <p class="nav-group">Account</p>
-      <button class="nav-item" data-page="billing"><span class="glyph">▣</span>Billing</button>
-      <button class="nav-item" data-page="webhooks"><span class="glyph">◇</span>APIs &amp; Webhooks</button>
-      <a class="nav-item" href="/documentation" target="_blank" rel="noopener"><span class="glyph">▤</span>Documentation</a>
-      <button class="nav-item" data-page="notifications"><span class="glyph">●</span>Notifications <b class="nav-badge" id="notification-badge" hidden>0</b></button>
-      <button class="nav-item" data-page="security"><span class="glyph">♢</span>Security</button>
+      <button class="nav-item" data-page="billing"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#billing"></use></svg>Billing</button>
+      <button class="nav-item" data-page="webhooks"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#webhooks"></use></svg>APIs &amp; Webhooks</button>
+      <a class="nav-item" href="/documentation" target="_blank" rel="noopener"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#documentation"></use></svg>Documentation</a>
+      <button class="nav-item" data-page="notifications"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#notifications"></use></svg>Notifications <b class="nav-badge" id="notification-badge" hidden>0</b></button>
+      <button class="nav-item" data-page="security"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#security"></use></svg>Security</button>
 
       <p class="nav-group" data-admin-only>Platform</p>
-      <button class="nav-item" data-page="requests" data-admin-only><span class="glyph">↗</span>Requests <b class="nav-badge" id="request-badge" hidden>0</b></button>
-      <button class="nav-item" data-page="activity" data-admin-only><span class="glyph">◌</span>Activity</button>
-      <button class="nav-item" data-page="providers" data-admin-only><span class="glyph">⇄</span>Carrier Providers</button>
-      <button class="nav-item" data-page="email" data-admin-only><span class="glyph">✎</span>Email Delivery</button>
-      <button class="nav-item" data-page="settings" data-admin-only><span class="glyph">⚙</span>Platform Settings</button>
+      <button class="nav-item" data-page="requests" data-admin-only><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#requests"></use></svg>Requests <b class="nav-badge" id="request-badge" hidden>0</b></button>
+      <button class="nav-item" data-page="activity" data-admin-only><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#activity"></use></svg>Activity</button>
+      <button class="nav-item" data-page="providers" data-admin-only><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#providers"></use></svg>Carrier Providers</button>
+      <button class="nav-item" data-page="email" data-admin-only><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#email"></use></svg>Email Delivery</button>
+      <button class="nav-item" data-page="settings" data-admin-only><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#settings"></use></svg>Platform Settings</button>
     </nav>
 
     <div class="sidebar-foot">
       <div class="who">
         <div class="avatar" id="avatar">A</div>
         <div class="who-copy"><strong id="who">Admin</strong><small id="role">Administrator</small></div>
-        <button class="icon-btn" id="logout" title="Sign out" aria-label="Sign out">⏻</button>
+        <button class="icon-btn" id="logout" title="Sign out" aria-label="Sign out"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#logout"></use></svg></button>
       </div>
     </div>
   </aside>
 
   <main class="main">
     <header class="topbar" id="topbar">
-      <button class="icon-btn menu-btn" id="menu" aria-label="Open navigation">☰</button>
+      <button class="icon-btn menu-btn" id="menu" aria-label="Open navigation"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><use href="/static/images/icons.svg#menu"></use></svg></button>
       <div class="page-head"><h1 id="page-title">Overview</h1><p id="page-subtitle">Calls, services and account activity</p></div>
       <div class="topbar-tools">
         <div class="health" id="health"><i></i><span>Checking system…</span></div>

@@ -168,7 +168,7 @@ def test_finish_deployment_removes_helper_container_after_failed_copy(monkeypatc
 
     monkeypatch.setattr(module, "run", fake_run)
     with pytest.raises(RuntimeError, match="/app/deploy-kit"):
-        module.extract_deploy_kit("engineerip/telephony-api:latest")
+        module.extract_deploy_kit("telephony-control/api:latest")
     assert ["docker", "rm", "helper-container-id"] in calls
 
 
@@ -188,7 +188,7 @@ def test_finish_deployment_offline_check_uses_corrected_host_script(monkeypatch)
         return SimpleNamespace(returncode=0, stdout='{"status": "transcribed"}\n', stderr="")
 
     monkeypatch.setattr(module, "run", fake_run)
-    module.offline_transcription("engineerip/telephony-api:latest")
+    module.offline_transcription("telephony-control/api:latest")
     command = calls[0]
     assert "--network" in command and "none" in command
     assert any(part.endswith("check-voicemail-transcription.py:/tmp/check-voicemail-transcription.py:ro")
@@ -200,8 +200,8 @@ def test_finish_deployment_offline_check_uses_corrected_host_script(monkeypatch)
 def test_calling_voicemail_release_uses_two_imported_images_without_server_source():
     guide = (ROOT / "docs/WEBRTC-RELEASE.md").read_text()
     for item in (
-        "docker build --platform linux/amd64 -t \"engineerip/telephony-api:$Tag\" .",
-        "docker build --platform linux/amd64 -t \"engineerip/asterisk:$Tag\" ./asterisk",
+        "docker build --platform linux/amd64 -t \"telephony-control/api:$Tag\" .",
+        "docker build --platform linux/amd64 -t \"telephony-control/asterisk:$Tag\" ./asterisk",
         "docker save -o", "docker load -i", "cd /opt/Calling_integration",
         'IMAGE_TAG="$TAG" docker compose up -d --no-build --no-deps --force-recreate asterisk telephony-ari telephony-api',
         "/app/deploy-kit/scripts/check-voicemail-transcription.py", "--network none",
@@ -210,3 +210,32 @@ def test_calling_voicemail_release_uses_two_imported_images_without_server_sourc
         assert item in guide
     assert "does not need Git, source changes, a compiler" in guide
     assert "do **not** run `docker compose down -v`" in guide
+
+
+def test_finish_resolves_effective_image_and_forwards_legacy_proxy_arguments(monkeypatch):
+    module = load_script('finish-deployment.py', 'finish_neutral_naming_test')
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(stdout='reviewed\n', stderr='', returncode=0)
+
+    monkeypatch.setattr(module, 'run', run)
+    module.install_proxy('tel.example.com', None, False, 'engineerip-asterisk', 'telephony-internal')
+    assert '--asterisk-container' in calls[0]
+    assert 'engineerip-asterisk' in calls[0]
+    assert '--network' in calls[0] and 'telephony-internal' in calls[0]
+    source = (ROOT / 'scripts/finish-deployment.py').read_text()
+    assert '"compose", "config", "--images", "telephony-api"' in source
+
+
+def test_finish_verify_uses_compose_image_including_legacy_override(monkeypatch):
+    module = load_script('finish-deployment.py', 'finish_effective_image_test')
+    seen = []
+    monkeypatch.setattr(module, 'normalise_text_files', lambda: None)
+    monkeypatch.setattr(module, 'require_host_tools', lambda: None)
+    monkeypatch.setattr(module, 'run', lambda argv, **kw: SimpleNamespace(
+        stdout='engineerip/telephony-api:saved-tag\n', stderr='', returncode=0))
+    monkeypatch.setattr(module, 'verify', lambda *args: seen.append(args))
+    assert module.main(['saved-tag', 'tel.example.com', '--verify-only']) == 0
+    assert seen == [('saved-tag', 'tel.example.com', 'engineerip/telephony-api:saved-tag')]

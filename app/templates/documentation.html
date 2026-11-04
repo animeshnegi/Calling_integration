@@ -9,7 +9,7 @@
   <link rel="apple-touch-icon" href="/static/images/favicon.svg">
   <link rel="stylesheet" href="/static/css/tailwind.css">
 </head>
-<body>
+<body class="docs-page">
 <div class="wrap">
   <header class="top">
     <a class="brand" href="/">
@@ -72,7 +72,7 @@ Authorization: Bearer eip_&lt;secret&gt;</pre>
       and can be revoked at any moment. A revoked key stops working immediately. Endpoints answer
       <code>401</code> for a missing or invalid credential and <code>403</code> when the key lacks the scope.
     </p>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Scope</th><th>Allows</th></tr></thead>
       <tbody>
         <tr><td><code>calls:read</code></td><td>List, read and search calls.</td></tr>
@@ -84,7 +84,7 @@ Authorization: Bearer eip_&lt;secret&gt;</pre>
         <tr><td><code>webhooks:manage</code></td><td>List, create, delete and test webhook endpoints through the API.</td></tr>
         <tr><td><code>*</code></td><td>Full access. Use it only for trusted administrative tooling.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <div class="note warn">
       A key authenticates a <b>server</b>. Never put it in browser JavaScript, a mobile app, or a public HTML audio
       element: your backend should call us and proxy what the browser needs.
@@ -101,7 +101,7 @@ Authorization: Bearer eip_&lt;secret&gt;</pre>
   "contact_id": "582",
   "member_id": "37"
 }</pre>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Field</th><th>Required</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>phone</code></td><td>Yes</td><td>The customer to call, in E.164 form (<code>+</code>, country code, number).</td></tr>
@@ -109,7 +109,7 @@ Authorization: Bearer eip_&lt;secret&gt;</pre>
         <tr><td><code>caller_id_number</code></td><td>No</td><td>The number presented to the customer. It must be one of your active numbers. Defaults to the number the extension belongs to.</td></tr>
         <tr><td><code>contact_id</code>, <code>member_id</code></td><td>No</td><td>Your own identifiers, stored on the call and echoed in every event.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <p>
       The call is <b>employee-first</b>: the extension rings, and only when it answers does the platform dial the
       customer and bridge the two legs. No answer means the customer is never called. A successful request returns
@@ -139,7 +139,7 @@ curl -sS -X POST {{API_BASE}}/api/v1/calls \
   -d '{"phone":"+16235551234","extension":"101@+13025550001"}'</pre>
 
     <h3>Following one call</h3>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
       <tbody>
         <tr><td><span class="pill get">GET</span> <code>/api/v1/calls/&lt;call_id&gt;</code></td><td>Current state of one call.</td></tr>
@@ -147,7 +147,7 @@ curl -sS -X POST {{API_BASE}}/api/v1/calls \
         <tr><td><span class="pill post">POST</span> <code>/api/v1/calls/&lt;call_id&gt;/hangup</code></td><td>End an active call. An answered call ends as <code>call.completed</code>, an unanswered one as <code>call.failed</code>; both carry <code>reason: "hangup_requested"</code>.</td></tr>
         <tr><td><span class="pill post">POST</span> <code>/api/v1/calls/&lt;call_id&gt;/disposition</code></td><td>Store your CRM outcome: <code>disposition</code> (up to 100 characters) and <code>notes</code> (up to 2,000). Emits <code>call.disposition</code>.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <p>Treat <code>call_id</code> as the stable identifier and make your own processing idempotent on it.</p>
 
     <h3>Browser calls (optional)</h3>
@@ -158,7 +158,7 @@ curl -sS -X POST {{API_BASE}}/api/v1/calls \
 
   <section id="read">
     <h2><span class="step">4</span>Read your own configuration</h2>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
       <tbody>
         <tr><td><span class="pill get">GET</span> <code>/api/v1/extensions</code></td><td><code>extensions</code> (the three digits of each active extension), <code>keys</code> (the full key of each active extension, such as <code>101@+13025550001</code>, which always names one line) and <code>default_extension</code>.</td></tr>
@@ -167,7 +167,7 @@ curl -sS -X POST {{API_BASE}}/api/v1/calls \
         <tr><td><span class="pill get">GET</span> <code>/api/v1/providers</code></td><td>Always an empty list for a customer key: carrier configuration is platform-only.</td></tr>
         <tr><td><span class="pill get">GET</span> <code>/health</code></td><td><code>{"ok", "asterisk", "ari_ready"}</code>: <code>200</code> when the telephony engine and its event worker are ready, <code>503</code> otherwise. No authentication.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <p>Read <code>/api/v1/numbers</code> before presenting caller-ID choices, so a user can only pick a number they own.</p>
   </section>
 
@@ -178,20 +178,20 @@ curl -sS -X POST {{API_BASE}}/api/v1/calls \
       extension's own <b>Record</b> switch under <b>Extensions → Edit</b>. Turning either one off stops new recordings.
     </p>
     <h3>Recordings</h3>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
       <tbody>
         <tr><td><span class="pill get">GET</span> <code>/api/v1/recordings</code></td><td>Calls that have recording metadata: <code>{"recordings": [...]}</code>.</td></tr>
         <tr><td><span class="pill get">GET</span> <code>/api/v1/recordings/&lt;call_id&gt;/file</code></td><td>Streams a recording whose status is <code>finalized</code> or <code>available</code>. Supports <code>Range</code> requests for seeking. Anything else answers <code>404</code>.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <h3>Voicemail</h3>
     <p>
       Voicemail is <b>number-scoped</b>. Each extension has one mailbox per line, named <code>&lt;digits&gt;-&lt;number digits&gt;</code>:
       the 101 on <code>+13025550001</code> is <code>101-13025550001</code>, and the 101 on another line is a separate mailbox.
       Folders are <code>inbox</code>, <code>old</code> and <code>urgent</code>.
     </p>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
       <tbody>
         <tr><td><span class="pill get">GET</span> <code>/api/v1/voicemail/mailboxes</code></td><td>Your voicemail mailboxes with the count of new, old, urgent and total messages in each.</td></tr>
@@ -200,7 +200,7 @@ curl -sS -X POST {{API_BASE}}/api/v1/calls \
         <tr><td><span class="pill post">POST</span> <code>/api/v1/voicemails/&lt;mailbox&gt;/&lt;folder&gt;/&lt;message&gt;/read</code></td><td>Marks an <code>inbox</code> message read by moving it to <code>old</code>. Other folders answer <code>404</code>.</td></tr>
         <tr><td><span class="pill del">DELETE</span> <code>/api/v1/voicemails/&lt;mailbox&gt;/&lt;folder&gt;/&lt;message&gt;</code></td><td>Deletes one message.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <p>Use the <code>message</code> and <code>mailbox</code> fields from the list in the paths above. Proxy audio through your backend so the key never reaches a browser.</p>
   </section>
 
@@ -245,7 +245,7 @@ ok = hmac.compare_digest(expected, received)</pre>
 
     <h3>Managing endpoints through the API</h3>
     <p>These need the <code>webhooks:manage</code> scope.</p>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
       <tbody>
         <tr><td><span class="pill get">GET</span> <code>/api/v1/webhooks</code></td><td>Your endpoints. The secret is never returned; <code>has_token</code> says whether one is set.</td></tr>
@@ -253,7 +253,7 @@ ok = hmac.compare_digest(expected, received)</pre>
         <tr><td><span class="pill post">POST</span> <code>/api/v1/webhooks/&lt;id&gt;/test</code></td><td>Send a test delivery. <code>200</code> when your endpoint accepts it, <code>502</code> when it does not.</td></tr>
         <tr><td><span class="pill del">DELETE</span> <code>/api/v1/webhooks/&lt;id&gt;</code></td><td>Delete an endpoint. Its undelivered events are dropped.</td></tr>
       </tbody>
-    </table>
+    </table></div>
   </section>
 
   <section id="events">
@@ -262,7 +262,7 @@ ok = hmac.compare_digest(expected, received)</pre>
       <code>call</code> object with the call's <code>call_id</code>, <code>direction</code>, <code>extension</code>, <code>phone</code>,
       <code>caller_id_number</code>, <code>status</code>, timestamps, <code>duration_seconds</code>, <code>recording_status</code> and
       <code>disposition</code>. Some events add a <code>reason</code>.</p>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Event</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>call.started</code></td><td>A call was created, inbound or outbound.</td></tr>
@@ -284,7 +284,7 @@ ok = hmac.compare_digest(expected, received)</pre>
         <tr><td><code>call.failed</code></td><td>The call could not be completed. <code>reason</code> explains why.</td></tr>
         <tr><td><code>call.disposition</code></td><td>Your CRM outcome and notes were saved on the call.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <p>Use <code>answered</code> for reach and connect reporting, and <code>duration_seconds</code> for talk time. Do not
       derive a second duration engine in your CRM: the lifecycle events are the factual record.</p>
   </section>
@@ -293,7 +293,7 @@ ok = hmac.compare_digest(expected, received)</pre>
     <h2><span class="step">8</span>Register a device (SIP)</h2>
     <p>In <b>Devices &amp; SIP → Credentials</b> you will find the values below, in one table. Each value has its own
       <b>Copy</b> button and <b>Copy everything</b> puts the whole set on the clipboard for the phone.</p>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Value</th><th>What it looks like</th></tr></thead>
       <tbody>
         <tr><td>SIP username</td><td>The account label, the extension and the number's digits, joined by underscores — for example <code>MERIDIAN_101_13025550001</code>. The platform generates it, keeps it unique across the whole platform, and it cannot be edited. It is the device's login identity, and a caller never dials it. Desk phones and softphones like Zoiper use this one.</td></tr>
@@ -303,7 +303,7 @@ ok = hmac.compare_digest(expected, received)</pre>
         <tr><td>Numbers</td><td>The line the extension belongs to. It calls out with that number as caller ID, and its three digits reach it on that line.</td></tr>
         <tr><td>Answers calls to</td><td>The numbers whose incoming calls ring this extension. If it says none, set the extension as a number's incoming extension under <b>Numbers</b>.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <div class="note">A device that is already registered keeps its session until it registers again: change the password
       on the phone after rotating it here.</div>
     <div class="note">Registration server, API base and webhook URLs all come from the one address in
@@ -314,7 +314,7 @@ ok = hmac.compare_digest(expected, received)</pre>
 
   <section id="errors">
     <h2><span class="step">9</span>Errors &amp; limits</h2>
-    <table>
+    <div class="table-wrap"><table>
       <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>400</code></td><td>Invalid JSON or phone number; an extension that is not 101–999, not yours, or ambiguous without its number; a <code>caller_id_number</code> that is not one of your active numbers; or an extension with no number to call out on.</td></tr>
@@ -325,7 +325,7 @@ ok = hmac.compare_digest(expected, received)</pre>
         <tr><td><code>429</code></td><td>Rate limit reached — back off and retry the same idempotency key.</td></tr>
         <tr><td><code>502</code> / <code>503</code></td><td>The telephony engine is unavailable; the call was not placed.</td></tr>
       </tbody>
-    </table>
+    </table></div>
     <ul>
       <li>Request bodies are limited to 64 KiB.</li>
       <li>Rate limits are per client address: 120 requests a minute for the API as a whole, and 30 call starts a minute for <code>POST /api/v1/calls</code>.</li>

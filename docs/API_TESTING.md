@@ -29,13 +29,13 @@ A healthy result is HTTP 200 with JSON containing:
 The CRM should use the private Docker DNS name:
 
 ```text
-http://engineerip-telephony-api:5000
+http://telephony-api:5000
 ```
 
 Example:
 
 ```bash
-curl http://engineerip-telephony-api:5000/health
+curl http://telephony-api:5000/health
 ```
 
 ## 4. Test authentication
@@ -43,7 +43,7 @@ curl http://engineerip-telephony-api:5000/health
 Without the token:
 
 ```bash
-curl -i http://engineerip-telephony-api:5000/api/v1/calls
+curl -i http://telephony-api:5000/api/v1/calls
 ```
 
 Expected: HTTP 401.
@@ -53,7 +53,7 @@ With the token:
 ```bash
 curl -i \
   -H "Authorization: Bearer $TELEPHONY_TOKEN" \
-  http://engineerip-telephony-api:5000/api/v1/calls
+  http://telephony-api:5000/api/v1/calls
 ```
 
 Expected: HTTP 200.
@@ -75,7 +75,7 @@ Use an authorized test destination and a registered extension:
 
 ```bash
 curl -i -X POST \
-  http://engineerip-telephony-api:5000/api/v1/calls \
+  http://telephony-api:5000/api/v1/calls \
   -H "Authorization: Bearer $TELEPHONY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"phone":"+18586763047","extension":"101"}'
@@ -105,7 +105,7 @@ Replace `<call_id>` with the ID returned by the create-call response:
 ```bash
 curl -i \
   -H "Authorization: Bearer $TELEPHONY_TOKEN" \
-  http://engineerip-telephony-api:5000/api/v1/calls/<call_id>
+  http://telephony-api:5000/api/v1/calls/<call_id>
 ```
 
 The response should show employee/customer channel IDs, bridge state, answer state and final duration after the call completes.
@@ -115,14 +115,14 @@ The response should show employee/customer channel IDs, bridge state, answer sta
 ```bash
 curl -i -X POST \
   -H "Authorization: Bearer $TELEPHONY_TOKEN" \
-  http://engineerip-telephony-api:5000/api/v1/calls/<call_id>/hangup
+  http://telephony-api:5000/api/v1/calls/<call_id>/hangup
 ```
 
 ## 9. Set a disposition
 
 ```bash
 curl -i -X POST \
-  http://engineerip-telephony-api:5000/api/v1/calls/<call_id>/disposition \
+  http://telephony-api:5000/api/v1/calls/<call_id>/disposition \
   -H "Authorization: Bearer $TELEPHONY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"disposition":"follow_up","notes":"API test"}'

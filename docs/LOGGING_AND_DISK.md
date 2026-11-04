@@ -64,7 +64,7 @@ Recreating containers removes their old writable layers and container log files 
 Verify the configured policy:
 
 ```bash
-docker inspect engineerip-asterisk \
+docker inspect telephony-asterisk \
   --format '{{json .HostConfig.LogConfig}}'
 ```
 
@@ -87,7 +87,7 @@ The Compose limits and tmpfs work with the old image after recreation. To also r
 ```bash
 # Container stream sizes and paths
 docker inspect --format '{{.Name}} {{.LogPath}}' \
-  engineerip-telephony-api engineerip-telephony-ari engineerip-asterisk
+  telephony-api telephony-ari telephony-asterisk
 
 # Named volume sizes; recordings and voicemail may legitimately be large
 docker system df -v

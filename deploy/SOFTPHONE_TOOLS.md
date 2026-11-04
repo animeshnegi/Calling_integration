@@ -94,7 +94,7 @@ After importing a NEW image built with that Dockerfile, extract the tools from a
 
 ```bash
 cd /opt/Calling_integration
-tools_container=$(docker create engineerip/telephony-api:YOUR_TAG)
+tools_container=$(docker create telephony-control/api:YOUR_TAG)
 docker cp "${tools_container}:/app/deploy-kit/." /opt/Calling_integration/
 docker rm "$tools_container"
 ```
@@ -122,9 +122,9 @@ containers), build and save both images locally. Use a fresh tag:
 
 ```powershell
 $tag = "softphone-v2"
-docker build --platform linux/amd64 -t "engineerip/telephony-api:${tag}" .
-docker build --platform linux/amd64 -t "engineerip/asterisk:${tag}" ./asterisk
-docker image save --output "engineerip-telephony-${tag}.tar" "engineerip/telephony-api:${tag}" "engineerip/asterisk:${tag}"
+docker build --platform linux/amd64 -t "telephony-control/api:${tag}" .
+docker build --platform linux/amd64 -t "telephony-control/asterisk:${tag}" ./asterisk
+docker image save --output "engineerip-telephony-${tag}.tar" "telephony-control/api:${tag}" "telephony-control/asterisk:${tag}"
 ```
 
 Use `--output` rather than piping binary image data through PowerShell. Match the
@@ -149,7 +149,7 @@ and use its actual filename in option A.
 ## Persist a bridged 1Panel proxy's private network
 
 A host-networked proxy uses host loopback and needs no extra network. A bridged
-proxy uses Docker DNS `engineerip-asterisk:8088`. If the installer attaches that
+proxy uses Docker DNS `telephony-asterisk:8088`. If the installer attaches that
 proxy to `telephony-internal`, persist it as an external network in
 1Panel's proxy Compose configuration, preserving all existing networks. For example
 (use the actual proxy service name):

@@ -150,18 +150,18 @@ each of these has silently regressed at least once:
 curl -s http://127.0.0.1:5000/jssip.min.js | head -c 40      # JsSIP v3.10.1 banner
 
 # 2. the outbound guard compares inside $[...] (the ] belongs after the comparison)
-docker exec engineerip-asterisk sh -lc \
+docker exec telephony-asterisk sh -lc \
   "grep GotoIf /etc/asterisk/dynamic/extensions.dynamic.conf | head -1"
 
 # 3. DTLS-SRTP is compiled in, or every WebRTC call fails at media setup
-docker exec engineerip-asterisk asterisk -rx "module show like res_srtp"
+docker exec telephony-asterisk asterisk -rx "module show like res_srtp"
 
 # 4. the softphone's WebSocket path reaches Asterisk - this is what
 #    "SIP WebSocket disconnected." means when it is broken (the softphone
 #    dials wss://<the host serving the phone page>/ws - probe YOUR_WEB_HOST)
-docker exec engineerip-asterisk asterisk -rx "http show status"
-docker exec engineerip-asterisk asterisk -rx "module show like res_http_websocket"
-docker exec engineerip-asterisk asterisk -rx "module show like res_pjsip_transport_websocket"
+docker exec telephony-asterisk asterisk -rx "http show status"
+docker exec telephony-asterisk asterisk -rx "module show like res_http_websocket"
+docker exec telephony-asterisk asterisk -rx "module show like res_pjsip_transport_websocket"
 python3 scripts/check-softphone-websocket.py ws://127.0.0.1:8088/ws
 python3 scripts/check-softphone-websocket.py wss://YOUR_WEB_HOST/ws
 # Both must PASS a real 101 handshake selecting subprotocol sip. A plain
@@ -172,7 +172,7 @@ python3 scripts/check-softphone-websocket.py wss://YOUR_WEB_HOST/ws
 
 # 5. the media path - a call that connects and stays completely silent is
 #    almost always RTP going to (or coming from) an address nobody can reach
-docker exec engineerip-asterisk asterisk -rx "pjsip show transport transport-wss" | grep -i external
+docker exec telephony-asterisk asterisk -rx "pjsip show transport transport-wss" | grep -i external
 #   ExternalMediaAddress must be a NUMERIC public IP (the renderer resolves the
 #   Service address); the host firewall must also pass the RTP range (default
 #   UDP 10000-10100) from the internet, not just 5060 and 443
@@ -193,7 +193,7 @@ dig +short YOUR_SIP_HOST | head -2                    # must equal the VM's publ
 
 # 7. browser and phone identities are separate - a Zoiper matched to the
 #    WebRTC endpoint gets DTLS-SRTP it cannot speak: connected, billed, silent
-docker exec engineerip-asterisk sh -lc \
+docker exec telephony-asterisk sh -lc \
   "grep -A2 'type=endpoint' /etc/asterisk/dynamic/pjsip.dynamic.conf | grep -B2 webrtc=yes | head -4"
 #   the webrtc=yes endpoint must be named <SIP username>-webrtc, and the plain
 #   <SIP username> must sit on the plain endpoint beside it
@@ -498,8 +498,8 @@ in a maintenance window: replacing the Asterisk container interrupts active call
 Confirm the image actually running on the VM:
 
 ```bash
-docker exec engineerip-asterisk cat /usr/share/asterisk/build-portability.txt
-docker exec engineerip-asterisk asterisk -rx 'core show settings'
+docker exec telephony-asterisk cat /usr/share/asterisk/build-portability.txt
+docker exec telephony-asterisk asterisk -rx 'core show settings'
 ```
 
 The metadata must report `BUILD_NATIVE=disabled`, and Asterisk's build options

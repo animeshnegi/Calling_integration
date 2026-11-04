@@ -173,3 +173,18 @@ def test_existing_mysql_network_is_optional_and_only_attaches_database_clients()
     example = (ROOT / '.env.example').read_text()
     assert '# COMPOSE_FILE=docker-compose.yml:docker-compose.mysql-network.yml' in example
     assert '# MYSQL_DOCKER_NETWORK=1panel-network' in example
+
+
+def test_docker_neutral_defaults_and_explicit_legacy_override():
+    compose = (ROOT / 'docker-compose.yml').read_text()
+    assert 'engineerip/' not in compose
+    assert 'container_name: engineerip-' not in compose
+    for name in ('telephony-api', 'telephony-ari', 'telephony-asterisk'):
+        assert f'container_name: {name}' in compose
+    assert '${TELEPHONY_API_IMAGE:-telephony-control/api}' in compose
+    assert '${TELEPHONY_ASTERISK_IMAGE:-telephony-control/asterisk}' in compose
+    legacy = (ROOT / 'docker-compose.legacy-names.yml').read_text()
+    assert 'container_name: engineerip-asterisk' in legacy
+    assert legacy.count('engineerip/telephony-api:${IMAGE_TAG:-latest}') == 2
+    assert 'networks:' not in legacy and 'volumes:' not in legacy
+    assert 'VOICEMAIL_CONTEXT: engineerip' in compose  # preserve mailbox identity

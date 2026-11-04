@@ -49,7 +49,7 @@ That one script:
 
 1. verifies/loads the image archive and checks its architecture;
 2. starts/recreates all Compose services with `--no-build`—so
-   `engineerip-asterisk` exists before the proxy installer runs;
+   `telephony-asterisk` exists before the proxy installer runs;
 3. uses the corrected host tools from the extracted archive and normalizes
    Windows CRLF line endings—no `tools_container`/`docker cp` step;
 4. waits for Asterisk's direct SIP WebSocket;
@@ -98,9 +98,9 @@ $Tag = "20261027-local1"
 $ImageTar = "engineerip-telephony-${Tag}.tar"
 $ToolsTar = "softphone-proxy-tools.tar.gz"
 
-docker build --platform linux/amd64 -t "engineerip/telephony-api:$Tag" .
-docker build --platform linux/amd64 -t "engineerip/asterisk:$Tag" ./asterisk
-docker image save --output $ImageTar "engineerip/telephony-api:$Tag" "engineerip/asterisk:$Tag"
+docker build --platform linux/amd64 -t "telephony-control/api:$Tag" .
+docker build --platform linux/amd64 -t "telephony-control/asterisk:$Tag" ./asterisk
+docker image save --output $ImageTar "telephony-control/api:$Tag" "telephony-control/asterisk:$Tag"
 
 # Linux-compatible sha256sum -c format, not PowerShell's default hash-only output.
 $ImageHash = (Get-FileHash $ImageTar -Algorithm SHA256).Hash.ToLower()
@@ -237,7 +237,7 @@ IMAGE_TAG="$TAG" docker compose up -d --no-build --no-deps --force-recreate \
 docker compose ps
 ```
 
-The API and ARI services use the **same** rebuilt `engineerip/telephony-api`
+The API and ARI services use the **same** rebuilt `telephony-control/api`
 image: the API serves the admin UI; `telephony-ari` runs the voicemail email
 worker and offline recognizer. Asterisk uses the rebuilt PBX image for hold
 music and shared mailbox permissions. No outbound routing change is required.
@@ -342,7 +342,7 @@ not test transcription. To test the recognizer without a voicemail:
 ```bash
 cd /opt/Calling_integration
 TAG=calling-voicemail-20261029  # use the tag that was actually loaded
-docker run --rm --network none "engineerip/telephony-api:$TAG" \
+docker run --rm --network none "telephony-control/api:$TAG" \
   python /app/deploy-kit/scripts/check-voicemail-transcription.py
 # Expected: "status": "transcribed", "go forward ten meters"
 ```

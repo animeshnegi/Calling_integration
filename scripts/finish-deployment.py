@@ -93,7 +93,7 @@ def load_image(archive):
 def start_services(tag):
     print("== Starting/recreating services from the loaded image (no build) ==")
     # This must happen BEFORE the proxy installer: its preflight needs the
-    # engineerip-asterisk container and the loopback 8088 listener.
+    # telephony-asterisk container and the loopback 8088 listener.
     result = run(["docker", "compose", "up", "-d", "--no-build", "--force-recreate"],
                  env=compose_env(tag), capture=True)
     if result.stdout.strip():
@@ -135,11 +135,15 @@ def wait_for_direct_websocket(timeout=60):
         time.sleep(2)
 
 
-def install_proxy(domain, proxy_container, skip_proxy):
+def install_proxy(domain, proxy_container, skip_proxy, asterisk_container=None, network=None):
     if skip_proxy:
         print("== Proxy installation skipped (--skip-proxy) ==")
         return
     installer = [sys.executable, str(ROOT / "scripts/install-softphone-proxy.py"), "--domain", domain]
+    if asterisk_container:
+        installer += ["--asterisk-container", asterisk_container]
+    if network:
+        installer += ["--network", network]
     if proxy_container:
         installer += ["--proxy-container", proxy_container]
     print("== Reviewing the active 1Panel/OpenResty /ws route ==")
@@ -224,14 +228,21 @@ def main(argv=None):
     parser.add_argument("--verify-only", action="store_true", help="run checks only; no service start or nginx changes")
     parser.add_argument("--skip-proxy", action="store_true", help="start and verify but do not modify the 1Panel/nginx route")
     parser.add_argument("--proxy-container", help="exact nginx/OpenResty container name when auto-detection is ambiguous")
+    parser.add_argument("--asterisk-container", help="legacy/custom Asterisk name passed to proxy installer")
+    parser.add_argument("--network", help="legacy/custom private network passed to proxy installer")
     parser.add_argument("--image-tar", help="optional image .tar/.tar.gz to docker load before finishing")
     parser.add_argument("--refresh-tools-from-image", action="store_true",
                         help="optional: overwrite host tools with /app/deploy-kit from the loaded image")
     args = parser.parse_args(argv)
-    image = f"engineerip/telephony-api:{args.tag}"
     try:
         normalise_text_files()
         require_host_tools()
+        # Resolve the effective image through Compose, including legacy overrides.
+        images = run(["docker", "compose", "config", "--images", "telephony-api"],
+                     env=compose_env(args.tag), capture=True).stdout.strip().splitlines()
+        if len(images) != 1:
+            raise RuntimeError("Cannot resolve exactly one API image from Compose")
+        image = images[0]
         if args.image_tar:
             load_image(args.image_tar)
         if not args.verify_only:
@@ -242,7 +253,7 @@ def main(argv=None):
                 normalise_text_files()
                 require_host_tools()
             wait_for_direct_websocket()
-            install_proxy(args.domain, args.proxy_container, args.skip_proxy)
+            install_proxy(args.domain, args.proxy_container, args.skip_proxy, args.asterisk_container, args.network)
         verify(args.tag, args.domain, image)
         print("\nPASS: deployment is ready. Hard-refresh the admin page once.")
         print("Still check the email provider test, a new voicemail transcript, and one 101↔105 call separately.")

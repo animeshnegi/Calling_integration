@@ -54,8 +54,8 @@ For immediate recovery **before** installing the persistent override, attach
 both existing containers, only if they are not already on that network:
 
 ```bash
-docker network connect 1panel-network engineerip-telephony-api
-docker network connect 1panel-network engineerip-telephony-ari
+docker network connect 1panel-network telephony-api
+docker network connect 1panel-network telephony-ari
 docker compose restart telephony-ari telephony-api
 ```
 

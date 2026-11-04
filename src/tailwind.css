@@ -39,13 +39,14 @@
   }
   .content { @apply mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8; }
   .page { @apply hidden; }
-  .page.active { @apply block animate-[fade_.18s_ease-out]; }
+  .page.active { @apply block; }
   .page-head { @apply min-w-0 flex-1; }
   .page-head h1 { @apply text-lg font-semibold leading-tight sm:text-xl; }
   .page-head p { @apply mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400; }
   .topbar-tools { @apply ml-auto flex items-center gap-2; }
   .aurora { @apply pointer-events-none fixed inset-0 -z-10 hidden; }
-  .scrim { @apply fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-sm; }
+  .scrim { @apply pointer-events-none fixed inset-0 z-40 bg-slate-950/40 opacity-0 transition-opacity; }
+  .scrim.open { @apply pointer-events-auto opacity-100; }
 
   /* ------------------------------------------------------------- sidebar */
   .brand { @apply flex items-center gap-3 px-2 py-2; }
@@ -152,14 +153,14 @@
   .kv-item strong { @apply mt-1 block text-sm font-semibold; }
 
   /* -------------------------------------------------------------- status */
-  .status, .tag, .tone-bad, .tone-ok, .tone-info, .tone-violet {
+  .status, .tag {
     @apply inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold;
   }
   .status, .tag { @apply bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300; }
-  .status.finalized, .status.completed, .status.online, .status.ok, .tone-ok { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300; }
-  .status.failed, .status.offline, .status.danger, .tone-bad { @apply bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300; }
-  .status.recording, .status.ringing, .tone-info { @apply bg-sky-50 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300; }
-  .status.finalizing, .tone-violet { @apply bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300; }
+  .status.finalized, .status.completed, .status.online, .status.ok { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300; }
+  .status.failed, .status.offline, .status.danger { @apply bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300; }
+  .status.recording, .status.ringing { @apply bg-sky-50 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300; }
+  .status.finalizing { @apply bg-brand-50 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300; }
   .status.changed { @apply ring-2 ring-brand-300; }
   .tag.danger { @apply bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300; }
   .notice, .routing-save-status { @apply rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300; }
@@ -167,12 +168,13 @@
   .toasts > * { @apply rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-panel dark:border-slate-700 dark:bg-slate-900; }
 
   /* -------------------------------------------------------------- modals */
-  .modal { @apply fixed inset-0 z-50 grid place-items-center p-4; }
-  .modal-card { @apply w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900; }
+  .modal { @apply invisible pointer-events-none fixed inset-0 z-[70] grid place-items-center bg-slate-950/40 p-4 opacity-0; }
+  .modal.open { @apply visible pointer-events-auto opacity-100; }
+  .modal-card { @apply flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900; }
   .modal-head { @apply flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800; }
   .modal-head h3 { @apply text-base font-semibold; }
-  .modal-body { @apply max-h-[70vh] overflow-y-auto px-5 py-4 text-sm; }
-  .modal-foot { @apply flex justify-end gap-2 border-t border-slate-100 px-5 py-3 dark:border-slate-800; }
+  .modal-body { @apply min-h-0 flex-1 overflow-y-auto px-5 py-4 text-sm; }
+  .modal-foot { @apply flex shrink-0 justify-end gap-2 border-t border-slate-100 px-5 py-3 dark:border-slate-800; }
 
   /* ------------------------------------------- routing studio / workspace
      The many family-prefixed nodes are layout hints only; one shared rule
@@ -191,7 +193,7 @@
   .flow-node.selected, .selected { @apply border-brand-400 ring-2 ring-brand-100 dark:ring-brand-500/20; }
   .routing-blank, .routing-editor-empty, .canvas-empty, .ws-empty { @apply rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400; }
   .routing-inline-note, .ring-source-footnote, .routing-selection-head, .credential-note { @apply text-xs text-slate-500 dark:text-slate-400; }
-  .ws-scroll { @apply max-h-[70vh] overflow-y-auto; }
+  .ws-scroll { @apply min-h-0 flex-1 overflow-y-auto overscroll-contain; }
   .ws-tabs { @apply flex gap-1 border-b border-slate-200 dark:border-slate-800; }
   .ws-tab { @apply rounded-t-lg px-3 py-2 text-xs font-semibold text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white; }
   .ws-tab.active { @apply border-b-2 border-brand-600 text-brand-700 dark:text-brand-300; }
@@ -230,30 +232,30 @@
   .lede { @apply my-4 max-w-2xl text-base leading-relaxed text-slate-600 dark:text-slate-300; }
   nav.toc { @apply flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-white p-3 text-sm dark:border-slate-800 dark:bg-slate-900; }
   nav.toc a { @apply rounded-lg px-2 py-1 text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-500/10; }
-  section { @apply scroll-mt-6 py-6; }
-  section h2 { @apply mb-3 border-b border-slate-200 pb-2 text-xl dark:border-slate-800; }
-  section h3 { @apply mb-2 mt-5 text-base; }
+  :where(.docs-page, .check-page) section { @apply scroll-mt-6 py-6; }
+  :where(.docs-page, .check-page) section h2 { @apply mb-3 border-b border-slate-200 pb-2 text-xl dark:border-slate-800; }
+  :where(.docs-page, .check-page) section h3 { @apply mb-2 mt-5 text-base; }
   .step { @apply mr-2 inline-grid h-6 w-6 place-items-center rounded-full bg-brand-100 text-xs font-bold text-brand-700 dark:bg-brand-500/20 dark:text-brand-300; }
-  p, li { @apply text-sm leading-relaxed text-slate-600 dark:text-slate-300; }
-  ul, ol { @apply my-3 list-inside list-disc space-y-1 pl-2; }
-  code { @apply rounded bg-slate-100 px-1 py-0.5 font-mono text-xs text-slate-800 dark:bg-slate-800 dark:text-slate-100; }
-  pre { @apply my-3 overflow-x-auto rounded-xl bg-slate-900 p-4 text-xs leading-relaxed text-slate-100; }
-  pre code { @apply bg-transparent p-0 text-inherit; }
-  pre .c { @apply text-slate-400; }
-  pre .k { @apply text-sky-300; }
-  pre .s { @apply text-emerald-300; }
-  table { @apply my-3 w-full border-collapse text-left text-sm; }
-  th, td { @apply border-b border-slate-200 px-3 py-2 align-top dark:border-slate-800; }
-  th { @apply text-xs font-semibold uppercase tracking-wide text-slate-500; }
-  td code { @apply whitespace-nowrap; }
-  .grid { display: grid; gap: .75rem; }
-  @media (min-width: 640px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  :where(.docs-page, .check-page) p, :where(.docs-page, .check-page) li { @apply text-sm leading-relaxed text-slate-600 dark:text-slate-300; }
+  :where(.docs-page, .check-page) ul, :where(.docs-page, .check-page) ol { @apply my-3 list-inside list-disc space-y-1 pl-2; }
+  :where(.docs-page, .check-page) code { @apply rounded bg-slate-100 px-1 py-0.5 font-mono text-xs text-slate-800 dark:bg-slate-800 dark:text-slate-100; }
+  :where(.docs-page, .check-page) pre { @apply my-3 overflow-x-auto rounded-xl bg-slate-900 p-4 text-xs leading-relaxed text-slate-100; }
+  :where(.docs-page, .check-page) pre code { @apply bg-transparent p-0 text-inherit; }
+  :where(.docs-page, .check-page) pre .c { @apply text-slate-400; }
+  :where(.docs-page, .check-page) pre .k { @apply text-sky-300; }
+  :where(.docs-page, .check-page) pre .s { @apply text-emerald-300; }
+  :where(.docs-page, .check-page) table { @apply my-3 w-full border-collapse text-left text-sm; }
+  :where(.docs-page, .check-page) th, :where(.docs-page, .check-page) td { @apply border-b border-slate-200 px-3 py-2 align-top dark:border-slate-800; }
+  :where(.docs-page, .check-page) th { @apply text-xs font-semibold uppercase tracking-wide text-slate-500; }
+  :where(.docs-page, .check-page) td code { @apply whitespace-nowrap; }
+  :where(.docs-page, .check-page) .grid { display: grid; gap: .75rem; }
+  @media (min-width: 640px) { :where(.docs-page, .check-page) .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .box { @apply rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900; }
   .box b { @apply block text-sm font-semibold; }
   .box small { @apply mt-1 block text-xs text-slate-500 dark:text-slate-400; }
   .box.deploy { @apply border-brand-200 bg-brand-50 dark:border-brand-500/30 dark:bg-brand-500/10; }
   .note { @apply my-3 rounded-lg border-l-4 border-brand-400 bg-brand-50 p-3 text-sm dark:bg-brand-500/10; }
-  .warn { @apply my-3 rounded-lg border-l-4 border-amber-400 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-500/10 dark:text-amber-200; }
+  :where(.docs-page, .check-page) .warn { @apply my-3 rounded-lg border-l-4 border-amber-400 bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-500/10 dark:text-amber-200; }
   .pill { @apply mr-2 inline-block rounded px-1.5 py-0.5 font-mono text-[11px] font-bold uppercase; }
   .pill.get { @apply bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-300; }
   .pill.post { @apply bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300; }
@@ -262,11 +264,11 @@
   .phone-cta b { @apply block text-sm font-semibold; }
   .phone-cta small { @apply text-xs text-slate-500 dark:text-slate-400; }
   .phone-cta .dial { @apply rounded-lg bg-brand-600 px-3 py-2 text-sm font-semibold text-white; }
-  footer { @apply border-t border-slate-200 py-6 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400; }
+  :where(.docs-page, .check-page) footer { @apply border-t border-slate-200 py-6 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400; }
   .result { @apply rounded-lg border border-slate-200 p-3 text-sm dark:border-slate-800; }
   .result.fine { @apply border-emerald-300 bg-emerald-50 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-200; }
   .result.busy { @apply border-amber-300 bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200; }
-  .bar { @apply h-2 rounded-full bg-slate-200 dark:bg-slate-700; }
+  :where(.docs-page, .check-page) .bar { @apply h-2 rounded-full bg-slate-200 dark:bg-slate-700; }
   .measured { @apply font-mono text-xs; }
 
   /* sign-in */
@@ -318,4 +320,139 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .formal-console .page.active, .formal-console .card-enter { animation: none; }
+}
+
+/* Console layout contracts: role visibility, mobile navigation, and independent
+   drawer/modal scroll. These complement Tailwind utilities, not call logic. */
+[hidden] { display: none !important; }
+@layer components {
+  .formal-console { @apply bg-slate-100 dark:bg-slate-950; }
+  .formal-console .sidebar { @apply z-50 -translate-x-full transition-transform md:translate-x-0; }
+  .formal-console .sidebar.open { @apply translate-x-0; }
+  .formal-console .brand { @apply mb-2 border-b border-slate-100 pb-5 dark:border-slate-800; }
+  .formal-console .nav-group { @apply mt-5 text-[10px] font-semibold tracking-[0.12em]; }
+  .formal-console .nav-item { @apply min-h-10; }
+  .formal-console .page { @apply py-0; }
+  .formal-console .content { @apply py-6 lg:px-8; }
+  .formal-console .panel { @apply p-5; }
+  .formal-console .panel-head { @apply mb-4 pb-4; }
+  .formal-console .panel-head p { @apply mt-1 text-xs text-slate-500 dark:text-slate-400; }
+  .formal-console .stat { @apply block border-t-2 border-t-slate-300 bg-white p-5 dark:border-t-slate-600 dark:bg-slate-900; }
+  .formal-console .stat-top { @apply flex items-center justify-between gap-3; }
+  .formal-console .stat.tone-ok { @apply border-t-emerald-500; }
+  .formal-console .stat.tone-bad { @apply border-t-rose-500; }
+  .formal-console .stat.tone-info { @apply border-t-sky-500; }
+  .formal-console .stat-value { @apply my-3 text-3xl; }
+  .formal-console .stat-grid { @apply sm:grid-cols-2 xl:grid-cols-5; }
+  .formal-console .split-analytics { @apply grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]; }
+  .formal-console .metric-rows > div { @apply flex items-center justify-between gap-4 border-b border-slate-100 py-3 last:border-0 dark:border-slate-800; }
+  .formal-console .metric-rows strong { @apply whitespace-nowrap font-semibold tabular-nums text-slate-900 dark:text-slate-100; }
+  .formal-console table { @apply m-0 w-full border-collapse text-left text-sm; }
+  .formal-console th { @apply whitespace-nowrap border-b border-slate-200 px-4 py-3 text-xs font-semibold text-slate-500 dark:border-slate-700 dark:text-slate-400; }
+  .formal-console td { @apply border-b border-slate-100 px-4 py-3 align-middle dark:border-slate-800; }
+  .formal-console tbody tr { @apply hover:bg-slate-50 dark:hover:bg-slate-800/50; }
+  .formal-console .field { @apply text-sm font-medium text-slate-700 dark:text-slate-200; }
+  .formal-console .field small { @apply font-normal text-xs leading-relaxed text-slate-500 dark:text-slate-400; }
+  .formal-console input, .formal-console select, .formal-console textarea { @apply min-w-0 max-w-full; }
+  .formal-console .panel-body > form { @apply space-y-5; }
+  .formal-console .workspace { @apply invisible pointer-events-none fixed inset-y-0 right-0 z-[60] flex w-full max-w-4xl translate-x-full flex-col border-l border-slate-200 bg-white shadow-2xl transition-transform dark:border-slate-800 dark:bg-slate-900; }
+  .formal-console .workspace.open { @apply visible pointer-events-auto translate-x-0; }
+  .formal-console .workspace .ws-head { @apply m-0 shrink-0 border-b border-slate-200 p-5 dark:border-slate-800; }
+  .formal-console .ws-head-top { @apply flex w-full items-start gap-3; }
+  .formal-console .ws-id { @apply min-w-0 flex-1; }
+  .formal-console .ws-id h2 { @apply text-lg font-semibold; }
+  .formal-console .ws-id small, .formal-console .ws-id p { @apply text-xs text-slate-500 dark:text-slate-400; }
+  .formal-console .ws-summary { @apply space-y-4 p-5; }
+  .formal-console .ws-metrics { @apply grid grid-cols-2 gap-3 sm:grid-cols-4; }
+  .formal-console .ws-tabs { @apply sticky top-0 z-10 m-0 overflow-x-auto bg-white px-5 dark:bg-slate-900; }
+  .formal-console .ws-tab { @apply shrink-0 whitespace-nowrap py-3; }
+  .formal-console .ws-body { @apply space-y-5 p-5; }
+  .formal-console .ws-section { @apply space-y-4; }
+  .formal-console .ws-section-head { @apply flex flex-wrap items-center justify-between gap-3; }
+  .formal-console .ws-section-head p { @apply mt-1 text-xs text-slate-500 dark:text-slate-400; }
+  .formal-console .ws-cards { @apply grid-cols-1 sm:grid-cols-2 lg:grid-cols-2; }
+  .formal-console .ws-card-head { @apply items-start; }
+  .formal-console .ws-card-actions { @apply mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-3 dark:border-slate-800; }
+  .formal-console .modal-card.wide { @apply max-w-3xl; }
+  .formal-console .modal-head { @apply shrink-0; }
+  .formal-console .modal-body > .field, .formal-console .modal-body > .field-row { @apply mb-4; }
+  .formal-console .chart { @apply flex h-48 items-end gap-2 pb-6; }
+  .formal-console .chart-day { @apply relative flex h-full min-w-0 flex-1 items-end gap-0.5; }
+  .formal-console .chart-day i { @apply block min-w-0 flex-1 rounded-t bg-slate-200 dark:bg-slate-700; }
+  .formal-console .chart-day b { @apply block min-w-0 flex-1 rounded-t bg-brand-600; }
+  .formal-console .chart-day small { @apply absolute -bottom-5 left-0 text-[9px] text-slate-500; }
+  .formal-console .board-tile { @apply flex items-start gap-3; }
+  .formal-console .board-tile p { @apply flex flex-col gap-1; }
+  .formal-console .board-tile b { @apply text-2xl font-semibold tabular-nums; }
+  .formal-console .board-tile small, .formal-console .board-tile i { @apply text-xs not-italic text-slate-500 dark:text-slate-400; }
+  .formal-console .board-head > div { @apply flex flex-wrap items-center gap-2; }
+  .formal-console .board-head small { @apply text-xs text-slate-500; }
+  .formal-console .board-load { @apply mt-4 grid gap-3 sm:grid-cols-2; }
+  .formal-console .load-row { @apply flex items-center gap-3 text-xs text-slate-500; }
+  .formal-console .load-bar { @apply h-1.5 flex-1 overflow-hidden bg-slate-200 dark:bg-slate-700; }
+  .formal-console .load-bar i { @apply block h-full bg-brand-600; }
+  .login-shell { @apply mx-auto w-full max-w-5xl gap-12 px-5 py-12; }
+  .login-card { @apply rounded-xl p-8 shadow-sm; }
+  .login-card h1 { @apply mt-8 text-2xl font-semibold; }
+  .login-card .login-lede { @apply mb-7 mt-2 text-sm; }
+  .login-card form { @apply space-y-5; }
+  .login-card .field { @apply text-sm font-medium; }
+  .login-card .btn { @apply w-full; }
+  .login-aside { @apply border-l border-slate-200 pl-12 dark:border-slate-800; }
+  .login-copy h2 { @apply my-4 text-3xl leading-tight text-slate-900 dark:text-slate-100; }
+  .login-points { @apply mt-6 list-none space-y-2 p-0; }
+  .login-points i { @apply mr-2 not-italic text-brand-600; }
+  .check-page iframe { @apply h-[75vh] w-full rounded-lg border border-slate-200; }
+}
+/* Theme class lives on body itself; descendant-only dark variants cannot set
+   body's inherited text/background. Keep headings legible in both skins. */
+@layer base {
+  body.theme-dark { @apply bg-slate-950 text-slate-100; }
+  body.theme-light { @apply bg-slate-100 text-slate-900; }
+}
+@layer components {
+  .formal-console.theme-dark { @apply bg-slate-950 text-slate-100; }
+  .formal-console .ws-metric { @apply flex items-center gap-3 text-left; }
+  .formal-console .ws-metric p { @apply flex flex-col gap-1; }
+  .formal-console .ws-metric b { @apply block font-semibold; }
+  .formal-console .cell-sub { @apply mt-1 block; }
+}
+@layer components {
+  .formal-console .stat-grid { @apply grid-cols-2 xl:grid-cols-5; }
+  .formal-console .ws-status { @apply flex flex-wrap gap-2; }
+  .formal-console .ws-chip { @apply items-center gap-2 rounded-md px-3 py-2; }
+  .formal-console .ws-chip b, .formal-console .ws-chip small { @apply font-medium; }
+  .formal-console .journey-head { @apply justify-between; }
+  .formal-console .journey-head small { @apply text-xs text-slate-500; }
+  .formal-console .journey-steps { @apply flex flex-wrap gap-2; }
+  .formal-console .journey-step { @apply inline-flex items-center gap-2; }
+}
+@layer components {
+  .nav-icon { @apply h-[18px] w-[18px] shrink-0 fill-none stroke-current; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+}
+@layer components {
+  .formal-console .tools, .formal-console .toolbar, .formal-console .head-tools { @apply min-w-0 max-w-full; }
+  .formal-console .routing-target-label { @apply flex min-w-0 max-w-full flex-col gap-1 text-xs; }
+  .formal-console .routing-target-label select { @apply w-full max-w-full; }
+}
+@layer components {
+  .formal-console .field { @apply min-w-0; }
+  .formal-console .field-row { @apply grid-cols-1 sm:grid-cols-2; }
+  .formal-console .field small, .formal-console .field code { overflow-wrap: anywhere; }
+}
+@layer components {
+  .formal-console .scope-field { @apply min-w-0 max-w-full flex-wrap; }
+  .formal-console .scope-field select { @apply w-full min-w-0 max-w-full sm:w-auto; }
+}
+@layer components {
+  .formal-console .rows, .formal-console .acc-item, .formal-console .acc-body { @apply min-w-0 max-w-full; }
+  .formal-console .acc-head > div { @apply min-w-0 flex-1; overflow-wrap: anywhere; }
+  .formal-console .acc-item:not(.open) > .acc-body { @apply hidden; }
+  .formal-console .row > div { @apply min-w-0 max-w-full; overflow-wrap: anywhere; }
+  .formal-console audio { @apply min-w-0 max-w-full; }
+}
+@layer components {
+  .formal-console .board-tiles { @apply grid-cols-2 lg:grid-cols-3; }
+  .formal-console .health.bad { @apply bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300; }
+  .formal-console .health.bad i { @apply bg-rose-500; }
 }

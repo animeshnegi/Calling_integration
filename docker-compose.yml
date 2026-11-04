@@ -16,9 +16,9 @@ x-logging: &bounded-logging
 
 services:
   telephony-api:
-    image: engineerip/telephony-api:${IMAGE_TAG:-latest}
+    image: ${TELEPHONY_API_IMAGE:-telephony-control/api}:${IMAGE_TAG:-latest}
     build: .
-    container_name: engineerip-telephony-api
+    container_name: telephony-api
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env
@@ -67,9 +67,9 @@ services:
       - /tmp:rw,noexec,nosuid,size=32m
 
   telephony-ari:
-    image: engineerip/telephony-api:${IMAGE_TAG:-latest}
+    image: ${TELEPHONY_API_IMAGE:-telephony-control/api}:${IMAGE_TAG:-latest}
     build: .
-    container_name: engineerip-telephony-ari
+    container_name: telephony-ari
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env
@@ -113,9 +113,9 @@ services:
     command: ["python", "-m", "app.asterisk.worker"]
 
   asterisk:
-    image: engineerip/asterisk:${IMAGE_TAG:-latest}
+    image: ${TELEPHONY_ASTERISK_IMAGE:-telephony-control/asterisk}:${IMAGE_TAG:-latest}
     build: ./asterisk
-    container_name: engineerip-asterisk
+    container_name: telephony-asterisk
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env

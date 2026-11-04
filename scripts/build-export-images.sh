@@ -3,12 +3,12 @@ set -euo pipefail
 
 TAG="${1:-$(date -u +%Y%m%d-%H%M%S)}"
 PLATFORM="${PLATFORM:-linux/amd64}"
-OUTPUT="${OUTPUT:-engineerip-telephony-${TAG}.tar.gz}"
+OUTPUT="${OUTPUT:-telephony-control-${TAG}.tar.gz}"
 
 for tool in docker gzip tar sha256sum mktemp; do
   command -v "$tool" >/dev/null || { echo "$tool is required (use Bash/WSL or Git Bash)" >&2; exit 1; }
 done
-TOOLS_OUTPUT="${TOOLS_OUTPUT:-engineerip-softphone-tools-${TAG}.tar.gz}"
+TOOLS_OUTPUT="${TOOLS_OUTPUT:-telephony-softphone-tools-${TAG}.tar.gz}"
 TOOLS_CONTAINER=""
 TOOLS_DIR=""
 cleanup() {
@@ -21,13 +21,16 @@ export IMAGE_TAG="$TAG" DOCKER_DEFAULT_PLATFORM="$PLATFORM"
 echo "Building $PLATFORM images with tag $TAG..."
 docker compose build --pull
 
+API_IMAGE="$(docker compose config --images telephony-api)"
+ASTERISK_IMAGE="$(docker compose config --images asterisk)"
+
 echo "Exporting $OUTPUT..."
-docker image save "engineerip/telephony-api:${TAG}" "engineerip/asterisk:${TAG}" | gzip -1 > "$OUTPUT"
+docker image save "$API_IMAGE" "$ASTERISK_IMAGE" | gzip -1 > "$OUTPUT"
 (cd "$(dirname "$OUTPUT")" && sha256sum "$(basename "$OUTPUT")") > "$OUTPUT.sha256"
 # Export the host tools too: docker save/load alone never updates host files.
 # Use a stopped container, so no application or PBX process runs on the builder.
 TOOLS_DIR="$(mktemp -d)"
-TOOLS_CONTAINER="$(docker create "engineerip/telephony-api:${TAG}")"
+TOOLS_CONTAINER="$(docker create "$API_IMAGE")"
 TOOLS_COPY_DIR="$TOOLS_DIR/"
 if command -v cygpath >/dev/null; then TOOLS_COPY_DIR="$(cygpath -w "$TOOLS_DIR")"; fi
 # Git Bash must not rewrite the Linux path inside the container argument.

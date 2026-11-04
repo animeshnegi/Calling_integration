@@ -1,3 +1,7 @@
+> Existing EngineerIP-named containers: read [the Docker naming migration](DOCKER_NAMING_MIGRATION.md)
+> before applying these neutral-name examples. The legacy override preserves existing
+> image/container names without restoring any CRM dependency.
+
 # Deployment
 
 > Production requires `DATABASE_URI` pointing to a reachable MySQL database. The application creates missing tables automatically. Complete [MYSQL.md](MYSQL.md) before starting the containers. Guide
@@ -330,7 +334,7 @@ The installer:
 3. Requires a real SIP WebSocket upgrade **directly from Asterisk** before any
    modification. If Asterisk fails, it stops without changing files/networks.
 4. Uses host loopback for host networking. With bridging it uses Docker DNS
-   `engineerip-asterisk:8088`, reuses a shared network or, only with explicit
+   `telephony-asterisk:8088`, reuses a shared network or, only with explicit
    `--connect-network`, attaches the proxy to the existing private network.
    No additional HTTP/ARI port is published to the Internet.
 5. Adds only the exact `/ws` location in that HTTPS vhost. It leaves certificates,
@@ -399,7 +403,7 @@ without this include does not enable the route.
 ```bash
 sudo nginx -t && sudo systemctl reload nginx
 # No Asterisk restart is needed to add/reload this nginx route.
-docker port engineerip-asterisk 8088
+docker port telephony-asterisk 8088
 # Expected: 127.0.0.1:8088 (never 0.0.0.0).
 python3 scripts/check-softphone-websocket.py ws://127.0.0.1:8088/ws \
   --origin https://tel.engineerip.com
@@ -417,7 +421,7 @@ upgrade only; registration and media still need their own checks.
   vhost, route precedence, and any upstream proxy/CDN. The public path is not
   reaching a working Asterisk handler. Nginx may be forwarding it to Flask.
 - **Direct check also returns 404:** inspect Asterisk before changing nginx:
-  `docker exec engineerip-asterisk asterisk -rx "http show status"`,
+  `docker exec telephony-asterisk asterisk -rx "http show status"`,
   `module show like res_http_websocket`, and
   `module show like res_pjsip_transport_websocket`. The `/ws` URI and both modules
   must be available. An HTTP 404 alone cannot prove which hop generated it.

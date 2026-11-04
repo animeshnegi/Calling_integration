@@ -193,6 +193,13 @@ base deployment standalone.
 
 ## Deployment
 
+**Existing installations:** Docker defaults now use `telephony-control/*` images
+and neutral container names. Before upgrading a production Compose file, read
+[`docs/DOCKER_NAMING_MIGRATION.md`](docs/DOCKER_NAMING_MIGRATION.md) and enable the
+legacy-names override to retain your current images/containers. Do not rename
+Asterisk during a UI-only update. Retain the MySQL-network override if required.
+
+
 ```bash
 cp .env.example .env
 # edit .env: secrets, public SIP address and RTP range.

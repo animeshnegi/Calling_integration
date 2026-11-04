@@ -210,3 +210,18 @@ def test_admin_template_uses_stylesheet_classes_not_inline_css():
 def test_login_has_no_legacy_product_branding():
     html = (TEMPLATES / "admin-login.html").read_text(encoding="utf-8")
     assert "EIP" not in html
+
+
+def test_console_layout_contracts_are_scoped_and_complete():
+    source = (ROOT / 'src/tailwind.css').read_text()
+    for selector in ('.workspace.open', '.modal.open', '.sidebar.open', '.scrim.open'):
+        assert selector in source
+    assert '[hidden] { display: none !important; }' in source
+    assert 'body.theme-dark' in source
+    assert '\n  .grid {' not in source  # never override Tailwind grid globally
+    assert '\n  section {' not in source  # docs spacing cannot affect console
+    assert '.status, .tag, .tone-' not in source  # cards are not badges
+    icons = STATIC / 'images/icons.svg'
+    assert icons.is_file()
+    html = (TEMPLATES / 'admin.html').read_text()
+    assert '/static/images/icons.svg#dashboard' in html

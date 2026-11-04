@@ -69,7 +69,7 @@ def docker_calls(monkeypatch):
     def command(*args):
         calls.append(args)
         if args[:3] == ("docker", "inspect", "--format"):
-            assert args[-1] == "engineerip-asterisk"
+            assert args[-1] == "telephony-asterisk"
             return json.dumps({"telephony-internal": {"IPAddress": "172.22.0.4"}})
         return ""
 
@@ -79,15 +79,15 @@ def docker_calls(monkeypatch):
 
 
 def test_only_matching_https_server_changes_and_second_install_is_idempotent():
-    updated = installer.render_route(HOST_CONFIG, DOMAIN, "http://engineerip-asterisk:8088")
+    updated = installer.render_route(HOST_CONFIG, DOMAIN, "http://telephony-asterisk:8088")
     assert updated.count("location = /ws") == 1
-    assert "proxy_pass http://engineerip-asterisk:8088;" in updated
+    assert "proxy_pass http://telephony-asterisk:8088;" in updated
     assert 'proxy_set_header Connection "upgrade";' in updated
     before = installer.https_servers(HOST_CONFIG, DOMAIN)[0]
     after = installer.https_servers(updated, DOMAIN)[0]
     assert updated[:before.closing] == HOST_CONFIG[:before.closing]
     assert updated[after.end:] == HOST_CONFIG[before.end:]
-    assert installer.render_route(updated, DOMAIN, "http://engineerip-asterisk:8088") == updated
+    assert installer.render_route(updated, DOMAIN, "http://telephony-asterisk:8088") == updated
 
 
 def test_nginx_quoted_regex_comments_variables_and_literal_punctuation_are_not_blocks():
@@ -133,7 +133,7 @@ def test_host_network_uses_host_loopback_without_network_attachment(tmp_path, do
 def test_bridge_network_never_uses_the_proxy_containers_loopback(tmp_path, docker_calls):
     proxy = Proxy(tmp_path, mode="bridge")
     plan = installer.make_plan(proxy, DOMAIN)
-    assert plan.upstream == "http://engineerip-asterisk:8088"
+    assert plan.upstream == "http://telephony-asterisk:8088"
     assert plan.direct_url == "ws://172.22.0.4:8088/ws" and plan.attach
     with pytest.raises(installer.InstallError, match="--connect-network"):
         installer.apply_plan(proxy, plan)
