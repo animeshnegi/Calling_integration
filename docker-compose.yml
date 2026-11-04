@@ -1,9 +1,9 @@
 # Standalone Telephony Control. No external CRM/1Panel networks are required:
 # the API is published on loopback for a reverse proxy, and other systems
 # integrate over HTTPS through the bearer-authenticated REST API or signed
-# webhooks. Remote/host MySQL is reached through DATABASE_URI. If that URI uses
-# another container's Docker hostname, set MYSQL_DOCKER_NETWORK in .env.
-# Docker DNS is network-scoped; only API and ARI join that external network.
+# webhooks. XAMPP/host/remote MySQL is reached through DATABASE_URI. For an
+# existing Docker MySQL container, use docker-compose.local.yml as an override;
+# it attaches only API and ARI to that external network.
 #
 # Bound Docker logs prevent SIP noise, health checks, or application errors from
 # filling the VM disk. Limits apply per container and require container recreation.
@@ -50,7 +50,6 @@ services:
     networks:
       - telephony-internal
       - data-network
-      - mysql-existing-network
     # Optional extra network for an existing MySQL container is configured
     # by attaching this service in docker-compose.local.yml.
 
@@ -103,7 +102,6 @@ services:
     networks:
       - telephony-internal
       - data-network
-      - mysql-existing-network
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
@@ -176,11 +174,6 @@ networks:
   data-network:
     driver: bridge
     name: telephony-data
-  # Defined in docker-compose.local.yml only when MYSQL_DOCKER_NETWORK is set.
-  mysql-existing-network:
-    external: true
-    name: ${MYSQL_DOCKER_NETWORK:-telephony-mysql-network}
-
 volumes:
   telephony_data:
   asterisk_dynamic_config:
