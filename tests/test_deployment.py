@@ -159,32 +159,51 @@ def test_asterisk_image_declares_both_websocket_listeners():
 
 
 def test_existing_mysql_network_is_optional_and_only_attaches_database_clients():
-    override = (ROOT / 'docker-compose.mysql-network.yml').read_text()
-    base = (ROOT / 'docker-compose.yml').read_text()
-    services = override.split('services:', 1)[1].split('\nnetworks:', 1)[0]
-    assert '  telephony-api:' in services
-    assert '  telephony-ari:' in services
-    assert '  asterisk:' not in services
-    assert services.count('- mysql-existing-network') == 2
-    assert 'external: true' in override
-    assert '${MYSQL_DOCKER_NETWORK:?' in override
-    assert 'mysql-existing-network' not in base
-    assert 'crm-network' not in base
-    example = (ROOT / '.env.example').read_text()
-    assert '# COMPOSE_FILE=docker-compose.yml:docker-compose.mysql-network.yml' in example
-    assert '# MYSQL_DOCKER_NETWORK=1panel-network' in example
+    base = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    override = (ROOT / "docker-compose.local.yml").read_text(encoding="utf-8")
+    services = override.split("services:", 1)[1].split("\\nnetworks:", 1)[0]
+    assert "  telephony-api:" in services
+    assert "  telephony-ari:" in services
+    assert "  asterisk:" not in services
+    assert services.count("- mysql-existing-network") == 2
+    assert "external: true" in override
+    assert "${MYSQL_DOCKER_NETWORK:?" in override
+    assert "mysql-existing-network" not in base
+    assert "crm-network" not in base
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "# MYSQL_DOCKER_NETWORK=1panel-network" in example
+    assert "# COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml" in example
+    assert "docker-compose.mysql-network.yml" not in example
+    assert "docker-compose.legacy-names.yml" not in example
 
 
-def test_docker_neutral_defaults_and_explicit_legacy_override():
-    compose = (ROOT / 'docker-compose.yml').read_text()
-    assert 'engineerip/' not in compose
-    assert 'container_name: engineerip-' not in compose
-    for name in ('telephony-api', 'telephony-ari', 'telephony-asterisk'):
-        assert f'container_name: {name}' in compose
-    assert '${TELEPHONY_API_IMAGE:-telephony-control/api}' in compose
-    assert '${TELEPHONY_ASTERISK_IMAGE:-telephony-control/asterisk}' in compose
-    legacy = (ROOT / 'docker-compose.legacy-names.yml').read_text()
-    assert 'container_name: engineerip-asterisk' in legacy
-    assert legacy.count('engineerip/telephony-api:${IMAGE_TAG:-latest}') == 2
-    assert 'networks:' not in legacy and 'volumes:' not in legacy
-    assert 'VOICEMAIL_CONTEXT: engineerip' in compose  # preserve mailbox identity
+def test_xampp_mode_does_not_require_an_external_mysql_network():
+    base = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "host.docker.internal:host-gateway" in base
+    assert "mysql-existing-network" not in base
+    assert "external: true" not in base
+
+
+def test_only_the_two_supported_compose_files_remain():
+    assert (ROOT / "docker-compose.yml").is_file()
+    assert (ROOT / "docker-compose.local.yml").is_file()
+    assert not (ROOT / "docker-compose.mysql-network.yml").exists()
+    assert not (ROOT / "docker-compose.legacy-names.yml").exists()
+
+
+def test_docker_neutral_defaults_and_env_based_legacy_names():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "engineerip/" not in compose
+    assert "container_name: engineerip-" not in compose
+    assert "${TELEPHONY_API_IMAGE:-telephony-control/api}" in compose
+    assert "${TELEPHONY_ASTERISK_IMAGE:-telephony-control/asterisk}" in compose
+    for setting in (
+        "TELEPHONY_API_IMAGE=engineerip/telephony-api",
+        "TELEPHONY_ASTERISK_IMAGE=engineerip/asterisk",
+        "TELEPHONY_API_CONTAINER=engineerip-telephony-api",
+        "TELEPHONY_ARI_CONTAINER=engineerip-telephony-ari",
+        "TELEPHONY_ASTERISK_CONTAINER=engineerip-asterisk",
+    ):
+        assert setting in example
+    assert "VOICEMAIL_CONTEXT: engineerip" in compose
