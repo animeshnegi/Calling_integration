@@ -1,26 +1,17 @@
-# Optional local/testing override. Use it TOGETHER with the base file:
+# Optional override for an existing MySQL Docker container (e.g. 1Panel).
 #
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+# Use only when DATABASE_URI points to a MySQL container hostname such as
+# 1Panel-mysql-H8JJ. Set MYSQL_DOCKER_NETWORK in .env and include this file:
 #
-# The base file is standalone. This override supports either a throwaway local
-# MySQL or an existing external Docker MySQL network:
+#   MYSQL_DOCKER_NETWORK=1panel-network
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml
 #
-# Set DATABASE_URI in .env BEFORE running Compose (base-file validation requires it):
-#   DATABASE_URI=mysql+pymysql://eip:eip-local-password@mysql:3306/telephony?charset=utf8mb4
-# Then run:
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml \
-#       --profile bundled-db up --build
+# XAMPP on Windows, host-installed MySQL, and managed/remote MySQL do NOT need
+# this override. Leave MYSQL_DOCKER_NETWORK and COMPOSE_FILE blank/unset and
+# run docker compose with docker-compose.yml alone.
 #
-# For an existing MySQL on this machine, host-gateway resolves it from Docker:
-#   DATABASE_URI=mysql+pymysql://root:PASSWORD@host.docker.internal:3306/telephony?charset=utf8mb4
-#
-# For a managed/remote MySQL, point DATABASE_URI at that host directly.
-#
-# Existing Docker MySQL (e.g. 1Panel): use this same optional override with
-# MYSQL_DOCKER_NETWORK=1panel-network in .env. This attaches API + ARI only;
-# the Asterisk container stays isolated. Do not set MYSQL_DOCKER_NETWORK for
-# XAMPP/host MySQL or managed MySQL.
-# Never use the bundled database in production.
+# This override attaches only the API and ARI worker to the existing database
+# network. Asterisk remains isolated on telephony-internal.
 
 services:
   telephony-api:
@@ -35,31 +26,7 @@ services:
       - data-network
       - mysql-existing-network
 
-  mysql:
-    image: mysql:8.4
-    container_name: telephony-local-mysql
-    # Opt-in only: started with --profile bundled-db. Never use in production.
-    profiles: ["bundled-db"]
-    restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: telephony
-      MYSQL_USER: eip
-      MYSQL_PASSWORD: eip-local-password
-      MYSQL_ROOT_PASSWORD: eip-local-root-password
-    networks:
-      - data-network
-    volumes:
-      - mysql_local_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-peip-local-root-password"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
 networks:
   mysql-existing-network:
     external: true
     name: ${MYSQL_DOCKER_NETWORK:?Set MYSQL_DOCKER_NETWORK when using an existing Docker MySQL network}
-
-volumes:
-  mysql_local_data:
