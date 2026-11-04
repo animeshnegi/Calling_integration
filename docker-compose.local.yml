@@ -2,8 +2,8 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
 #
-# The base file is already standalone (all networks are local bridges), so this
-# override only adds a throwaway MySQL for machines that have no database:
+# The base file is standalone. This override supports either a throwaway local
+# MySQL or an existing external Docker MySQL network:
 #
 # Set DATABASE_URI in .env BEFORE running Compose (base-file validation requires it):
 #   DATABASE_URI=mysql+pymysql://eip:eip-local-password@mysql:3306/telephony?charset=utf8mb4
