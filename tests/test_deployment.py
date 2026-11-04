@@ -161,7 +161,7 @@ def test_asterisk_image_declares_both_websocket_listeners():
 def test_existing_mysql_network_is_optional_and_only_attaches_database_clients():
     base = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     override = (ROOT / "docker-compose.local.yml").read_text(encoding="utf-8")
-    services = override.split("services:", 1)[1].split("\\nnetworks:", 1)[0]
+    services = override.split("services:", 1)[1].split("\nnetworks:", 1)[0]
     assert "  telephony-api:" in services
     assert "  telephony-ari:" in services
     assert "  asterisk:" not in services
