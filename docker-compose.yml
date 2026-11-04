@@ -2,8 +2,8 @@
 # the API is published on loopback for a reverse proxy, and other systems
 # integrate over HTTPS through the bearer-authenticated REST API or signed
 # webhooks. Remote/host MySQL is reached through DATABASE_URI. If that URI uses
-# another container's Docker hostname, enable docker-compose.mysql-network.yml
-# to join the existing database network; Docker DNS is network-scoped.
+# another container's Docker hostname, set MYSQL_DOCKER_NETWORK in .env.
+# Docker DNS is network-scoped; only API and ARI join that external network.
 #
 # Bound Docker logs prevent SIP noise, health checks, or application errors from
 # filling the VM disk. Limits apply per container and require container recreation.
@@ -50,6 +50,7 @@ services:
     networks:
       - telephony-internal
       - data-network
+      - mysql-existing-network
     # Expose the Flask admin/API only on the local host.
     # Use a reverse proxy for remote access instead of publishing it publicly.
     ports:
@@ -99,6 +100,7 @@ services:
     networks:
       - telephony-internal
       - data-network
+      - mysql-existing-network
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
@@ -163,14 +165,20 @@ services:
       start_period: 20s
 
 networks:
-  # Both networks are local bridges. Nothing here depends on a CRM container,
-  # a hosting panel, or any pre-existing Docker network.
+  # Required networks are local bridges. Existing Docker MySQL is opt-in via .env;
+  # Asterisk remains isolated from this optional database network.
   telephony-internal:
     driver: bridge
     name: telephony-internal
   data-network:
     driver: bridge
     name: telephony-data
+  # Optional external network for an existing MySQL container. When unset, the
+  # API/ARI containers join an unused external network and use host/remote MySQL
+  # as configured by DATABASE_URI. Set MYSQL_DOCKER_NETWORK for 1Panel MySQL.
+  mysql-existing-network:
+    external: true
+    name: ${MYSQL_DOCKER_NETWORK:-telephony-mysql-network}
 
 
 volumes:
