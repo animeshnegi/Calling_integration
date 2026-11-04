@@ -70,7 +70,7 @@ services:
       - /tmp:rw,noexec,nosuid,size=32m
 
   telephony-ari:
-    image: ${TELEPHONY_API_IMAGE:-telephony-control/api}:${IMAGE_TAG:-latest}
+    image: ${TELEPHONY_API_IMAGE:-engineerip/telephony-api}:${IMAGE_TAG:-latest}
     build: .
     container_name: ${TELEPHONY_ARI_CONTAINER:-engineerip-telephony-ari}
     restart: unless-stopped
