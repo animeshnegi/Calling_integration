@@ -210,11 +210,9 @@ docker compose up -d
 docker compose ps
 ```
 
-No `docker network create` step is needed. For a throwaway local MySQL:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml --profile bundled-db up --build
-```
+No external network is required for XAMPP or managed/remote MySQL. For a
+1Panel MySQL container, configure `COMPOSE_FILE` as shown above; Compose will
+load the optional override automatically.
 
 The API is served by Gunicorn and published on `127.0.0.1:5000`; put an HTTPS
 reverse proxy in front of it for remote access. Asterisk ARI 8088 and WSS 8089
