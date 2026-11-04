@@ -51,7 +51,6 @@ services:
       - telephony-internal
       - data-network
       - mysql-panel-network
-      - data-network
     # Expose the Flask admin/API only on the local host.
     # Use a reverse proxy for remote access instead of publishing it publicly.
     ports:
