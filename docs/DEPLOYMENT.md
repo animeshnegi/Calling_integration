@@ -1,6 +1,4 @@
-> Existing EngineerIP-named containers: read [the Docker naming migration](DOCKER_NAMING_MIGRATION.md)
-> before applying these neutral-name examples. The legacy override preserves existing
-> image/container names without restoring any CRM dependency.
+> Existing EngineerIP-named containers: read [the Docker naming migration](DOCKER_NAMING_MIGRATION.md) before applying these neutral-name examples. Preserve the existing image/container names through the `TELEPHONY_*` values in the server `.env`.
 
 # Deployment
 
@@ -65,30 +63,41 @@ The default RTP range is UDP `10000-10100`. Keep these aligned:
 
 The VPS firewall must be updated manually when the range changes.
 
-## 3b. Local testing with any MySQL (no 1panel, no CRM network)
+## 3b. Choose the MySQL connection mode
 
-The database is never bundled in production compose: the app connects to
-whatever `DATABASE_URI` in `.env` points at, so any MySQL works - a Docker
-container, a host-installed server, or a managed cloud database.
+The repository keeps exactly two Compose files:
 
-The base `docker-compose.yml` uses only local bridges. For a throwaway MySQL on
-a laptop or a plain test box, add the override file:
+- `docker-compose.yml` is the default for XAMPP on Windows, host-installed MySQL, and remote/managed MySQL. It does not require an external Docker network.
+- `docker-compose.local.yml` is an optional override only for an existing MySQL container on another Docker network, such as the 1Panel MySQL container.
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+For XAMPP on Windows, leave `MYSQL_DOCKER_NETWORK` and `COMPOSE_FILE` blank or unset. Use the host gateway in `DATABASE_URI`:
+
+```dotenv
+DATABASE_URI=mysql+pymysql://USER:URL_ENCODED_PASSWORD@host.docker.internal:3306/eip_telephony?charset=utf8mb4
 ```
 
-Pick the matching `DATABASE_URI` in `.env`:
+For the production 1Panel MySQL container, set both values in the server `.env`:
 
-- MySQL installed on the same machine:
-  `mysql+pymysql://root:PASSWORD@host.docker.internal:3306/eip_telephony?charset=utf8mb4`
-- Any other MySQL (remote server or managed database):
-  `mysql+pymysql://USER:PASSWORD@203.0.113.5:3306/eip_telephony?charset=utf8mb4`
-- No MySQL at all - start the bundled throwaway one (testing only):
-  `docker compose -f docker-compose.yml -f docker-compose.local.yml --profile bundled-db up --build`
-  with `DATABASE_URI=mysql+pymysql://eip:eip-local-password@mysql:3306/eip_telephony?charset=utf8mb4`
+```dotenv
+MYSQL_DOCKER_NETWORK=1panel-network
+COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml
+DATABASE_URI=mysql+pymysql://USER:URL_ENCODED_PASSWORD@1Panel-mysql-H8JJ:3306/eip_telephony?charset=utf8mb4
+```
 
-Production servers keep using `docker-compose.yml` alone, exactly as before.
+Compose reads `COMPOSE_FILE` from `.env` and automatically loads the override. That override attaches only `telephony-api` and `telephony-ari` to the existing MySQL network; Asterisk remains isolated. Do not use the override for XAMPP or a remote database.
+
+Validate the selected configuration before starting services:
+
+```bash
+docker compose config --quiet
+```
+
+If changing an existing production deployment from a previous Compose definition, recreate only the API and ARI worker after validating. Do not run `down -v`, and do not recreate Asterisk for a database-network-only change:
+
+```bash
+docker compose up -d --no-build --no-deps telephony-ari telephony-api
+docker compose logs --tail=100 telephony-api telephony-ari
+```
 
 ## 4. Build/start
 
