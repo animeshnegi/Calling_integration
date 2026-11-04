@@ -20,6 +20,7 @@ jobs:
           MYSQL_DOCKER_NETWORK: existing-mysql
           COMPOSE_FILE: docker-compose.yml:docker-compose.local.yml
         run: |
+          cp .env.example .env
           docker compose config --quiet
           docker compose config --format json > /tmp/compose.json
           python - <<'PY'
