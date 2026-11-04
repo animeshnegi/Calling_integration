@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from flask import Response, g, jsonify, redirect, request, send_file, send_from_directory, stream_with_context
 
-from ..admin import extension_digits, extension_mailbox, extension_scope
+from ..models.settings import extension_digits, extension_mailbox, extension_scope
 from ..config import Config
 from ..voicemail import mailbox_name
 

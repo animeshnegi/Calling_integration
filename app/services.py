@@ -14,7 +14,7 @@ from typing import Any
 
 import requests
 
-from .admin import (
+from .models.settings import (
     browser_username, endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox,
     extension_scope,
 )

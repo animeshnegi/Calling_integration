@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ..admin import (
+from ..models.settings import (
     SettingsStore, browser_username, endpoint_name as extension_endpoint, extension_digits, extension_key,
     extension_mailbox, extension_scope, same_account,
 )

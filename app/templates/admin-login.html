@@ -15,12 +15,12 @@
 <main class="login-shell">
   <section class="login-card">
     <div class="brand">
-      <span class="brand-mark">E</span>
+      <span class="brand-mark">T</span>
       <div><strong>Telephony Control</strong><small>Control</small></div>
     </div>
 
     <h1>Welcome back</h1>
-    <p class="login-lede">Sign in to manage calls, extensions, phone numbers, recordings and CRM integrations.</p>
+    <p class="login-lede">Manage your workspace.</p>
 
     <form id="login" novalidate>
       <label class="field">Username
@@ -29,18 +29,18 @@
       <label class="field">Password
         <input name="password" type="password" autocomplete="current-password" required>
       </label>
-      <button class="btn primary block" type="submit">Sign in to your control panel</button>
+      <button class="btn primary block" type="submit">Sign in</button>
       <div id="error" class="notice warn login-error" role="alert"></div>
     </form>
 
-    <p class="login-foot">New to EIP? <a href="/#signup">Create your account</a></p>
+    <p class="login-foot">New here? <a href="/#signup">Create your account</a></p>
   </section>
 
   <aside class="login-aside">
     <div class="login-copy">
       <span>TELEPHONY CONTROL</span>
-      <h2>Everything your calling system needs, in one place.</h2>
-      <p>Manage extensions and DIDs, organize recordings by employee, connect SIP providers, and deliver call events directly to your CRM.</p>
+      <h2>Your calling workspace.</h2>
+      <p>Calls, devices and integrations in one place.</p>
       <ul class="login-points">
         <li><i>✓</i>Live registration and device status for every extension</li>
         <li><i>✓</i>Call recordings and voicemail filed by employee</li>
@@ -50,38 +50,6 @@
   </aside>
 </main>
 
-<script>
-document.querySelector('#login').addEventListener('submit', async event => {
-  event.preventDefault();
-  const button = event.target.querySelector('button');
-  const error = document.querySelector('#error');
-  const label = button.textContent;
-  button.disabled = true;
-  button.textContent = 'Signing in…';
-  error.textContent = '';
-  try {
-    const response = await fetch('/login', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-      body: JSON.stringify(Object.fromEntries(new FormData(event.target))),
-    });
-    const contentType = response.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      if (response.redirected && new URL(response.url).pathname === '/admin') {
-        location = '/admin';
-        return;
-      }
-      throw Error(`Login endpoint returned ${response.status} ${contentType || 'without JSON'}. Check proxy and API logs.`);
-    }
-    const data = await response.json();
-    if (!response.ok) throw Error(data.error || `Login failed (${response.status})`);
-    location = '/admin';
-  } catch (exception) {
-    error.textContent = exception.message || 'Unable to contact the login service';
-    button.disabled = false;
-    button.textContent = label;
-  }
-});
-</script>
+<script src="/static/js/login.js"></script>
 </body>
 </html>

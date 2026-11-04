@@ -1117,7 +1117,11 @@ def test_the_layout_self_check_is_served_to_signed_in_accounts_only(tmp_path):
         assert page.status_code == 200
         body = page.get_data(as_text=True)
         assert "Console layout check" in body
-        assert "ws-scroll" in body and "platform-recording" in body      # it measures the real thing
+        assert '<script src="/static/js/console-check.js"></script>' in body
+        script = client.get("/static/js/console-check.js")
+        assert script.status_code == 200
+        source = script.get_data(as_text=True)
+        assert "ws-scroll" in source and "platform-recording" in source  # measures the real thing
         assert "{{" not in body                                          # nothing left to render
         # A diagnostic page, not a view of anybody's account.
         assert "meridian" not in body.lower().replace("console layout check", "")

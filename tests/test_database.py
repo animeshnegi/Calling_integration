@@ -173,7 +173,7 @@ def test_compose_caps_python_service_resources():
 
 def test_boot_failures_back_off_instead_of_hot_looping():
     wsgi = (ROOT / "wsgi.py").read_text()
-    worker = (ROOT / "app" / "ari_worker.py").read_text()
+    worker = (ROOT / "app" / "asterisk" / "worker.py").read_text()
     assert "time.sleep(10)" in wsgi and "raise" in wsgi
     assert "time.sleep(10)" in worker
 

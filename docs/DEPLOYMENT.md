@@ -355,11 +355,11 @@ services:
   openresty:  # use the existing proxy service name
     networks:
       # Keep this service's existing networks as well.
-      - engineerip-telephony-internal
+      - telephony-internal
 networks:
-  engineerip-telephony-internal:
+  telephony-internal:
     external: true
-    name: engineerip-telephony-internal
+    name: telephony-internal
 ```
 
 Do not add `networks` to a service that already uses `network_mode: host`; it does

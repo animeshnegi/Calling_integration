@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from sqlalchemy import BigInteger, String
 from sqlalchemy.types import VARCHAR
 
-import app.admin as admin
+import app.models.settings as admin
 from app.admin import SettingsStore
 from app.database import metadata, reconcile_statements
 

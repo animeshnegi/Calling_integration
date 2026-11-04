@@ -50,7 +50,7 @@
   /* ------------------------------------------------------------- sidebar */
   .brand { @apply flex items-center gap-3 px-2 py-2; }
   .brand-mark {
-    @apply grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-sm font-bold text-white shadow-panel;
+    @apply grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-700 text-sm font-bold text-white shadow-panel;
   }
   .brand-copy { @apply flex flex-col leading-tight; }
   .brand-copy strong { @apply text-sm font-semibold; }
@@ -226,7 +226,7 @@
   header.top { @apply flex flex-wrap items-center gap-3 border-b border-slate-200 py-4 dark:border-slate-800; }
   .brand b { @apply text-sm font-semibold; }
   .brand small { @apply block text-xs text-slate-500 dark:text-slate-400; }
-  .brand .mark { @apply grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-sm font-bold text-white; }
+  .brand .mark { @apply grid h-9 w-9 place-items-center rounded-lg bg-brand-700 text-sm font-bold text-white; }
   .lede { @apply my-4 max-w-2xl text-base leading-relaxed text-slate-600 dark:text-slate-300; }
   nav.toc { @apply flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-white p-3 text-sm dark:border-slate-800 dark:bg-slate-900; }
   nav.toc a { @apply rounded-lg px-2 py-1 text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-500/10; }
@@ -293,3 +293,29 @@
 .call-body{flex:1 1 auto;min-height:0;overflow-y:auto}
 .call-footer{flex:0 0 auto;position:relative;z-index:1;display:flex;align-items:center;justify-content:center;gap:1rem;padding:1rem}
 .hangup-icon{display:inline-block;transform:rotate(135deg)}
+
+/* Shared formal console treatment for administrator and customer workspaces.
+   Presentation only: DOM hooks, visibility and call controls stay unchanged. */
+@layer components {
+  .formal-console .topbar { @apply bg-white dark:bg-slate-900; }
+  .formal-console .panel, .formal-console .glass-card,
+  .formal-console .card, .formal-console .handling-card,
+  .formal-console .ws-card { @apply rounded-lg shadow-none; }
+  .formal-console .stat, .formal-console .tile,
+  .formal-console .board-tile, .formal-console .ws-metric { @apply rounded-lg shadow-none; }
+  .formal-console .btn { @apply rounded-md shadow-none; }
+  .formal-console .nav-item { @apply rounded-md; }
+  .formal-console .nav-item.active { @apply font-semibold; }
+  .formal-console .brand-mark { @apply rounded-md shadow-none; }
+  .formal-console .panel-head h2, .formal-console .ws-card-head h2 { @apply text-sm font-semibold; }
+  .formal-console .stat-value { @apply text-2xl font-semibold tabular-nums; }
+  .formal-console .hero { @apply rounded-lg border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900; }
+  .formal-console .hero h2 { @apply mb-3 text-base font-semibold; }
+  .formal-console .hero-actions { @apply mt-4; }
+  .formal-console .table-wrap { @apply rounded-lg; }
+  .formal-console th { @apply bg-slate-50 dark:bg-slate-800; }
+  .formal-console .theme-toggle { @apply rounded-md; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .formal-console .page.active, .formal-console .card-enter { animation: none; }
+}

@@ -419,7 +419,7 @@ async function main() {
     check('the SIP stack is loaded from the vendored same-origin build',
       /<script src="\/jssip\.min\.js">/.test(shippedPage));
     check('and falls back to the pinned upstream build if that fails',
-      /JsSIP@3\.10\.1/.test(shippedPage));
+      /JsSIP@3\.10\.1/.test(fs.readFileSync(assetPath('jssip-fallback.js'), 'utf8')));
     check('the in-call status line carries the class its stylesheet styles',
       env.d.getElementById('active-status').classList.contains('active-status'),
       env.d.getElementById('active-status').className);

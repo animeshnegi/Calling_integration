@@ -53,7 +53,7 @@ to exist** before `docker compose up`.
 app/
 ├── __init__.py            app factory (wires services, routes, workers)
 ├── config.py              environment-driven configuration
-├── admin.py               settings store, users, billing, console endpoints
+├── admin.py               legacy import compatibility alias
 ├── services.py            call state machine and ARI event handling
 ├── database.py            MySQL/SQLite abstraction and schema repair
 ├── local_transcription.py offline voicemail transcription
@@ -61,14 +61,16 @@ app/
 ├── voicemail*.py          mailbox store and email delivery
 ├── models/                Call dataclass + CallStore, split by concern
 │   ├── call.py
+│   ├── settings.py        settings, users, billing, extension identities
 │   └── store.py
 ├── routes/                HTTP surface
+│   ├── admin.py           admin/customer routes and session handling
 │   └── api.py
 ├── asterisk/              everything that talks to Asterisk
 │   ├── client.py          ARI REST client + event loop
 │   ├── ami.py             AMI client
 │   ├── config_sync.py     renders PJSIP / dialplan / voicemail from the DB
-│   └── worker.py          standalone ARI worker entrypoint
+│   └── worker.py          standalone ARI worker and boot backoff
 ├── templates/             all HTML pages
 │   ├── index.html  admin.html  admin-login.html
 │   ├── documentation.html  console-check.html  phone.html
@@ -89,11 +91,21 @@ tailwind.config.js         Tailwind content + theme
 package.json               `npm run css` builds static/css/tailwind.css
 ```
 
-Python modules are grouped by concern, HTML lives only in `templates/`, and
-every CSS/JS/image lives only under `static/`. The `app/ami.py`,
-`app/asterisk_client.py`, `app/telephony_config.py` and `app/ari_worker.py`
-files are thin compatibility shims so existing imports and the
-`python -m app.ari_worker` entrypoint keep working.
+HTML lives in `templates/`; executable page scripts, stylesheets and images live
+under `static/`. `models/settings.py` owns settings persistence and shared
+account/extension identity helpers without importing Flask. `routes/admin.py`
+owns the admin/customer HTTP surface, sessions and login throttling. ARI, AMI,
+configuration rendering and the background worker live under `asterisk/`.
+
+Legacy imports (`app.admin`, `app.asterisk_client`, `app.ami`,
+`app.telephony_config`) and `python -m app.ari_worker` remain supported.
+The canonical worker command is `python -m app.asterisk.worker`; both commands
+run the same implementation, including startup retry/backoff and recording
+reconciliation. No database schema or SIP/routing identifiers change.
+
+The softphone loads bundled JsSIP first, then a synchronous static fallback
+loader before `phone.js`. That loader retains the pinned upstream URL only for
+the existing recovery case where the local library fails to load.
 
 ## UI (Tailwind)
 

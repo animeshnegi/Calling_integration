@@ -9,26 +9,15 @@
   <link rel="apple-touch-icon" href="/static/images/favicon.svg">
   <link rel="stylesheet" href="/static/css/tailwind.css">
 </head>
-<body class="theme-loading antialiased">
-  <script>
-    /* Applies the remembered skin before the first paint so a reload never
-       flashes the other theme. The role decides the default on a first visit,
-       once the state payload names it. */
-    (function () {
-      try {
-        var role = localStorage.getItem('eip-console-role');
-        var skin = localStorage.getItem('eip-console-theme' + (role ? ':' + role : ''));
-        if (skin === 'light' || skin === 'dark') document.body.classList.add('theme-' + skin);
-      } catch (e) { /* storage unavailable: keep the role default */ }
-    })();
-  </script>
+<body class="theme-loading antialiased formal-console">
+  <script src="/static/js/console-theme.js"></script>
 <!-- Ambient gradient field; purely decorative. -->
 <div class="aurora" aria-hidden="true"><b></b><b></b><b></b></div>
 
 <div class="shell min-h-screen">
   <aside class="sidebar shadow-sm" id="sidebar">
     <div class="brand">
-      <span class="brand-mark">E</span>
+      <span class="brand-mark">T</span>
       <div class="brand-copy"><strong>Telephony Control</strong><small>Control</small></div>
     </div>
 
@@ -73,7 +62,7 @@
   <main class="main">
     <header class="topbar" id="topbar">
       <button class="icon-btn menu-btn" id="menu" aria-label="Open navigation">☰</button>
-      <div class="page-head"><h1 id="page-title">Overview</h1><p id="page-subtitle">Your telephony environment at a glance</p></div>
+      <div class="page-head"><h1 id="page-title">Overview</h1><p id="page-subtitle">Calls, services and account activity</p></div>
       <div class="topbar-tools">
         <div class="health" id="health"><i></i><span>Checking system…</span></div>
         <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false">
@@ -96,15 +85,15 @@
           <article class="stat tone-info"><div class="stat-top"><span class="stat-icon">✉</span><span class="stat-label">New voicemail</span></div><div class="stat-value" id="stat-voicemails">0</div><div class="stat-note">Waiting to be heard</div></article>
         </div>
 
-        <div class="ws-status" id="customer-status" data-customer-only style="margin-top:16px"></div>
+        <div class="mt-4 ws-status" id="customer-status" data-customer-only></div>
 
-        <div class="grid split-analytics" data-customer-only style="margin-top:16px">
+        <div class="mt-4 grid split-analytics" data-customer-only>
           <article class="panel feature sheen">
             <div class="panel-head"><div><h2>14-day call volume</h2><p>Answered calls compared with total attempts</p></div><span class="count" id="analytics-period">Last 14 days</span></div>
-            <div class="panel-body"><div class="chart" id="call-trend"><div class="skeleton" style="height:150px"></div></div></div>
+            <div class="panel-body"><div class="chart" id="call-trend"><div class="h-[150px] skeleton"></div></div></div>
           </article>
           <article class="panel">
-            <div class="panel-head"><div><h2>Service performance</h2><p>Operational metrics across your environment</p></div></div>
+            <div class="panel-head"><div><h2>Service performance</h2><p class="sr-only">Operational metrics across your environment</p></div></div>
             <div class="panel-body flush"><div class="metric-rows">
               <div><span>Answer rate</span><strong id="metric-answer-rate">0%</strong></div>
               <div><span>Missed inbound</span><strong id="metric-missed">0</strong></div>
@@ -114,26 +103,26 @@
           </article>
         </div>
 
-        <section class="hero sheen" data-customer-only style="margin-top:16px" id="journey-hero">
+        <section class="mt-4 hero sheen" data-customer-only id="journey-hero">
           <button class="hero-dismiss" id="journey-dismiss" type="button" aria-label="Hide the setup journey" title="Hide the setup journey"></button>
-          <h2>Your setup journey</h2>
+          <h2>Workspace setup</h2>
           <p class="sr-only" title="Complete each step to get your phone system fully live. Progress is saved automatically." aria-label="Complete each step to get your phone system fully live. Progress is saved automatically.">Complete each step to get your phone system fully live. Progress is saved automatically.</p>
           <div class="journey" id="customer-journey"></div>
           <div class="hero-actions"><button class="btn primary" id="request-number">Request a number</button></div>
         </section>
 
-        <article class="panel sheen" data-customer-only style="margin-top:16px" id="journey-restore" hidden>
-          <div class="panel-head"><div><h2>Your setup journey</h2><p>Hidden. Your progress is still saved.</p></div><button class="btn ghost sm" id="journey-restore-btn" type="button">Show it again</button></div>
+        <article class="mt-4 panel sheen" data-customer-only id="journey-restore" hidden>
+          <div class="panel-head"><div><h2>Workspace setup</h2><p>Hidden. Your progress is still saved.</p></div><button class="btn ghost sm" id="journey-restore-btn" type="button">Show setup</button></div>
         </article>
 
         <div class="grid cols-2" data-admin-only>
           <article class="panel">
-            <div class="panel-head"><div><h2>Quick actions</h2><p>Common provisioning tasks</p></div></div>
+            <div class="panel-head"><div><h2>Quick actions</h2><p class="sr-only">Common provisioning tasks</p></div></div>
             <div class="panel-body"><div class="grid cols-2">
-              <button class="ws-metric" data-go="users" data-new="user"><span class="glyph">＋</span><p><small>Add customer</small><b style="font-size:13px">Create access</b></p></button>
-              <button class="ws-metric" data-go="numbers" data-new="number"><span class="glyph">＋</span><p><small>Assign number</small><b style="font-size:13px">Provision a DID</b></p></button>
-              <button class="ws-metric" data-go="sipaccounts" data-new="sipaccount"><span class="glyph">＋</span><p><small>SIP service</small><b style="font-size:13px">Add a device</b></p></button>
-              <button class="ws-metric" data-go="providers" data-new="provider"><span class="glyph">＋</span><p><small>Carrier</small><b style="font-size:13px">Add provider</b></p></button>
+              <button class="ws-metric" data-go="users" data-new="user"><span class="glyph">＋</span><p><small>Add customer</small><b class="text-[13px]">Create access</b></p></button>
+              <button class="ws-metric" data-go="numbers" data-new="number"><span class="glyph">＋</span><p><small>Assign number</small><b class="text-[13px]">Provision a DID</b></p></button>
+              <button class="ws-metric" data-go="sipaccounts" data-new="sipaccount"><span class="glyph">＋</span><p><small>SIP service</small><b class="text-[13px]">Add a device</b></p></button>
+              <button class="ws-metric" data-go="providers" data-new="provider"><span class="glyph">＋</span><p><small>Carrier</small><b class="text-[13px]">Add provider</b></p></button>
             </div></div>
           </article>
           <article class="panel">
@@ -147,12 +136,12 @@
           </article>
         </div>
 
-        <article class="panel" data-admin-only style="margin-top:16px">
+        <article class="mt-4 panel" data-admin-only>
           <div class="panel-head"><div><h2>Recent call activity</h2><p>Latest calls across every customer</p></div><button class="btn ghost sm" data-go="calls">Open call history</button></div>
           <div class="panel-body flush"><div id="recent-calls" class="table-wrap"></div></div>
         </article>
 
-        <article class="panel" data-customer-only style="margin-top:16px">
+        <article class="mt-4 panel" data-customer-only>
           <div class="panel-head"><div><h2>Recent calls</h2><p>Latest activity across your extensions</p></div><button class="btn ghost sm" data-go="calls">View all</button></div>
           <div class="panel-body flush"><div id="recent-calls-customer" class="table-wrap"></div></div>
         </article>
@@ -169,7 +158,7 @@
           <div class="panel-head"><div><h2>Customer accounts</h2><p class="sr-only" title="Open a customer to manage their numbers, devices, routing, calls, billing and integrations in one place" aria-label="Open a customer to manage their numbers, devices, routing, calls, billing and integrations in one place">Open a customer to manage their numbers, devices, routing, calls, billing and integrations in one place</p></div><span class="count" id="customer-count">0 customers</span></div>
           <div class="panel-body flush"><div id="user-list" class="cards"></div></div>
         </article>
-        <article class="panel" style="margin-top:16px">
+        <article class="mt-4 panel">
           <div class="panel-head"><div><h2>Platform administrators</h2><p>Privileged accounts; customers are never given this role</p></div><button class="btn ghost sm" data-open="platformadmin">＋ Add administrator</button></div>
           <div class="panel-body flush"><div id="platform-admin-list" class="rows"></div></div>
         </article>
@@ -291,8 +280,8 @@
         <div class="toolbar">
           <div class="search" data-admin-only><span>⌕</span><input id="recording-search" placeholder="Search phone, number or call ID"></div>
           <select id="recording-extension"><option value="">All extensions</option></select>
-          <input id="recording-from" type="date" title="From date" style="width:auto">
-          <input id="recording-to" type="date" title="To date" style="width:auto">
+          <input id="recording-from" type="date" title="From date" class="w-auto">
+          <input id="recording-to" type="date" title="To date" class="w-auto">
           <span class="spacer"></span>
           <button class="btn ghost sm" id="refresh-recordings">Refresh</button>
           <a class="btn ghost sm" href="/admin/api/calls/export.csv?recordings=true" download>Export CSV</a>
@@ -340,7 +329,7 @@
           </article>
         </div>
 
-        <article class="panel" style="margin-top:16px">
+        <article class="mt-4 panel">
           <div class="panel-head"><div><h2>Webhook delivery history</h2><p>Persistent outbox attempts, retries and terminal errors</p></div><span class="count" id="delivery-count">0 deliveries</span></div>
           <div class="panel-body flush"><div id="webhook-delivery-list" class="table-wrap"></div></div>
         </article>
@@ -354,7 +343,7 @@
           <div class="panel-head"><div><h2>Subscriptions</h2><p class="sr-only" title="Monthly number billing, renewal cycles and scheduled discontinuation" aria-label="Monthly number billing, renewal cycles and scheduled discontinuation">Monthly number billing, renewal cycles and scheduled discontinuation</p></div></div>
           <div class="panel-body flush"><div id="subscription-list" class="rows"></div></div>
         </article>
-        <article class="panel" style="margin-top:16px">
+        <article class="mt-4 panel">
           <div class="panel-head"><div><h2>Invoices</h2><p>Invoice history and payment status</p></div></div>
           <div class="panel-body flush"><div id="invoice-list" class="table-wrap"></div></div>
         </article>
@@ -375,7 +364,7 @@
             <div class="panel-head"><div><h2>My call recording</h2><p class="sr-only" title="Applies only while the administrator&#x27;s global recording switch is enabled" aria-label="Applies only while the administrator&#x27;s global recording switch is enabled">Applies only while the administrator's global recording switch is enabled</p></div></div>
             <div class="panel-body">
               <label class="switch"><span class="switch-copy"><b>Allow recording for my extension</b><small id="profile-recording-help">Recording is off by default.</small></span><input id="profile-recording" type="checkbox"><i class="track"></i></label>
-              <div class="btn-row" style="margin-top:14px"><button class="btn primary" type="submit">Save preference</button></div>
+              <div class="mt-[14px] btn-row"><button class="btn primary" type="submit">Save preference</button></div>
             </div>
           </form>
           <form class="panel" id="profile-email-form">
@@ -386,7 +375,7 @@
             </div>
           </form>
         </div>
-        <form class="panel" id="password-form" style="margin-top:16px">
+        <form class="mt-4 panel" id="password-form">
           <div class="panel-head"><div><h2>Account password</h2><p>Use a unique password with at least 14 characters</p></div></div>
           <div class="panel-body">
             <div class="field-row">
@@ -396,7 +385,7 @@
             <div class="btn-row"><button class="btn primary" type="submit">Change password</button></div>
           </div>
         </form>
-        <article class="notice secure" style="margin-top:16px"><span class="glyph">⚿</span><div><b>Security boundary</b>ARI and AMI remain private. Recordings stream through authenticated routes, and SIP and webhook secrets are encrypted at rest. Keep this panel behind HTTPS, a VPN, or a trusted reverse proxy.</div></article>
+        <article class="mt-4 notice secure"><span class="glyph">⚿</span><div><b>Security boundary</b>ARI and AMI remain private. Recordings stream through authenticated routes, and SIP and webhook secrets are encrypted at rest. Keep this panel behind HTTPS, a VPN, or a trusted reverse proxy.</div></article>
       </section>
 
       <!-- =========================================================== REQUESTS -->
@@ -431,7 +420,7 @@
           <div class="panel-head"><div><h2>Elastic Email voicemail delivery</h2><p class="sr-only" title="The API key is encrypted and can only be configured by an administrator" aria-label="The API key is encrypted and can only be configured by an administrator">The API key is encrypted and can only be configured by an administrator</p></div></div>
           <div class="panel-body">
             <label class="switch"><span class="switch-copy"><b>Enable voicemail email</b><small>Send each new voicemail as an email attachment.</small></span><input id="email-enabled" type="checkbox"><i class="track"></i></label>
-            <div class="field-row" style="margin-top:16px">
+            <div class="mt-4 field-row">
               <label class="field">Elastic Email API key<input id="email-key" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing" aria-describedby="email-key-status"><small id="email-key-status">No key configured</small></label>
               <label class="field">Verified sender email<input id="email-from" type="email" placeholder="voicemail@example.com"></label>
             </div>
@@ -447,7 +436,7 @@
             <p id="email-feedback" role="status" aria-live="polite"></p>
           </div>
         </form>
-        <article class="panel" style="margin-top:16px">
+        <article class="mt-4 panel">
           <div class="panel-head"><div><h2>Recent email deliveries</h2><p class="sr-only" title="Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox." aria-label="Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.">Provider acceptance, errors and transcription results. Accepted does not mean delivered to the inbox.</p></div></div>
           <div class="panel-body flush"><div id="email-delivery-list" class="table-wrap"></div></div>
         </article>
@@ -552,10 +541,10 @@
 <div class="modal" id="modal" aria-hidden="true">
   <div class="modal-card" id="modal-card">
     <header class="modal-head">
-      <div style="flex:1"><h2 id="modal-title">Add item</h2><p id="modal-subtitle"></p></div>
+      <div class="flex-1"><h2 id="modal-title">Add item</h2><p id="modal-subtitle"></p></div>
       <button class="icon-btn" id="modal-close" aria-label="Close">✕</button>
     </header>
-    <form id="modal-form" style="display:flex;flex-direction:column;min-height:0;flex:1">
+    <form id="modal-form" class="flex min-h-0 flex-1 flex-col">
       <div class="modal-body" id="modal-fields"></div>
       <footer class="modal-foot">
         <button type="button" class="btn ghost" id="modal-cancel">Cancel</button>
@@ -569,10 +558,10 @@
 <div class="modal" id="flow-config-modal" aria-hidden="true">
   <div class="modal-card">
     <header class="modal-head">
-      <div style="flex:1"><h2 id="flow-config-title">Configure routing node</h2><p>Set the destination and timing for this step.</p></div>
+      <div class="flex-1"><h2 id="flow-config-title">Configure routing node</h2><p>Set the destination and timing for this step.</p></div>
       <button type="button" class="icon-btn" id="flow-config-close" aria-label="Close">✕</button>
     </header>
-    <form id="flow-config-form" style="display:flex;flex-direction:column;min-height:0;flex:1">
+    <form id="flow-config-form" class="flex min-h-0 flex-1 flex-col">
       <div class="modal-body" id="flow-config-fields"></div>
       <footer class="modal-foot">
         <button type="button" class="btn ghost" id="flow-config-cancel">Cancel</button>

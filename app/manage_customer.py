@@ -8,7 +8,7 @@ import os
 import re
 import sys
 
-from .admin import SettingsStore
+from .models.settings import SettingsStore
 
 
 def provision_customer(store: SettingsStore, username: str, email: str, password: str) -> tuple[int, bool]:

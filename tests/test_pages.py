@@ -96,7 +96,10 @@ def test_the_softphone_loads_its_sip_stack_from_this_origin(tmp_path: Path):
     html = client.get("/phone").get_data(as_text=True)
     assert '<script src="/jssip.min.js">' in html
     assert "cdn.jsdelivr.net/npm/jssip" not in html
-    assert "JsSIP@3.10.1" in html  # the pinned fallback, if any, stays pinned
+    assert '<script src="/static/js/jssip-fallback.js"></script>' in html
+    fallback = client.get("/static/js/jssip-fallback.js")
+    assert fallback.status_code == 200
+    assert "JsSIP@3.10.1" in fallback.get_data(as_text=True)
 
     stack = client.get("/jssip.min.js")
     assert stack.status_code == 200
@@ -184,3 +187,26 @@ def test_premium_call_screen_keeps_end_call_visible_with_dtmf_open():
     assert ".call-body{" in css and "overflow-y:auto" in css
     assert ".call-footer{" in css and "flex:0 0 auto" in css and "z-index:1" in css
     assert ".hangup-icon{" in css and "transform:rotate(135deg)" in css
+
+
+@pytest.mark.parametrize("page,asset", [
+    ("index.html", "signup.js"),
+    ("admin-login.html", "login.js"),
+    ("admin.html", "console-theme.js"),
+    ("console-check.html", "console-check.js"),
+])
+def test_non_phone_pages_keep_executable_scripts_in_static(page, asset):
+    html = (TEMPLATES / page).read_text(encoding="utf-8")
+    assert f'<script src="/static/js/{asset}"></script>' in html
+    assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html)
+    assert (STATIC / "js" / asset).is_file()
+
+
+def test_admin_template_uses_stylesheet_classes_not_inline_css():
+    html = (TEMPLATES / "admin.html").read_text(encoding="utf-8")
+    assert not re.search(r"\bstyle=", html)
+
+
+def test_login_has_no_legacy_product_branding():
+    html = (TEMPLATES / "admin-login.html").read_text(encoding="utf-8")
+    assert "EIP" not in html

@@ -128,7 +128,7 @@ async function main() {
     await settle(320);
     check('administrator console boots without runtime errors', errors.length === 0, errors[0]);
     check('administrator gets the dark skin', d.body.classList.contains('theme-dark'), d.body.className);
-    check('the pre-paint skin script runs before the console paints', /eip-console-theme/.test(d.body.innerHTML.slice(0, 1200)));
+    check('the pre-paint skin script runs before the console paints',  /<script src="\/static\/js\/console-theme\.js"><\/script>/.test(d.body.innerHTML.slice(0, 1200)));
     check('a role marker is applied for role-specific code', d.body.classList.contains('admin-theme'));
     check('the administrator is signed in', d.getElementById('who').textContent.trim().length > 0);
   }

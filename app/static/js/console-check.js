@@ -1,0 +1,186 @@
+/* A browser-only self-check: jsdom (which the automated tests use) has no layout
+   engine, so the geometry of the drawer can only be measured where it is used.
+   Everything here reads positions and sizes; nothing is written and no customer
+   data is displayed. */
+(function () {
+  const frame = document.getElementById('frame');
+  const tbody = document.getElementById('results');
+  const log = document.getElementById('log');
+  const status = document.getElementById('status');
+  const summary = document.getElementById('summary');
+  const again = document.getElementById('again');
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const round = value => Math.round(value * 10) / 10;
+  let failures = 0;
+
+  function note(line) { log.textContent += line + '\n'; }
+  function record(name, state, detail) {
+    if (state === 'bad') failures += 1;
+    const row = document.createElement('tr');
+    row.innerHTML = `<td>${name}</td>
+      <td class="result ${state}">${state === 'ok' ? 'PASS' : state === 'bad' ? 'FAIL' : state === 'skip' ? 'SKIP' : 'INFO'}</td>
+      <td class="measured">${detail ?? ''}</td>`;
+    tbody.appendChild(row);
+    note(`${state === 'ok' ? 'PASS' : state === 'bad' ? 'FAIL' : state.toUpperCase()}  ${name}${detail ? ' — ' + detail : ''}`);
+  }
+
+  async function openWorkspace(w, d) {
+    const opener = d.querySelector('[data-open-customer]');
+    if (!opener) return 'no customer row to open';
+    opener.click();
+    for (let i = 0; i < 30; i += 1) {
+      await sleep(120);
+      if (d.getElementById('workspace')?.classList.contains('open')) return null;
+    }
+    return 'the workspace did not open';
+  }
+
+  async function measure() {
+    tbody.innerHTML = '';
+    log.textContent = '';
+    failures = 0;
+    status.className = 'pill busy';
+    status.textContent = 'Measuring…';
+
+    const w = frame.contentWindow;
+    const d = frame.contentDocument;
+    if (!w || !d) { status.className = 'pill bad'; status.textContent = 'The console frame did not load'; return; }
+
+    await sleep(1500);
+    note(`console assets: ${[...d.querySelectorAll('link[rel=stylesheet], script[src]')].map(x => x.getAttribute('href') || x.getAttribute('src')).join(', ')}`);
+
+    /* 1. Which console build is being served? */
+    const region = d.getElementById('ws-scroll');
+    const summaryBlock = d.querySelector('.ws-summary');
+    record('the console being served has the scroll region (.ws-scroll)',
+      region ? 'ok' : 'bad',
+      region ? 'present' : 'not found: this deployment is serving an older console build — redeploy the app');
+    if (!region) {
+      status.className = 'pill bad';
+      status.textContent = 'The served console is an older build';
+      return;
+    }
+    record('the account summary sits inside that region',
+      summaryBlock && region.contains(summaryBlock) ? 'ok' : 'bad',
+      summaryBlock ? (region.contains(summaryBlock) ? 'inside .ws-scroll' : 'outside .ws-scroll') : 'no .ws-summary');
+
+    const isAdmin = (() => { try { return !!w.eval('state.is_admin'); } catch (error) { return false; } })();
+    const opened = await openWorkspace(w, d);
+    record('the customer workspace opens from a customer row', opened ? 'bad' : 'ok', opened || 'workspace open');
+    if (opened) { status.className = 'pill bad'; status.textContent = 'Could not open the workspace'; return; }
+    await sleep(500);
+
+    const head = d.querySelector('.ws-head-top');
+    const tabs = d.getElementById('ws-tabs');
+    const body = d.getElementById('ws-body');
+    if (!head || !tabs || !body) {
+      record('the drawer has the identity, tab row and content it needs', 'bad',
+        `head ${!!head}, tabs ${!!tabs}, body ${!!body}`);
+      status.className = 'pill bad';
+      status.textContent = 'The drawer is missing parts of its markup';
+      return;
+    }
+
+    /* 2. Geometry, measured with the region at the top. */
+    region.scrollTop = 0;
+    await sleep(120);
+    const headTopBefore = head.getBoundingClientRect().top;
+    const regionBox = region.getBoundingClientRect();
+    const tabsBox = tabs.getBoundingClientRect();
+    const tabContentHeight = regionBox.bottom - tabsBox.bottom;
+    const scrollable = region.scrollHeight > region.clientHeight + 2;
+    record('the region below the identity is the scroller',
+      scrollable ? 'ok' : 'info',
+      `content ${round(region.scrollHeight)}px in a ${round(region.clientHeight)}px box`);
+    record('the identity block leaves its height to that region',
+      headTopBefore <= regionBox.top + 1 ? 'ok' : 'bad',
+      `head top ${round(headTopBefore)}, region top ${round(regionBox.top)}`);
+    record('the tab row sits above the tab content',
+      tabsBox.bottom <= body.getBoundingClientRect().top + 1 ? 'ok' : 'bad',
+      `tabs bottom ${round(tabsBox.bottom)}, content top ${round(body.getBoundingClientRect().top)}`);
+    record('the tab content is not its own scroller',
+      Math.abs(body.scrollHeight - body.clientHeight) <= 2 ? 'ok' : 'bad',
+      `content ${round(body.scrollHeight)}px in ${round(body.clientHeight)}px`);
+    record('the tab content gets real room below the pinned row',
+      tabContentHeight > 200 ? 'ok' : 'bad',
+      `${round(tabContentHeight)}px visible below the tab row`);
+
+    /* 3. Scroll until the tab row reaches the top of the region. */
+    const travel = Math.min(tabs.offsetTop + 140, region.scrollHeight);
+    region.scrollTop = travel;
+    await sleep(160);
+    const headTopAfter = head.getBoundingClientRect().top;
+    const pinnedBox = tabs.getBoundingClientRect();
+    const regionAfter = region.getBoundingClientRect();
+    record('the identity block does not move while scrolling',
+      Math.abs(headTopAfter - headTopBefore) <= 1 ? 'ok' : 'bad',
+      `head top ${round(headTopBefore)} → ${round(headTopAfter)} after scrolling ${round(travel)}px`);
+    record('the tab row pins to the top of the region',
+      Math.abs(pinnedBox.top - regionAfter.top) <= 3 ? 'ok' : 'bad',
+      `tabs top ${round(pinnedBox.top)}, region top ${round(regionAfter.top)}`);
+    record('the tab content still has room under the pinned row',
+      regionAfter.bottom - pinnedBox.bottom > 200 ? 'ok' : 'bad',
+      `${round(regionAfter.bottom - pinnedBox.bottom)}px visible`);
+
+    /* 4. The bottom of a tab is reachable, and nothing is hidden behind the row. */
+    region.scrollTop = region.scrollHeight;
+    await sleep(160);
+    const atBottom = region.scrollHeight - region.clientHeight - region.scrollTop <= 2;
+    const lastChild = body.lastElementChild;
+    const lastBox = lastChild ? lastChild.getBoundingClientRect() : null;
+    record('scrolling to the end exposes the last thing on the page',
+      atBottom && lastBox && lastBox.bottom <= region.getBoundingClientRect().bottom + 2 ? 'ok' : 'bad',
+      lastBox ? `last element bottom ${round(lastBox.bottom)} vs region bottom ${round(region.getBoundingClientRect().bottom)}` : 'no content');
+    record('switching a tab brings it back under the pinned row',
+      typeof w.renderWsTab === 'function' ? 'ok' : 'bad',
+      typeof w.renderWsTab === 'function' ? 'renderWsTab() available' : 'missing');
+    if (typeof w.renderWsTab === 'function') {
+      w.renderWsTab('calls');
+      await sleep(220);
+      record('and the region scrolls back to the tab row',
+        region.scrollTop <= tabs.offsetTop + 4 ? 'ok' : 'bad',
+        `scrollTop ${round(region.scrollTop)} vs tab row at ${round(tabs.offsetTop)}`);
+    }
+
+    /* 5. The platform recording switch. */
+    if (!isAdmin) {
+      record('the platform recording switch (administrator only)', 'skip', 'signed in as a customer');
+    } else {
+      const nav = d.querySelector('[data-page="settings"]');
+      if (nav) { nav.click(); await sleep(400); }
+      const toggle = d.getElementById('platform-recording');
+      const flag = (() => { try { return w.eval('state.recording_platform_enabled'); } catch (error) { return undefined; } })();
+      record('the administrator has the global recording switch',
+        toggle ? 'ok' : 'bad',
+        toggle ? 'present on Settings' : 'not found: this deployment is serving an older console build');
+      if (toggle) {
+        record('it shows what the platform is actually set to',
+          toggle.checked === !!flag ? 'ok' : 'bad',
+          `switch ${toggle.checked ? 'on' : 'off'}, state says ${flag}`);
+        record('it says which switch decides whether a call records',
+          /switch is on/.test(d.getElementById('recording-platform-help')?.textContent || '') ? 'ok' : 'bad',
+          d.getElementById('recording-platform-help')?.textContent?.slice(0, 80));
+      }
+    }
+
+    status.className = 'pill ' + (failures ? 'bad' : 'ok');
+    status.textContent = failures ? `${failures} check(s) failed` : 'Everything passed';
+    summary.textContent = failures
+      ? 'A FAIL line names what is wrong; the measured column says what was seen. If the console build is old, redeploy and run this again.'
+      : 'The drawer scrolls as asked: the identity stays, the account summary scrolls away, the tab row pins, and the tab content runs underneath it.';
+  }
+
+  let ready = false;
+  frame.addEventListener('load', async () => {
+    if (ready) return;
+    ready = true;
+    try { await measure(); }
+    catch (error) { note('measurement failed: ' + error.message); status.className = 'pill bad'; status.textContent = 'The check could not run'; }
+  });
+  again.addEventListener('click', async () => {
+    ready = false;
+    tbody.innerHTML = '';
+    log.textContent = '';
+    frame.src = '/admin?' + Date.now();
+  });
+})();

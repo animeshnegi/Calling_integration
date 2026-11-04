@@ -1,8 +1,8 @@
 from flask import Flask
 
-from .admin import register_admin
+from .routes.admin import register_admin
 from .ami import AsteriskAMI
-from .asterisk_client import AsteriskClient
+from .asterisk.client import AsteriskClient
 from .config import Config
 from .routes import register_routes
 from .services import TelephonyService
@@ -64,7 +64,7 @@ def create_app(config_class=Config, *, start_ari: bool = False, sync_config: boo
     register_routes(app, service)
 
     if start_ari:
-        from .asterisk_client import ari_event_loop
+        from .asterisk.client import ari_event_loop
 
         def on_event(event):
             try:
