@@ -100,7 +100,6 @@ services:
     networks:
       - telephony-internal
       - data-network
-      - mysql-panel-network
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
