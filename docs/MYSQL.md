@@ -36,30 +36,26 @@ The `.local.yml` file adds the external network only to the API and ARI worker.
 Asterisk stays on its private telephony network. For XAMPP/host MySQL or managed
 MySQL, leave `MYSQL_DOCKER_NETWORK` blank and use `docker-compose.yml` alone.
 
-The colon is the Compose file separator on Linux. If `COMPOSE_FILE` already
-lists other overrides, keep those entries and append the MySQL override.
-Leave `DATABASE_URI`, its password and its database name unchanged. Do not use
-the container's temporary IP as a permanent database hostname.
+Keep `DATABASE_URI`, its password and its database name unchanged. Do not
+use the container's temporary IP as a permanent database hostname.
 
 Validate and recreate only the two database clients (brief application/worker
 interruption; schedule around active calls):
 
 ```bash
-docker compose config --quiet
-docker compose up -d --no-build --no-deps telephony-ari telephony-api
-docker compose logs --tail=50 telephony-api telephony-ari
+docker compose -f docker-compose.yml -f docker-compose.local.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --no-build --no-deps telephony-ari telephony-api
+docker compose -f docker-compose.yml -f docker-compose.local.yml logs --tail=50 telephony-api telephony-ari
 curl -fsS http://127.0.0.1:5000/health
 ```
 
-Use the same two `-f` arguments for subsequent Compose commands while this
-external-network mode is enabled. Asterisk is not attached to the database
-network, recreated or restarted by the scoped command above. No database
-recreation, volume deletion, CRM connection or proxy installer is required.
-The API/worker will regain connectivity only after DNS, authentication and
-schema access all succeed; inspect the next error if startup still fails.
+Use both Compose files for subsequent commands while this external-network mode
+is enabled. Asterisk is not attached to the database network and is not
+recreated by the scoped command. No database recreation, volume deletion, CRM
+connection or proxy installer is required.
 
-For immediate recovery **before** applying the two-file Compose configuration, attach
-both existing containers, only if they are not already on that network:
+For immediate recovery before recreating the two clients, attach both existing
+containers only if they are not already on that network:
 
 ```bash
 docker network connect 1panel-network telephony-api
