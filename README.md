@@ -186,10 +186,11 @@ created automatically. See [`docs/MYSQL.md`](docs/MYSQL.md).
 
 **Existing Docker MySQL / 1Panel upgrades:** a hostname such as
 `1Panel-mysql-H8JJ` only resolves on the MySQL container's Docker network. Set
-`MYSQL_DOCKER_NETWORK=1panel-network` in `.env` and use both Compose files with
-`docker compose -f docker-compose.yml -f docker-compose.local.yml ...`. The
-optional override connects only the API/worker to MySQL; Asterisk stays isolated.
-For XAMPP or remote MySQL, leave `MYSQL_DOCKER_NETWORK` unset.
+`MYSQL_DOCKER_NETWORK=1panel-network` and
+`COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml` in `.env`. Compose
+then loads the optional override automatically. It connects only the API and
+ARI worker to MySQL; Asterisk stays isolated. For XAMPP on Windows or remote
+MySQL, leave both variables unset and use the base Compose file alone.
 
 ## Deployment
 
