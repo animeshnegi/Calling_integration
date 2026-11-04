@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
 
 jobs:
@@ -10,15 +10,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate production and local Compose definitions
-        # Placeholder values only; do not start services or contact a database.
+      - name: Validate XAMPP/host MySQL Compose configuration
         run: |
           cp .env.example .env
           trap 'rm -f .env' EXIT
           docker compose config --quiet
-          MYSQL_DOCKER_NETWORK=existing-mysql docker compose -f docker-compose.yml -f docker-compose.legacy-names.yml -f docker-compose.mysql-network.yml config --quiet
-          MYSQL_DOCKER_NETWORK=existing-mysql docker compose -f docker-compose.yml -f docker-compose.mysql-network.yml config --quiet
-          docker compose -f docker-compose.yml -f docker-compose.local.yml --profile bundled-db config --quiet
+      - name: Validate 1Panel external MySQL network override
+        env:
+          MYSQL_DOCKER_NETWORK: existing-mysql
+          COMPOSE_FILE: docker-compose.yml:docker-compose.local.yml
+        run: |
+          docker compose config --quiet
+          docker compose config --format json > /tmp/compose.json
+          python - <<'PY'
+          import json
+          with open("/tmp/compose.json", encoding="utf-8") as handle:
+              config = json.load(handle)
+          services = config["services"]
+          api = set(services["telephony-api"]["networks"])
+          ari = set(services["telephony-ari"]["networks"])
+          asterisk = set(services["asterisk"]["networks"])
+          assert "mysql-existing-network" in api
+          assert "mysql-existing-network" in ari
+          assert "mysql-existing-network" not in asterisk
+          assert api == ari
+          assert asterisk == {"telephony-internal"}
+          PY
 
   pytest:
     runs-on: ubuntu-latest
