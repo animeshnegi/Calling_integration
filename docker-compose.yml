@@ -103,6 +103,7 @@ services:
     networks:
       - telephony-internal
       - data-network
+      - mysql-existing-network
     volumes:
       - telephony_data:/app/instance
       - asterisk_dynamic_config:/app/asterisk-config
@@ -175,6 +176,10 @@ networks:
   data-network:
     driver: bridge
     name: telephony-data
+  # Defined in docker-compose.local.yml only when MYSQL_DOCKER_NETWORK is set.
+  mysql-existing-network:
+    external: true
+    name: ${MYSQL_DOCKER_NETWORK:-telephony-mysql-network}
 
 volumes:
   telephony_data:
