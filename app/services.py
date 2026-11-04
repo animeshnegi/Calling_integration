@@ -560,19 +560,40 @@ class TelephonyService:
             for target in self.dial_endpoints(destination, number)
         ]
         for index, (destination, target) in enumerate(dial_plan):
+            current = self.store.get(call_id)
+            if not current or current.ended_at or current.status in {"completed", "failed"}:
+                break
             try:
-                leg = self.asterisk.create_inbound_employee_leg(
+                # A ring-group timeout is the overall limit for that route.
+                # An extension may request a shorter personal timeout, but a
+                # longer per-desk value must not silently defeat the flow's
+                # configured no-answer time.
+                timeout = min(ring_timeout, int(desk_timeouts.get(destination, ring_timeout)))
+                leg = str(self.asterisk.create_inbound_employee_leg(
                     call_id, destination, channel_id, index=index, endpoint=target,
-                    timeout=int(desk_timeouts.get(destination, ring_timeout)),
-                )
+                    timeout=timeout,
+                ))
             except Exception:
                 continue
-            legs.append((str(leg), destination))
-            self._leg_index[str(leg)] = call_id
+            legs.append((leg, destination))
+            self._leg_index[leg] = call_id
+            # Persist each originated phone immediately. A caller can hang up
+            # while the next endpoint is still being created; teardown must
+            # already know every physical phone that has started ringing.
+            current = self.store.update(
+                call_id,
+                employee_channel_id=legs[0][0],
+                employee_channel_ids=",".join(f"{channel}|{ext}" for channel, ext in legs),
+            )
+            if not current or current.ended_at or current.status in {"completed", "failed"}:
+                self._hangup_quietly(leg)
+                self._leg_index.pop(leg, None)
+                break
         if not legs:
-            self._inbound_no_answer(self.store.get(call_id), plan, "inbound_no_ringing_device")
+            current = self.store.get(call_id)
+            if current and not current.ended_at and current.status not in {"completed", "failed"}:
+                self._inbound_no_answer(current, plan, "inbound_no_ringing_device")
             return self.store.get(call_id)
-        self.store.update(call_id, employee_channel_id=legs[0][0], employee_channel_ids=",".join(f"{leg}|{ext}" for leg, ext in legs))
         return self.store.get(call_id)
 
     def _inbound_no_answer(self, call: Call, plan: dict, reason: str = "inbound_not_answered") -> None:
@@ -652,35 +673,48 @@ class TelephonyService:
             updated = self.store.update(call.call_id, extension=fallbacks[0], status="ringing_fallback")
             self._inbound_no_answer(updated, next_plan)
             return True
+        current = self.store.update(call.call_id, extension=fallbacks[0], status="ringing_fallback")
+        if not current or current.ended_at or current.status in {"completed", "failed"}:
+            return True
         ring_timeout = int(next_plan.get("timeout") or 30)
         desk_timeouts = next_plan.get("timeouts") or {}
         legs: list[tuple[str, str]] = []
+        prior = [token for token in str(call.employee_channel_ids or "").split(",") if token]
         for destination in next_plan["destinations"]:
             for index, target in enumerate(self.dial_endpoints(destination, call.caller_id_number or "")):
+                current = self.store.get(call.call_id)
+                if not current or current.ended_at or current.status in {"completed", "failed"}:
+                    break
                 try:
-                    leg = self.asterisk.create_inbound_employee_leg(
+                    timeout = min(ring_timeout, int(desk_timeouts.get(destination, ring_timeout)))
+                    leg = str(self.asterisk.create_inbound_employee_leg(
                         call.call_id, destination, call.customer_channel_id or "",
-                        index=10 + len(legs) + index, endpoint=target,
-                        timeout=int(desk_timeouts.get(destination, ring_timeout)),
-                    )
+                        index=10 + len(legs) + index, endpoint=target, timeout=timeout,
+                    ))
                 except Exception:
                     continue
-                legs.append((str(leg), destination))
-                self._leg_index[str(leg)] = call.call_id
+                legs.append((leg, destination))
+                self._leg_index[leg] = call.call_id
+                current = self.store.update(
+                    call.call_id,
+                    employee_channel_id=legs[0][0], extension=legs[0][1],
+                    employee_channel_ids=",".join([*prior, *(f"{channel}|{ext}" for channel, ext in legs)]),
+                )
+                if not current or current.ended_at or current.status in {"completed", "failed"}:
+                    self._hangup_quietly(leg)
+                    self._leg_index.pop(leg, None)
+                    break
+            else:
+                continue
+            break
         if not legs:
-            updated = self.store.update(call.call_id, extension=fallbacks[0], status="ringing_fallback")
-            self._inbound_no_answer(updated, next_plan)
+            current = self.store.get(call.call_id)
+            if current and not current.ended_at and current.status not in {"completed", "failed"}:
+                updated = self.store.update(call.call_id, extension=fallbacks[0], status="ringing_fallback")
+                self._inbound_no_answer(updated, next_plan)
             return True
-        prior = [token for token in str(call.employee_channel_ids or "").split(",") if token]
-        pairs = [f"{leg}|{ext}" for leg, ext in legs]
         for old_leg, _ in self._leg_pairs(call):
             self._leg_index.pop(old_leg, None)
-        self.store.update(
-            call.call_id,
-            status="ringing_fallback",
-            employee_channel_id=legs[0][0], extension=legs[0][1],
-            employee_channel_ids=",".join([*prior, *pairs]),
-        )
         self.notify_crm("call.employee_ringing", self.store.get(call.call_id), {"fallbacks": fallbacks})
         return True
 

@@ -240,12 +240,13 @@ def test_outbound_call_variables_omit_absent_metadata(monkeypatch):
 def test_inbound_employee_leg_is_originated_from_the_customer_channel(monkeypatch):
     captured = capture_request(monkeypatch)
 
-    assert ari_client().create_inbound_employee_leg("call-1", "102", "customer-1") == "call-1-employee"
+    assert ari_client().create_inbound_employee_leg("call-1", "102", "customer-1", timeout=10) == "call-1-employee"
 
     assert captured["params"]["endpoint"] == "PJSIP/102"
     assert captured["params"]["originator"] == "customer-1"
     assert captured["params"]["appArgs"] == "inbound_employee,call-1"
     assert captured["params"]["channelId"] == "call-1-employee"
+    assert captured["params"]["timeout"] == 10
 
 
 def test_customer_leg_targets_the_provider_endpoint_from_the_employee_channel(monkeypatch):

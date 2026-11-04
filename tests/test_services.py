@@ -1162,7 +1162,7 @@ def test_a_forward_answer_bridges_the_waiting_caller(tmp_path: Path):
 # test_telephony_config cover the mailbox and dialplan halves.
 
 
-def _ring_flow_service(tmp_path, extensions=("101", "102"), ring=None, extra_nodes=None, desk_flow=None):
+def _ring_flow_service(tmp_path, extensions=("101", "102"), ring=None, extra_nodes=None, desk_flow=None, ring_timeout=25):
     """A plain ringing main line, one call already waiting on it.
 
     `extensions` are the desks that exist on the line; `ring` names the ones
@@ -1178,7 +1178,7 @@ def _ring_flow_service(tmp_path, extensions=("101", "102"), ring=None, extra_nod
     number = "+13025559908"
     keys = line_setup(settings, number, owner, extensions)
     rung = list(ring or extensions)
-    nodes = [{"type": "ring_group", "extensions": [keys[e] for e in rung], "timeout": 25, "configured": True}]
+    nodes = [{"type": "ring_group", "extensions": [keys[e] for e in rung], "timeout": ring_timeout, "configured": True}]
     nodes.extend(extra_nodes(keys) if callable(extra_nodes) else (extra_nodes or []))
     settings.save_call_route(owner, {"phone_number": number, "name": "Main call flow", "active": True, "route": {"nodes": nodes}})
     if desk_flow is not None:
@@ -1216,6 +1216,50 @@ def test_when_the_desks_ring_out_the_call_lands_in_the_mailbox(tmp_path):
     assert "chan-inbound-chain" not in asterisk.hung_up
 
 
+def test_caller_hangup_during_parallel_origination_cancels_every_started_phone(tmp_path):
+    from app.admin import SettingsStore
+
+    service, asterisk, store = make_service(tmp_path)
+    settings = SettingsStore(str(tmp_path / "settings.db"), "secret" * 8)
+    service.settings_store = settings
+    owner = make_customer(settings, "cancel-race", "Cancel Race")
+    number = "+13025559906"
+    keys = line_setup(settings, number, owner, ("101", "102", "103"))
+    settings.save_call_route(owner, {
+        "phone_number": number,
+        "name": "Main call flow",
+        "active": True,
+        "route": {"nodes": [
+            {"type": "ring_group", "extensions": list(keys.values()), "timeout": 10},
+            {"type": "voicemail", "mailbox": keys["101"], "configured": True},
+        ]},
+    })
+
+    caller = "caller-cancels-ringing"
+    asterisk.live_channels.append(caller)
+    originated = []
+
+    def create_leg(call_id, extension, customer_channel_id, index=0, endpoint=None, timeout=30):
+        channel = f"{call_id}-employee" if index == 0 else f"{call_id}-employee-{index}"
+        originated.append(channel)
+        asterisk.live_channels.append(channel)
+        if index == 1:
+            # Caller hangs up while the next physical device has been created
+            # but before the ARI originate response is returned to the worker.
+            service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": caller}})
+        return channel
+
+    asterisk.create_inbound_employee_leg = create_leg
+    call = service.start_inbound(
+        {"id": caller, "caller": {"number": "+13025550000"}}, number, keys["101"]
+    )
+
+    assert call.ended_at
+    assert len(originated) == 2  # the third device was never started
+    assert set(originated).issubset(set(asterisk.hung_up))
+    assert asterisk.continued == []  # no voicemail transfer after caller disconnect
+
+
 def test_a_disabled_voicemail_step_takes_no_messages(tmp_path):
     service, asterisk, store, _, _, _, keys, call = _ring_flow_service(
         tmp_path,
@@ -1241,6 +1285,33 @@ def test_a_desk_rings_for_the_seconds_its_call_handling_asks(tmp_path):
     timed = {item["extension"]: item["timeout"] for item in asterisk.inbound_timeouts}
     assert timed[keys["101"]] == 15
     assert timed[keys["102"]] == 25
+
+
+def test_ring_group_timeout_caps_longer_per_desk_timeout_and_then_uses_voicemail(tmp_path):
+    from app.admin import extension_mailbox
+
+    service, asterisk, store, _, _, _, keys, call = _ring_flow_service(
+        tmp_path,
+        extensions=("101", "102"),
+        ring_timeout=10,
+        desk_flow=lambda keys: {"target": keys["101"], "nodes": [
+            {"type": "extension", "extension": keys["101"], "timeout": 30, "configured": True},
+        ]},
+        extra_nodes=lambda keys: [
+            {"type": "voicemail", "mailbox": keys["101"], "configured": True},
+        ],
+    )
+
+    # A desk-specific timeout can shorten a ring-group window, but must not
+    # make the main flow ring longer than the timeout the user set there.
+    assert {item["timeout"] for item in asterisk.inbound_timeouts} == {10}
+
+    for leg, _ in service._leg_pairs(call):
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    assert asterisk.continued == [
+        ("chan-inbound-chain", "voicemail-inbound", extension_mailbox(keys["101"])),
+    ]
+    assert "chan-inbound-chain" not in asterisk.hung_up
 
 
 def test_an_unanswered_call_is_handed_to_the_next_desk(tmp_path):
