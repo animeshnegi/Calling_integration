@@ -178,7 +178,7 @@ time. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the failure-runbook.
 ## Database
 
 ```dotenv
-DATABASE_URI=mysql+pymysql://eip:URL_ENCODED_PASSWORD@mysql.example.internal:3306/telephony?charset=utf8mb4
+DATABASE_URI=mysql+pymysql://eip_app:URL_ENCODED_PASSWORD@mysql.example.internal:3306/eip_telephony?charset=utf8mb4
 ```
 
 The database and a restricted MySQL user must exist; tables and indexes are
