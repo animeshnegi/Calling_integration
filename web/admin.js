@@ -2206,7 +2206,7 @@ function renderDeskHandling() {
   $('flow-nodes').innerHTML = `<div class="desk-editor">
     <div class="desk-policy">
       <section class="handling-card"><header><span class="handling-step">01</span><div><h4>Ring this device</h4><p>All registered phones for this extension.</p></div><label class="routing-toggle"><input id="desk-ring-enabled" type="checkbox" ${ring.ring_enabled !== false ? 'checked' : ''}><span>Ring device</span></label></header>
-        <div class="handling-body"><label class="field">Ring for<select id="desk-ring-timeout">${[10,15,20,25,30,45,60,90,120,...(ring.timeout && ![10,15,20,25,30,45,60,90,120].includes(Number(ring.timeout)) ? [Number(ring.timeout)] : [])].sort((a,b)=>a-b).map(seconds => `<option value="${seconds}" ${Number(ring.timeout || 25) === seconds ? 'selected' : ''}>${seconds} seconds</option>`).join('')}</select></label><p class="routing-field-note" id="desk-ring-note">When ringing is off, the no-answer action runs immediately.</p></div>
+        <div class="handling-body"><label class="field">Ring for<select id="desk-ring-timeout">${[10,15,20,25,30,45,60,90,120,...(ring.timeout && ![10,15,20,25,30,45,60,90,120].includes(Number(ring.timeout)) ? [Number(ring.timeout)] : [])].sort((a,b)=>a-b).map(seconds => `<option value="${seconds}" ${Number(ring.timeout || 25) === seconds ? 'selected' : ''}>${seconds} seconds</option>`).join('')}</select></label><p class="routing-field-note" id="desk-ring-note">When ringing is off, the no-answer action runs immediately. A shorter number-workflow timer caps this setting.</p></div>
       </section>
       <div class="handling-connector"><span>↓</span> No answer or device unavailable</div>
       <section class="handling-card"><header><span class="handling-step">02</span><div><h4>Choose what happens next</h4><p>A clear ending, never a dead end.</p></div></header>
@@ -2363,14 +2363,9 @@ function flowStepDefaults(node) {
   // The target is the workflow being edited, whichever picker opened it: the
   // administrator's list or the customer's main-line-then-desk pair.
   const { type, target } = flowTargetParts(currentFlowKey() || $('route-target')?.value);
-  const owner = flowOwnerId();
-  const mine = (state.extensions || []).filter(x => x.active && (!state.is_admin || !owner || x.owner_user_id === owner));
-  // The line's journey starts by ringing every device on that very line: add a
-  // desk and its phone joins the ring. Other lines' desks never do.
   if (type === 'number') {
-    const line = String(target || '');
-    const onLine = mine.filter(x => !line || String(x.number) === line);
-    return { ...node, extensions: (onLine.length ? onLine : mine).map(x => x.extension) };
+    // A new ring step must be configured explicitly, never silently all desks.
+    return { ...node, extensions: [] };
   }
   if (type === 'extension') return { ...node, extensions: [target] };
   const group = (state.groups || []).find(x => String(x.id) === String(target));
@@ -2411,7 +2406,7 @@ function openFlowConfig(index) {
     fields = `<label class="field">Ring a saved group<select name="group_id">${flowGroupOptions(node.group_id)}</select>
         <small>Choosing a group fills in its members below; you can still adjust them for this step.</small></label>
       <div class="field"><span>Ring these extensions</span>${flowDestinationCards(node.extensions || [])}<small>Choose one or more desks from this customer's numbers.</small></div>
-      <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
+      <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required><small>${node.type === 'sequential' ? 'Per extension, in the selected order.' : 'All selected extensions ring together.'} A shorter extension call-handling timer takes priority.</small></label>`;
   } else if (node.type === 'extension') {
     const desk = flowTargetParts(currentFlowKey()).type === 'extension';
     fields = `<label class="field">Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension || '')}</select>
@@ -2435,8 +2430,8 @@ function openFlowConfig(index) {
         <small>Mapped keys answer immediately; with no mappings the classic menu accepts full extension numbers.</small></label>
       <div class="map-rows" id="ivr-map-rows">${mapRows}</div>
       <button type="button" class="btn ghost sm" data-add-map>＋ Add key mapping</button>
-      <label class="field">Spoken prompt<textarea name="prompt" rows="3" maxlength="400" required>${esc(node.prompt || '')}</textarea>
-        <small>Read out before the caller is asked to type an extension — 400 characters at most.</small></label>
+      <label class="field">Prompt script (recording reference)<textarea name="prompt" rows="3" maxlength="400" required>${esc(node.prompt || '')}</textarea>
+        <small>Reference text only — editing this does not synthesize audio. Install the matching recording for the chosen voice; otherwise callers hear the stock extension prompt.</small></label>
       <div class="field-row">
         <label class="field">Voice<select name="voice">${ivrVoiceOptions(node.voice)}</select></label>
         <label class="field">Input timeout (seconds)<input type="number" name="input_timeout" min="2" max="30" value="${node.input_timeout || 6}" required></label>

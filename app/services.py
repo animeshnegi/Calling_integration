@@ -553,7 +553,6 @@ class TelephonyService:
         # an extension's own number, every device for a customer's main line, a
         # whole group when the customer built one.
         plan = self.settings_store.inbound_plan(number, extension)
-        destinations = list(plan.get("destinations", [extension]))
         call = Call(
             call_id=call_id, contact_id=None, member_id=None, extension=extension, phone=caller,
             caller_id_number=number, provider=(owned or incoming_number or {}).get("provider"),
@@ -567,29 +566,61 @@ class TelephonyService:
             # an extension, so there is no employee to report as ringing yet.
             return self._start_ivr(call, channel, plan)
         self.notify_crm("call.employee_ringing", call)
-        legs: list[tuple[str, str]] = []
-        ring_timeout = int(plan.get("timeout") or 30)
-        desk_timeouts = plan.get("timeouts") or {}
-        dial_plan = [
-            (destination, target)
-            for destination in destinations
-            for target in self.dial_endpoints(destination, number)
-        ]
-        for index, (destination, target) in enumerate(dial_plan):
-            try:
-                leg = self.asterisk.create_inbound_employee_leg(
-                    call_id, destination, channel_id, index=index, endpoint=target,
-                    timeout=int(desk_timeouts.get(destination, ring_timeout)),
-                )
-            except Exception:
-                continue
-            legs.append((str(leg), destination))
-            self._leg_index[str(leg)] = call_id
-        if not legs:
-            self._inbound_no_answer(self.store.get(call_id), plan, "inbound_no_ringing_device")
-            return self.store.get(call_id)
-        self.store.update(call_id, employee_channel_id=legs[0][0], employee_channel_ids=",".join(f"{leg}|{ext}" for leg, ext in legs))
+        self._ring_inbound_stage(self.store.get(call_id), plan)
         return self.store.get(call_id)
+
+    def _ring_inbound_stage(self, call: Call, plan: dict) -> None:
+        """Execute one ordered ring step; simultaneous members share a stage.
+
+        Persist the remaining steps and no-answer target so a config edit or
+        worker restart cannot change the journey of a call already ringing.
+        """
+        stages = list(plan.get("ring_stages") or [])
+        if not stages and "ring_stages" not in plan:
+            stages = [{"destinations": list(plan.get("destinations") or []),
+                       "timeout": int(plan.get("timeout") or 25), "timeouts": plan.get("timeouts") or {}}]
+        next_index = int(plan.get("next_leg_index") or 0)
+        while stages:
+            stage = stages.pop(0)
+            legs = []
+            for destination in stage["destinations"]:
+                for target in self.dial_endpoints(destination, call.caller_id_number or ""):
+                    index = next_index
+                    next_index += 1
+                    try:
+                        leg = self.asterisk.create_inbound_employee_leg(
+                            call.call_id, destination, call.customer_channel_id or "", index=index, endpoint=target,
+                            timeout=int((stage.get("timeouts") or {}).get(destination, stage.get("timeout") or 25)),
+                        )
+                    except Exception:
+                        logger.exception("Inbound ring leg failed for call %s", call.call_id)
+                        continue
+                    legs.append((str(leg), destination))
+                    self._leg_index[str(leg)] = call.call_id
+            current_plan = {**plan, "ring_stages": stages, "next_leg_index": next_index}
+            if legs:
+                for old_leg, _ in self._leg_pairs(call):
+                    self._leg_index.pop(old_leg, None)
+                for leg, _ in legs:
+                    self._leg_index[leg] = call.call_id
+                self.store.update(call.call_id, employee_channel_id=legs[0][0], extension=legs[0][1],
+                                  employee_channel_ids=",".join(f"{leg}|{ext}" for leg, ext in legs),
+                                  routing_plan=json.dumps(current_plan))
+                return
+        final_plan = {**plan, "ring_stages": [], "next_leg_index": next_index}
+        self.store.update(call.call_id, routing_plan=json.dumps(final_plan))
+        self._inbound_no_answer(self.store.get(call.call_id), final_plan, "inbound_not_answered")
+
+    def _saved_inbound_plan(self, call: Call) -> dict:
+        if call.routing_plan:
+            return json.loads(call.routing_plan)
+        plan = self.settings_store.inbound_plan(call.caller_id_number or "", call.extension) if self.settings_store else {}
+        if (plan.get("kind") == "ivr" or call.status == "ringing_fallback") and self.settings_store:
+            row = self.settings_store.extension_row(call.extension)
+            return self.settings_store.selected_desk_plan(call.extension, call.caller_id_number or "", row.get("owner_user_id") if row else None)
+        # Calls started by an older worker have already rung the original list.
+        plan.pop("ring_stages", None)
+        return plan
 
     def _inbound_no_answer(self, call: Call, plan: dict, reason: str = "inbound_not_answered") -> None:
         """One incoming no-answer path, including desks with ringing disabled."""
@@ -660,10 +691,11 @@ class TelephonyService:
         fallbacks = [str(value) for value in (plan.get("fallbacks") or []) if str(value)]
         if not fallbacks:
             return False
-        next_plan = {**plan, "destinations": fallbacks}
+        next_plan = {**plan, "destinations": fallbacks, "ring_stages": []}
         if self.settings_store and hasattr(self.settings_store, "apply_desk_handling"):
             row = self.settings_store.extension_row(fallbacks[0])
             next_plan = self.settings_store.apply_desk_handling(next_plan, fallbacks, call.caller_id_number or "", row.get("owner_user_id") if row else None)
+        self.store.update(call.call_id, routing_plan=json.dumps(next_plan))
         if not next_plan["destinations"]:
             updated = self.store.update(call.call_id, extension=fallbacks[0], status="ringing_fallback")
             self._inbound_no_answer(updated, next_plan)
@@ -729,11 +761,18 @@ class TelephonyService:
         if not session:
             return
         media = str(session["plan"].get("media") or "sound:custom/ivr-welcome")
+        if session.get("playback_id"):
+            try:
+                self.asterisk.stop_playback(session["playback_id"])
+            except Exception:
+                logger.warning("Could not stop expired IVR playback for channel %s", channel_id)
         try:
             self.asterisk.answer_channel(channel_id)
         except Exception:
             pass
         playback_id = f"ivr-{session['call_id']}-{session['tries']}"
+        session["playback_id"] = playback_id
+        playing = True
         try:
             self.asterisk.play_channel_media(channel_id, media, playback_id=playback_id)
         except Exception:
@@ -744,8 +783,10 @@ class TelephonyService:
             try:
                 self.asterisk.play_channel_media(channel_id, self.IVR_STOCK_PROMPT, playback_id=playback_id)
             except Exception:
-                pass
-        session["deadline"] = time.monotonic() + session["input_timeout"]
+                playing = False
+        # Input time starts after PlaybackFinished, not while the greeting plays.
+        # A lost playback event must not strand a caller indefinitely (45s cap).
+        session["deadline"] = time.monotonic() + session["input_timeout"] + (45 if playing else 0)
         session["resolve_after"] = 0.0
 
     def _ivr_digit(self, channel_id: str, digit: str) -> None:
@@ -809,34 +850,12 @@ class TelephonyService:
         self._ivr_sessions_map().pop(channel_id, None)
         self.asterisk.stop_playback(f"ivr-{session['call_id']}-{session['tries']}")
         call = self.store.get(session["call_id"])
-        plan = dict(session["plan"])
-        plan["destinations"] = [extension]
-        if self.settings_store and hasattr(self.settings_store, "apply_desk_handling"):
+        plan = {"destinations": [extension], "timeout": 25, "voicemail": "", "forward": ""}
+        if self.settings_store:
             row = self.settings_store.extension_row(extension)
-            owner = row.get("owner_user_id") if row else None
-            plan = self.settings_store.apply_desk_handling(plan, [extension], session.get("number") or "", owner)
-        self.store.update(call.call_id, extension=extension)
-        if not plan.get("destinations"):
-            self._inbound_no_answer(self.store.get(call.call_id), plan)
-            return
-        legs: list[str] = []
-        for index, target in enumerate(self.dial_endpoints(extension, session.get("number") or "")):
-            try:
-                leg = self.asterisk.create_inbound_employee_leg(
-                    session["call_id"], extension, channel_id, index=index, endpoint=target,
-                    timeout=int((plan.get("timeouts") or {}).get(extension, plan.get("timeout") or 30)),
-                )
-            except Exception:
-                continue
-            legs.append(str(leg))
-            self._leg_index[str(leg)] = session["call_id"]
-        if not legs:
-            self._inbound_no_answer(self.store.get(session["call_id"]), plan, "ivr_extension_unavailable")
-            return
-        self.store.update(
-            session["call_id"], extension=extension, employee_channel_id=legs[0],
-            employee_channel_ids=",".join(f"{leg}|{extension}" for leg in legs),
-        )
+            plan = self.settings_store.selected_desk_plan(extension, session.get("number") or "", row.get("owner_user_id") if row else None)
+        call = self.store.update(call.call_id, extension=extension)
+        self._ring_inbound_stage(call, plan)
         self.notify_crm("call.ivr_extension_selected", self.store.get(session["call_id"]), {"digits": session["digits"], "extension": extension})
 
     def _ivr_fallback(self, session: dict[str, Any], digits: str) -> None:
@@ -850,36 +869,13 @@ class TelephonyService:
         if fallback:
             return self._ivr_dial({**session, "digits": digits}, fallback)
         destinations = [str(value) for value in (plan.get("fallback_destinations") or [])]
-        if self.settings_store and hasattr(self.settings_store, "apply_desk_handling"):
-            number = session.get("number") or ""
-            owner = next((row.get("owner_user_id") for row in self.settings_store.list_numbers() if row["number"] == number), None)
-            plan = self.settings_store.apply_desk_handling({**plan, "destinations": destinations}, destinations, number, owner)
-            destinations = plan["destinations"]
-        if destinations:
-            legs: list[tuple[str, str]] = []
-            dial_plan = [
-                (destination, target)
-                for destination in destinations
-                for target in self.dial_endpoints(destination, session.get("number") or "")
-            ]
-            for index, (destination, target) in enumerate(dial_plan):
-                try:
-                    leg = self.asterisk.create_inbound_employee_leg(
-                        session["call_id"], destination, channel_id, index=index, endpoint=target,
-                    )
-                except Exception:
-                    continue
-                legs.append((str(leg), destination))
-                self._leg_index[str(leg)] = session["call_id"]
-            if legs:
-                self.store.update(
-                    session["call_id"], extension=legs[0][1],
-                    employee_channel_id=legs[0][0], employee_channel_ids=",".join(f"{leg}|{ext}" for leg, ext in legs),
-                )
-                self.notify_crm("call.ivr_fallback", self.store.get(session["call_id"]), {"digits": digits})
-                return
         call = self.store.get(session["call_id"])
-        self._inbound_no_answer(call, plan, "ivr_no_selection")
+        fallback_plan = {**plan, "destinations": destinations, "ring_stages": list(plan.get("fallback_stages") or [])}
+        if self.settings_store and destinations:
+            row = self.settings_store.extension_row(destinations[0])
+            fallback_plan = self.settings_store.apply_desk_handling(fallback_plan, destinations, session.get("number") or "", row.get("owner_user_id") if row else None)
+        self._ring_inbound_stage(call, fallback_plan)
+        self.notify_crm("call.ivr_fallback", self.store.get(session["call_id"]), {"digits": digits})
 
     def process_ivr_timeouts(self, now: float | None = None) -> int:
         """Called from the worker loop: move every waiting caller along."""
@@ -1165,6 +1161,14 @@ class TelephonyService:
                 self.notify_crm(f"call.recording_{'finished' if event_type == 'RecordingFinished' else 'failed'}", updated)
             return
 
+        if event_type in {"PlaybackFinished", "PlaybackFailed"}:
+            playback_id = str((event.get("playback") or {}).get("id") or "")
+            for session in list(self._ivr_sessions_map().values()):
+                if playback_id and playback_id == session.get("playback_id"):
+                    session["deadline"] = time.monotonic() + session["input_timeout"]
+                    session["playback_id"] = ""
+            return
+
         channel = event.get("channel") or {}
         channel_id = channel.get("id")
         if not channel_id:
@@ -1281,11 +1285,11 @@ class TelephonyService:
                     # the caller; one that ends in a forward number rings it
                     # with the caller still waiting; the default flow simply
                     # ends the call.
-                    plan = self.settings_store.inbound_plan(call.caller_id_number or "", call.extension) if self.settings_store else {}
-                    if (plan.get("kind") == "ivr" or call.status == "ringing_fallback") and self.settings_store:
-                        row = self.settings_store.extension_row(call.extension)
-                        plan = self.settings_store.apply_desk_handling(plan, [call.extension], call.caller_id_number or "", row.get("owner_user_id") if row else None)
-                    self._inbound_no_answer(call, plan)
+                    plan = self._saved_inbound_plan(call)
+                    if plan.get("ring_stages"):
+                        self._ring_inbound_stage(call, plan)
+                    else:
+                        self._inbound_no_answer(call, plan)
                     return
                 for leg in legs:
                     self._leg_index.pop(leg, None)

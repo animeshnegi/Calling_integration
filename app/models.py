@@ -39,16 +39,19 @@ class Call:
     disposition: str | None = None
     notes: str | None = None
     owner_user_id: int | None = None
+    routing_plan: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("routing_plan", None)
+        return data
 
 
 _COLUMNS = (
     "call_id", "contact_id", "member_id", "extension", "phone", "caller_id_number", "provider", "direction", "status",
     "answered", "started_at", "answered_at", "ended_at", "duration_seconds", "employee_channel_id",
     "employee_channel_ids", "customer_channel_id", "bridge_id", "recording_name", "recording_format", "recording_status",
-    "recording_path", "disposition", "notes", "owner_user_id",
+    "recording_path", "disposition", "notes", "owner_user_id", "routing_plan",
 )
 
 
@@ -99,6 +102,8 @@ class CallStore:
                 )
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(calls)").fetchall()}
+            if "routing_plan" not in columns:
+                db.execute("ALTER TABLE calls ADD COLUMN routing_plan TEXT")
             if "owner_user_id" not in columns:
                 db.execute("ALTER TABLE calls ADD COLUMN owner_user_id INTEGER")
             if "caller_id_number" not in columns:

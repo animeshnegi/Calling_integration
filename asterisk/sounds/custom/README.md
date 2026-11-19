@@ -17,4 +17,4 @@ pcm_mulaw ivr-welcome.ulaw` produces one from a normal recording.
 
 Until a file is installed the menu is not silent: the service falls back to Asterisk's
 stock `vm-enter-num-to-call` prompt ("please enter the number you wish to call"), and the
-step's **Spoken prompt** text stays in the console as the script the recording should say.
+step's **Prompt script (recording reference)** text stays in the console as the script the recording should say.

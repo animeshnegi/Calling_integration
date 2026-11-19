@@ -2826,7 +2826,7 @@ class SettingsStore(WebhookStoreMixin):
                 if fallback and fallback not in owned_extensions:
                     raise ValueError("IVR fallback must be an extension owned by this customer")
             elif node_type == "business_hours":
-                if not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", str(node.get("start", ""))) or not re.fullmatch(r"[0-2][0-9]:[0-5][0-9]", str(node.get("end", ""))):
+                if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", str(node.get("start", ""))) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", str(node.get("end", ""))):
                     raise ValueError("Business hours must include valid opening and closing times")
                 days = node.get("days")
                 if not isinstance(days, list) or not days or any(int(day) not in range(1, 8) for day in days):
@@ -2981,7 +2981,7 @@ class SettingsStore(WebhookStoreMixin):
         owner = (row or {}).get("owner_user_id")
         flow = None
         if owner is not None:
-            flow = next((item for item in self.list_call_routes(int(owner)) if item["phone_number"] == number), None)
+            flow = next((item for item in self.list_call_routes(int(owner)) if item["phone_number"] == number and item.get("active", True)), None)
         if not flow:
             # The legacy path: no designed flow, so the number rings the
             # extension it points at. The link holds the dialled digits, which
@@ -3002,7 +3002,7 @@ class SettingsStore(WebhookStoreMixin):
         if owner is not None and extension and not any(str(node.get("type")) in journey_kinds for node in nodes):
             desk_flow = next(
                 (item for item in self.list_routing_flows(int(owner), target_type="extension")
-                 if str(item.get("target")) == str(extension)),
+                 if str(item.get("target")) == str(extension) and item.get("active", True)),
                 None,
             )
             desk_nodes = ((desk_flow or {}).get("route") or {}).get("nodes") or []
@@ -3013,7 +3013,7 @@ class SettingsStore(WebhookStoreMixin):
         # A flow that carries a menu asks the caller for an extension instead of
         # ringing anybody; whatever the flow says besides that step is where an
         # unanswered or invalid entry goes.
-        ivr_node = next((node for node in nodes if str(node.get("type")) == "ivr"), None)
+        ivr_node = next((node for node in nodes if str(node.get("type")) == "ivr" and node.get("enabled") is not False), None)
         if ivr_node is not None and not self._plan_nodes(nodes, owner, extension, number).get("outside_hours"):
             answer = self._ivr_answer_plan(ivr_node, owner, extension, nodes, number)
             if answer is not None:
@@ -3061,11 +3061,11 @@ class SettingsStore(WebhookStoreMixin):
         for key in keys:
             flow = next(
                 (item for item in self.list_routing_flows(int(owner) if owner is not None else None, target_type="extension")
-                 if str(item.get("target")) == str(key)),
+                 if str(item.get("target")) == str(key) and item.get("active", True)),
                 None,
             )
             for node in ((flow or {}).get("route") or {}).get("nodes") or []:
-                if not isinstance(node, dict):
+                if not isinstance(node, dict) or node.get("enabled") is False:
                     continue
                 kind = str(node.get("type"))
                 if kind == "extension" and str(node.get("extension") or "") == str(key):
@@ -3092,7 +3092,19 @@ class SettingsStore(WebhookStoreMixin):
         """
         handling = self._desk_handling(keys, number, owner)
         plan["destinations"] = [key for key in plan.get("destinations", []) if key not in handling["disabled"]]
-        plan["timeouts"] = {**(plan.get("timeouts") or {}), **handling["timeouts"]}
+        # Both limits are meaningful: the shorter number/desk limit wins.
+        existing = plan.get("timeouts") or {}
+        ceiling = int(plan.get("timeout") or 30)
+        plan["timeouts"] = {
+            key: min(int(existing.get(key, ceiling)), int(handling["timeouts"].get(key, ceiling)))
+            for key in keys
+        }
+        for stage in plan.get("ring_stages") or []:
+            stage["destinations"] = [key for key in stage["destinations"] if key not in handling["disabled"]]
+            stage["timeouts"] = {
+                key: min(int(stage["timeout"]), int(handling["timeouts"].get(key, stage["timeout"])))
+                for key in stage["destinations"]
+            }
         ending = self._desk_handling(keys[:1], number, owner)
         plan["fallbacks"] = ending["fallbacks"]
         if not plan.get("voicemail") and not plan.get("forward"):
@@ -3101,6 +3113,14 @@ class SettingsStore(WebhookStoreMixin):
                 plan["forward"] = ending["forward"]
                 plan["forward_timeout"] = ending["forward_timeout"]
         return plan
+
+    def selected_desk_plan(self, extension: str, number: str, owner) -> dict:
+        """After IVR selection, only that desk's own no-answer policy applies."""
+        timeout = self._desk_handling([extension], number, owner)["timeouts"].get(extension, 25)
+        return self.apply_desk_handling(
+            {"destinations": [extension], "timeout": timeout, "voicemail": "", "forward": "", "outside_hours": False},
+            [extension], number, owner,
+        )
 
     def _desk_voicemail(self, number: str, extension: str, owner) -> str:
         """The mailbox of the desk the line answers with, when the flow is silent.
@@ -3117,7 +3137,7 @@ class SettingsStore(WebhookStoreMixin):
             return ""
         owner_id = int(owner) if owner is not None else None
         flow = next(
-            (item for item in self.list_routing_flows(owner_id, target_type="extension") if item["target"] == key),
+            (item for item in self.list_routing_flows(owner_id, target_type="extension") if item["target"] == key and item.get("active", True)),
             None,
         )
         nodes = ((flow or {}).get("route") or {}).get("nodes") or []
@@ -3163,6 +3183,7 @@ class SettingsStore(WebhookStoreMixin):
             },
             "fallback": fallback if fallback in company_keys else "",
             "fallback_destinations": list(tail.get("destinations") or []),
+            "fallback_stages": tail.get("ring_stages") or [],
             "voicemail": tail.get("voicemail") or "",
             "timeout": int(tail.get("timeout") or 30),
             "forward": tail.get("forward") or "",
@@ -3180,9 +3201,14 @@ class SettingsStore(WebhookStoreMixin):
         } if owner is not None else set()
         groups = {str(item["id"]): item for item in self.list_groups(int(owner))} if owner is not None else {}
         now = datetime.now()
+        # Hours gate the whole journey regardless of the tile's position.
+        hours = next((node for node in nodes if node.get("type") == "business_hours" and node.get("enabled") is not False), None)
+        if hours is not None:
+            nodes = [hours, *[node for node in nodes if node is not hours]]
         open_now, seen_hours = False, False
         destinations, timeout, voicemail, forward, forward_timeout = [], 30, "", "", 25
         timeouts: dict[str, int] = {}
+        ring_stages: list[dict] = []
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -3195,7 +3221,11 @@ class SettingsStore(WebhookStoreMixin):
                 start, end = str(node.get("start") or "09:00"), str(node.get("end") or "17:00")
                 weekday = now.isoweekday()
                 clock = now.strftime("%H:%M")
-                open_now = (not days or weekday in days) and start <= clock <= end
+                if start > end:  # An overnight shift belongs to its opening day.
+                    previous_day = (weekday - 2) % 7 + 1
+                    open_now = ((not days or weekday in days) and clock >= start) or ((not days or previous_day in days) and clock < end)
+                else:
+                    open_now = (not days or weekday in days) and start <= clock < end
                 continue
             if seen_hours and not open_now:
                 # Outside business hours only a terminal step applies; ringing
@@ -3204,15 +3234,19 @@ class SettingsStore(WebhookStoreMixin):
                     voicemail = self._voicemail_key(number, str(node.get("mailbox") or ""), owner)
                 elif kind == "forward" and not forward:
                     forward = str(node.get("phone") or "")
+                    forward_timeout = max(5, min(120, int(node.get("timeout") or 25)))
                 continue
             if kind in {"ring_group", "simultaneous", "sequential"}:
                 members = [str(value) for value in (node.get("extensions") or [])]
                 group = groups.get(str(node.get("group_id") or ""))
                 if group and not members:
                     members = [str(value) for value in (group.get("members") or [])]
-                destinations.extend(value for value in members if value in allowed)
-                if str(node.get("timeout") or "").isdigit():
-                    timeout = max(5, min(120, int(node["timeout"])))
+                members = list(dict.fromkeys(value for value in members if value in allowed))
+                destinations.extend(members)
+                stage_timeout = max(5, min(120, int(node.get("timeout") or (group or {}).get("timeout") or 25)))
+                timeout = stage_timeout
+                batches = [[key] for key in members] if kind == "sequential" else [members]
+                ring_stages.extend({"destinations": batch, "timeout": stage_timeout} for batch in batches if batch)
             elif kind == "extension":
                 value = str(node.get("extension") or "")
                 if value and value in allowed:
@@ -3221,19 +3255,22 @@ class SettingsStore(WebhookStoreMixin):
                     # seconds, and the leg is rung for exactly that long.
                     if str(node.get("timeout") or "").isdigit():
                         timeouts[value] = max(5, min(120, int(node["timeout"])))
+                    ring_stages.append({"destinations": [value], "timeout": timeouts.get(value, 25)})
             elif kind == "voicemail" and not voicemail and node.get("enabled") is not False:
                 voicemail = self._voicemail_key(number, str(node.get("mailbox") or ""), owner)
             elif kind == "forward" and not forward:
                 forward = str(node.get("phone") or "")
                 if str(node.get("timeout") or "").isdigit():
                     forward_timeout = max(5, min(120, int(node["timeout"])))
-        # A ring step may repeat an extension; ring each device once, in order.
+        # Destinations are unique for policy lookup; stages retain execution order.
         unique = list(dict.fromkeys(destinations))
         has_ring = any(node.get("type") in {"extension", "simultaneous", "sequential", "ring_group"} for node in nodes)
         if not unique and not voicemail and not forward and extension and not has_ring and not (seen_hours and not open_now):
             unique = [extension] if extension in allowed else []
+            ring_stages = [{"destinations": unique, "timeout": timeout}] if unique else []
         return {
             "destinations": unique, "timeout": timeout, "voicemail": voicemail,
+            "ring_stages": ring_stages,
             "forward": forward, "forward_timeout": forward_timeout,
             "timeouts": {key: timeouts[key] for key in unique if key in timeouts},
             "outside_hours": bool(seen_hours and not open_now),
@@ -3485,6 +3522,17 @@ class SettingsStore(WebhookStoreMixin):
                 node.update(extensions=members, enabled=bool(members) and node.get("enabled") is not False, configured=True,
                             label="Ring assigned desks" if members else "No direct ring destinations")
             if number in selected and not present:
+                # Adding a ring source joins an existing parallel stage, not a
+                # new ordered step after the original desks have timed out.
+                parallel = next((node for node in nodes if node.get("type") in {"simultaneous", "ring_group"} and node.get("enabled") is not False), None)
+                if parallel is not None:
+                    members = list(parallel.get("extensions") or (groups.get(str(parallel.get("group_id"))) or {}).get("members") or [])
+                    parallel.pop("group_id", None)
+                    parallel["extensions"] = list(dict.fromkeys([*members, key]))
+                    changed = True
+                    self._validate_route_nodes(route, owner, target_type="number", target=number)
+                    updates.append((number, json.dumps(route, separators=(",", ":"))))
+                    continue
                 ring = {"type": "simultaneous", "extensions": [key], "timeout": 25,
                         "configured": True, "label": "Additional desk"}
                 # Insert before a terminal fallback, without moving hours/IVR.

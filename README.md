@@ -276,3 +276,7 @@ For real telephony validation, verify provider registration, each Zoiper/SIP ext
 ## Security boundary
 
 Do not expose Asterisk ARI TCP 8088 or AMI TCP 5038 publicly. SIP/RTP ports are exposed only as required for device/provider connectivity. The browser API remains disabled until a deliberate short-lived credential and trusted WSS/TLS design is deployed.
+
+## Incoming workflow behavior
+
+See [WORKFLOWS.md](docs/WORKFLOWS.md) for number versus extension settings, simultaneous/sequential ringing, timeout precedence, IVR voicemail routing, recording requirements, and staging verification.

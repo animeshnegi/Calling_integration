@@ -260,3 +260,221 @@ def test_forwarded_to_desk_with_ringing_off_takes_its_message_without_a_loop(stu
     assert asterisk.continued == [("internal-forward", "voicemail-inbound", extension_mailbox(target))]
     assert "internal-forward" not in asterisk.hung_up
     assert calls.get(call.call_id).ended_at
+
+
+@pytest.mark.parametrize("mode,initial", [("sequential", 1), ("simultaneous", 2), ("ring_group", 2)])
+def test_ring_mode_controls_which_desks_ring(studio, mode, initial):
+    service, asterisk, calls, settings, owner, number, _, keys, _ = studio
+    members = [keys["101"], keys["102"]]
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": mode, "extensions": members, "timeout": 25},
+        {"type": "voicemail", "mailbox": members[0]},
+    ]}})
+    call = service.start_inbound({"id": "mode-call", "caller": {"number": "+13025550000"}}, number, members[0])
+    assert [extension for _, extension in asterisk.inbound_legs] == members[:initial]
+    if mode == "sequential":
+        first_leg = call.employee_channel_id
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": first_leg}})
+        assert [extension for _, extension in asterisk.inbound_legs] == members
+        assert not asterisk.continued
+        second_leg = calls.get(call.call_id).employee_channel_id
+        assert second_leg != first_leg
+        # A duplicate old event cannot skip the second extension.
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": first_leg}})
+        assert not asterisk.continued
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": second_leg}})
+        assert asterisk.continued == [("mode-call", "voicemail-inbound", extension_mailbox(members[0]))]
+    assert all(item["timeout"] == 25 for item in asterisk.inbound_timeouts)
+
+
+def test_ivr_selected_desk_uses_own_voicemail_not_number_fallback(studio):
+    service, asterisk, calls, settings, owner, number, _, keys, _ = studio
+    first, selected = keys["101"], keys["102"]
+    set_handling(settings, owner, selected, action="voicemail", extra=[
+        {"type": "voicemail", "mailbox": selected, "enabled": True},
+    ])
+    menu = {**settings.default_ivr_node(), "keys": [{"key": "2", "target": selected}]}
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        menu, {"type": "voicemail", "mailbox": first},
+    ]}})
+    call = service.start_inbound({"id": "select-second", "caller": {"number": "+13025550000"}}, number, first)
+    assert not asterisk.inbound_legs
+    service.handle_ari_event({"type": "ChannelDtmfReceived", "channel": {"id": "select-second"}, "digit": "2"})
+    current = calls.get(call.call_id)
+    assert [ext for _, ext in asterisk.inbound_legs] == [selected]
+    assert asterisk.inbound_timeouts[-1]["timeout"] == 15
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": current.employee_channel_id}})
+    assert asterisk.continued == [("select-second", "voicemail-inbound", extension_mailbox(selected))]
+    assert "routing_plan" not in calls.get(call.call_id).to_dict()
+
+
+@pytest.mark.parametrize("number_timeout,desk_timeout,expected", [(25, 60, 25), (60, 25, 25), (10, 15, 10)])
+def test_number_and_desk_timers_use_shorter_limit(studio, number_timeout, desk_timeout, expected):
+    service, asterisk, _, settings, owner, number, _, keys, _ = studio
+    key = keys["101"]
+    settings.save_routing_flow(owner, {"target_type": "extension", "target": key, "route": {"nodes": [
+        {"type": "extension", "extension": key, "timeout": desk_timeout},
+    ]}})
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": "ring_group", "extensions": [key], "timeout": number_timeout},
+    ]}})
+    service.start_inbound({"id": "timed", "caller": {"number": "+13025550000"}}, number, key)
+    assert asterisk.inbound_timeouts[-1]["timeout"] == expected
+
+
+def test_ordered_extension_steps_survive_a_worker_restart_and_flow_edit(studio):
+    from app.services import TelephonyService
+    service, asterisk, calls, settings, owner, number, _, keys, _ = studio
+    first, second = keys["101"], keys["102"]
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": "extension", "extension": first, "timeout": 10},
+        {"type": "extension", "extension": second, "timeout": 20},
+        {"type": "voicemail", "mailbox": first},
+    ]}})
+    call = service.start_inbound({"id": "restart-stages", "caller": {"number": "+13025550000"}}, number, first)
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": "voicemail", "mailbox": second},
+    ]}})
+    restarted = TelephonyService(asterisk, service.config, store=calls, settings_store=settings)
+    restarted.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": call.employee_channel_id}})
+    assert [extension for _, extension in asterisk.inbound_legs] == [first, second]
+    assert [item["timeout"] for item in asterisk.inbound_timeouts] == [10, 20]
+    restarted.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": calls.get(call.call_id).employee_channel_id}})
+    assert asterisk.continued == [("restart-stages", "voicemail-inbound", extension_mailbox(first))]
+
+
+def test_all_unanswered_desks_use_first_desks_mailbox(studio):
+    service, asterisk, _, settings, owner, number, _, keys, _ = studio
+    for key in keys.values():
+        set_handling(settings, owner, key, action="voicemail", extra=[
+            {"type": "voicemail", "mailbox": key, "enabled": True},
+        ])
+    first, second = keys["101"], keys["102"]
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": "simultaneous", "extensions": [first, second], "timeout": 25},
+    ]}})
+    call = service.start_inbound({"id": "first-mailbox", "caller": {"number": "+13025550000"}}, number, first)
+    for leg, _ in service._leg_pairs(call):
+        service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": leg}})
+    assert asterisk.continued == [("first-mailbox", "voicemail-inbound", extension_mailbox(first))]
+
+
+def test_business_hours_gate_even_when_tile_follows_ring(studio, monkeypatch):
+    from datetime import datetime
+    import app.admin as admin
+    class ClosedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 23, 20, 0)  # Monday, after closing.
+    monkeypatch.setattr(admin, "datetime", ClosedClock)
+    service, asterisk, _, settings, owner, number, _, keys, _ = studio
+    first = keys["101"]
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": "simultaneous", "extensions": list(keys.values()), "timeout": 25},
+        {"type": "business_hours", "start": "09:00", "end": "17:00", "days": [1]},
+        {"type": "voicemail", "mailbox": first},
+    ]}})
+    service.start_inbound({"id": "hours-order", "caller": {"number": "+13025550000"}}, number, first)
+    assert not asterisk.inbound_legs
+    assert asterisk.continued == [("hours-order", "voicemail-inbound", extension_mailbox(first))]
+
+
+def test_overnight_business_hours_use_opening_weekday(studio, monkeypatch):
+    from datetime import datetime
+    import app.admin as admin
+    class OvernightClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 24, 1, 0)  # Tuesday belongs to Monday's shift.
+    monkeypatch.setattr(admin, "datetime", OvernightClock)
+    _, _, _, settings, owner, number, _, keys, _ = studio
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": "business_hours", "start": "22:00", "end": "06:00", "days": [1]},
+        {"type": "extension", "extension": keys["101"], "timeout": 25},
+    ]}})
+    assert settings.inbound_plan(number)["destinations"] == [keys["101"]]
+    with pytest.raises(ValueError, match="opening and closing"):
+        settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+            {"type": "business_hours", "start": "29:00", "end": "06:00", "days": [1]},
+        ]}})
+
+
+def test_ivr_waits_for_prompt_completion_before_input_timeout(studio, monkeypatch):
+    import app.services as engine
+    now = [1000.0]
+    monkeypatch.setattr(engine.time, "monotonic", lambda: now[0])
+    service, asterisk, _, settings, owner, number, _, keys, _ = studio
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [settings.default_ivr_node()]}})
+    service.start_inbound({"id": "long-prompt", "caller": {"number": "+13025550000"}}, number, keys["101"])
+    session = service._ivr_sessions_map()["long-prompt"]
+    assert service.process_ivr_timeouts(now=1007) == 0
+    now[0] = 1010
+    service.handle_ari_event({"type": "PlaybackFinished", "playback": {"id": session["playback_id"]}})
+    assert session["deadline"] == 1016
+    assert service.process_ivr_timeouts(now=1015) == 0
+    assert service.process_ivr_timeouts(now=1016) == 1
+    assert session["tries"] == 1
+
+
+def test_disabled_ivr_and_inactive_desk_policy_do_not_interfere(studio):
+    service, asterisk, _, settings, owner, number, _, keys, _ = studio
+    first = keys["101"]
+    settings.save_routing_flow(owner, {"target_type": "extension", "target": first, "active": False, "route": {"nodes": [
+        {"type": "extension", "extension": first, "timeout": 5, "ring_enabled": False},
+    ]}})
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {**settings.default_ivr_node(), "enabled": False},
+        {"type": "extension", "extension": first, "timeout": 25},
+    ]}})
+    service.start_inbound({"id": "disabled-policy", "caller": {"number": "+13025550000"}}, number, first)
+    assert not service.has_ivr_sessions()
+    assert [extension for _, extension in asterisk.inbound_legs] == [first]
+    assert asterisk.inbound_timeouts[-1]["timeout"] == 25
+
+
+def test_workflow_voicemail_is_provisioned_even_without_extension_switch(studio):
+    _, _, _, settings, owner, number, _, keys, _ = studio
+    first, selected = keys["101"], keys["102"]
+    assert not settings.extension_voicemail_enabled(selected)
+    set_handling(settings, owner, selected, action="voicemail", extra=[
+        {"type": "voicemail", "mailbox": selected, "enabled": True, "pin": "4321"},
+    ])
+    sync = TelephonyConfigSync(settings, None, "/tmp/unused-workflow-render.conf")
+    assert f"{extension_mailbox(selected)} =>" in sync.render_voicemail()
+    assert f"exten => {extension_mailbox(selected)},1,VoiceMail({extension_mailbox(selected)}@engineerip,u)" in sync.render_dialplan()
+
+
+def test_ivr_selected_forward_policy_does_not_inherit_number_voicemail(studio):
+    service, asterisk, calls, settings, owner, number, _, keys, _ = studio
+    first, selected = keys["101"], keys["102"]
+    set_handling(settings, owner, selected, action="forward", extra=[
+        {"type": "forward", "phone": "+13025550123", "timeout": 20},
+    ])
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {**settings.default_ivr_node(), "keys": [{"key": "2", "target": selected}]},
+        {"type": "voicemail", "mailbox": first},
+    ]}})
+    call = service.start_inbound({"id": "ivr-forward", "caller": {"number": "+13025550000"}}, number, first)
+    service.handle_ari_event({"type": "ChannelDtmfReceived", "channel": {"id": "ivr-forward"}, "digit": "2"})
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": calls.get(call.call_id).employee_channel_id}})
+    assert not asterisk.continued
+    assert asterisk.forwarded == [{"phone": "+13025550123", "timeout": 20, "caller_id": number}]
+
+
+def test_after_hours_forward_uses_configured_forward_timer(studio, monkeypatch):
+    from datetime import datetime
+    import app.admin as admin
+    class ClosedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 23, 20, 0)
+    monkeypatch.setattr(admin, "datetime", ClosedClock)
+    service, asterisk, _, settings, owner, number, _, keys, _ = studio
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": "business_hours", "start": "09:00", "end": "17:00", "days": [1]},
+        {"type": "extension", "extension": keys["101"], "timeout": 25},
+        {"type": "forward", "phone": "+13025550123", "timeout": 40},
+    ]}})
+    service.start_inbound({"id": "closed-forward", "caller": {"number": "+13025550000"}}, number, keys["101"])
+    assert not asterisk.inbound_legs
+    assert asterisk.forwarded[-1]["timeout"] == 40
