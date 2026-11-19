@@ -304,7 +304,7 @@ curl -sS -X POST {{API_BASE}}/api/v1/calls \
   <section id="webhooks">
     <h2><span class="step">6</span>Webhooks &amp; signatures</h2>
     <p>
-      Add an endpoint in <b>APIs &amp; Webhooks → Add endpoint</b>, or through the API. Each endpoint has a URL (HTTP or HTTPS,
+      Add an endpoint in <b>APIs &amp; Webhooks → Add endpoint</b>, or through the API. Each endpoint has a public-internet URL (HTTP or HTTPS; private destinations and redirects are rejected,
       without credentials in the address), the signing secret you choose, and the events it wants. Every delivery carries the
       secret as a bearer token and as an HMAC signature of the exact bytes sent:
     </p>

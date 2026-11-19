@@ -412,7 +412,7 @@ def test_main_wires_ari_loop_and_runs_maintenance_on_schedule(monkeypatch):
     assert service.cleanup_scans == 1
     assert service.recording_scans == 2
     assert bundle.retries == [1, 1]  # pending configuration is retried every 30s
-    assert bundle.sleeps == [30, 30, 30]
+    assert bundle.sleeps == [5, 5, 5]
 
 
 def test_pending_config_failure_is_logged_and_does_not_stop_call_maintenance(monkeypatch):
@@ -423,7 +423,7 @@ def test_pending_config_failure_is_logged_and_does_not_stop_call_maintenance(mon
     bundle = run_main(monkeypatch, service, FakeVoicemailNotifier(), [40.0], retry_callback=fail_retry)
     assert "Pending Asterisk RTP/configuration retry failed" in bundle.app.logger.exceptions
     assert service.webhook_scans == 1 and service.recording_scans == 1
-    assert bundle.sleeps == [30]
+    assert bundle.sleeps == [5]
 
 
 def test_main_event_handler_logs_failures_without_stopping_the_worker(monkeypatch):
@@ -456,4 +456,4 @@ def test_main_logs_maintenance_failures_and_keeps_scheduling(monkeypatch):
         "Recording retention cleanup failed",
     ]
     # The worker keeps its cadence after failures instead of exiting.
-    assert bundle.sleeps == [30, 30, 30]
+    assert bundle.sleeps == [5, 5, 5]

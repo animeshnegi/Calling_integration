@@ -1,7 +1,5 @@
 import re
 import secrets
-import time
-from collections import defaultdict, deque
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
@@ -14,7 +12,6 @@ from .voicemail import mailbox_name
 
 E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 CALL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_request_times: dict[str, deque[float]] = defaultdict(deque)
 WINDOW_SECONDS = 60
 MAX_REQUESTS_PER_WINDOW = 120
 MAX_OUTBOUND_CALLS_PER_WINDOW = 30
@@ -26,14 +23,12 @@ def _client_key(scope: str = "api") -> str:
 
 
 def _rate_limited(scope: str = "api", limit: int = MAX_REQUESTS_PER_WINDOW) -> bool:
-    now = time.monotonic()
-    bucket = _request_times[_client_key(scope)]
-    while bucket and now - bucket[0] >= WINDOW_SECONDS:
-        bucket.popleft()
-    if len(bucket) >= limit:
-        return True
-    bucket.append(now)
-    return False
+    from flask import current_app
+    identity = getattr(g, "api_client", None)
+    if scope == "outbound" and getattr(g, "api_owner_id", None) is not None:
+        identity = f"tenant:{g.api_owner_id}"
+    key = f"{scope}:{identity}" if identity else _client_key(scope)
+    return current_app.extensions["rate_limiter"].limited(key, limit, WINDOW_SECONDS)
 
 
 def require_token(scope_or_fn=None):
@@ -43,26 +38,34 @@ def require_token(scope_or_fn=None):
     def decorator(fn: Callable):
         @wraps(fn)
         def wrapped(*args: Any, **kwargs: Any):
-            if _rate_limited():
-                return jsonify({"error": "rate limit exceeded"}), 429
             from flask import current_app
             service = current_app.extensions.get("telephony_service")
             config = getattr(service, "config", Config)
             supplied = request.headers.get("Authorization", "")
             token = supplied[7:] if supplied.startswith("Bearer ") else ""
             if not token:
+                if _rate_limited("unauthenticated"):
+                    return jsonify({"error": "rate limit exceeded"}), 429
                 return jsonify({"error": "unauthorized"}), 401
             if config.TELEPHONY_TOKEN and secrets.compare_digest(token, config.TELEPHONY_TOKEN):
                 g.api_client = "legacy-master"
                 g.api_owner_id = None
+                if _rate_limited("identity"):
+                    return jsonify({"error": "rate limit exceeded"}), 429
                 return fn(*args, **kwargs)
             identity = service.settings_store.authenticate_api_key(token, required_scope) if service.settings_store else None
             if identity is False:
+                if _rate_limited("unauthenticated"):
+                    return jsonify({"error": "rate limit exceeded"}), 429
                 return jsonify({"error": "insufficient API key scope"}), 403
             if not identity:
+                if _rate_limited("unauthenticated"):
+                    return jsonify({"error": "rate limit exceeded"}), 429
                 return jsonify({"error": "unauthorized"}), 401
             g.api_client = f"key:{identity['id']}"
             g.api_owner_id = identity.get("owner_user_id")
+            if _rate_limited("identity"):
+                return jsonify({"error": "rate limit exceeded"}), 429
             return fn(*args, **kwargs)
         return wrapped
 
@@ -87,9 +90,9 @@ def register_routes(app, service):
 
     def call_allowed(call):
         owner = api_owner_id()
-        return bool(call) and (owner is None or call.extension in {row["extension"] for row in api_extensions()})
+        return bool(call) and (owner is None or call.owner_user_id == owner)
 
-    def build_call(data):
+    def build_call(data, reserved_call_id=None):
         if not isinstance(data, dict):
             return None, (jsonify({"error": "JSON object required"}), 400)
         if not service.ari_ready():
@@ -135,6 +138,7 @@ def register_routes(app, service):
             call = service.start_outbound(
                 phone=phone,
                 extension=extension,
+                **({"call_id": reserved_call_id} if reserved_call_id else {}),
                 contact_id=data.get("contact_id"),
                 member_id=data.get("member_id"),
                 provider=provider,
@@ -233,10 +237,14 @@ def register_routes(app, service):
         extension = request.args.get("extension", "").strip() or None
         status = request.args.get("status", "").strip() or None
         query = request.args.get("q", "").strip()[:100] or None
-        owned = [row["extension"] for row in api_extensions()] if api_owner_id() is not None else None
+        owned = [row["key"] for row in api_extensions()] if api_owner_id() is not None else None
+        if extension and owned is not None and extension.isdigit():
+            extension, problem = service.settings_store.resolve_requested_extension(extension, api_owner_id())
+            if problem:
+                return jsonify({"error": problem}), (404 if problem == "Extension not found" else 400)
         if extension and owned is not None and extension not in owned:
             return jsonify({"error": "extension not found"}), 404
-        calls, total = service.store.search(extension=extension, extensions=owned if not extension else None, status=status, query=query, limit=limit, offset=offset)
+        calls, total = service.store.search(extension=extension, owner_user_id=api_owner_id(), status=status, query=query, limit=limit, offset=offset)
         return jsonify({"calls": [call.to_dict() for call in calls], "total": total, "limit": limit, "offset": offset})
 
     @app.post("/api/v1/calls")
@@ -248,20 +256,24 @@ def register_routes(app, service):
         client = getattr(g, "api_client", "unknown")
         if request_key and (len(request_key) < 8 or len(request_key) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]+", request_key)):
             return jsonify({"error": "invalid Idempotency-Key"}), 400
+        data = request.get_json(silent=True)
+        reserved_id = None
         if request_key:
-            claimed, prior_call_id = service.settings_store.claim_idempotency(client, request_key)
+            from .idempotency import reserve
+            try:
+                claimed, reserved_id = reserve(service.settings_store.database, client, request_key, data)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 409
+            prior = service.store.get(reserved_id)
+            if prior:
+                return jsonify({"call": prior.to_dict(), "idempotent_replay": True}), 200
             if not claimed:
-                prior = service.store.get(prior_call_id) if prior_call_id else None
-                if prior:
-                    return jsonify({"call": prior.to_dict(), "idempotent_replay": True}), 200
                 return jsonify({"error": "an identical call request is already in progress"}), 409
-        call, error = build_call(request.get_json(silent=True))
+        call, error = build_call(data, reserved_id)
         if error:
-            if request_key:
-                service.settings_store.finish_idempotency(client, request_key, None)
+            # Never release a reservation after an ambiguous originate failure.
+            # Once the lease expires, the same primary key fences a late writer.
             return error
-        if request_key:
-            service.settings_store.finish_idempotency(client, request_key, call.call_id)
         return jsonify({"call": call.to_dict(), "idempotent_replay": False}), 201
 
     @app.post("/api/v1/browser/call")
@@ -469,6 +481,8 @@ def register_routes(app, service):
     @app.post("/api/v1/webhooks/<int:webhook_id>/test")
     @require_token("webhooks:manage")
     def test_webhook(webhook_id: int):
+        if not any(row["id"] == webhook_id for row in service.settings_store.list_webhooks(owner_user_id=api_owner_id())):
+            return jsonify({"error": "webhook not found"}), 404
         result = service.test_webhook(webhook_id)
         status = 200 if result.get("ok") else (404 if result.get("error") == "webhook not found" else 502)
         return jsonify(result), status
@@ -485,6 +499,8 @@ def register_routes(app, service):
         notes = str(data.get("notes", "")).strip()
         if len(disposition) > 100 or len(notes) > 2000:
             return jsonify({"error": "disposition or notes too long"}), 400
+        if not call_allowed(service.store.get(call_id)):
+            return jsonify({"error": "call not found"}), 404
         call = service.store.update(call_id, disposition=disposition or None, notes=notes or None)
         if not call:
             return jsonify({"error": "call not found"}), 404

@@ -15,7 +15,6 @@ import time
 import uuid
 from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
-from collections import defaultdict, deque
 from functools import wraps
 from pathlib import Path
 
@@ -24,6 +23,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from pymysql.err import IntegrityError as MySQLIntegrityError
 from sqlalchemy import inspect
 
+from .accounts import update_user_as_admin
+from .webhooks import WebhookStoreMixin
 from .database import Database
 from .voicemail import mailbox_name
 
@@ -31,7 +32,6 @@ DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, MySQLIntegrityError)
 INPUT_DB_ERRORS = (ValueError, TypeError, sqlite3.IntegrityError, MySQLIntegrityError)
 
 
-_LOGIN_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 _LOGIN_WINDOW = 15 * 60
 _LOGIN_LIMIT = 8
 
@@ -252,7 +252,7 @@ def same_account(left: Any, right: Any) -> bool:
     return normalise(left) == normalise(right)
 
 
-class SettingsStore:
+class SettingsStore(WebhookStoreMixin):
     def __init__(self, path: str, secret_key: str):
         uri = path if "://" in path else f"sqlite:///{path}"
         self.database = Database(uri)
@@ -1056,6 +1056,15 @@ class SettingsStore:
                 seen.add(key)
                 ordered.append(key)
         return ordered
+
+    def get_call_owner(self, extension: str) -> int | None:
+        """Resolve legacy call identities conservatively, without guessing digits."""
+        rows = self.list_extensions()
+        if extension_scope(extension):
+            matches = [row for row in rows if row["key"] == extension]
+        else:
+            matches = [row for row in rows if row["digits"] == extension]
+        return matches[0]["owner_user_id"] if len(matches) == 1 else None
 
     def get_extension_owner(self, extension: str) -> int | None:
         """The account that holds this extension key.
@@ -3658,100 +3667,6 @@ class SettingsStore:
             )
         return name
 
-    def list_webhooks(self, include_tokens: bool = False, owner_user_id: int | None = None):
-        with self._connect() as db:
-            where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
-            rows = db.execute(
-                f"SELECT id,name,url,token_enc,events,active,created_at,updated_at,owner_user_id FROM webhook_endpoints{where} ORDER BY name",
-                (int(owner_user_id),) if owner_user_id is not None else (),
-            ).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            encrypted = item.pop("token_enc")
-            item["has_token"] = bool(encrypted)
-            if include_tokens:
-                item["token"] = self.decrypt(encrypted) if encrypted else ""
-            result.append(item)
-        return result
-
-    def save_webhook(self, data, owner_user_id: int | None = None):
-        from urllib.parse import urlparse
-
-        name = self._validate_config_value(data.get("name", ""), "webhook name", 80)
-        url = str(data.get("url", "")).strip()
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or len(url) > 1000:
-            raise ValueError("Webhook URL must be a valid HTTP or HTTPS URL without embedded credentials")
-        events = str(data.get("events", "*")).strip() or "*"
-        event_items = [item.strip() for item in events.split(",") if item.strip()]
-        if len(event_items) > 50 or any(not re.fullmatch(r"(?:\*|call\.[a-z_]+)", item) for item in event_items):
-            raise ValueError("Events must be * or comma-separated call event names")
-        events = ",".join(dict.fromkeys(event_items))
-        token = str(data.get("token") or "")
-        if len(token) > 1000 or any(char in token for char in "\r\n"):
-            raise ValueError("Invalid webhook token")
-        webhook_id = data.get("id")
-        with self._connect() as db:
-            existing = None
-            if webhook_id not in {None, ""}:
-                existing = db.execute("SELECT id,token_enc,owner_user_id FROM webhook_endpoints WHERE id=?", (int(webhook_id),)).fetchone()
-                if existing and owner_user_id is not None and existing["owner_user_id"] != int(owner_user_id):
-                    raise ValueError("Webhook not found")
-            if existing is None:
-                existing = db.execute("SELECT id,token_enc,owner_user_id FROM webhook_endpoints WHERE name=? AND (owner_user_id=? OR (owner_user_id IS NULL AND ? IS NULL))", (name, owner_user_id, owner_user_id)).fetchone()
-            encrypted = self.encrypt(token) if token else (existing["token_enc"] if existing else "")
-            conflict = db.execute("SELECT id FROM webhook_endpoints WHERE name=?", (name,)).fetchone()
-            if conflict and (not existing or conflict["id"] != existing["id"]):
-                raise ValueError("A webhook with this name already exists")
-            if existing:
-                db.execute(
-                    "UPDATE webhook_endpoints SET name=?,url=?,token_enc=?,events=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (name, url, encrypted, events, int(bool(data.get("active", True))), existing["id"]),
-                )
-                return existing["id"]
-            cursor = db.execute(
-                "INSERT INTO webhook_endpoints(name,url,token_enc,events,active,owner_user_id) VALUES(?,?,?,?,?,?)",
-                (name, url, encrypted, events, int(bool(data.get("active", True))), owner_user_id),
-            )
-            return cursor.lastrowid
-
-    def enqueue_webhook(self, endpoint_id: int, event: str, payload: dict):
-        import json
-        delivery_id = str(uuid.uuid4())
-        with self._connect() as db:
-            db.execute("INSERT INTO webhook_deliveries(id,endpoint_id,event,payload) VALUES(?,?,?,?)",
-                       (delivery_id, int(endpoint_id), event, json.dumps(payload, separators=(",", ":"), sort_keys=True)))
-        return delivery_id
-
-    def pending_webhook_deliveries(self, limit: int = 100):
-        import json
-        with self._connect() as db:
-            db.execute("DELETE FROM webhook_deliveries WHERE (status='delivered' OR attempts>=5) AND updated_at<datetime('now','-30 days')")
-            rows = db.execute("SELECT id,endpoint_id,event,payload,attempts FROM webhook_deliveries WHERE status IN ('pending','failed') AND attempts<5 AND next_attempt_at<=CURRENT_TIMESTAMP ORDER BY created_at LIMIT ?", (limit,)).fetchall()
-        result = []
-        endpoints = {row["id"]: row for row in self.list_webhooks(include_tokens=True)}
-        for row in rows:
-            endpoint = endpoints.get(row["endpoint_id"])
-            if endpoint and endpoint["active"]:
-                item = dict(row); item["payload"] = json.loads(item["payload"]); item["endpoint"] = endpoint; result.append(item)
-        return result
-
-    def finish_webhook_delivery(self, delivery_id: str, success: bool, error: str | None):
-        with self._connect() as db:
-            db.execute("""UPDATE webhook_deliveries SET status=?,attempts=attempts+1,last_error=?,
-                delivered_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE delivered_at END,
-                next_attempt_at=datetime('now','+' || MIN(300,30*(attempts+1)) || ' seconds'),updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                ("delivered" if success else "failed", error, int(success), delivery_id))
-
-    def list_webhook_deliveries(self, limit: int = 50, owner_user_id: int | None = None):
-        with self._connect() as db:
-            if owner_user_id is None:
-                rows = db.execute("SELECT id,endpoint_id,event,status,attempts,last_error,delivered_at,created_at,updated_at FROM webhook_deliveries ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-            else:
-                rows = db.execute("SELECT d.id,d.endpoint_id,d.event,d.status,d.attempts,d.last_error,d.delivered_at,d.created_at,d.updated_at FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id=d.endpoint_id WHERE e.owner_user_id=? ORDER BY d.created_at DESC LIMIT ?", (int(owner_user_id), limit)).fetchall()
-        return [dict(row) for row in rows]
-
     def list_api_keys(self, owner_user_id: int | None = None):
         with self._connect() as db:
             where = " WHERE owner_user_id=?" if owner_user_id is not None else ""
@@ -3808,35 +3723,6 @@ class SettingsStore:
                 return False
             db.execute("UPDATE api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
         return {"id": row["id"], "name": row["name"], "scopes": list(scopes), "owner_user_id": row["owner_user_id"]}
-
-    def claim_idempotency(self, client: str, request_key: str):
-        with self._connect() as db:
-            db.execute("DELETE FROM api_idempotency WHERE created_at<datetime('now','-24 hours')")
-            row = db.execute("SELECT call_id FROM api_idempotency WHERE client=? AND request_key=?", (client, request_key)).fetchone()
-            if row:
-                return False, row["call_id"]
-            try:
-                db.execute("INSERT INTO api_idempotency(client,request_key) VALUES(?,?)", (client, request_key))
-                return True, None
-            except DB_INTEGRITY_ERRORS:
-                row = db.execute("SELECT call_id FROM api_idempotency WHERE client=? AND request_key=?", (client, request_key)).fetchone()
-                return False, row["call_id"] if row else None
-
-    def finish_idempotency(self, client: str, request_key: str, call_id: str | None):
-        with self._connect() as db:
-            if call_id:
-                db.execute("UPDATE api_idempotency SET call_id=? WHERE client=? AND request_key=?", (call_id, client, request_key))
-            else:
-                db.execute("DELETE FROM api_idempotency WHERE client=? AND request_key=?", (client, request_key))
-
-    def delete_webhook(self, webhook_id, owner_user_id: int | None = None):
-        with self._connect() as db:
-            if owner_user_id is not None and not db.execute("SELECT 1 FROM webhook_endpoints WHERE id=? AND owner_user_id=?", (int(webhook_id), int(owner_user_id))).fetchone():
-                raise ValueError("Webhook not found")
-            db.execute("UPDATE webhook_deliveries SET status='failed',attempts=5,last_error='webhook deleted',updated_at=CURRENT_TIMESTAMP WHERE endpoint_id=? AND status!='delivered'", (int(webhook_id),))
-            result = db.execute("DELETE FROM webhook_endpoints WHERE id=?", (int(webhook_id),))
-            if result.rowcount == 0:
-                raise ValueError("Webhook not found")
 
     def delete_provider(self, provider_id):
         with self._connect() as db:
@@ -4518,19 +4404,13 @@ def register_admin(app, config, on_telephony_change=None):
         return wrapped
 
     def login_rate_limited():
-        username = str((request.get_json(silent=True) or request.form).get("username", "")).strip().lower()[:80]
-        now = time.monotonic()
-        keys = [f"ip:{request.remote_addr or 'unknown'}", f"user:{username}"]
-        limited = False
-        for key in keys:
-            bucket = _LOGIN_BUCKETS[key]
-            while bucket and now - bucket[0] >= _LOGIN_WINDOW:
-                bucket.popleft()
-            if len(bucket) >= _LOGIN_LIMIT:
-                limited = True
-            else:
-                bucket.append(now)
-        return limited
+        data = request.get_json(silent=True) or request.form
+        username = str(data.get("username", "")).strip().lower()[:80] if hasattr(data, "get") else ""
+        limiter = current_app.extensions["rate_limiter"]
+        ip_limited = limiter.limited(f"login:ip:{request.remote_addr or 'unknown'}", _LOGIN_LIMIT, _LOGIN_WINDOW)
+        if ip_limited:
+            return True
+        return bool(username) and limiter.limited(f"login:user:{username}", _LOGIN_LIMIT, _LOGIN_WINDOW)
 
     @app.get("/admin-assets/<path:filename>")
     def admin_asset(filename):
@@ -4547,12 +4427,8 @@ def register_admin(app, config, on_telephony_change=None):
             return jsonify({"error": "too many signup attempts; try again later"}), 429
         try:
             data = request.get_json(silent=True) or {}
-            required = {"full_name": "Name", "company_name": "Company name", "job_role": "Role", "phone": "Phone number"}
-            missing = [label for field, label in required.items() if not str(data.get(field, "")).strip()]
-            if missing:
-                raise ValueError(f"Required fields: {', '.join(missing)}")
-            data.update({"role": "user", "extension": "", "active": True})
-            user_id = store.save_user(data)
+            from .accounts import create_customer
+            user_id = create_customer(store, data)
             store.add_activity(user_id, user_id, "customer.signup", "customer", user_id, f"{data['company_name']} account created")
             store.add_notification(user_id, "welcome", "Welcome to EIP Telephony", "Request a phone number to begin configuring your telephony environment.")
             return jsonify({"ok": True, "user_id": user_id, "message": "Account created. Sign in to continue."}), 201
@@ -4604,6 +4480,8 @@ def register_admin(app, config, on_telephony_change=None):
         if login_rate_limited():
             return jsonify({"error": "too many login attempts"}), 429
         data = request.get_json(silent=True) or request.form
+        if not hasattr(data, "get"):
+            return jsonify({"error": "JSON object required"}), 400
         try:
             user = store.authenticate(str(data.get("username", "")), str(data.get("password", "")))
         except Exception:
@@ -4695,7 +4573,7 @@ def register_admin(app, config, on_telephony_change=None):
             "email_config": store.get_email_config() if is_admin else {},
             "email_deliveries": store.list_voicemail_deliveries() if is_admin else [],
             "call_summary": current_app.extensions["telephony_service"].store.summary(
-                extensions=store.call_extension_names(user_id) if not is_admin else None,
+                owner_user_id=user_id if not is_admin else None,
             ),
             "voicemail_summary": {
                 "total": len(voicemail_messages), "new": sum(row["folder"] == "inbox" for row in voicemail_messages),
@@ -5137,7 +5015,7 @@ def register_admin(app, config, on_telephony_change=None):
         except ValueError:
             return jsonify({"error": "invalid pagination"}), 400
         calls, total = current_app.extensions["telephony_service"].store.search(
-            extension=extension or None, extensions=owned_extensions if not extension else None,
+            extension=extension or None, owner_user_id=int(session["admin_user_id"]) if session.get("admin_role") != "admin" else None,
             status=status or None, recordings_only=recordings_only,
             query=query or None, number=number or None, limit=limit, offset=offset,
         )
@@ -5147,8 +5025,7 @@ def register_admin(app, config, on_telephony_change=None):
         calls = current_app.extensions["telephony_service"].store.all()
         if session.get("admin_role") == "admin":
             return calls
-        owned = set(store.call_extension_names(int(session["admin_user_id"])))
-        return [call for call in calls if call.extension in owned]
+        return [call for call in calls if call.owner_user_id == int(session["admin_user_id"])]
 
     @app.get("/admin/api/calls/export.csv")
     @login_required
@@ -5399,9 +5276,7 @@ def register_admin(app, config, on_telephony_change=None):
     def admin_recording_file(call_id):
         service = current_app.extensions["telephony_service"]
         call = service.store.get(call_id)
-        if call and session.get("admin_role") != "admin" and not any(
-            row["key"] == call.extension for row in store.list_extensions(int(session["admin_user_id"]))
-        ):
+        if call and session.get("admin_role") != "admin" and call.owner_user_id != int(session["admin_user_id"]):
             return jsonify({"error": "recording not found"}), 404
         if not call or not call.recording_name or call.recording_status not in {"finalized", "available"}:
             return jsonify({"error": "recording not found"}), 404
@@ -5646,7 +5521,7 @@ def register_admin(app, config, on_telephony_change=None):
         try:
             data = request.get_json(silent=True) or {}
             data.update({"role": "user", "extension": ""})
-            user_id = store.save_user(data, int(session["admin_user_id"]))
+            user_id = update_user_as_admin(store, data, int(session["admin_user_id"]))
             return jsonify({"ok": True, "user_id": user_id})
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
@@ -5657,7 +5532,7 @@ def register_admin(app, config, on_telephony_change=None):
         try:
             data = request.get_json(silent=True) or {}
             data.update({"role": "admin", "extension": "", "active": True})
-            user_id = store.save_user(data, int(session["admin_user_id"]))
+            user_id = update_user_as_admin(store, data, int(session["admin_user_id"]))
             return jsonify({"ok": True, "user_id": user_id}), 201
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400

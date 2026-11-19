@@ -38,6 +38,7 @@ class Call:
     recording_path: str | None = None
     disposition: str | None = None
     notes: str | None = None
+    owner_user_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -47,7 +48,7 @@ _COLUMNS = (
     "call_id", "contact_id", "member_id", "extension", "phone", "caller_id_number", "provider", "direction", "status",
     "answered", "started_at", "answered_at", "ended_at", "duration_seconds", "employee_channel_id",
     "employee_channel_ids", "customer_channel_id", "bridge_id", "recording_name", "recording_format", "recording_status",
-    "recording_path", "disposition", "notes",
+    "recording_path", "disposition", "notes", "owner_user_id",
 )
 
 
@@ -98,6 +99,8 @@ class CallStore:
                 )
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(calls)").fetchall()}
+            if "owner_user_id" not in columns:
+                db.execute("ALTER TABLE calls ADD COLUMN owner_user_id INTEGER")
             if "caller_id_number" not in columns:
                 db.execute("ALTER TABLE calls ADD COLUMN caller_id_number TEXT")
             if "employee_channel_ids" not in columns:
@@ -106,6 +109,7 @@ class CallStore:
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_customer_channel ON calls(customer_channel_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_recording_name ON calls(recording_name)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_calls_started_at ON calls(started_at)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_calls_owner_started_at ON calls(owner_user_id,started_at)")
 
     @staticmethod
     def _from_row(row: Any | None) -> Call | None:
@@ -116,6 +120,11 @@ class CallStore:
         return Call(**data)
 
     def create(self, call: Call) -> Call:
+        resolver = getattr(self, "owner_resolver", None)
+        if resolver and call.owner_user_id is None:
+            call.owner_user_id = resolver(call.extension)
+            if call.owner_user_id is None:
+                call.owner_user_id = -1  # platform or unresolved: never infer a future tenant
         values = [getattr(call, col) for col in _COLUMNS]
         values[_COLUMNS.index("answered")] = int(call.answered)
         with self._lock, self._connect() as db:
@@ -190,10 +199,14 @@ class CallStore:
         number: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        owner_user_id: int | None = None,
     ) -> tuple[list[Call], int]:
         """Return a filtered, paginated call list and total result count."""
         clauses: list[str] = []
         values: list[Any] = []
+        if owner_user_id is not None:
+            clauses.append("owner_user_id=?")
+            values.append(owner_user_id)
         if extension:
             clauses.append("extension=?")
             values.append(extension)
@@ -228,7 +241,7 @@ class CallStore:
             ).fetchall()
         return [self._from_row(row) for row in rows if row is not None], total
 
-    def summary(self, extension: str | None = None, extensions: list[str] | None = None) -> dict[str, int]:
+    def summary(self, extension: str | None = None, extensions: list[str] | None = None, owner_user_id: int | None = None) -> dict[str, int]:
         if extension:
             where, values = " WHERE extension=?", (extension,)
         elif extensions is not None:
@@ -236,6 +249,9 @@ class CallStore:
             values = tuple(extensions)
         else:
             where, values = "", ()
+        if owner_user_id is not None:
+            where += (" AND " if where else " WHERE ") + "owner_user_id=?"
+            values = (*values, owner_user_id)
         with self._connect() as db:
             row = db.execute(f"""
                 SELECT COUNT(*) AS total,

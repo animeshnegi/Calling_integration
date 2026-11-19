@@ -14,6 +14,8 @@ from typing import Any
 
 import requests
 
+from . import webhook_transport
+
 from .admin import (
     browser_username, endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox,
     extension_scope,
@@ -43,6 +45,15 @@ class TelephonyService:
         self.config = config
         self.store = store or CallStore(getattr(config, "DATABASE_URI", "") or config.CALLS_DB_PATH)
         self.settings_store = settings_store
+        if settings_store:
+            self.store.owner_resolver = settings_store.get_call_owner
+            # Freeze legacy ownership once; ambiguous bare digits fail closed.
+            with self.store._connect() as db:
+                legacy = db.execute("SELECT call_id,extension FROM calls WHERE owner_user_id IS NULL").fetchall()
+                for row in legacy:
+                    owner = settings_store.get_call_owner(row["extension"])
+                    db.execute("UPDATE calls SET owner_user_id=? WHERE call_id=? AND owner_user_id IS NULL",
+                               (owner if owner is not None else -1, row["call_id"]))
         self._finalizing: set[str] = set()
         self._finalize_lock = threading.Lock()
         # Channel id -> call id for every leg of a call that is ringing several
@@ -230,9 +241,13 @@ class TelephonyService:
             signature = hmac.new(token.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
             headers["X-EngineerIP-Signature"] = f"sha256={signature}"
         try:
-            response = requests.post(url, data=body, headers=headers, timeout=5)
-            return response.ok, response.status_code, None if response.ok else f"HTTP {response.status_code}"
-        except requests.RequestException as exc:
+            response = webhook_transport.post(url, data=body, headers=headers, timeout=(3, 5))
+            try:
+                ok = 200 <= response.status_code < 300
+                return ok, response.status_code, None if ok else f"HTTP {response.status_code}"
+            finally:
+                response.close()
+        except (requests.RequestException, ValueError, OSError) as exc:
             return False, None, exc.__class__.__name__
 
     def _webhook_endpoints(self, event: str, owner_user_id: int | None = None) -> list[dict[str, Any]]:
@@ -254,7 +269,8 @@ class TelephonyService:
         payload = {"event": event, "call": call.to_dict()}
         if extra:
             payload.update(extra)
-        owner = self.settings_store.get_extension_owner(call.extension) if self.settings_store else None
+        owner = call.owner_user_id
+        owner = owner if owner is not None and owner >= 0 else None
         for endpoint in self._webhook_endpoints(event, owner):
             if endpoint.get("id") is not None and self.settings_store:
                 try:
@@ -269,7 +285,7 @@ class TelephonyService:
         if not self.settings_store:
             return 0
         delivered = 0
-        for item in self.settings_store.pending_webhook_deliveries():
+        for item in self.settings_store.pending_webhook_deliveries(limit=10):
             endpoint = item["endpoint"]
             ok, _, error = self._send_webhook(endpoint["url"], endpoint.get("token", ""), item["payload"], item["id"])
             self.settings_store.finish_webhook_delivery(item["id"], ok, error)
@@ -290,7 +306,7 @@ class TelephonyService:
         ok, status, error = self._send_webhook(endpoint["url"], endpoint.get("token", ""), payload)
         return {"ok": ok, "status_code": status, "error": error}
 
-    def start_outbound(self, *, phone: str, extension: str, contact_id=None, member_id=None, provider=None, caller_id_number=None) -> Call:
+    def start_outbound(self, *, phone: str, extension: str, contact_id=None, member_id=None, provider=None, caller_id_number=None, call_id=None) -> Call:
         if not self.ari_ready():
             raise RuntimeError("ARI event worker is not ready")
         source = self.settings_store.get_outbound_number(extension, caller_id_number) if self.settings_store else None
@@ -299,7 +315,7 @@ class TelephonyService:
         if source and provider and source["provider"] != provider:
             raise RuntimeError("The selected callback number belongs to a different provider")
         provider_endpoint, provider_name = self._provider_endpoint(source["provider"] if source else provider)
-        call_id = str(uuid.uuid4())
+        call_id = call_id or str(uuid.uuid4())
         call = Call(
             call_id=call_id,
             contact_id=str(contact_id) if contact_id is not None else None,

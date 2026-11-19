@@ -26,7 +26,7 @@ This project handles SIP credentials, phone numbers and a paid outbound calling 
 - The last active administrator cannot be removed, and users cannot disable, demote, or delete their own administrator account.
 - Voicemail email delivery is deduplicated with a persistent audio fingerprint and caps attachments at 20 MiB.
 - Voicemail file operations validate mailbox/folder/message identifiers, reject symlinks and traversal, and preserve Asterisk message numbering.
-- Webhook management requires a `webhooks:manage`/full API key or an authenticated administrator. Stored webhook/SIP secrets are encrypted at rest. Deliveries use bearer authentication plus timestamped HMAC-SHA256 signatures and unique delivery IDs for replay/idempotency controls. Webhook administrators are trusted: a configured URL causes a server-side outbound request, so limit admin access and use an outbound network policy where SSRF impact is a concern.
+- Webhook management requires a `webhooks:manage`/full API key or an authenticated administrator. Stored webhook/SIP secrets are encrypted at rest. Deliveries use bearer authentication plus timestamped HMAC-SHA256 signatures and unique delivery IDs for replay/idempotency controls. Customers can create their own endpoints. Webhook destinations must resolve exclusively to public IP addresses; deliveries pin the validated address, preserve TLS hostname checks, disable redirects and environment proxies, and reject private destinations. Enforce an outbound network policy as defense in depth; see deployment guidance.
 
 These controls address common OWASP API risks including broken authentication, unrestricted resource consumption, security misconfiguration and unsafe sensitive business flows.
 
@@ -74,4 +74,6 @@ The outbound flow now persists deterministic channel IDs, rings the employee fir
 
 ## Multi-tenant isolation
 
-Customer accounts own extensions, numbers, API keys, webhooks, calls (through extension ownership), recordings, voicemail, and invoices. All customer panel and API queries apply this ownership on the server. SIP provider credentials are platform-administrator-only. See [MULTI_TENANCY_AND_BILLING.md](MULTI_TENANCY_AND_BILLING.md).
+Customer accounts own extensions, numbers, API keys, webhooks, calls (through immutable ownership snapshots), recordings, voicemail, and invoices. Customer call history, recordings and disposition access use the stored call owner, not the extension’s current assignee. Ambiguous legacy records are administrator-only; see the ownership upgrade policy in DEPLOYMENT.md. SIP provider credentials are platform-administrator-only. See [MULTI_TENANCY_AND_BILLING.md](MULTI_TENANCY_AND_BILLING.md).
+
+Public signup uses an explicit profile-field allowlist and a create-only boundary; IDs, roles, active flags, and extension assignments are rejected. Administrative account changes use a separate operation that checks the acting administrator.

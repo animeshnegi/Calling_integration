@@ -95,3 +95,7 @@ Configured DID routes enter the private ARI application. Telephony creates an in
 ## Security
 
 Do not expose this webhook publicly without authentication, TLS, replay protection and rate limiting. Prefer placing the Flask telephony API on the private Docker network and using a narrow internal route between EngineerIP and this service.
+
+## Destination policy
+
+Only public HTTP/HTTPS receivers are supported, including the bootstrap environment URL. Private and mixed-address DNS answers are rejected on every delivery; the validated IP is pinned for the connection, TLS still verifies the original hostname, redirects are not followed, and environment proxies are ignored. Endpoint tests enforce tenant ownership. Back this with a network egress policy; see [deployment](DEPLOYMENT.md#webhook-egress-policy).

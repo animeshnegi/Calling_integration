@@ -2,6 +2,7 @@ import os
 
 
 class Config:
+    TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "0"))
     FLASK_ENV = os.getenv("FLASK_ENV", "production").lower()
     SECRET_KEY = os.getenv("SECRET_KEY", "")
     TELEPHONY_TOKEN = os.getenv("TELEPHONY_TOKEN", "")
@@ -50,6 +51,8 @@ class Config:
 
     @classmethod
     def validate(cls) -> None:
+        if cls.TRUSTED_PROXY_HOPS < 0:
+            raise RuntimeError("TRUSTED_PROXY_HOPS must be nonnegative")
         if cls.FLASK_ENV not in {"production", "development", "testing"}:
             raise RuntimeError("FLASK_ENV must be production, development, or testing")
         if cls.DATABASE_URI and not cls.DATABASE_URI.startswith(("mysql://", "mysql+pymysql://", "sqlite:///")):

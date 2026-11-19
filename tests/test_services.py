@@ -142,11 +142,14 @@ def test_webhook_is_bearer_authenticated_and_hmac_signed(tmp_path, monkeypatch):
         ok = True
         status_code = 200
 
+        def close(self):
+            pass
+
     def fake_post(url, **kwargs):
         captured.update(kwargs)
         return Response()
 
-    monkeypatch.setattr("app.services.requests.post", fake_post)
+    monkeypatch.setattr("app.services.webhook_transport.post", fake_post)
     ok, status, error = service._send_webhook("https://crm.example/events", "shared-secret", {"event": "call.test"})
     assert ok is True and status == 200 and error is None
     assert captured["headers"]["Authorization"] == "Bearer shared-secret"
@@ -172,7 +175,10 @@ def test_database_webhook_is_queued_and_retried_by_worker(tmp_path, monkeypatch)
         ok = True
         status_code = 200
 
-    monkeypatch.setattr("app.services.requests.post", lambda *args, **kwargs: Response())
+        def close(self):
+            pass
+
+    monkeypatch.setattr("app.services.webhook_transport.post", lambda *args, **kwargs: Response())
     assert service.process_webhook_deliveries() >= 1
     assert all(row["status"] == "delivered" for row in settings.list_webhook_deliveries())
 

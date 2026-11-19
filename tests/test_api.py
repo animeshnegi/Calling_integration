@@ -569,8 +569,6 @@ def test_public_signup_and_customer_resources_are_tenant_isolated(tmp_path):
 def test_administrators_manage_customer_integrations_without_creating_them(tmp_path):
     """The customer owns their keys and endpoints; the administrator keeps the ones
     they created working, and cannot fabricate a credential in their name."""
-    from app import admin as admin_module
-    admin_module._LOGIN_BUCKETS.clear()   # the sign-in rate limit is per-process and per-IP
     client = app_client(tmp_path)
     store = client.application.extensions["settings_store"]
     for username in ("customer-one", "customer-two"):
@@ -785,21 +783,27 @@ def test_admin_webhook_test_reports_the_endpoint_answer(tmp_path, monkeypatch):
         ok = True
         status_code = 200
 
+        def close(self):
+            pass
+
     class Refused:
         ok = False
         status_code = 503
+
+        def close(self):
+            pass
 
     def accept(url, **kwargs):
         sent.append((url, kwargs["data"]))
         return Accepted()
 
-    monkeypatch.setattr("app.services.requests.post", accept)
+    monkeypatch.setattr("app.services.webhook_transport.post", accept)
     response = client.post(f"/admin/api/webhooks/{webhook_id}/test", headers=csrf)
     assert response.status_code == 200
     assert response.json == {"ok": True, "status_code": 200, "error": None}
     assert sent and b'"event":"webhook.test"' in sent[0][1]
 
-    monkeypatch.setattr("app.services.requests.post", lambda url, **kwargs: Refused())
+    monkeypatch.setattr("app.services.webhook_transport.post", lambda url, **kwargs: Refused())
     response = client.post(f"/admin/api/webhooks/{webhook_id}/test", headers=csrf)
     assert response.status_code == 502
     assert response.json == {"ok": False, "status_code": 503, "error": "HTTP 503"}
@@ -856,10 +860,6 @@ def test_email_config_rotation_test_and_secret_redaction(tmp_path, monkeypatch):
 
 
 def test_elastic_email_api_saves_and_reports_safe_structured_test_results(tmp_path, monkeypatch):
-    from collections import defaultdict, deque
-    from app import admin as admin_module
-    # The login limiter is process-global; do not consume other tests' quota.
-    monkeypatch.setattr(admin_module, "_LOGIN_BUCKETS", defaultdict(deque))
     client = app_client(tmp_path)
     assert client.post("/admin/login", json={"username": "admin", "password": "test-admin-password-1234"}).status_code == 200
     headers = {"X-CSRF-Token": client.get("/admin/api/state").json["csrf_token"]}
@@ -916,10 +916,6 @@ def test_customer_cannot_read_or_change_email_provider_settings(tmp_path, monkey
 
 def test_admin_ui_and_state_are_not_cached_across_image_upgrades(tmp_path, monkeypatch):
     """A stale admin.js must never keep removed API-key fields alive."""
-    from collections import defaultdict, deque
-    from app import admin as admin_module
-    # Login rate limiting is process-global; isolate this focused UI check.
-    monkeypatch.setattr(admin_module, "_LOGIN_BUCKETS", defaultdict(deque))
     client = app_client(tmp_path)
     for path in ("/admin/login", "/admin-assets/admin.js", "/admin-assets/admin.css"):
         response = client.get(path)

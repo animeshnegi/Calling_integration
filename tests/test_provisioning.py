@@ -15,16 +15,8 @@ import pytest
 from dialplan_helpers import dynamic_dial
 
 from app import create_app
-from app import admin as admin_module
 from app.config import Config
 
-
-@pytest.fixture(autouse=True)
-def fresh_login_budget():
-    """The sign-in limiter is process-wide by design; each test starts clean."""
-    admin_module._LOGIN_BUCKETS.clear()
-    yield
-    admin_module._LOGIN_BUCKETS.clear()
 
 
 class FakeAsterisk:

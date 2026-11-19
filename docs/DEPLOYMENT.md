@@ -460,3 +460,81 @@ upgrade only; registration and media still need their own checks.
 ## Testing boundary
 
 Automated tests verify the Python application and call-state transitions with fake Asterisk clients. They cannot prove live carrier registration, inbound DID delivery, NAT/audio, Zoiper registration, WebRTC microphone access, RTP quality or IPComms behavior. Those require the deployed VPS and live provider account.
+
+## Shared rate limits and trusted proxies
+
+API and login limits are now atomic database-backed fixed-window counters shared
+by Gunicorn workers and replicas using the same database. Authenticated requests
+are limited by API identity; outbound calls share an account budget across that
+account's keys. Failed authentication is limited by client IP; login also limits
+the username. Counters expire automatically (stale keys are removed after one
+day). Fixed windows can permit a burst on either side of a boundary; enforce
+stricter traffic/connection budgets at the edge for public deployments.
+
+`TRUSTED_PROXY_HOPS` defaults to `0`: forwarding headers are not trusted. Only
+set it (usually to `1`) when the API can be reached **exclusively** through that
+many trusted proxies, and every proxy overwrites or sanitizes forwarding headers.
+Do not enable it on a publicly reachable API port. With one trusted nginx proxy,
+include:
+
+```nginx
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+`X-Real-IP` alone does not configure Werkzeug's client address. Verify observed
+addresses using two different clients before enabling public signup/login.
+Database outages fail closed rather than silently falling back to per-process
+counters; monitor database availability and rate-limit responses.
+
+## Webhook egress policy
+
+Customer-created and environment/bootstrap webhook URLs must target the public
+internet. Private, loopback, link-local, reserved and mixed public/private DNS
+answers are rejected at delivery time; IP literals are also checked at save time.
+Redirects and environment HTTP proxies are disabled. Each delivery resolves DNS
+again and pins the connection to a validated IP, retaining hostname certificate
+verification and TLS SNI. Private webhook destinations are **not supported**.
+
+Back this application policy with an egress firewall/network policy denying
+webhook access to internal control planes and cloud metadata. Permit only the
+public webhook ports required by your integrations. Existing private endpoints
+will fail after this upgrade; migrate them to a public authenticated receiver.
+
+## Call ownership upgrade
+
+New calls snapshot `owner_user_id` before origination. Extension deletion,
+renumbering or reassignment does not transfer historical call access. On the
+first upgraded startup, legacy NULL ownership is frozen from the current scoped
+extension identity. Bare-digit identities are attributed only if globally
+unambiguous; ambiguous, orphaned and platform records use internal owner `-1`
+and are visible to platform administrators only. This one-time inference cannot
+reconstruct historical reassignment: take a backup and audit historical ownership
+before upgrading. Never assign ambiguous records merely by matching digits;
+reconcile them from authoritative historical evidence. Check affected records via
+an administrator's call history or `SELECT call_id,extension FROM calls WHERE
+owner_user_id=-1` using a restricted operations session.
+
+## Idempotency recovery and retention
+
+Call reservations are durable in `call_requests`, including the request hash and
+a deterministic call ID. An unfulfilled reservation has a 60-second lease; a
+retry after expiry uses the **same** primary key, so a late original request
+cannot insert another call and originate twice. A persisted call is returned on
+replay even if the HTTP process died before sending its response. A persisted
+call is not automatically re-originated: inspect its status and reconcile with
+ARI before a deliberate new call. Worker restart recovery handles calls whose
+channels no longer exist.
+
+Keys are not automatically reused after 24 hours. Retain reservation rows for as
+long as clients may retry. Do not delete them independently of call retention:
+doing so loses the stored request fingerprint. To place a new call, use a new
+key. Monitor growth and archive reservations together with their call history
+under an explicit retention/replay policy.
+
+During upgrade, completed reservations in the old `api_idempotency` table are
+honored for their original 24-hour lifetime. Their original payload hash is
+unknown; the first upgraded replay pins the hash to the supplied payload. Legacy
+in-flight rows have no recoverable call ID and return 409 until reconciled or the
+legacy 24-hour window expires. Do not blindly delete such rows and retry; first
+check call/ARI records to rule out an already originated call.

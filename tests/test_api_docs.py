@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 
-from app import admin as admin_module
 from app.admin import SettingsStore
 from app.services import TelephonyService
 from tests.test_provisioning import customer_client, make_app
@@ -29,12 +28,6 @@ PILL_RE = re.compile(r'<span class="pill (?:get|post|del)">(GET|POST|DELETE)</sp
 # Routes that are not part of the public API: a private engine hook, off by default.
 INTERNAL_ROUTES = {"/api/v1/webhooks/ari"}
 
-
-@pytest.fixture(autouse=True)
-def fresh_login_budget():
-    admin_module._LOGIN_BUCKETS.clear()
-    yield
-    admin_module._LOGIN_BUCKETS.clear()
 
 
 def normalise(path: str) -> str:
@@ -102,11 +95,14 @@ def test_webhook_signature_matches_the_documented_verification(monkeypatch):
         ok = True
         status_code = 200
 
+        def close(self):
+            pass
+
     def fake_post(url, **kwargs):
         captured.update(kwargs)
         return Response()
 
-    monkeypatch.setattr("app.services.requests.post", fake_post)
+    monkeypatch.setattr("app.services.webhook_transport.post", fake_post)
     payload = {"event": "call.completed", "call": {"call_id": "abc-123", "status": "completed"}, "reason": "hangup_requested"}
     TelephonyService._send_webhook("https://crm.example/events", "shared-secret", payload)
 

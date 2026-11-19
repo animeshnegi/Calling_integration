@@ -258,7 +258,7 @@ Rotate any credentials that were previously exposed in logs, screenshots, source
 
 ## Validation
 
-The repository has GitHub Actions coverage for the Python test suite. Run locally before deployment:
+The repository has GitHub Actions jobs for the Python suite (including real nginx) and real MySQL 8.4 acceptance tests. See [the testing guide](docs/TESTING.md) for dependency setup, separate fast/MySQL/proxy commands, and the live-telephony release gate. Run locally before deployment:
 
 ```bash
 python -m pytest -q

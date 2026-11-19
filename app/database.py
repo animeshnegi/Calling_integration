@@ -148,6 +148,7 @@ notifications = Table("notifications", metadata,
     Column("kind", String(40), nullable=False), Column("title", String(160), nullable=False), Column("message", String(1000), nullable=False),
     Column("read_at", DateTime), Column("created_at", DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")))
 calls = Table("calls", metadata,
+    Column("owner_user_id", BigInteger),
     Column("call_id", String(128), primary_key=True), Column("contact_id", String(255)), Column("member_id", String(255)),
     Column("extension", String(64), nullable=False), Column("phone", String(16), nullable=False), Column("caller_id_number", String(16)),
     Column("provider", String(80)), Column("direction", String(20), nullable=False), Column("status", String(40), nullable=False),
@@ -164,6 +165,7 @@ Index("idx_calls_employee_channel", calls.c.employee_channel_id)
 Index("idx_calls_customer_channel", calls.c.customer_channel_id)
 Index("idx_calls_recording_name", calls.c.recording_name)
 Index("idx_calls_started_at", calls.c.started_at)
+Index("idx_calls_owner_started_at", calls.c.owner_user_id, calls.c.started_at)
 
 
 def mysql_column_sql(column) -> str:
@@ -432,6 +434,11 @@ class Database:
         }
         for statement in reconcile_statements(existing) + timestamp_column_fixes(existing):
             conn.execute(text(statement))
+        # create_all skips indexes on existing tables. Add newly declared indexes
+        # only after column reconciliation, under the same schema advisory lock.
+        for table in metadata.sorted_tables:
+            for index in table.indexes:
+                index.create(conn, checkfirst=True)
         conn.commit()
 
     def connect(self):

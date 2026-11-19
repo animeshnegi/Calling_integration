@@ -6,16 +6,8 @@ showed "None assigned yet" even though it belongs to that line and calls out on 
 """
 import pytest
 
-from app import admin as admin_module
 from tests.test_provisioning import admin_client, customer_client, make_app
 
-
-@pytest.fixture(autouse=True)
-def fresh_login_budget():
-    """The sign-in limiter is process-wide; each test starts with its own budget."""
-    admin_module._LOGIN_BUCKETS.clear()
-    yield
-    admin_module._LOGIN_BUCKETS.clear()
 
 
 def _number_for(app, admin, user_id, number="+13025550001", inbound=""):

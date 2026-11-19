@@ -14,7 +14,7 @@ Production retains `TELEPHONY_TOKEN` as an emergency/legacy master credential. N
 
 Available scopes are `calls:read`, `calls:write`, `config:read`, `recordings:read`, `voicemail:read`, `voicemail:write`, and `webhooks:manage`; `*` is full access.
 
-The API has a lightweight per-client request limit and a separate outbound-call limit to reduce abuse and toll-fraud risk. A production reverse proxy/API gateway should enforce equivalent limits across multiple replicas.
+The API uses shared database-backed fixed-window limits: 120 requests/minute per authenticated API identity and 30 outbound calls/minute per customer account (across its keys). Unauthenticated failures are limited by client IP. Login has separate IP/username limits. Add edge traffic limits and configure trusted proxies as described in [deployment](DEPLOYMENT.md#shared-rate-limits-and-trusted-proxies).
 
 ## Health
 
@@ -82,7 +82,7 @@ on two lines present their own number. An extension that has no line of its own
 presents nothing, and the call is rejected with *"No active callback number is
 assigned to this extension"*. See [`NUMBER_OWNERSHIP.md`](NUMBER_OWNERSHIP.md).
 
-Send a unique `Idempotency-Key` (8–128 safe characters) for every user click/CRM job. The key is scoped to the API client for 24 hours. A successful replay returns HTTP 200 with the original call and `idempotent_replay: true`; a concurrent in-progress duplicate returns 409. This prevents network retries from originating duplicate paid calls.
+Send a unique `Idempotency-Key` (8–128 safe characters) for every user click/CRM job. The key is scoped to the API client and retained durably; never reuse a key for a different call payload. Reuse with different input returns 409. An unfulfilled reservation can be retried after its 60-second lease; retries retain the same call ID. A successful replay returns HTTP 200 with the original call and `idempotent_replay: true`; a concurrent in-progress duplicate returns 409. This prevents network retries from originating duplicate paid calls. A persisted call is returned even if the original HTTP process crashed; it is not re-originated. See the [recovery and upgrade policy](DEPLOYMENT.md#idempotency-recovery-and-retention).
 
 The production call lifecycle is employee-first:
 

@@ -1,5 +1,7 @@
 from flask import Flask
 
+from . import idempotency  # register shared schema before initialization
+from .rate_limits import RateLimiter
 from .admin import register_admin
 from .ami import AsteriskAMI
 from .asterisk_client import AsteriskClient
@@ -15,6 +17,11 @@ def create_app(config_class=Config, *, start_ari: bool = False, sync_config: boo
     config_class.validate()
     app = Flask(__name__)
     app.config.from_object(config_class)
+    # Enable only behind exactly this many trusted, network-restricted proxies.
+    proxy_hops = int(getattr(config_class, "TRUSTED_PROXY_HOPS", 0))
+    if proxy_hops:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxy_hops, x_proto=proxy_hops)
     app.config["MAX_CONTENT_LENGTH"] = config_class.MAX_CONTENT_LENGTH
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SECURE"] = config_class.FLASK_ENV == "production"
@@ -31,6 +38,7 @@ def create_app(config_class=Config, *, start_ari: bool = False, sync_config: boo
     register_admin(app, config_class, on_telephony_change=apply_telephony_config)
     settings_store = app.extensions["settings_store"]
     app.extensions["telephony_config_sync"] = TelephonyConfigSync(settings_store, ami, config_class.ASTERISK_DYNAMIC_CONFIG_PATH)
+    app.extensions["rate_limiter"] = RateLimiter(settings_store.database)
     service = TelephonyService(asterisk, config_class, settings_store=settings_store)
     app.extensions["telephony_service"] = service
     app.extensions["voicemail_store"] = VoicemailStore(config_class.VOICEMAIL_PATH, config_class.VOICEMAIL_CONTEXT)
