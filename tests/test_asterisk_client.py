@@ -252,7 +252,7 @@ def test_create_bridge_uses_mixing_type_and_deterministic_id(monkeypatch):
     assert ari_client().create_bridge("call-1") == "bridge-call-1"
 
     assert captured["params"] == {
-        "type": "mixing",
+        "type": "mixing,proxy_media",
         "bridgeId": "bridge-call-1",
         "name": "EngineerIP call-1",
     }
@@ -522,3 +522,31 @@ def test_a_local_leg_rings_an_extension_without_a_carrier(monkeypatch):
     assert captured["params"]["originator"] == "call-1-employee"
     assert captured["params"]["appArgs"] == "customer,call-1"
     assert captured["params"]["callerId"] == "+13025550098"
+
+
+def test_recording_normalizes_legacy_signed_linear_codec_name(monkeypatch):
+    captured = capture_request(monkeypatch)
+    ari_client().start_bridge_recording("bridge-1", "call-1", "slin16", False)
+    assert captured["params"]["format"] == "sln16"
+
+
+@pytest.mark.parametrize("message,status,reason", [
+    ("Unable to write recording file /private/path", 500, "storage"),
+    ("Unknown format slin16", 422, "format"),
+    ("Cannot record bridge with no audio", 409, "audio"),
+    ("Recording already exists", 409, "conflict"),
+    ("Unauthorized", 401, "auth"),
+])
+def test_ari_errors_expose_only_safe_recording_diagnostics(monkeypatch, message, status, reason):
+    class Failure:
+        ok = False
+        status_code = status
+        def json(self):
+            return {"message": message + " secret-token password=private"}
+    monkeypatch.setattr("app.asterisk_client.requests.request", lambda *a, **kw: Failure())
+    with pytest.raises(AsteriskError) as caught:
+        ari_client()._request("POST", "/bridges/id/record")
+    assert caught.value.reason == reason
+    assert caught.value.status_code == status
+    assert "secret-token" not in caught.value.recording_message
+    assert "/private/path" not in caught.value.recording_message

@@ -14,7 +14,21 @@ from .config import Config
 
 
 class AsteriskError(RuntimeError):
-    pass
+    def __init__(self, message, *, status_code=None, reason=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.reason = reason
+
+    @property
+    def recording_message(self):
+        messages = {
+            "storage": "Asterisk cannot write recording storage. Check volume ownership, free space and read-only mounts.",
+            "format": "Asterisk does not support the selected recording format. Use WAV and check format modules.",
+            "audio": "Asterisk could not access bridge audio. Check bridge media and RTP connectivity.",
+            "conflict": "Asterisk rejected a conflicting recording. Check live/stored recording state for this call.",
+            "auth": "Asterisk denied recording access. Check ARI credentials and permissions.",
+        }
+        return messages.get(self.reason, "Asterisk recording request failed" + (f" (HTTP {self.status_code})" if self.status_code else "") + ". Check ARI connectivity and Asterisk logs for this call ID.")
 
 
 def endpoint_name(extension: Any) -> str:
@@ -51,7 +65,24 @@ class AsteriskClient:
             **kwargs,
         )
         if not response.ok:
-            raise AsteriskError(f"Asterisk API {response.status_code}")
+            # Classify, but never expose arbitrary upstream bodies (which may
+            # contain internal paths, endpoint identities or credentials).
+            try:
+                detail = str(response.json().get("message", "")).lower()
+            except (ValueError, AttributeError):
+                detail = ""
+            reason = None
+            if any(word in detail for word in ("permission", "read-only", "no space", "writ")):
+                reason = "storage"
+            elif "format" in detail:
+                reason = "format"
+            elif "audio" in detail:
+                reason = "audio"
+            elif response.status_code in {401, 403}:
+                reason = "auth"
+            elif response.status_code == 409:
+                reason = "conflict"
+            raise AsteriskError(f"Asterisk API {response.status_code}", status_code=response.status_code, reason=reason)
         if not response.content:
             return None
         return response.json()
@@ -191,11 +222,13 @@ class AsteriskClient:
         return result if isinstance(result, list) else []
 
     def create_bridge(self, call_id: str) -> str:
+        # Keep media inside Asterisk instead of allowing native packet-sharing
+        # optimizations; bridge recorders must have access to decoded audio.
         bridge_id = f"bridge-{call_id}"
         self._request(
             "POST",
             "/bridges",
-            params={"type": "mixing", "bridgeId": bridge_id, "name": f"EngineerIP {call_id}"},
+            params={"type": "mixing,proxy_media", "bridgeId": bridge_id, "name": f"EngineerIP {call_id}"},
         )
         return bridge_id
 
@@ -203,6 +236,8 @@ class AsteriskClient:
         self._request("POST", f"/bridges/{bridge_id}/addChannel", params={"channel": channel_id})
 
     def start_bridge_recording(self, bridge_id: str, name: str, fmt: str, beep: bool, max_duration: int = 0) -> dict[str, Any]:
+        # slin16 is a codec name; Asterisk's file format is sln16.
+        fmt = "sln16" if fmt == "slin16" else fmt
         return self._request(
             "POST",
             f"/bridges/{bridge_id}/record",

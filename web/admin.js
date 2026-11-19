@@ -1622,7 +1622,7 @@ async function loadRecordings() {
                 ? `<audio controls preload="none" src="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file"></audio>
                    <a class="btn ghost sm" download href="/admin/api/recordings/${encodeURIComponent(x.call_id)}/file">Download</a>`
                 : x.recording_status === 'failed'
-                  ? '<small style="color:var(--danger)">Recording failed. No playable audio is available; check the ARI worker and Asterisk recording logs for this call ID.</small>'
+                  ? `<small style="color:var(--danger)">${esc(x.recording_error || 'Recording failed. Check the ARI worker and Asterisk recording logs for this call ID. The worker will check for recoverable saved audio.')}</small>`
                   : '<small style="color:var(--text-3)">Audio becomes available after finalisation.</small>'}
             </div>
           </div>`).join('')}</div>

@@ -4113,7 +4113,7 @@ class SettingsStore(WebhookStoreMixin):
                 # browser RTCIceServer list or the softphone would be handed
                 # config its RTCPeerConnection rejects at call time.
                 parse_ice_servers(text)
-            if key == "recording_format" and text not in {"wav", "wav49", "gsm", "slin16"}:
+            if key == "recording_format" and text not in {"wav", "wav49", "gsm", "sln16", "slin16"}:
                 raise ValueError("Unsupported recording format")
             if key in {"recording_enabled", "recording_announcement", "recording_beep", "webrtc_enabled"} and text.lower() not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
                 raise ValueError(f"Invalid value for {key}")

@@ -20,6 +20,7 @@ from .admin import (
     browser_username, endpoint_name as extension_endpoint, extension_digits, extension_key, extension_mailbox,
     extension_scope,
 )
+from .asterisk_client import AsteriskError
 from .config import Config
 from .models import Call, CallStore
 
@@ -175,7 +176,8 @@ class TelephonyService:
     def _recording_settings(self, extension: str | None = None) -> dict[str, Any]:
         settings = self.settings_store.get_settings() if self.settings_store else {}
         fmt = str(settings.get("recording_format", "wav")).lower().strip()
-        if fmt not in {"wav", "wav49", "gsm", "slin16"}:
+        fmt = "sln16" if fmt == "slin16" else fmt
+        if fmt not in {"wav", "wav49", "gsm", "sln16"}:
             fmt = "wav"
         try:
             max_duration = max(0, int(settings.get("recording_max_duration_seconds", "0")))
@@ -1033,11 +1035,14 @@ class TelephonyService:
             except Exception:
                 pass
             self._hangup_call_channels(current)
-            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed")
+            updated = self.store.update(current.call_id, status="failed", ended_at=iso_now(), bridge_id=None, recording_status="failed", recording_error="Call bridge setup failed before recording could start. Check ARI worker and Asterisk bridge logs.")
             self.notify_crm("call.failed", updated, {"reason": "bridge_setup_failed"})
             return
         updated = self.store.update(current.call_id, bridge_id=bridge_id, status="bridged")
-        self.notify_crm("call.bridged", updated)
+        try:
+            self.notify_crm("call.bridged", updated)
+        except Exception:
+            logger.exception("Bridge notification failed for call %s; continuing recording setup", current.call_id)
         # Everything below is enhancement on top of a live, bridged call. A
         # failure here - a recorder that cannot write, a notification that
         # cannot queue - must never hang up the people already talking: the
@@ -1049,18 +1054,27 @@ class TelephonyService:
             name = f"call-{updated.call_id}"
             # Persist intent first: a fast finish event must already be
             # correlatable, and a failed start must remain visible in history.
-            updated = self.store.update(updated.call_id, recording_name=name, recording_format=recording["format"], recording_status="recording")
+            updated = self.store.update(updated.call_id, recording_name=name, recording_format=recording["format"], recording_status="recording", recording_error=None)
             self.asterisk.start_bridge_recording(bridge_id, name, recording["format"], recording["beep"], recording["max_duration"])
-            self.notify_crm("call.recording_started", updated)
+        except Exception as exc:
+            logger.exception("Recording setup failed for call %s", current.call_id)
+            message = exc.recording_message if isinstance(exc, AsteriskError) else "Recording start could not be confirmed. Check ARI connectivity, recording storage and format modules; reconciliation will check for saved audio."
+            # A fast RecordingFinished event may already have won this race.
+            updated = self.store.mark_recording_failed(current.call_id, message)
+            if updated and updated.recording_status == "failed":
+                self.notify_crm("call.recording_failed", updated)
+            return
+        # Notification/announcement errors must not label a successful recorder
+        # as failed. Keep these separate from the ARI recording-start operation.
+        try:
+            self.notify_crm("call.recording_started", self.store.get(current.call_id))
             if recording["announcement"] and recording["announcement_media"]:
                 try:
                     self.asterisk.play_bridge_media(bridge_id, recording["announcement_media"])
                 except Exception:
-                    self.notify_crm("call.recording_announcement_failed", updated)
+                    self.notify_crm("call.recording_announcement_failed", self.store.get(current.call_id))
         except Exception:
-            logger.exception("Recording setup failed for call %s", current.call_id)
-            updated = self.store.update(current.call_id, recording_status="failed")
-            self.notify_crm("call.recording_failed", updated)
+            logger.exception("Recording notification failed for call %s; recorder state unchanged", current.call_id)
 
     def _finalize(self, call_id: str, reason: str, keep: str = "") -> None:
         with self._finalize_lock:
@@ -1144,9 +1158,14 @@ class TelephonyService:
             name = str(recording.get("name") or "")
             call = self.store.find_by_recording(name) if name else None
             if call:
-                changes: dict[str, Any] = {
-                    "recording_status": "finalized" if event_type == "RecordingFinished" else "failed"
-                }
+                if call.recording_status == "deleted":
+                    return
+                if event_type == "RecordingFailed":
+                    updated = self.store.mark_recording_failed(call.call_id, "Asterisk reported a recording failure. Check recording storage, format modules and Asterisk logs for this call ID.")
+                    if updated and updated.recording_status == "failed":
+                        self.notify_crm("call.recording_failed", updated)
+                    return
+                changes: dict[str, Any] = {"recording_status": "finalized", "recording_error": None}
                 if recording.get("format") and not call.recording_format:
                     changes["recording_format"] = str(recording["format"])
                 if event_type == "RecordingFinished":
@@ -1318,7 +1337,7 @@ class TelephonyService:
                 continue
             if stored:
                 updated = self.store.update(
-                    call.call_id, recording_status="finalized",
+                    call.call_id, recording_status="finalized", recording_error=None,
                     recording_format=stored.get("format") or call.recording_format,
                     recording_path=stored.get("filename") or call.recording_path,
                 )

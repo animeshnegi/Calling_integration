@@ -1364,7 +1364,8 @@ def test_reconcile_recovers_recording_and_finalizing_but_leaves_live_and_unavail
         assert store.get(name).recording_format == "wav"
     assert store.get("live").recording_status == "recording"
     assert store.get("unavailable").recording_status == "finalizing"
-    assert set(queried) == {"missed", "stopped", "unavailable"}
+    assert store.get("failed").recording_status == "finalized"
+    assert set(queried) == {"missed", "stopped", "unavailable", "failed"}
     queried.clear()
     service.reconcile_recordings()
     assert queried == ["unavailable"]  # Idempotent, no duplicate finish notifications.
@@ -1418,3 +1419,84 @@ def test_late_ring_leg_events_cannot_transfer_the_voicemail_caller_twice(tmp_pat
     assert len(asterisk.continued) == 1
     assert "chan-inbound-chain" not in asterisk.hung_up
     assert store.get(call.call_id).ended_at
+
+
+def _enable_test_recording(service):
+    service._recording_settings = lambda extension: {
+        "enabled": True, "format": "wav", "beep": False, "max_duration": 0,
+        "announcement": False,
+    }
+
+
+def test_recording_notification_failure_does_not_fail_successful_audio(tmp_path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    _enable_test_recording(service)
+    def notify(event, *args):
+        if event == "call.recording_started":
+            raise RuntimeError("CRM database temporarily unavailable")
+    service.notify_crm = notify
+    service._start_bridge(call)
+    assert store.get(call.call_id).recording_status == "recording"
+    assert store.get(call.call_id).recording_error is None
+    assert not asterisk.hung_up
+
+
+def test_recording_finish_wins_over_uncertain_start_response(tmp_path):
+    from app.asterisk_client import AsteriskError
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    _enable_test_recording(service)
+    def start(bridge, name, *args):
+        service.handle_ari_event({"type": "RecordingFinished", "recording": {"name": name}})
+        raise AsteriskError("start response lost after completion")
+    asterisk.start_bridge_recording = start
+    service._start_bridge(call)
+    assert store.get(call.call_id).recording_status == "finalized"
+    assert store.get(call.call_id).recording_error is None
+    # Duplicate late failure event cannot hide known-finished audio either.
+    service.handle_ari_event({"type": "RecordingFailed", "recording": {"name": "call-" + call.call_id}})
+    assert store.get(call.call_id).recording_status == "finalized"
+
+
+def test_recording_storage_error_preserves_call_and_returns_safe_message(tmp_path):
+    from app.asterisk_client import AsteriskError
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    _enable_test_recording(service)
+    def fail(*args):
+        raise AsteriskError("Asterisk API 500", status_code=500, reason="storage")
+    asterisk.start_bridge_recording = fail
+    service._start_bridge(call)
+    current = store.get(call.call_id)
+    assert current.recording_status == "failed"
+    assert "volume ownership" in current.recording_error
+    assert current.status == "bridged" and not current.ended_at
+    assert not asterisk.hung_up
+
+
+def test_reconciliation_never_invents_missing_or_deleted_audio(tmp_path):
+    service, asterisk, store = make_service(tmp_path)
+    for status in ("failed", "deleted"):
+        store.create(Call(call_id=status, contact_id=None, member_id=None, extension="101", phone="+13025550100",
+                          recording_name=status, recording_status=status, recording_error="old error", ended_at="2026-11-19T00:00:00+00:00"))
+    queried = []
+    def missing(name):
+        queried.append(name)
+        return None
+    asterisk.get_stored_recording = missing
+    service.reconcile_recordings()
+    assert queried == ["failed"]
+    assert store.get("failed").recording_status == "failed"
+    assert store.get("deleted").recording_status == "deleted"
+
+
+def test_bridge_notification_failure_does_not_skip_recorder(tmp_path):
+    service, asterisk, store, call = _bridged_setup(tmp_path)
+    _enable_test_recording(service)
+    starts = []
+    asterisk.start_bridge_recording = lambda *args: starts.append(args)
+    def notify(event, *args):
+        if event == "call.bridged":
+            raise RuntimeError("notification failure")
+    service.notify_crm = notify
+    service._start_bridge(call)
+    assert len(starts) == 1
+    assert store.get(call.call_id).recording_status == "recording"

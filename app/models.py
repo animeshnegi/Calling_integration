@@ -35,6 +35,7 @@ class Call:
     recording_name: str | None = None
     recording_format: str | None = None
     recording_status: str | None = None
+    recording_error: str | None = None
     recording_path: str | None = None
     disposition: str | None = None
     notes: str | None = None
@@ -51,7 +52,7 @@ _COLUMNS = (
     "call_id", "contact_id", "member_id", "extension", "phone", "caller_id_number", "provider", "direction", "status",
     "answered", "started_at", "answered_at", "ended_at", "duration_seconds", "employee_channel_id",
     "employee_channel_ids", "customer_channel_id", "bridge_id", "recording_name", "recording_format", "recording_status",
-    "recording_path", "disposition", "notes", "owner_user_id", "routing_plan",
+    "recording_error", "recording_path", "disposition", "notes", "owner_user_id", "routing_plan",
 )
 
 
@@ -102,6 +103,8 @@ class CallStore:
                 )
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(calls)").fetchall()}
+            if "recording_error" not in columns:
+                db.execute("ALTER TABLE calls ADD COLUMN recording_error TEXT")
             if "routing_plan" not in columns:
                 db.execute("ALTER TABLE calls ADD COLUMN routing_plan TEXT")
             if "owner_user_id" not in columns:
@@ -180,6 +183,12 @@ class CallStore:
                 "WHERE call_id=? AND recording_status='recording'", (call_id,),
             )
 
+    def mark_recording_failed(self, call_id: str, error: str) -> Call | None:
+        """A delayed start error must not undo a finish event or user deletion."""
+        with self._lock, self._connect() as db:
+            db.execute("UPDATE calls SET recording_status='failed',recording_error=? WHERE call_id=? AND (recording_status IS NULL OR recording_status IN ('recording','finalizing','failed'))", (error, call_id))
+            return self._from_row(db.execute("SELECT * FROM calls WHERE call_id=?", (call_id,)).fetchone())
+
     def stale_recordings(self) -> list[Call]:
         """Calls whose recording started but never reported finished.
 
@@ -191,7 +200,10 @@ class CallStore:
             rows = db.execute(
                 "SELECT * FROM calls WHERE recording_name IS NOT NULL AND recording_status IN ('recording','finalizing')"
             ).fetchall()
-        return [self._from_row(row) for row in rows if row is not None]
+            # A start response can be lost after Asterisk has already begun
+            # writing. Positive stored-file evidence can repair that false failure.
+            failed = db.execute("SELECT * FROM calls WHERE recording_name IS NOT NULL AND recording_status='failed' AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 200").fetchall()
+        return [self._from_row(row) for row in [*rows, *failed] if row is not None]
 
     def search(
         self,

@@ -49,7 +49,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
          echo "       installed before ./configure? Refusing to ship this image." >&2; \
          exit 1; \
        fi \
-    && for module in res_http_websocket res_pjsip_transport_websocket res_musiconhold format_wav; do \
+    && for module in res_http_websocket res_pjsip_transport_websocket res_musiconhold format_wav bridge_softmix res_ari_bridges res_ari_recordings res_stasis_recording; do \
          if [ ! -f "/usr/lib/asterisk/modules/${module}.so" ]; then \
            echo "ERROR: required ${module}.so was not built; WebSocket calls or hold music cannot work. Refusing this image." >&2; \
            exit 1; \

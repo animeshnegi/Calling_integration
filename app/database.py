@@ -161,7 +161,7 @@ calls = Table("calls", metadata,
     Column("employee_channel_id", String(255)), Column("employee_channel_ids", Text, nullable=False),
     Column("customer_channel_id", String(255)), Column("bridge_id", String(255)),
     Column("recording_name", String(255)), Column("recording_format", String(20)), Column("recording_status", String(40)),
-    Column("recording_path", Text), Column("disposition", String(80)), Column("notes", Text), Column("routing_plan", Text))
+    Column("recording_error", Text), Column("recording_path", Text), Column("disposition", String(80)), Column("notes", Text), Column("routing_plan", Text))
 Index("idx_calls_employee_channel", calls.c.employee_channel_id)
 Index("idx_calls_customer_channel", calls.c.customer_channel_id)
 Index("idx_calls_recording_name", calls.c.recording_name)
