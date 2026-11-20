@@ -61,3 +61,30 @@ On a staging deployment using the production network layout, verify:
 - Backup restore and an upgrade against a copy of the deployment's actual schema.
 
 Never perform paid-call or destructive migration testing against customer data.
+
+## Latest local regression verification — 2026-11-19
+
+After personal voicemail greetings, workflow timer fixes, duplicate-call handling,
+and compact console layouts:
+
+- Full suite: **658 passed, 5 skipped** (162.29 seconds).
+- Python compilation: all application and deployment-script modules passed.
+- JavaScript syntax: all `web/**/*.js` files passed `node --check`.
+- Shell syntax: shell scripts under `scripts/` and `asterisk/` passed `bash -n`.
+- `git diff --check` passed.
+
+Expanded greeting checks cover duration boundaries, phone temporary-greeting
+precedence, reset without deleting messages, invalid-upload preservation,
+authentication/CSRF/tenant isolation, administrator access, and independent
+greetings for same-digit extensions on different numbers. A Node test verifies
+the browser WAV writer's output format and PCM clipping using simulated Web Audio;
+it does not exercise a real browser's decoder or microphone.
+
+The five skips were three real-MySQL checks (no dedicated `TEST_MYSQL_URI`) and
+two real-nginx checks (nginx unavailable). Docker/Asterisk, a real browser, and
+physical SIP phones were unavailable here. These local results do **not** replace
+the staging release gate above. Specifically, make two incoming calls to distinct
+mailboxes, listen for each uploaded greeting, reset one to the automated greeting,
+and confirm the other is unchanged. Verify two-way audio, ring/input timing,
+one missed-call notification per call, recording playback, and voicemail email
+on the deployed system before declaring end-to-end acceptance complete.
