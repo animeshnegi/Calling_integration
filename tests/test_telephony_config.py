@@ -277,7 +277,7 @@ def test_voicemail_mailbox_and_routes_are_rendered(tmp_path: Path):
     pjsip = sync.render_pjsip()
     assert "mailboxes=101-13025550101@engineerip" in pjsip
     assert "send_pai=yes" in pjsip
-    assert "VoiceMailMain(@engineerip)" in dialplan
+    assert "VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip)" in dialplan
     assert "exten => 13025550101,1" in dialplan
     assert "exten => +13025550101,1" in dialplan
     assert "rings extension 101" in dialplan
@@ -331,7 +331,7 @@ def test_the_two_101s_present_their_own_number_and_keep_their_own_mailbox(tmp_pa
     assert "VoiceMail(101-13025550098@engineerip,u)" in own_a
     assert dynamic_dial("101-13025550067") in own_b
     assert "VoiceMail(101-13025550067@engineerip,u)" in own_b
-    assert "VoiceMailMain(@engineerip)" in context_a and "VoiceMailMain(@engineerip)" in context_b
+    assert "VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip)" in context_a and "VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip)" in context_b
 
     # The other line's full number still routes internally - the same customer
     # owns it - straight to that number's own 101 and its own box, not the trunk.
@@ -974,7 +974,7 @@ def test_every_number_has_its_own_extension_set(tmp_path: Path):
 
     # Voicemail login and outbound dialling keep working in every context.
     for context in (context_a, context_b, north_context, platform_context):
-        assert "VoiceMailMain(@engineerip)" in context
+        assert "VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip)" in context
         assert "exten => _XXXX.,1,NoOp(Outbound" in context
         assert "Dial(PJSIP/${EXTEN}@${OUTBOUND_TRUNK},60)" in context
 
@@ -1379,7 +1379,7 @@ def test_the_call_handling_tab_carries_the_mailbox_settings(tmp_path: Path):
     assert "101-13025559909 => 1234," in voicemail          # the step's pin is the box's pin
     dialplan = sync.render_dialplan()
     assert "exten => *97,1,NoOp(EngineerIP voicemail login)" in dialplan
-    assert "VoiceMailMain(@engineerip)" in dialplan          # greetings are recorded here
+    assert "VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip)" in dialplan          # greetings are recorded here
 
 
 def test_extension_dial_uses_reachable_contacts_not_the_aor_list_as_a_uri(tmp_path):

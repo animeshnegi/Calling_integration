@@ -529,3 +529,65 @@ def test_forwarded_desk_uses_new_step_timer_not_original_number_limit(studio, fo
     assert calls.get(call.call_id).status == "ringing_fallback"
     assert asterisk.inbound_timeouts[-1]["extension"] == second
     assert asterisk.inbound_timeouts[-1]["timeout"] == expected
+
+
+def test_workflow_pin_replaces_existing_pin_and_blank_save_preserves_it(studio, tmp_path):
+    _, _, _, settings, owner, number, _, keys, _ = studio
+    key = keys['101']
+    settings.save_extension({'extension': key, 'voicemail_enabled': True, 'voicemail_pin': '1111'}, owner)
+    route = {'nodes': [{'type': 'extension', 'extension': key, 'timeout': 25},
+                       {'type': 'voicemail', 'mailbox': key, 'enabled': True, 'pin': '8765432109'}]}
+    settings.save_routing_flow(owner, {'target_type': 'extension', 'target': key, 'route': route})
+    assert settings.get_voicemail_pin(key) == '8765432109'
+    sync = TelephonyConfigSync(settings, object(), str(tmp_path / 'pjsip.dynamic.conf'))
+    assert f'{extension_mailbox(key)} => 8765432109,' in sync.render_voicemail()
+    # No plaintext secret is retained in route JSON or returned to the console.
+    saved = next(flow for flow in settings.list_routing_flows(owner) if flow['target'] == key)
+    assert 'pin' not in saved['route']['nodes'][-1]
+    settings.save_routing_flow(owner, {'target_type': 'extension', 'target': key,
+                                      'route': {'nodes': [{'type': 'voicemail', 'mailbox': key, 'pin': ''}]}})
+    assert settings.get_voicemail_pin(key) == '8765432109'
+    settings.save_call_route(owner, {'phone_number': number, 'route': {'nodes': [
+        {'type': 'voicemail', 'mailbox': key, 'pin': '2468'},
+    ]}})
+    assert settings.get_voicemail_pin(key) == '2468'
+    assert f'{extension_mailbox(key)} => 2468,' in sync.render_voicemail()
+
+
+@pytest.mark.parametrize('pin', ['123', '12345678901', '12x45', '1234;bad'])
+def test_invalid_workflow_pin_does_not_change_mailbox(studio, pin):
+    _, _, _, settings, owner, _, _, keys, _ = studio
+    key = keys['101']
+    settings.save_extension({'extension': key, 'voicemail_enabled': True, 'voicemail_pin': '4321'}, owner)
+    with pytest.raises(ValueError, match='PIN'):
+        settings.save_routing_flow(owner, {'target_type': 'extension', 'target': key, 'route': {'nodes': [
+            {'type': 'voicemail', 'mailbox': key, 'pin': pin},
+        ]}})
+    assert settings.get_voicemail_pin(key) == '4321'
+
+
+def test_physical_and_browser_endpoints_bind_own_mailbox_and_advertise_access_code(studio, tmp_path):
+    import re
+    _, _, _, settings, owner, _, _, keys, primary_keys = studio
+    # The same digits on two numbers must never send the user to a generic
+    # mailbox-number prompt: a hyphenated scoped mailbox cannot be typed as DTMF.
+    for key in (keys['101'], primary_keys['101']):
+        settings.save_extension({'extension': key, 'webrtc_enabled': True}, owner)
+        settings.save_routing_flow(owner, {'target_type': 'extension', 'target': key, 'route': {'nodes': [
+            {'type': 'voicemail', 'mailbox': key, 'pin': '5678', 'enabled': True},
+        ]}})
+    sync = TelephonyConfigSync(settings, object(), str(tmp_path / 'pjsip.dynamic.conf'))
+    pjsip = sync.render_pjsip(media_address='192.0.2.1')
+    endpoints = re.findall(r'\[[^\]]+\]\ntype=endpoint\n(.*?)(?=\n\[|\Z)', pjsip, re.S)
+    for key in (keys['101'], primary_keys['101']):
+        mailbox = extension_mailbox(key)
+        matching = [body for body in endpoints if f'set_var=ENGINEERIP_MAILBOX={mailbox}\n' in body]
+        assert len(matching) >= 3  # canonical endpoint, SIP username alias, browser
+        for body in matching:
+            assert 'voicemail_extension=*97' in body
+            assert f'mailboxes={mailbox}@engineerip' in body
+    dialplan = sync.render_dialplan()
+    assert 'VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip)' in dialplan
+    assert 'VoiceMailMain(@engineerip)' not in dialplan
+    assert 'GotoIf($["${ENGINEERIP_MAILBOX}"=""]?unavailable)' in dialplan
+    assert 'VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip,s)' not in dialplan  # PIN is never bypassed

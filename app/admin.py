@@ -3548,6 +3548,27 @@ class SettingsStore(WebhookStoreMixin):
                 updates.append((number, json.dumps(route, separators=(",", ":"))))
         return updates
 
+    def _route_pin_updates(self, route):
+        """Workflow PIN entry updates the same encrypted secret as extension settings.
+
+        Blank means keep the existing PIN. Never echo/store new PINs in route JSON.
+        Ownership and mailbox resolution must already have been validated.
+        """
+        updates = []
+        for node in route.get("nodes") or []:
+            if node.get("type") != "voicemail":
+                continue
+            pin = str(node.pop("pin", "") or "").strip()
+            if not pin:
+                continue
+            if not re.fullmatch(r"[0-9]{4,10}", pin):
+                raise ValueError("Mailbox PIN must contain 4 to 10 digits")
+            row = self._extension_row(str(node.get("mailbox") or ""))
+            if not row:
+                raise ValueError("Voicemail mailbox not found")
+            updates.append((self.encrypt(pin), row["id"]))
+        return updates
+
     def save_routing_flow(self, owner_user_id: int, data: dict, target_type: str | None = None, target: str | None = None):
         import json
         owner_user_id = int(owner_user_id)
@@ -3570,9 +3591,12 @@ class SettingsStore(WebhookStoreMixin):
         self._resolve_flow_nodes(route, owner_user_id)
         self._validate_route_nodes(route, owner_user_id, target_type=target_type, target=target)
         source_updates = self._ring_source_updates(owner_user_id, target, data["ring_sources"]) if target_type == "extension" and "ring_sources" in data else []
+        pin_updates = self._route_pin_updates(route)
         payload = json.dumps(route, separators=(",", ":"))
         default_name = "Extension call flow" if target_type == "extension" else "Group call flow"
         with self._connect() as db:
+            for encrypted_pin, extension_id in pin_updates:
+                db.execute("UPDATE extensions SET voicemail_pin_enc=? WHERE id=?", (encrypted_pin, extension_id))
             for number, route_payload in source_updates:
                 found = db.execute("SELECT id FROM call_routes WHERE owner_user_id=? AND phone_number=?", (owner_user_id, number)).fetchone()
                 if found:
@@ -3609,8 +3633,11 @@ class SettingsStore(WebhookStoreMixin):
         # stored as that line's keys, so it keeps ringing this line's desks.
         self._resolve_flow_nodes(route, int(owner_user_id), phone_number)
         self._validate_route_nodes(route, int(owner_user_id), target_type="number", target=phone_number)
+        pin_updates = self._route_pin_updates(route)
         payload = json.dumps(route, separators=(",", ":"))
         with self._connect() as db:
+            for encrypted_pin, extension_id in pin_updates:
+                db.execute("UPDATE extensions SET voicemail_pin_enc=? WHERE id=?", (encrypted_pin, extension_id))
             existing = db.execute("SELECT id,owner_user_id FROM call_routes WHERE phone_number=?", (phone_number,)).fetchone()
             if existing and existing["owner_user_id"] != int(owner_user_id):
                 raise ValueError("Call route belongs to another customer")

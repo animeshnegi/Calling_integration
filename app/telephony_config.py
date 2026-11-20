@@ -506,6 +506,7 @@ class TelephonyConfigSync:
         # ambiguous because nothing is named `101` unless it is a platform row -
         # and a platform row answers only in the operator's own context.
         all_extensions = self.store.list_extensions()
+        voicemail_keys = self.voicemail_keys([row for row in all_extensions if row["active"]])
         for ext in all_extensions:
             if not ext["active"]:
                 continue
@@ -564,8 +565,9 @@ class TelephonyConfigSync:
                 "direct_media=no", "rtp_symmetric=yes", "force_rport=yes", "rewrite_contact=yes",
                 "identify_by=username,auth_username",
                 f"set_var=OUTBOUND_CID={outbound_cid}", f"set_var=OUTBOUND_TRUNK={outbound_trunk}",
-                f"allow_subscribe={'yes' if ext.get('voicemail_enabled') else 'no'}",
-                *([f"mailboxes={mailbox}@engineerip"] if ext.get("voicemail_enabled") else []),
+                f"set_var=ENGINEERIP_MAILBOX={mailbox if extension in voicemail_keys else ''}",
+                f"allow_subscribe={'yes' if extension in voicemail_keys else 'no'}",
+                *([f"mailboxes={mailbox}@engineerip", "voicemail_extension=*97"] if extension in voicemail_keys else []),
             ]
             browser_endpoint = []
             if ext.get("webrtc_enabled") and username:
@@ -750,10 +752,10 @@ class TelephonyConfigSync:
             # number they belong to (`101-13025550001`), never the digits alone
             # and never `101@engineerip`. The pin is the one stored for the row.
             mailbox = extension_mailbox(key)
-            self.store.alias_voicemail_pin(mailbox, extension_digits(key))
+            self.store.alias_voicemail_pin(mailbox, key)
             pin = self._clean(
-                self.store.get_voicemail_pin(mailbox)
-                or self.store.get_voicemail_pin(key)
+                self.store.get_voicemail_pin(key)
+                or self.store.get_voicemail_pin(mailbox)
                 or (getattr(self, "_flow_voicemail_pins", {}) or {}).get(str(extension["key"]))
                 or extension_digits(key)
             )
@@ -953,7 +955,10 @@ class TelephonyConfigSync:
 
         voicemail_login = [
             "exten => *97,1,NoOp(EngineerIP voicemail login)",
-            " same => n,VoiceMailMain(@engineerip)",
+            ' same => n,GotoIf($["${ENGINEERIP_MAILBOX}"=""]?unavailable)',
+            " same => n,VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip)",
+            " same => n,Hangup()",
+            " same => n(unavailable),Playback(vm-nobox)",
             " same => n,Hangup()",
         ]
         # A three-digit number that is not on this line is nobody's extension

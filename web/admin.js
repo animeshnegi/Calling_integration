@@ -2278,7 +2278,7 @@ function renderDeskHandling() {
       <div class="handling-connector"><span>↓</span> No answer or device unavailable</div>
       <section class="handling-card"><header><span class="handling-step">02</span><div><h4>Choose what happens next</h4><p>A clear ending, never a dead end.</p></div></header>
         <div class="handling-body"><label class="field">No-answer action<select id="desk-no-answer">${choices.map(([value,label]) => `<option value="${value}" ${action === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
-          <div data-desk-action="voicemail"><div class="routing-inline-note">✉ Messages go to <b>${esc(extensionLabel(key))}</b>'s private mailbox.</div><label class="field">Mailbox PIN<input id="desk-mailbox-pin" type="password" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,8}" maxlength="8" value="${esc(vm?.pin || '')}" placeholder="Keep existing PIN"></label><p class="routing-field-note">Upload a personal greeting in <b>Voicemail → Personal voicemail greeting</b>, or dial <b>*97</b> from this desk to record it. Without a personal greeting, callers hear the automated greeting.</p></div>
+          <div data-desk-action="voicemail"><div class="routing-inline-note">✉ Messages go to <b>${esc(extensionLabel(key))}</b>'s private mailbox.</div><label class="field">Mailbox PIN<input id="desk-mailbox-pin" type="password" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,10}" maxlength="10" value="${esc(vm?.pin || '')}" placeholder="Keep existing PIN"></label><p class="routing-field-note">On your IP phone, set the voicemail access number/code to <b>*97</b> (not the PIN). Dial *97 from this extension, then enter this PIN when prompted. Upload a personal greeting in <b>Voicemail → Personal voicemail greeting</b>, or dial <b>*97</b> from this desk to record it. Without a personal greeting, callers hear the automated greeting.</p></div>
           <div data-desk-action="extension"><label class="field">Forward to extension<select id="desk-next-extension"><option value="">Choose an extension</option>${flowExtensionOptions(nextDesk?.extension || '')}</select></label><label class="field">Forward ring for (seconds)<input id="desk-next-timeout" type="number" min="5" max="120" value="${Number(nextDesk?.timeout || 25)}" required></label><p class="routing-field-note">One forwarding round. The destination desk's shorter timer still applies.</p></div>
           <div data-desk-action="forward"><label class="field">Forward to number<input id="desk-forward-number" type="tel" value="${esc(forward?.phone || '')}" placeholder="+13025550123" pattern="\\+[1-9][0-9]{7,14}"></label><label class="field">Forward ring for (seconds)<input id="desk-forward-timeout" type="number" min="5" max="120" value="${Number(forward?.timeout || 25)}" required></label><p class="routing-field-note">Use international E.164 format. Carrier charges may apply.</p></div>
         </div>
@@ -2304,7 +2304,7 @@ function syncDeskHandling() {
   const nodes = [{type:'extension', extension:key, timeout, ring_enabled:$('desk-ring-enabled').checked, no_answer:action, configured:true, label:`Ring device ${$('desk-ring-enabled').checked ? 'on' : 'off'} · ${timeout}s`}];
   if (action === 'voicemail') {
     const pin = $('desk-mailbox-pin').value.trim();
-    if (pin && !/^[0-9]{4,8}$/.test(pin)) { notify('The mailbox PIN must be 4 to 8 digits', true); return false; }
+    if (pin && !/^[0-9]{4,10}$/.test(pin)) { notify('The mailbox PIN must be 4 to 10 digits', true); return false; }
     nodes.push({type:'voicemail', mailbox:key, enabled:true, pin, configured:true, label:'Send to voicemail'});
   } else if (action === 'extension') {
     const destination = $('desk-next-extension').value;
@@ -2487,8 +2487,8 @@ function openFlowConfig(index) {
   } else if (node.type === 'voicemail') {
     fields = `<label class="field switch-line"><input type="checkbox" name="enabled" ${node.enabled !== false ? 'checked' : ''}> Take messages (voicemail on)</label>
       <label class="field">Voicemail mailbox<select name="mailbox" required><option value="">Choose mailbox</option>${flowExtensionOptions(node.mailbox || '')}</select></label>
-      <label class="field">Mailbox PIN (4–8 digits)<input name="pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" value="${esc(node.pin || '')}" placeholder="Leave empty to keep the stored PIN"></label>
-      <p class="field-hint">Greeting: dial <b>*97</b> from the mailbox's own phone to record or change it. Messages and greetings live in the mailbox until deleted.</p>`;
+      <label class="field">Mailbox PIN (4–10 digits)<input name="pin" inputmode="numeric" pattern="[0-9]{4,10}" maxlength="8" value="${esc(node.pin || '')}" placeholder="Leave empty to keep the stored PIN"></label>
+      <p class="field-hint">Phone voicemail number/code: <b>*97</b>, not the PIN. Enter the PIN only after connecting. Dial <b>*97</b> from the mailbox's own phone to record or change it. Messages and greetings live in the mailbox until deleted.</p>`;
   } else if (node.type === 'forward') {
     fields = `<label class="field">Forward to E.164 number<input name="phone" type="tel" pattern="\\+[1-9][0-9]{7,14}" placeholder="+13025550123" value="${esc(node.phone || '')}" required></label>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required></label>`;
@@ -2552,7 +2552,7 @@ function saveFlowConfig(event) {
     node.mailbox = form.get('mailbox');
     node.enabled = form.get('enabled') === 'on';
     node.pin = String(form.get('pin') || '').trim();
-    if (node.pin && !/^[0-9]{4,8}$/.test(node.pin)) return notify('The mailbox PIN must be 4 to 8 digits', true);
+    if (node.pin && !/^[0-9]{4,10}$/.test(node.pin)) return notify('The mailbox PIN must be 4 to 10 digits', true);
     node.label = node.enabled ? (node.label || `Mailbox ${node.mailbox}`) : 'Voicemail off';
   } else if (node.type === 'forward') {
     node.phone = form.get('phone');

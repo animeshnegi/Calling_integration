@@ -28,10 +28,9 @@ the folder can never drift apart. The APIs and the console accept the key or the
 mailbox name anywhere, and the bare digits only while they name one extension of the
 account - two matches are refused with an explicit ambiguity error rather than
 guessed. A row with no number of its own keeps the bare `101` it was filed under, and
-that is what a `*97` caller types for it.
-The extension's own pin is filed under the same name; a mailbox that has to be longer
-than the digits records where its pin came from (`voicemail_pin_aliases`), so entering
-either name at the `*97` prompt opens the same mailbox.
+the authenticated endpoint selects its mailbox automatically when it dials `*97`.
+The extension's PIN is stored encrypted on that exact extension row. Legacy
+mailbox aliases point to the full scoped extension key, not ambiguous digits.
 
 ## Upgrading a mailbox that gained a number
 
@@ -73,10 +72,25 @@ From a registered extension, dial:
 *97
 ```
 
-Asterisk opens `VoiceMailMain` in the private `engineerip` context. Enter the mailbox
-name the credentials sheet shows - `101-13025550001` for 101 on that number - and the
-configured PIN; the digits alone work only where they name one extension of the
-account.
+Set the IP phone's **Voicemail number / Message key number / Voicemail access
+code** to `*97`, **not** the mailbox PIN. These phone fields usually contain a
+number to dial, not a password. If the phone has a separate voicemail password
+field, it is optional; manual PIN entry after connection is supported.
+
+The authenticated endpoint supplies its own number-scoped mailbox to
+`VoiceMailMain` in the private `engineerip` context. Enter only the configured
+mailbox PIN when prompted, optionally followed by `#`. There is no mailbox-number
+prompt, and callers never need to type a hyphenated mailbox name on the keypad.
+PIN authentication is not skipped. An endpoint without a configured mailbox is
+refused rather than offered a generic login to other mailboxes.
+
+Set or reset the PIN in the extension's call handling (4–10 digits), save the
+workflow, and ensure the PBX configuration reload succeeds. This updates the
+same encrypted PIN as extension settings. Leaving the field blank preserves the
+existing PIN; the console does not read the saved PIN back. Phone and browser
+endpoints, their SIP-username aliases, and message-waiting notifications use the
+same mailbox identity. The endpoint advertises `*97` as its voicemail destination
+to compatible message-waiting clients.
 
 ## Administration panel
 
@@ -198,7 +212,20 @@ Store the Asterisk message identity (`mailbox`, `folder`, and `message`) only as
 
 ### `*97` cannot find the mailbox
 
-Confirm the mailbox is enabled and rendered in `voicemail.dynamic.conf`. At the prompt, enter the three-digit extension mailbox and its PIN - or `<digits>-<number>` when two of the account's lines hold the same digits. The name the console shows on the credentials sheet is the one that always works.
+Confirm the mailbox is enabled and rendered in `voicemail.dynamic.conf`, and that
+the phone's authenticated endpoint has `set_var=ENGINEERIP_MAILBOX=<mailbox>`.
+Dial `*97` from that endpoint; it should ask for the PIN only. Save a fresh PIN in
+call handling if necessary, and check the configuration reload result.
+
+For **“Address incomplete” / SIP 484**, first check that the phone's voicemail
+number is `*97`, not its PIN or a mailbox name. Try dialing `*97` directly. If no
+INVITE reaches Asterisk, the phone may have a local star-code or dial-plan rule;
+allow `*97` or configure its Message key to dial `*97` on the correct registered
+account. Check SIP logs to distinguish a local phone rejection from a server
+response. Never post PINs, SIP passwords, or unredacted authentication traces in
+support logs. After deploying a server fix, reload PJSIP, voicemail and dialplan
+configuration using the normal configuration-sync process; restart/re-register
+the phone if it caches the old message-waiting destination.
 
 ### Messages exist but admin playback returns 404
 
