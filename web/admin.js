@@ -99,7 +99,7 @@ const CUSTOMER_BLOCKED = ['users', 'providers', 'email', 'settings', 'requests',
 /* ------------------------------------------------------------ 3. Transport */
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
-  if (options.body) headers['Content-Type'] = 'application/json';
+  if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
   if (csrf && options.method && !['GET', 'HEAD'].includes(options.method)) headers['X-CSRF-Token'] = csrf;
   const response = await fetch(path, { ...options, headers });
   let data = {};
@@ -1393,6 +1393,9 @@ function renderScopeExtensionSelects() {
   const multiLine = new Set(pool.map(x => x.number)).size > 1;
   const option = x => `<option value="${esc(x.key || x.extension)}" title="${esc(extensionLabel(x.key || x.extension))}">${esc(extensionDigitsOf(x.extension))} — ${esc(scopeShort(x.display_name || 'Unnamed', 22))}${multiLine ? ` · ${esc(x.number)}` : ''}</option>`;
   const active = pool.filter(x => x.active).map(option).join('');
+  const previousGreetingExtension = val('greeting-extension');
+  setSelectOptions($('greeting-extension'), `<option value="">Choose an extension</option>${active}`);
+  if (previousGreetingExtension !== val('greeting-extension')) loadGreeting();
   setSelectOptions($('call-extension'), `<option value="">All extensions</option>${active}`);
   setSelectOptions($('recording-extension'), `<option value="">All extensions</option>${active}`);
   setSelectOptions($('voicemail-extension'), `<option value="">All mailboxes</option>${pool.filter(x => x.voicemail_enabled).map(option).join('')}`);
@@ -1638,6 +1641,70 @@ async function loadRecordings() {
 }
 
 /* -------------------------------------------------------- 20. Voicemail */
+let greetingBusy = false;
+async function loadGreeting() {
+  const select = $('greeting-extension');
+  if (!select) return;
+  const key = select.value;
+  const preview = $('greeting-preview');
+  preview.pause(); preview.hidden = true; preview.removeAttribute('src'); preview.load();
+  $('greeting-save').disabled = !key || greetingBusy;
+  $('greeting-reset').disabled = true;
+  $('greeting-status').textContent = key ? 'Loading greeting…' : 'Choose an extension to manage its greeting.';
+  if (!key) return;
+  try {
+    const url = `/admin/api/voicemail-greetings/${encodeURIComponent(key)}`;
+    const data = await api(url);
+    if (select.value !== key) return;
+    $('greeting-status').textContent = data.custom ? 'Personal greeting is active.' : 'Automated greeting is active (no personal greeting set).';
+    $('greeting-reset').disabled = !data.custom || greetingBusy;
+    if (data.custom) { preview.src = `${url}/file?t=${Date.now()}`; preview.hidden = false; }
+  } catch (error) { if (select.value === key) $('greeting-status').textContent = error.message; }
+}
+
+async function greetingWav(file) {
+  if (file.size > 20 * 1024 * 1024) throw Error('Audio file must be smaller than 20 MB');
+  const context = new AudioContext();
+  let decoded;
+  try { decoded = await context.decodeAudioData(await file.arrayBuffer()); }
+  finally { await context.close(); }
+  if (decoded.duration < 0.1 || decoded.duration > 120) throw Error('Greeting must be between 0.1 and 120 seconds');
+  const render = new OfflineAudioContext(1, Math.ceil(decoded.duration * 8000), 8000);
+  const source = render.createBufferSource(); source.buffer = decoded;
+  source.connect(render.destination); source.start();
+  const samples = (await render.startRendering()).getChannelData(0);
+  const buffer = new ArrayBuffer(44 + samples.length * 2), view = new DataView(buffer);
+  const text = (offset, value) => [...value].forEach((character, i) => view.setUint8(offset + i, character.charCodeAt(0)));
+  text(0, 'RIFF'); view.setUint32(4, buffer.byteLength - 8, true); text(8, 'WAVE'); text(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, 'data'); view.setUint32(40, samples.length * 2, true);
+  samples.forEach((value, i) => { const v = Math.max(-1, Math.min(1, value)); view.setInt16(44 + i * 2, v * (v < 0 ? 32768 : 32767), true); });
+  return new Blob([buffer], {type:'audio/wav'});
+}
+
+async function changeGreeting(reset = false) {
+  const key = val('greeting-extension');
+  if (!key || greetingBusy) return;
+  if (reset && !confirm('Remove this extension’s personal greetings and restore the automated greeting? Messages and PIN stay unchanged.')) return;
+  greetingBusy = true;
+  $('greeting-extension').disabled = true;
+  $('greeting-save').disabled = $('greeting-reset').disabled = true;
+  try {
+    let body;
+    if (!reset) {
+      const file = $('greeting-upload').files[0];
+      if (!file) throw Error('Choose your greeting audio first');
+      $('greeting-status').textContent = 'Preparing and uploading greeting…';
+      body = new FormData(); body.append('greeting', await greetingWav(file), 'greeting.wav');
+    }
+    await api(`/admin/api/voicemail-greetings/${encodeURIComponent(key)}`, {method:reset ? 'DELETE' : 'POST', body});
+    $('greeting-upload').value = '';
+    notify(reset ? 'Automated greeting restored' : 'Personal greeting saved');
+  } catch (error) { notify(error.message, true); }
+  finally { greetingBusy = false; $('greeting-extension').disabled = false; await loadGreeting(); }
+}
+
 async function loadVoicemails() {
   const params = new URLSearchParams();
   if (val('voicemail-extension')) params.set('extension', val('voicemail-extension'));
@@ -2211,7 +2278,7 @@ function renderDeskHandling() {
       <div class="handling-connector"><span>↓</span> No answer or device unavailable</div>
       <section class="handling-card"><header><span class="handling-step">02</span><div><h4>Choose what happens next</h4><p>A clear ending, never a dead end.</p></div></header>
         <div class="handling-body"><label class="field">No-answer action<select id="desk-no-answer">${choices.map(([value,label]) => `<option value="${value}" ${action === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
-          <div data-desk-action="voicemail"><div class="routing-inline-note">✉ Messages go to <b>${esc(extensionLabel(key))}</b>'s private mailbox.</div><label class="field">Mailbox PIN<input id="desk-mailbox-pin" type="password" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,8}" maxlength="8" value="${esc(vm?.pin || '')}" placeholder="Keep existing PIN"></label><p class="routing-field-note">Dial <b>*97</b> from this desk to record your greeting and access the mailbox.</p></div>
+          <div data-desk-action="voicemail"><div class="routing-inline-note">✉ Messages go to <b>${esc(extensionLabel(key))}</b>'s private mailbox.</div><label class="field">Mailbox PIN<input id="desk-mailbox-pin" type="password" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,8}" maxlength="8" value="${esc(vm?.pin || '')}" placeholder="Keep existing PIN"></label><p class="routing-field-note">Upload a personal greeting in <b>Voicemail → Personal voicemail greeting</b>, or dial <b>*97</b> from this desk to record it. Without a personal greeting, callers hear the automated greeting.</p></div>
           <div data-desk-action="extension"><label class="field">Forward to extension<select id="desk-next-extension"><option value="">Choose an extension</option>${flowExtensionOptions(nextDesk?.extension || '')}</select></label><label class="field">Forward ring for (seconds)<input id="desk-next-timeout" type="number" min="5" max="120" value="${Number(nextDesk?.timeout || 25)}" required></label><p class="routing-field-note">One forwarding round. The destination desk's shorter timer still applies.</p></div>
           <div data-desk-action="forward"><label class="field">Forward to number<input id="desk-forward-number" type="tel" value="${esc(forward?.phone || '')}" placeholder="+13025550123" pattern="\\+[1-9][0-9]{7,14}"></label><label class="field">Forward ring for (seconds)<input id="desk-forward-timeout" type="number" min="5" max="120" value="${Number(forward?.timeout || 25)}" required></label><p class="routing-field-note">Use international E.164 format. Carrier charges may apply.</p></div>
         </div>
@@ -4617,3 +4684,7 @@ setInterval(() => { if (!document.hidden) refreshDeviceStatus(); }, 8000);
 // recording work in progress. Small and in-place, so it never competes with the
 // console for attention or repaints.
 setInterval(() => { if (!document.hidden) loadSystem(); }, 5000);
+
+wire('greeting-extension', 'change', loadGreeting);
+wire('greeting-save', 'click', () => changeGreeting(false));
+wire('greeting-reset', 'click', () => changeGreeting(true));

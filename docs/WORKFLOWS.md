@@ -137,3 +137,25 @@ phone; measure ringing; choose each IVR destination; leave a message; retrieve i
 from the correct mailbox; test busy/offline endpoints, answer cancellation, and
 confirm no-answer forwarding. Check ARI worker and Asterisk logs if an expected
 mailbox transfer fails. See [TESTING.md](TESTING.md) for test commands.
+
+### Personal voicemail greetings
+
+In **Voicemail → Personal voicemail greeting**, select an extension and upload
+its own recorded greeting (0.1–120 seconds, source file at most 20 MB). The
+browser converts supported audio formats to Asterisk-compatible mono 8 kHz,
+16-bit PCM WAV. The server validates the audio and installs `unavail.wav`
+atomically in that extension's number-scoped mailbox on the shared voicemail
+volume. No Asterisk restart or configuration reload is required.
+
+The preview plays the greeting callers hear before leaving a message, not the
+system voice that reads mailbox menus. You can also dial `*97` from the desk,
+enter its mailbox PIN, and use mailbox options to record its unavailable greeting.
+A phone-recorded temporary greeting takes precedence; uploading a replacement
+removes that temporary override.
+
+No personal recording is required. **Use automated greeting** removes custom
+unavailable, busy, temporary, and recorded-name greeting files to restore the
+standard Asterisk greeting. It does not delete messages or change the mailbox
+PIN, voicemail routing, or email settings. Voicemail must still be enabled in
+the extension/number workflow. Tenant users can manage only mailboxes belonging
+to their account; administrator sessions can manage any existing extension.

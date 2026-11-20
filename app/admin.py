@@ -5218,6 +5218,48 @@ def register_admin(app, config, on_telephony_change=None):
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
+    def greeting_mailbox(extension):
+        # Require an exact scoped key/mailbox, never guess between two 101s.
+        owner = None if session.get("admin_role") == "admin" else int(session["admin_user_id"])
+        row = next((row for row in store.list_extensions(owner)
+                    if extension in {str(row["key"]), extension_mailbox(row["key"])}), None)
+        return extension_mailbox(row["key"]) if row else None
+
+    @app.route("/admin/api/voicemail-greetings/<extension>", methods=["GET", "POST", "DELETE"])
+    @login_required
+    def admin_voicemail_greeting(extension):
+        mailbox = greeting_mailbox(extension)
+        if not mailbox:
+            return jsonify({"error": "extension not found"}), 404
+        voicemail = current_app.extensions["voicemail_store"]
+        try:
+            if request.method == "POST":
+                if request.content_length and request.content_length > 2_100_000:
+                    return jsonify({"error": "Greeting upload is too large"}), 413
+                upload = request.files.get("greeting")
+                if not upload:
+                    return jsonify({"error": "Choose a greeting audio file"}), 400
+                voicemail.save_greeting(mailbox, upload.stream.read(2_000_001))
+            elif request.method == "DELETE":
+                voicemail.reset_greeting(mailbox)
+            path = voicemail.greeting_path(mailbox)
+            return jsonify({"custom": bool(path), "mailbox": mailbox})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.get("/admin/api/voicemail-greetings/<extension>/file")
+    @login_required
+    def admin_voicemail_greeting_file(extension):
+        mailbox = greeting_mailbox(extension)
+        if not mailbox:
+            return jsonify({"error": "extension not found"}), 404
+        path = current_app.extensions["voicemail_store"].greeting_path(mailbox)
+        if not path:
+            return jsonify({"error": "No personal greeting set"}), 404
+        response = send_file(path, conditional=True)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
     @app.get("/admin/api/voicemails")
     @login_required
     def admin_voicemails():

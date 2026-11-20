@@ -82,6 +82,62 @@ class VoicemailStore:
         # message must not require permission to create Old or Urgent.
         return resolved
 
+    def greeting_path(self, mailbox: str) -> Path | None:
+        """The unavailable greeting used by VoiceMail(...,u), including *97 recordings."""
+        directory = self._folder(mailbox, "inbox").parent
+        for stem in ("temp", "unavail"):
+            path = self._audio_path(directory, stem)
+            if path:
+                return path
+        return None
+
+    def save_greeting(self, mailbox: str, data: bytes) -> None:
+        """Install a bounded, canonical Asterisk-compatible PCM greeting atomically."""
+        import io
+        import os
+        import tempfile
+        import wave
+        if len(data) > 2_000_000:
+            raise ValueError("Greeting must be at most 120 seconds")
+        try:
+            with wave.open(io.BytesIO(data), "rb") as audio:
+                frames = audio.getnframes()
+                if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()) != (1, 2, 8000, "NONE"):
+                    raise ValueError("Upload a mono 8 kHz, 16-bit PCM WAV greeting")
+                if not 800 <= frames <= 960000:
+                    raise ValueError("Greeting must be between 0.1 and 120 seconds")
+                pcm = audio.readframes(frames)
+                if len(pcm) != frames * 2:
+                    raise ValueError("Incomplete WAV greeting")
+        except (wave.Error, EOFError) as exc:
+            raise ValueError("Invalid WAV greeting") from exc
+        with self._locked():
+            directory = self._folder(mailbox, "inbox", create=True).parent
+            fd, temporary = tempfile.mkstemp(prefix=".greeting-", dir=directory)
+            try:
+                with os.fdopen(fd, "wb") as output:
+                    os.fchmod(output.fileno(), 0o660)
+                    with wave.open(output, "wb") as audio:
+                        audio.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+                        audio.writeframes(pcm)
+                os.replace(temporary, directory / "unavail.wav")
+                # Temporary phone-recorded greetings override unavailable greetings.
+                for stem in ("temp", "unavail"):
+                    for suffix in ("wav", "WAV", "gsm", "sln", "sln16", "ulaw", "alaw", "g722", "g729"):
+                        path = directory / f"{stem}.{suffix}"
+                        if path.name != "unavail.wav":
+                            path.unlink(missing_ok=True)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+
+    def reset_greeting(self, mailbox: str) -> None:
+        """Restore Asterisk's automated greeting without deleting any messages/PIN."""
+        with self._locked():
+            directory = self._folder(mailbox, "inbox").parent
+            for stem in ("temp", "unavail", "busy", "greet"):
+                for suffix in ("wav", "WAV", "gsm", "sln", "sln16", "ulaw", "alaw", "g722", "g729"):
+                    (directory / f"{stem}.{suffix}").unlink(missing_ok=True)
+
     @staticmethod
     def _metadata(path: Path) -> dict[str, str]:
         parser = configparser.ConfigParser(interpolation=None)

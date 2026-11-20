@@ -313,6 +313,17 @@
           <span class="spacer"></span>
           <button class="btn ghost sm" id="refresh-voicemails">Refresh</button>
         </div>
+        <article class="panel" style="margin-bottom:12px">
+          <div class="panel-head"><div><h2>Personal voicemail greeting</h2><p>The message callers hear before leaving voicemail—not the voice used to read mailbox menus.</p></div></div>
+          <div class="panel-body">
+            <label class="field">Extension<select id="greeting-extension"><option value="">Choose an extension</option></select></label>
+            <p id="greeting-status" role="status">Choose an extension to manage its greeting.</p>
+            <audio id="greeting-preview" controls hidden aria-label="Personal greeting preview"></audio>
+            <label class="field">Your greeting audio<input id="greeting-upload" type="file" accept="audio/*"><small>Up to 120 seconds. Browser-supported audio is converted automatically. You can also dial *97 from this extension, enter its mailbox PIN, and record a greeting in mailbox options.</small></label>
+            <div class="tools"><button class="btn primary" id="greeting-save" disabled>Upload greeting</button> <button class="btn ghost" id="greeting-reset" disabled>Use automated greeting</button></div>
+            <p class="muted">No personal greeting is required: Asterisk uses its automated greeting by default. Changes apply immediately to future voicemail greetings; enable voicemail in the extension's call handling.</p>
+          </div>
+        </article>
         <article class="panel">
           <div class="panel-head"><div><h2>Voicemail</h2><p>Listen to messages, mark them read, or delete them</p></div><span class="count" id="voicemail-count">0 messages</span></div>
           <div class="panel-body flush"><div id="voicemail-list" class="rows"></div></div>
