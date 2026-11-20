@@ -3052,6 +3052,7 @@ class SettingsStore(WebhookStoreMixin):
         """
         timeouts: dict[str, int] = {}
         fallbacks: list[str] = []
+        fallback_timeouts: dict[str, int] = {}
         disabled: list[str] = []
         forward, forward_timeout = "", 25
         allowed = {
@@ -3077,10 +3078,11 @@ class SettingsStore(WebhookStoreMixin):
                     value = str(node.get("extension") or "")
                     if value and value in allowed and value not in fallbacks and value not in keys:
                         fallbacks.append(value)
+                        fallback_timeouts[value] = max(5, min(120, int(node.get("timeout") or 25)))
                 elif kind == "forward" and not forward:
                     forward = str(node.get("phone") or "")
                     forward_timeout = int(node.get("timeout") or 25)
-        return {"timeouts": timeouts, "fallbacks": fallbacks, "disabled": disabled,
+        return {"timeouts": timeouts, "fallbacks": fallbacks, "fallback_timeouts": fallback_timeouts, "disabled": disabled,
                 "forward": forward, "forward_timeout": forward_timeout}
 
     def apply_desk_handling(self, plan: dict, keys: list[str], number: str, owner) -> dict:
@@ -3107,6 +3109,7 @@ class SettingsStore(WebhookStoreMixin):
             }
         ending = self._desk_handling(keys[:1], number, owner)
         plan["fallbacks"] = ending["fallbacks"]
+        plan["fallback_timeouts"] = ending["fallback_timeouts"]
         if not plan.get("voicemail") and not plan.get("forward"):
             plan["voicemail"] = self._desk_voicemail(number, keys[0], owner) if keys else ""
             if not plan.get("voicemail"):
@@ -3190,6 +3193,7 @@ class SettingsStore(WebhookStoreMixin):
             "outside_hours": bool(tail.get("outside_hours")),
             "timeouts": tail.get("timeouts") or {},
             "fallbacks": list(tail.get("fallbacks") or []),
+            "fallback_timeouts": tail.get("fallback_timeouts") or {},
             "forward_timeout": int(tail.get("forward_timeout") or 25),
         }
 

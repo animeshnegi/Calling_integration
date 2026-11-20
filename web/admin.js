@@ -2206,14 +2206,14 @@ function renderDeskHandling() {
   $('flow-nodes').innerHTML = `<div class="desk-editor">
     <div class="desk-policy">
       <section class="handling-card"><header><span class="handling-step">01</span><div><h4>Ring this device</h4><p>All registered phones for this extension.</p></div><label class="routing-toggle"><input id="desk-ring-enabled" type="checkbox" ${ring.ring_enabled !== false ? 'checked' : ''}><span>Ring device</span></label></header>
-        <div class="handling-body"><label class="field">Ring for<select id="desk-ring-timeout">${[10,15,20,25,30,45,60,90,120,...(ring.timeout && ![10,15,20,25,30,45,60,90,120].includes(Number(ring.timeout)) ? [Number(ring.timeout)] : [])].sort((a,b)=>a-b).map(seconds => `<option value="${seconds}" ${Number(ring.timeout || 25) === seconds ? 'selected' : ''}>${seconds} seconds</option>`).join('')}</select></label><p class="routing-field-note" id="desk-ring-note">When ringing is off, the no-answer action runs immediately. A shorter number-workflow timer caps this setting.</p></div>
+        <div class="handling-body"><label class="field">Ring for<select id="desk-ring-timeout">${[5,10,15,20,25,30,45,60,90,120,...(ring.timeout && ![5,10,15,20,25,30,45,60,90,120].includes(Number(ring.timeout)) ? [Number(ring.timeout)] : [])].sort((a,b)=>a-b).map(seconds => `<option value="${seconds}" ${Number(ring.timeout || 25) === seconds ? 'selected' : ''}>${seconds} seconds</option>`).join('')}</select></label><p class="routing-field-note" id="desk-ring-note">When ringing is off, the no-answer action runs immediately. A shorter number-workflow timer caps this setting.</p></div>
       </section>
       <div class="handling-connector"><span>↓</span> No answer or device unavailable</div>
       <section class="handling-card"><header><span class="handling-step">02</span><div><h4>Choose what happens next</h4><p>A clear ending, never a dead end.</p></div></header>
         <div class="handling-body"><label class="field">No-answer action<select id="desk-no-answer">${choices.map(([value,label]) => `<option value="${value}" ${action === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
           <div data-desk-action="voicemail"><div class="routing-inline-note">✉ Messages go to <b>${esc(extensionLabel(key))}</b>'s private mailbox.</div><label class="field">Mailbox PIN<input id="desk-mailbox-pin" type="password" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,8}" maxlength="8" value="${esc(vm?.pin || '')}" placeholder="Keep existing PIN"></label><p class="routing-field-note">Dial <b>*97</b> from this desk to record your greeting and access the mailbox.</p></div>
-          <div data-desk-action="extension"><label class="field">Forward to extension<select id="desk-next-extension"><option value="">Choose an extension</option>${flowExtensionOptions(nextDesk?.extension || '')}</select></label><p class="routing-field-note">One forwarding round, so desks cannot create a loop.</p></div>
-          <div data-desk-action="forward"><label class="field">Forward to number<input id="desk-forward-number" type="tel" value="${esc(forward?.phone || '')}" placeholder="+13025550123" pattern="\\+[1-9][0-9]{7,14}"></label><p class="routing-field-note">Use international E.164 format. Carrier charges may apply.</p></div>
+          <div data-desk-action="extension"><label class="field">Forward to extension<select id="desk-next-extension"><option value="">Choose an extension</option>${flowExtensionOptions(nextDesk?.extension || '')}</select></label><label class="field">Forward ring for (seconds)<input id="desk-next-timeout" type="number" min="5" max="120" value="${Number(nextDesk?.timeout || 25)}" required></label><p class="routing-field-note">One forwarding round. The destination desk's shorter timer still applies.</p></div>
+          <div data-desk-action="forward"><label class="field">Forward to number<input id="desk-forward-number" type="tel" value="${esc(forward?.phone || '')}" placeholder="+13025550123" pattern="\\+[1-9][0-9]{7,14}"></label><label class="field">Forward ring for (seconds)<input id="desk-forward-timeout" type="number" min="5" max="120" value="${Number(forward?.timeout || 25)}" required></label><p class="routing-field-note">Use international E.164 format. Carrier charges may apply.</p></div>
         </div>
       </section>
       <div class="routing-policy-note">Number-level fallback takes precedence when configured. This desk's policy follows it across assigned incoming numbers.</div>
@@ -2242,11 +2242,15 @@ function syncDeskHandling() {
   } else if (action === 'extension') {
     const destination = $('desk-next-extension').value;
     if (!destination || destination === key) { notify('Choose another extension for unanswered calls', true); return false; }
-    nodes.push({type:'extension', extension:destination, timeout:25, configured:true, label:'Forward unanswered call'});
+    const nextTimeout = Number($('desk-next-timeout').value);
+    if (!Number.isInteger(nextTimeout) || nextTimeout < 5 || nextTimeout > 120) { notify('Forward ring time must be between 5 and 120 seconds', true); return false; }
+    nodes.push({type:'extension', extension:destination, timeout:nextTimeout, configured:true, label:'Forward unanswered call'});
   } else if (action === 'forward') {
     const phone = $('desk-forward-number').value.trim();
     if (!/^\+[1-9]\d{7,14}$/.test(phone)) { notify('Use an international number, for example +13025550123', true); return false; }
-    nodes.push({type:'forward', phone, timeout:25, configured:true, label:'Forward unanswered call'});
+    const forwardTimeout = Number($('desk-forward-timeout').value);
+    if (!Number.isInteger(forwardTimeout) || forwardTimeout < 5 || forwardTimeout > 120) { notify('Forward ring time must be between 5 and 120 seconds', true); return false; }
+    nodes.push({type:'forward', phone, timeout:forwardTimeout, configured:true, label:'Forward unanswered call'});
   }
   flowNodes = nodes;
   deskRingSources = [...document.querySelectorAll('[name="desk-ring-source"]:checked')].map(input => input.value);
@@ -2412,7 +2416,7 @@ function openFlowConfig(index) {
     fields = `<label class="field">Destination extension<select name="extension" required><option value="">Choose extension</option>${flowExtensionOptions(node.extension || '')}</select>
         <small>${desk ? 'The first step rings this desk itself; a later step is where an unanswered call is handed.' : 'The extension this step rings.'}</small></label>
       <label class="field">Ring timeout (seconds)<input type="number" name="timeout" min="5" max="120" value="${node.timeout || 25}" required>
-        <small>How long this extension rings before the flow moves on.</small></label>`;
+        <small>Maximum ring time before moving on. A shorter destination desk timer takes priority; busy or unavailable devices can finish early.</small></label>`;
   } else if (node.type === 'voicemail') {
     fields = `<label class="field switch-line"><input type="checkbox" name="enabled" ${node.enabled !== false ? 'checked' : ''}> Take messages (voicemail on)</label>
       <label class="field">Voicemail mailbox<select name="mailbox" required><option value="">Choose mailbox</option>${flowExtensionOptions(node.mailbox || '')}</select></label>
@@ -2434,7 +2438,7 @@ function openFlowConfig(index) {
         <small>Reference text only — editing this does not synthesize audio. Install the matching recording for the chosen voice; otherwise callers hear the stock extension prompt.</small></label>
       <div class="field-row">
         <label class="field">Voice<select name="voice">${ivrVoiceOptions(node.voice)}</select></label>
-        <label class="field">Input timeout (seconds)<input type="number" name="input_timeout" min="2" max="30" value="${node.input_timeout || 6}" required></label>
+        <label class="field">Input timeout (seconds)<input type="number" name="input_timeout" min="2" max="30" value="${node.input_timeout || 6}" required><small>Wait after the greeting and between digits. Each attempt has its own timeout.</small></label>
         <label class="field">Attempts<input type="number" name="attempts" min="1" max="5" value="${node.attempts || 2}" required></label>
       </div>
       <label class="field">Fallback extension<select name="fallback"><option value="">Continue with the steps below</option>${flowExtensionOptions(node.fallback || '')}</select>

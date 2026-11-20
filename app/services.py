@@ -456,7 +456,6 @@ class TelephonyService:
 
     # How long a caller has to press the next digit when what they typed could
     # still grow into a longer extension.
-    IVR_INTERDIGIT = 1.4
     # What to play when the chosen voice has no recording installed yet: the
     # stock Asterisk prompt asks the caller the same thing, so the menu works
     # before an operator drops in a custom greeting.
@@ -585,8 +584,14 @@ class TelephonyService:
         while stages:
             stage = stages.pop(0)
             legs = []
+            # Overlapping groups or repeated members must not ring the same SIP
+            # device twice in one simultaneous stage. Later stages remain intact.
+            dialed_targets = set()
             for destination in stage["destinations"]:
                 for target in self.dial_endpoints(destination, call.caller_id_number or ""):
+                    if target in dialed_targets:
+                        continue
+                    dialed_targets.add(target)
                     index = next_index
                     next_index += 1
                     try:
@@ -693,7 +698,11 @@ class TelephonyService:
         fallbacks = [str(value) for value in (plan.get("fallbacks") or []) if str(value)]
         if not fallbacks:
             return False
-        next_plan = {**plan, "destinations": fallbacks, "ring_stages": []}
+        # Forwarding to another desk is a new ring step, not more time on
+        # the original number step. Do not inherit its ceiling or per-desk map.
+        next_plan = {**plan, "destinations": fallbacks, "ring_stages": [],
+                     "timeout": 120,
+                     "timeouts": {key: int((plan.get("fallback_timeouts") or {}).get(key, 25)) for key in fallbacks}}
         if self.settings_store and hasattr(self.settings_store, "apply_desk_handling"):
             row = self.settings_store.extension_row(fallbacks[0])
             next_plan = self.settings_store.apply_desk_handling(next_plan, fallbacks, call.caller_id_number or "", row.get("owner_user_id") if row else None)
@@ -795,6 +804,16 @@ class TelephonyService:
         session = self._ivr_sessions_map().get(channel_id)
         if not session or not digit or not digit.isdigit():
             return
+        # Barge-in ends the greeting. A delayed PlaybackFinished for it must
+        # not restart the input clock after the caller has begun typing.
+        playback_id = session.get("playback_id")
+        session["playback_id"] = ""
+        session["deadline"] = time.monotonic() + session["input_timeout"]
+        if playback_id:
+            try:
+                self.asterisk.stop_playback(playback_id)
+            except Exception:
+                logger.warning("Could not stop IVR prompt on input for channel %s", channel_id)
         session["digits"] = (session["digits"] + digit)[:6]
         self._ivr_resolve(session, final=False)
 
@@ -810,7 +829,7 @@ class TelephonyService:
             if digits in key_map:
                 return self._ivr_dial(session, key_map[digits])
             if not final and any(str(key).startswith(digits) for key in key_map):
-                session["resolve_after"] = time.monotonic() + self.IVR_INTERDIGIT
+                session["resolve_after"] = session["deadline"]
                 return
             return self._ivr_retry(session, digits)
         keys = [str(key) for key in (session.get("keys") or [])]
@@ -833,7 +852,7 @@ class TelephonyService:
         if candidates and not final:
             # "1" cannot be dialled while "101" and "106" both exist: give the
             # caller a moment for the next digit.
-            session["resolve_after"] = time.monotonic() + self.IVR_INTERDIGIT
+            session["resolve_after"] = session["deadline"]
             return
         return self._ivr_retry(session, digits)
 
@@ -1083,7 +1102,7 @@ class TelephonyService:
             self._finalizing.add(call_id)
         try:
             call = self.store.get(call_id)
-            if not call or call.status == "completed":
+            if not call or call.status == "completed" or call.ended_at is not None:
                 return
             ended = iso_now()
             # Publish the transition before hangup/stop can emit a finish event.
@@ -1107,7 +1126,10 @@ class TelephonyService:
             if call.bridge_id:
                 self.asterisk.destroy_bridge(call.bridge_id)
             terminal_status = "failed" if call.status == "failed" else ("completed" if call.answered else "failed")
-            updated = self.store.update(call_id, status=terminal_status, ended_at=ended, duration_seconds=duration)
+            updated = self.store.finish_once(call_id, status=terminal_status, ended_at=ended, duration_seconds=duration)
+            if updated is None:
+                # Another worker/event already published this call's ending.
+                return
             if terminal_status == "completed":
                 self.notify_crm("call.completed", updated, {"reason": reason})
             else:

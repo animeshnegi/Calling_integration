@@ -170,6 +170,22 @@ class CallStore:
             db.execute(f"UPDATE calls SET {assignments} WHERE call_id=?", values)
             return self._from_row(db.execute("SELECT * FROM calls WHERE call_id=?", (call_id,)).fetchone())
 
+    def finish_once(self, call_id: str, *, status: str, ended_at: str, duration_seconds: int) -> Call | None:
+        """Persist the terminal transition once, even across worker instances.
+
+        A failed call is terminal only once ended_at is set: originate errors
+        can set status=failed before teardown has run.
+        """
+        with self._lock, self._connect() as db:
+            result = db.execute(
+                "UPDATE calls SET status=?,ended_at=?,duration_seconds=? "
+                "WHERE call_id=? AND ended_at IS NULL",
+                (status, ended_at, duration_seconds, call_id),
+            )
+            if not result.rowcount:
+                return None
+            return self._from_row(db.execute("SELECT * FROM calls WHERE call_id=?", (call_id,)).fetchone())
+
     def all(self) -> list[Call]:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM calls ORDER BY started_at DESC").fetchall()

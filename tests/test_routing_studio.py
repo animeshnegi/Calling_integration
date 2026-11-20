@@ -478,3 +478,54 @@ def test_after_hours_forward_uses_configured_forward_timer(studio, monkeypatch):
     service.start_inbound({"id": "closed-forward", "caller": {"number": "+13025550000"}}, number, keys["101"])
     assert not asterisk.inbound_legs
     assert asterisk.forwarded[-1]["timeout"] == 40
+
+
+@pytest.mark.parametrize("input_timeout", [2, 8, 30])
+def test_ivr_uses_configured_wait_between_digits_and_ignores_old_playback(studio, monkeypatch, input_timeout):
+    import app.services as engine
+    clock = [1000.0]
+    monkeypatch.setattr(engine.time, "monotonic", lambda: clock[0])
+    service, asterisk, _, settings, owner, number, _, keys, _ = studio
+    menu = {**settings.default_ivr_node(), "input_timeout": input_timeout, "attempts": 2}
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [menu]}})
+    service.start_inbound({"id": "digit-clock", "caller": {"number": "+13025550000"}}, number, keys["101"])
+    session = service._ivr_sessions_map()["digit-clock"]
+    playback_id = session["playback_id"]
+    service.handle_ari_event({"type": "ChannelDtmfReceived", "channel": {"id": "digit-clock"}, "digit": "1"})
+    assert playback_id in asterisk.stopped_playbacks
+    assert session["deadline"] == 1000 + input_timeout
+    assert service.process_ivr_timeouts(now=1000 + input_timeout - .1) == 0
+    # The next digit gets a full configured interval, not a hard-coded 1.4s.
+    clock[0] = 1000 + input_timeout - .1
+    service.handle_ari_event({"type": "ChannelDtmfReceived", "channel": {"id": "digit-clock"}, "digit": "0"})
+    expected_deadline = clock[0] + input_timeout
+    clock[0] += .05
+    service.handle_ari_event({"type": "PlaybackFinished", "playback": {"id": playback_id}})
+    assert session["deadline"] == expected_deadline
+    assert service.process_ivr_timeouts(now=expected_deadline - .01) == 0
+    assert service.process_ivr_timeouts(now=expected_deadline) == 1
+    assert session["tries"] == 1
+    assert session["digits"] == ""
+    assert len(asterisk.played) == 2
+
+
+@pytest.mark.parametrize("forward_timeout,destination_timeout,expected", [(45, 90, 45), (90, 45, 45), (5, 90, 5)])
+def test_forwarded_desk_uses_new_step_timer_not_original_number_limit(studio, forward_timeout, destination_timeout, expected):
+    service, asterisk, calls, settings, owner, number, _, keys, _ = studio
+    first, second = keys["101"], keys["102"]
+    settings.save_routing_flow(owner, {"target_type": "extension", "target": first, "route": {"nodes": [
+        {"type": "extension", "extension": first, "timeout": 60, "no_answer": "extension"},
+        {"type": "extension", "extension": second, "timeout": forward_timeout},
+    ]}})
+    settings.save_routing_flow(owner, {"target_type": "extension", "target": second, "route": {"nodes": [
+        {"type": "extension", "extension": second, "timeout": destination_timeout, "no_answer": "hangup"},
+    ]}})
+    settings.save_call_route(owner, {"phone_number": number, "route": {"nodes": [
+        {"type": "ring_group", "extensions": [first], "timeout": 10},
+    ]}})
+    call = service.start_inbound({"id": "forward-clock", "caller": {"number": "+13025550000"}}, number, first)
+    assert asterisk.inbound_timeouts[-1]["timeout"] == 10
+    service.handle_ari_event({"type": "ChannelDestroyed", "channel": {"id": call.employee_channel_id}})
+    assert calls.get(call.call_id).status == "ringing_fallback"
+    assert asterisk.inbound_timeouts[-1]["extension"] == second
+    assert asterisk.inbound_timeouts[-1]["timeout"] == expected

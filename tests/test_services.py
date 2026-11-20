@@ -298,7 +298,7 @@ def test_a_pause_on_an_incomplete_extension_asks_again(tmp_path):
     service, asterisk, _, _, _, _, _ = make_menu_service(tmp_path)
     digits(service, "10")
     assert asterisk.inbound_legs == []                                 # still might become 101
-    service.process_ivr_timeouts(now=time.monotonic() + service.IVR_INTERDIGIT + 0.1)
+    service.process_ivr_timeouts(now=next(iter(service._ivr_sessions_map().values()))["deadline"] + 0.1)
     assert asterisk.inbound_legs == []                                 # nobody was dialled
     assert len(asterisk.played) == 2                                   # and the menu asked again
 
@@ -1500,3 +1500,71 @@ def test_bridge_notification_failure_does_not_skip_recorder(tmp_path):
     service._start_bridge(call)
     assert len(starts) == 1
     assert store.get(call.call_id).recording_status == "recording"
+
+
+def test_missed_call_finalization_is_idempotent_but_repeat_calls_are_kept(tmp_path):
+    service, asterisk, store = make_service(tmp_path)
+
+    class Settings:
+        notifications = []
+
+        def list_numbers(self):
+            return [{"number": "+13022661626", "owner_user_id": 7}]
+
+        def add_notification(self, *args):
+            self.notifications.append(args)
+
+    settings = Settings()
+    service.settings_store = settings
+    events = []
+    service.notify_crm = lambda event, call, extra=None: events.append((event, call.call_id))
+    for call_id in ("inbound-first", "inbound-repeat"):
+        store.create(Call(call_id=call_id, contact_id=None, member_id=None, extension="101",
+                          phone="+12133861111", caller_id_number="+13022661626",
+                          direction="inbound", status="failed"))
+        service._finalize(call_id, "inbound_not_answered")
+        ended_at = store.get(call_id).ended_at
+        service._finalize(call_id, "channel_destroyed")
+        # Replayed events after a service restart must also be harmless.
+        other = TelephonyService(asterisk, config=service.config, store=store)
+        other.settings_store = settings
+        other.notify_crm = service.notify_crm
+        other._finalize(call_id, "channel_destroyed")
+        assert store.get(call_id).ended_at == ended_at
+    assert len(settings.notifications) == 2
+    assert events == [("call.failed", "inbound-first"), ("call.failed", "inbound-repeat")]
+
+
+def test_simultaneous_stage_rings_each_endpoint_once(tmp_path):
+    service, asterisk, store = make_service(tmp_path)
+    call = store.create(Call(call_id="duplicate-members", contact_id=None, member_id=None,
+                             extension="101", phone="+12133861111", direction="inbound",
+                             customer_channel_id="incoming"))
+    service.dial_endpoints = lambda destination, number: ["PJSIP/desk", "PJSIP/desk", "PJSIP/browser"]
+    service._ring_inbound_stage(call, {"ring_stages": [
+        {"destinations": ["101", "101", "alias"], "timeout": 25},
+        {"destinations": ["101"], "timeout": 15},
+    ]})
+    assert asterisk.inbound_endpoints == ["PJSIP/desk", "PJSIP/browser"]
+    # An explicit later ring stage is not removed by simultaneous deduplication.
+    import json
+    assert len(json.loads(store.get(call.call_id).routing_plan)["ring_stages"]) == 1
+
+
+def test_finish_once_is_atomic_across_store_instances(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    _, _, store = make_service(tmp_path)
+    store.create(Call(call_id="finish-race", contact_id=None, member_id=None,
+                      extension="101", phone="+12133861111"))
+    other = CallStore(str(tmp_path / "calls.db"))
+
+    def finish(index):
+        return (store if index % 2 else other).finish_once(
+            "finish-race", status="failed", ended_at="2026-11-19T19:38:00+00:00", duration_seconds=index)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(finish, range(16)))
+    assert sum(result is not None for result in results) == 1
+    winner = next(result for result in results if result is not None)
+    assert store.get("finish-race").duration_seconds == winner.duration_seconds

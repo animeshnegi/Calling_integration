@@ -1999,3 +1999,181 @@ body.customer-theme .routing-selection .scope-bar{display:none}
 @media(max-width:1250px){.routing-workflow-options{grid-template-columns:repeat(2,minmax(0,1fr))}.routing-studio .routing-mode-count{display:none}}
 @media(max-width:760px){.routing-studio .routing-modes button{padding:15px 12px}.routing-studio .routing-modes b{font-size:12px;line-height:1.45}.routing-selection{padding:17px 15px;margin-bottom:22px}.routing-selection-head{align-items:stretch;flex-direction:column;gap:12px}.routing-studio .routing-selection .scope-bar{flex:0 1 auto;width:100%}.routing-workflow-options{grid-template-columns:1fr;max-height:250px}.routing-workflow-options button{padding:13px 12px}.routing-search-row{gap:10px;align-items:stretch;flex-wrap:wrap}.routing-search{max-width:none;flex-basis:100%}.routing-search kbd{display:none}#routing-workflow-count{font-size:10px}.routing-studio .flow-toolbar{gap:14px}.routing-studio .flow-toolbar .tools{width:100%!important;margin-left:0!important}.routing-studio #save-route{flex:1}.routing-studio .flow-toolbar h3{font-size:19px}.routing-team-details>summary{padding:17px 16px}.routing-studio .routing-team-details .routing-departments{padding:17px}}
 .routing-studio .flow-toolbar>div:first-child{min-width:0;max-width:100%;overflow-wrap:anywhere}
+
+/* ===========================================================================
+   40. Compact console rhythm
+   Shared by admin and customer views. Content remains naturally scrollable;
+   density comes from spacing/layout, never zoom, clipped panels or tiny text.
+   ========================================================================== */
+body:has(.main){
+  --sidebar-w:238px;--topbar-h:60px;
+  --r-md:10px;--r-lg:12px;--r-xl:16px;
+  --sp-5:16px;--sp-6:22px;--sp-7:30px;
+}
+.main,.content,.page,.panel,.panel-body,.grid>*{min-width:0}
+.content{padding:18px 20px}
+.topbar{padding-inline:20px}
+.panel,.glass-card,.stat,.ws-card{box-shadow:var(--shadow-sm)}
+.panel-head{padding:12px 16px;gap:12px}
+.panel-body{padding:14px 16px}
+.panel-body.flush{padding:0}
+.grid,.cards{gap:12px}
+.cards{padding:14px;grid-template-columns:repeat(auto-fit,minmax(min(248px,100%),1fr))}
+.glass-card{padding:14px}
+.glass-card-head{gap:10px;margin-bottom:10px}
+.kv{gap:7px;margin-top:10px}
+.toolbar{padding:9px 12px;gap:8px;margin-bottom:12px}
+.scope-bar{gap:10px 16px}
+.customer-number-context{padding:10px 12px;margin-bottom:12px}
+.rows{padding:3px 14px}
+.row{padding-block:10px;gap:12px}
+.row>*{min-width:0;overflow-wrap:anywhere}
+.row-icon{width:34px;height:34px;border-radius:9px}
+.row p{margin-top:2px}
+.pager{padding:10px 14px}
+.acc-head{padding:12px 14px}
+.acc-body{padding:0 14px 12px}
+.stat-grid{gap:10px;grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr))}
+.stat{padding:14px 16px}
+.stat-value{font-size:26px}
+.stat-icon{width:32px;height:32px}
+.board-tiles{gap:9px}
+.board-tile{padding:10px}
+.switch{padding-block:10px}
+label.field{margin-bottom:11px}
+.field-row{gap:12px}
+.btn{min-height:36px;padding:7px 12px}
+.btn.sm{min-height:32px;padding:5px 10px}
+.ws-head{padding:16px 20px}
+.ws-head-top{gap:12px}
+.ws-summary{padding:14px 20px}
+.ws-body{padding:16px 20px 22px}
+.ws-card{padding:12px 14px}
+.ws-tabs{padding:7px 14px 0}
+.ws-tab{padding:8px 11px 10px}
+.ws-section{margin-bottom:16px}
+.ws-metric{padding:10px 12px}
+.stat:hover,.glass-card:hover,.ws-card:hover,.btn:not(:disabled):hover{transform:none}
+
+/* The workflow picker belongs beside the editor on roomy screens, not above
+   it as another full-height card. Saved targets stay searchable and scrollable. */
+.routing-studio .routing-heading{margin-bottom:12px;gap:12px}
+.routing-studio .routing-heading h2{font-size:22px;line-height:1.25}
+.routing-studio .routing-heading p{font-size:12px;line-height:1.5;margin-top:4px}
+.routing-studio .routing-modes{gap:10px;margin-bottom:14px}
+.routing-studio .routing-modes button{padding:11px 14px;gap:10px;border-radius:10px}
+.routing-studio .routing-modes b{font-size:13px}
+.routing-studio .routing-modes small{font-size:11px;margin-top:2px}
+.routing-mode-icon{width:30px;height:30px;font-size:17px}
+.routing-badge{padding:5px 9px;font-size:11px}
+#routing-workspace{
+  display:grid;grid-template-columns:220px minmax(0,1fr);
+  grid-template-rows:auto auto auto 1fr;gap:10px 16px;align-items:start;
+}
+.routing-selection{grid-column:1;grid-row:1/5;padding:14px;margin:0;border-radius:12px;box-shadow:none;min-width:0}
+.routing-selection-head{align-items:stretch;flex-direction:column;gap:10px;margin-bottom:10px}
+.routing-selection-head h3{font-size:14px}
+.routing-studio .routing-selection .scope-bar{flex:0 1 auto;width:100%}
+.routing-selection .scope-field select{min-height:36px}
+.routing-search-row{flex-wrap:wrap;gap:7px;margin-bottom:9px}
+.routing-search{padding-inline:9px;max-width:none;flex-basis:100%}
+.routing-search input[type=search]{min-height:36px;font-size:12px}
+.routing-search kbd{display:none}
+.routing-workflow-options{grid-template-columns:minmax(0,1fr);gap:6px;max-height:clamp(160px,48dvh,480px)}
+.routing-workflow-options button{padding:9px;gap:8px;min-height:48px;border-radius:8px}
+.workflow-choice-icon{width:27px;height:29px;font-size:15px}
+.routing-studio .flow-toolbar{grid-column:2;grid-row:1;padding:0 0 10px;margin:0;gap:10px;border:0;border-bottom:1px solid var(--line);border-radius:0;flex-direction:row;align-items:center}
+.routing-studio .flow-toolbar h3{font-size:17px;line-height:1.35}
+.routing-studio .routing-selected-meta{margin-top:3px;line-height:1.4}
+.routing-studio .flow-toolbar #routing-editor-description{margin-top:3px;line-height:1.4}
+.routing-studio #save-route{min-height:36px;min-width:108px;padding-inline:13px}
+.routing-studio .routing-save-status{grid-column:2;grid-row:2;margin:0;padding:8px 11px}
+.routing-editor-empty{grid-column:2;grid-row:3/5;padding:24px 16px}
+.routing-recipe{grid-column:2;grid-row:3;margin:0;padding:8px 12px;gap:10px;border-radius:8px}
+.routing-studio .flow-layout{grid-column:2;grid-row:4;grid-template-columns:180px minmax(0,1fr);gap:12px;min-width:0}
+.routing-studio .routing-library{padding:13px 10px;border-radius:10px;box-shadow:none}
+.routing-library .title{padding:0 2px 10px}
+.routing-library .title h3{font-size:14px;margin:5px 0}
+.routing-library .title p{font-size:11px;line-height:1.5}
+.routing-studio .routing-library button{padding:8px;gap:8px;margin-bottom:6px;border-radius:8px;min-height:42px}
+.routing-library .tile{width:27px;height:27px;font-size:14px;border-radius:7px}
+.routing-library .copy small{font-size:11px;line-height:1.35;margin-top:2px}
+.library-divider{padding:10px 2px 7px;letter-spacing:.06em}
+.routing-library-note{padding:10px 2px 0;margin-top:9px;line-height:1.5}
+.routing-studio .canvas{padding:14px 16px;min-height:300px;border-radius:10px;box-shadow:none}
+.routing-studio .canvas-status{padding-bottom:10px;margin-bottom:14px;flex-wrap:wrap;gap:6px}
+.routing-studio .canvas .flow-node{width:100%;max-width:520px;padding:11px 12px;margin-bottom:22px;gap:10px;border-radius:9px}
+.routing-studio .canvas .flow-node .icon{width:30px;height:30px;border-radius:8px}
+.routing-studio .canvas .flow-node .copy small{font-size:11px;line-height:1.45;margin-top:3px}
+.routing-studio .flow-drop{padding:10px;margin-top:14px;line-height:1.5}
+.routing-studio .canvas-empty{margin-bottom:14px;padding:12px}
+.routing-team-details{margin-top:14px;box-shadow:none;border-radius:10px}
+.routing-team-details>summary{padding:12px 14px}
+.routing-studio .routing-departments{padding:14px}
+.desk-editor{grid-template-columns:minmax(0,1.2fr) minmax(210px,1fr);gap:12px;min-width:0}
+.desk-editor>*{min-width:0}
+.handling-card,.ring-sources{border-radius:10px;box-shadow:none}
+.handling-card header{padding:12px 14px;gap:9px;flex-wrap:wrap}
+.handling-step{width:26px;height:26px}
+.handling-card h4,.ring-sources h4{font-size:13px}
+.handling-card header p{font-size:11px;line-height:1.4;margin-top:3px}
+.handling-body{padding:12px 14px}
+.handling-body .field{margin-bottom:10px}
+.handling-body select,.handling-body input{min-height:36px}
+.handling-connector{padding:6px 14px;gap:8px}
+.routing-field-note,.routing-policy-note{font-size:11px;line-height:1.5}
+.routing-policy-note{padding:9px 2px}
+.routing-inline-note{padding:9px;margin-bottom:10px;line-height:1.5}
+.ring-sources{padding:14px}
+.ring-source{padding:9px;gap:8px;margin-top:7px}
+.routing-destination-grid{gap:7px;max-height:240px}
+.routing-destination{padding:9px;gap:8px;border-radius:8px}
+
+@media(max-width:1400px){
+  .desk-editor{grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:1200px){
+  #routing-workspace{display:block}
+  .routing-selection{padding:12px 14px;margin-bottom:12px}
+  .routing-selection-head{flex-direction:row;align-items:center}
+  .routing-studio .routing-selection .scope-bar{flex:0 1 250px}
+  .routing-workflow-options{grid-template-columns:repeat(3,minmax(0,1fr));max-height:132px}
+  .routing-search-row{flex-wrap:nowrap}
+  .routing-search{flex:1;max-width:380px}
+  .routing-studio .flow-toolbar,.routing-save-status,.routing-recipe{margin-bottom:10px}
+  .desk-editor{grid-template-columns:minmax(0,1.2fr) minmax(220px,1fr)}
+}
+@media(max-width:820px){
+  .content{padding:12px}
+  .topbar{padding-inline:12px}
+  .desk-editor{grid-template-columns:minmax(0,1fr)}
+  .routing-workflow-options{grid-template-columns:repeat(2,minmax(0,1fr));max-height:150px}
+  .routing-studio .flow-layout{grid-template-columns:minmax(0,1fr)}
+  .routing-studio .routing-library{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;padding:12px}
+  .routing-library .title{grid-column:1/-1}
+  .routing-library .library-divider,.routing-library-note{display:none}
+  .routing-studio .routing-library button{margin:0}
+  .routing-studio .flow-toolbar{flex-wrap:wrap}
+  .routing-studio .flow-toolbar .tools{width:auto!important;margin-left:auto!important}
+  .ws-head,.ws-summary,.ws-body{padding-inline:14px}
+  .cards{grid-template-columns:minmax(0,1fr)}
+  .row.rec-row{grid-template-columns:minmax(0,1fr)!important}
+  .btn,.btn.sm,.ws-tab,.routing-studio #save-route{min-height:44px}
+  .handling-body input,.handling-body select,.routing-selection select{min-height:44px}
+}
+@media(max-width:520px){
+  .routing-selection-head{flex-direction:column;align-items:stretch;gap:8px}
+  .routing-studio .routing-selection .scope-bar{flex:0 1 auto;width:100%}
+  .routing-workflow-options{grid-template-columns:minmax(0,1fr);max-height:170px}
+  .routing-search-row{flex-wrap:wrap}
+  .routing-search{flex-basis:100%;max-width:none}
+  .routing-studio .routing-modes button{padding:10px;min-width:0}
+  .routing-studio .routing-modes b{font-size:12px}
+  .routing-studio .routing-modes small{font-size:11px;line-height:1.4;white-space:normal}
+  .routing-studio .routing-mode-count{display:none}
+  .routing-studio .canvas{padding:12px}
+  .routing-studio .flow-toolbar .tools{width:100%!important}
+  .routing-studio #save-route{width:100%}
+  .routing-recipe{justify-content:flex-start}
+  .routing-destination-grid{grid-template-columns:minmax(0,1fr)}
+}

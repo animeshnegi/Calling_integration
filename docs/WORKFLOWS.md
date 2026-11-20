@@ -76,9 +76,19 @@ A valid mapped key or full extension selection leaves the number's menu:
 
 The number's fallback extension or following ring/voicemail/forward steps apply
 when the caller never enters a valid selection and exhausts the configured
-attempts. The input timeout begins after the greeting finishes; digits can be
-entered during playback. A missing playback-finished event has a bounded 45s
-extra safety wait rather than leaving the caller stuck forever.
+attempts. The input timeout begins after the greeting finishes. Entering a digit
+stops the greeting and starts a full configured timeout between digits (there
+is no separate hard-coded short inter-digit timer). A delayed finish event for
+the interrupted greeting cannot extend that wait. Each retry starts a new
+attempt; mapped destinations still dial immediately when a valid key is entered.
+A missing playback-finished event has a bounded 45s extra safety wait rather
+than leaving the caller stuck forever.
+
+Forwarding to another extension starts a new ring step: its configured forward
+ring duration is capped by the destination desk's own timer, not the original
+number step's elapsed/shorter limit. Both extension and external forwarding
+ring durations can be edited in Extension Call Handling and survive subsequent
+saves. The default forwarding duration is 25 seconds.
 
 ### Mailbox identity
 
