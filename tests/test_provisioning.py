@@ -1860,3 +1860,28 @@ def test_saving_a_flow_applies_the_mailbox_and_dialplan(tmp_path, monkeypatch):
     })
     assert response.status_code == 200
     assert response.json["warning"] == "AMI unavailable"
+
+
+def test_saved_102_only_selection_is_not_a_generated_ring_all_default(tmp_path):
+    app = make_app(tmp_path)
+    store = app.extensions['settings_store']
+    customer, owner = customer_client(app, 'selected-desks')
+    number = '+13022661626'
+    assign_number(store, owner, number)
+    second = store.add_extension_to_number(number, owner, {'display_name': 'Desk'})
+    selected = second['key']
+    route = next(flow['route'] for flow in store.list_call_routes(owner) if flow['phone_number'] == number)
+    assert route['nodes'][0]['auto_expand'] is True
+    route['nodes'][0]['extensions'] = [selected]
+    # The browser sends an edited copy of the generated flow, including any
+    # stale managed-default marker. The API must revoke that marker on save.
+    response = customer.post('/admin/api/call-routes', json={
+        'target_type': 'number', 'phone_number': number, 'route': route, 'active': True,
+    })
+    assert response.status_code == 200
+    saved = next(flow['route'] for flow in store.list_call_routes(owner) if flow['phone_number'] == number)
+    assert 'auto_expand' not in saved['nodes'][0]
+    assert saved['nodes'][0]['extensions'] == [selected]
+    store.add_extension_to_number(number, owner, {'display_name': 'Later desk'})
+    store.sync_primary_flows(owner, selected)
+    assert store.inbound_plan(number)['destinations'] == [selected]

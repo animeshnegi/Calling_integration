@@ -591,3 +591,26 @@ def test_physical_and_browser_endpoints_bind_own_mailbox_and_advertise_access_co
     assert 'VoiceMailMain(@engineerip)' not in dialplan
     assert 'GotoIf($["${ENGINEERIP_MAILBOX}"=""]?unavailable)' in dialplan
     assert 'VoiceMailMain(${ENGINEERIP_MAILBOX}@engineerip,s)' not in dialplan  # PIN is never bypassed
+
+
+def test_selecting_only_102_never_adds_primary_101_after_provisioning(studio):
+    service, asterisk, _, settings, owner, number, _, keys, _ = studio
+    selected, unchecked = keys['102'], keys['101']
+    settings.save_call_route(owner, {'phone_number': number, 'route': {'nodes': [
+        {'type': 'ring_group', 'extensions': [selected], 'timeout': 25, 'configured': True},
+    ]}})
+    settings.add_extension_to_number(number, owner, {'display_name': 'New desk'})
+    settings.sync_primary_flows(owner, selected)
+    assert settings.inbound_plan(number)['destinations'] == [selected]
+    call = service.start_inbound({'id': 'only-102', 'caller': {'number': '+12133861111'}}, number, unchecked)
+    assert {extension for _, extension in asterisk.inbound_legs} == {selected}
+    assert all(unchecked not in target for target in asterisk.inbound_endpoints)
+    assert [extension for _, extension in service._leg_pairs(call)] == [selected]
+
+
+def test_explicit_empty_group_members_do_not_expand_to_entire_group(studio):
+    _, _, _, settings, owner, number, _, keys, _ = studio
+    group_id = settings.save_group({'name': 'Everyone', 'members': list(keys.values()), 'timeout': 25}, owner)
+    plan = settings._plan_nodes([{'type': 'ring_group', 'group_id': str(group_id), 'extensions': [], 'timeout': 25}], owner, keys['101'], number)
+    assert plan['destinations'] == []
+    assert plan['ring_stages'] == []

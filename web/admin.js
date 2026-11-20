@@ -2534,7 +2534,7 @@ function saveFlowConfig(event) {
     const group = (state.groups || []).find(x => String(x.id) === groupId);
     node.extensions = form.getAll('extensions');
     node.enabled = true;
-    if (group && !node.extensions.length) node.extensions = [...group.members];
+    delete node.auto_expand; // explicit selection must never be auto-expanded
     node.timeout = Number(form.get('timeout'));
     if (group) node.group_id = groupId; else delete node.group_id;
     if (!node.extensions.length) return notify('Select at least one extension', true);

@@ -1584,10 +1584,10 @@ class SettingsStore(WebhookStoreMixin):
     def sync_primary_flows(self, owner_user_id: int, extension: str) -> None:
         """A line rings every device on it, so adding one extends the line.
 
-        Only a flow that is still the generated one is rewritten: a single ring
-        step, the default timeout, no group, and members that are a subset of the
-        line's own devices. Anything the customer has designed - extra steps,
-        another timeout, a group - is left exactly as it is.
+        Only a flow explicitly marked as an automatically managed default can
+        grow. A matching shape (one 25-second ring step) is not proof: the user
+        may have deliberately selected only one desk. Explicit console saves
+        revoke automatic expansion, preserving unchecked destinations.
         """
         owner_user_id, extension = int(owner_user_id), str(extension)
         # Only a line the extension belongs to is rewritten: the number in its
@@ -1618,6 +1618,10 @@ class SettingsStore(WebhookStoreMixin):
         if not nodes or not isinstance(nodes[0], dict):
             return False
         head = nodes[0]
+        # Shape alone cannot distinguish a user's single-desk selection from
+        # our initial default. Only explicitly managed defaults may grow.
+        if head.get("auto_expand") is not True:
+            return False
         if str(head.get("type")) != "ring_group" or head.get("group_id") or not head.get("configured"):
             return False
         if int(head.get("timeout") or 0) != 25:
@@ -3243,7 +3247,7 @@ class SettingsStore(WebhookStoreMixin):
             if kind in {"ring_group", "simultaneous", "sequential"}:
                 members = [str(value) for value in (node.get("extensions") or [])]
                 group = groups.get(str(node.get("group_id") or ""))
-                if group and not members:
+                if group and "extensions" not in node:
                     members = [str(value) for value in (group.get("members") or [])]
                 members = list(dict.fromkeys(value for value in members if value in allowed))
                 destinations.extend(members)
@@ -3292,7 +3296,7 @@ class SettingsStore(WebhookStoreMixin):
         label = f"Ring extension {first} for 25s" if len(members) == 1 else f"Ring {len(members)} devices for 25s"
         nodes = [{
             "type": "ring_group", "extensions": members, "timeout": 25,
-            "label": label, "configured": True,
+            "label": label, "configured": True, "auto_expand": True,
         }]
         if voicemail:
             nodes.append({"type": "voicemail", "mailbox": str(voicemail), "label": f"Voicemail {extension_digits(voicemail)}", "configured": True})
@@ -3518,6 +3522,7 @@ class SettingsStore(WebhookStoreMixin):
                     present = present or node.get("enabled") is not False
                     continue
                 changed = True
+                node.pop("auto_expand", None)
                 members = [member for member in members if member != key]
                 if kind == "extension":
                     node.pop("extension", None)
@@ -3532,6 +3537,7 @@ class SettingsStore(WebhookStoreMixin):
                 if parallel is not None:
                     members = list(parallel.get("extensions") or (groups.get(str(parallel.get("group_id"))) or {}).get("members") or [])
                     parallel.pop("group_id", None)
+                    parallel.pop("auto_expand", None)
                     parallel["extensions"] = list(dict.fromkeys([*members, key]))
                     changed = True
                     self._validate_route_nodes(route, owner, target_type="number", target=number)
@@ -5586,6 +5592,12 @@ def register_admin(app, config, on_telephony_change=None):
             target = str(data.get("target") or "").strip()
             owner = flow_owner(data, target_type, target, data.get("phone_number"))
             if target_type == "number":
+                # An explicit save locks the selected members, even if the flow
+                # still looks exactly like the generated 25-second default.
+                route = data.get("route") or {}
+                for node in route.get("nodes") or []:
+                    if isinstance(node, dict):
+                        node.pop("auto_expand", None)
                 route_id = store.save_call_route(owner, data)
                 label = data.get("phone_number")
             else:

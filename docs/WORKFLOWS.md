@@ -159,3 +159,19 @@ standard Asterisk greeting. It does not delete messages or change the mailbox
 PIN, voicemail routing, or email settings. Voicemail must still be enabled in
 the extension/number workflow. Tenant users can manage only mailboxes belonging
 to their account; administrator sessions can manage any existing extension.
+
+### Explicit ring membership is authoritative
+
+Saving a number workflow locks the selected ring-step members. A custom single
+25-second ring step is not treated as the platform's initial ring-all default.
+Adding/provisioning another extension must not re-add unchecked desks. Only
+provisioned defaults carrying an explicit automatic-membership marker can grow;
+older unmarked workflows are conservatively preserved rather than guessed to be
+defaults. Explicit connected-number membership changes also revoke expansion.
+A supplied group-member list is authoritative, including an empty list; only
+legacy group steps without a member list inherit the saved group's membership.
+
+After upgrading, reselect the intended destinations and click **Save flow** for
+new calls. Existing calls retain their original routing snapshot. An explicitly
+configured later ring step or desk-forward destination still applies separately;
+remove those too if the other desk must never ring.
