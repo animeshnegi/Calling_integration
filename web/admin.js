@@ -76,7 +76,6 @@ const pageMeta = {
   dashboard: ['Overview', 'Your telephony environment at a glance'],
   users: ['Customers', 'Open a customer to manage everything they own in one place'],
   numbers: ['Numbers', 'Ownership, assignment and outbound caller ID'],
-  sipaccounts: ['Devices & SIP', 'Credentials, connected devices and live registration'],
   extensions: ['Extensions', 'Internal destinations grouped by customer'],
   routing: ['Call Routing', 'Number journeys & extension call handling'],
   calls: ['Calls', 'Inbound and outbound activity across extensions'],
@@ -213,6 +212,7 @@ function kv(label, value, cls = '') {
 
 /* --------------------------------------------------------- 5. Navigation */
 function showPage(name) {
+  if (name === 'sipaccounts') name = 'extensions'; // old bookmarks
   if (!pageMeta[name]) name = 'dashboard';
   if (!state.is_admin && CUSTOMER_BLOCKED.includes(name)) name = 'dashboard';
   if (name === 'users' && !state.is_admin) name = 'dashboard';
@@ -426,11 +426,11 @@ async function refreshDeviceStatus() {
     // A registration change is worth showing, but it must arrive as a status
     // pill flipping over, not as the whole list rebuilding itself.
     quietly(() => {
-      if (ownChanged && currentPage === 'sipaccounts') renderSipAccounts();
+      if (ownChanged && currentPage === 'extensions') renderSipAccounts();
       // The extensions page paints rows, the device page paints the customer's
       // extension cards: a registration change has to reach whichever is open.
       if (extensionsChanged) {
-        if (currentPage === 'sipaccounts') renderSipAccounts();
+        if (currentPage === 'extensions') renderSipAccounts();
         if (currentPage === 'extensions') renderExtensions();
       }
       if (workspace && $('workspace').classList.contains('open')) {
@@ -438,7 +438,7 @@ async function refreshDeviceStatus() {
         const workspaceExtensionsChanged = applyExtensions(workspace.extensions);
         updateWsDeviceChip();
         syncDeviceChip('#customer-status', state.sip_accounts);
-        if ((changed || workspaceExtensionsChanged) && (wsTab === 'devices' || wsTab === 'overview')) renderWsTab(wsTab);
+        if ((changed || workspaceExtensionsChanged) && (wsTab === 'extensions' || wsTab === 'overview')) renderWsTab(wsTab);
       } else if (ownChanged) {
         syncDeviceChip('#customer-status', state.sip_accounts);
       }
@@ -1246,7 +1246,7 @@ function renderMyRequests() {
   const steps = [
     ['request', 'Request a number', rows.some(r => r.request_type === 'number'), requestPage],
     ['number', 'Number assigned', !!state.phone_numbers.length, 'numbers'],
-    ['sip', 'Register a device', hasDevice, 'sipaccounts'],
+    ['sip', 'Register a device', hasDevice, 'extensions'],
     ['extensions', 'Extensions', !!state.extensions.length, 'extensions'],
     // A customer designs extension and group flows; number-level flows are
     // provisioned for them, so either kind means routing is in place.
@@ -1466,7 +1466,7 @@ function renderRecordingSwitch() {
   const help = $('recording-platform-help');
   if (help) {
     help.textContent = enabled
-      ? 'On. A device records while its own switch is on — the customer sets that per device under Devices & SIP. Switch this off to stop every recording immediately.'
+      ? 'On. A device records while its own switch is on — the customer sets that per device under Extensions. Switch this off to stop every recording immediately.'
       : 'Off. No device records, whatever a customer set on their own extension. Switch it on to let each device follow its own switch again.';
   }
 }
@@ -1476,7 +1476,7 @@ function renderRecordingSwitch() {
    went and reports what is configured. */
 function renderSettings() {
   const rows = [
-    ['Recording', 'Each device records only when its own switch is on, and only while the platform switch above is on. The customer turns the device switch on under Devices & SIP.', '◉'],
+    ['Recording', 'Each device records only when its own switch is on, and only while the platform switch above is on. The customer turns the device switch on under Extensions.', '◉'],
     ['Call defaults', "Each customer chooses the extension an API call uses and where an unmatched number lands, on their Numbers page.", '☎'],
   ];
   const legacy = state.settings || {};
@@ -3430,7 +3430,7 @@ async function showCredentials(id) {
 const WS_TABS = [
   ['overview', '▦', 'Overview'],
   ['numbers', '☎', 'Numbers'],
-  ['devices', '◈', 'Devices & SIP'],
+  ['extensions', '⌁', 'Extensions'],
   ['routing', '⌘', 'Routing'],
   ['calls', '◷', 'Calls'],
   ['recordings', '◉', 'Recordings'],
@@ -3642,12 +3642,13 @@ function wsEmpty(title, text, glyph) { return `<div class="ws-empty">${empty(tit
 
 function renderWsTab(tab, { keepScroll = false } = {}) {
   if (!workspace) return;
+  if (tab === 'devices') tab = 'extensions'; // legacy workspace links
   wsTab = tab;
   document.querySelectorAll('[data-ws-tab]').forEach(b => b.classList.toggle('active', b.dataset.wsTab === tab));
   const body = $('ws-body');
-  const scoped = ['devices', 'routing', 'calls', 'recordings'].includes(tab);
+  const scoped = ['extensions', 'routing', 'calls', 'recordings'].includes(tab);
   const html = ({
-    overview: wsOverview(), numbers: wsNumbers(), devices: wsDevices(), routing: wsRouting(),
+    overview: wsOverview(), numbers: wsNumbers(), extensions: wsDevices(), routing: wsRouting(),
     calls: wsCallsTab(), recordings: wsRecordingsTab(), requests: wsRequestsTab(),
     billing: wsBilling(), integrations: wsIntegrations(), activity: wsActivityTab(),
   }[tab] || wsOverview());
@@ -3710,7 +3711,7 @@ function wsOverview() {
         <button class="btn ghost sm" data-ws-tab="numbers">Manage</button></div></article>
       <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">◈</span><div><small>Devices</small><h4>${workspace.sip_accounts.length} SIP account${workspace.sip_accounts.length === 1 ? '' : 's'}</h4>
         <p>${workspace.sip_accounts.filter(s => s.registration_status === 'online').length} registered now</p></div>
-        <button class="btn ghost sm" data-ws-tab="devices">Manage</button></div></article>
+        <button class="btn ghost sm" data-ws-tab="extensions">Manage</button></div></article>
       <article class="ws-card"><div class="ws-card-head"><span class="ws-glyph">◷</span><div><small>Call activity</small><h4>${workspace.call_total} call${workspace.call_total === 1 ? '' : 's'}</h4>
         <p>${answered} answered in the most recent ${wsCalls().length}</p></div>
         <button class="btn ghost sm" data-ws-tab="calls">View calls</button></div></article>
@@ -3864,7 +3865,7 @@ function wsDevices() {
       <button class="btn ghost" data-new-for-customer="extension:${c.id}">＋ Add extension</button></div>
     <div class="ws-cards">${extensions || wsEmpty('No extensions', 'Add an extension to give this customer an internal destination.', '⌁')}</div>
 
-    <div class="ws-section-head" style="margin-top:26px"><div><h3>Devices &amp; SIP accounts</h3><p>Credentials for the phones and softphones this customer connects. The customer can view these too.</p></div>
+    <div class="ws-section-head" style="margin-top:26px"><div><h3>Additional SIP accounts</h3><p>Credentials for the phones and softphones this customer connects. The customer can view these too.</p></div>
       <button class="btn primary" data-new-for-customer="sipaccount:${c.id}">＋ Assign SIP service</button></div>
     <div class="ws-cards">${devices || wsEmpty('No SIP service assigned', 'Assign device credentials after provisioning a number.', '◈')}</div>
   </section>`;
@@ -4670,7 +4671,7 @@ window.addEventListener('resize', () => { if (workspace) moveTabInk(); }, { pass
 document.fonts?.ready.then(() => { if (workspace) moveTabInk(); });
 
 loadState().then(() => {
-  const requested = location.hash.slice(1);
+  const requested = location.hash.slice(1) === 'sipaccounts' ? 'extensions' : location.hash.slice(1);
   showPage(pageMeta[requested] ? requested : (state.is_admin ? 'users' : 'dashboard'));
 });
 

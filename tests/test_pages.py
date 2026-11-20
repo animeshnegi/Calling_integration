@@ -185,3 +185,22 @@ def test_premium_call_screen_keeps_end_call_visible_with_dtmf_open():
     assert ".call-body{" in css and "overflow-y:auto" in css
     assert ".call-footer{" in css and "flex:0 0 auto" in css and "z-index:1" in css
     assert ".hangup-icon{" in css and "transform:rotate(135deg)" in css
+
+
+def test_devices_tab_is_consolidated_into_extensions():
+    html = (WEB / 'admin.html').read_text()
+    script = (WEB / 'admin.js').read_text()
+    assert 'data-page="sipaccounts"' not in html
+    assert 'id="page-sipaccounts"' not in html
+    assert 'data-page="extensions"' in html
+    # Standalone administrative SIP accounts remain manageable, but no second
+    # copy of extension credentials or separate Devices & SIP page is exposed.
+    extensions = html.split('id="page-extensions"', 1)[1].split('</section>', 1)[0]
+    assert 'id="sip-account-list"' in extensions
+    assert 'id="extension-list"' in extensions
+    assert 'id="extension-credential-list"' not in html
+    tabs = script.split('const WS_TABS = [', 1)[1].split('];', 1)[0]
+    assert "['extensions', '⌁', 'Extensions']" in tabs
+    assert 'Devices & SIP' not in tabs
+    assert 'data-ws-tab="devices"' not in script
+    assert "if (name === 'sipaccounts') name = 'extensions'" in script
